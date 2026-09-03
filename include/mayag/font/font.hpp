@@ -657,7 +657,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                        g.size.x * k,
                        g.size.y * k};
 
-        dl.glyph(dst, g.uv, st.color, slot_);
+        dl.glyph(dst, g.uv, st.color, g.is_sdf);
     }
 
     FontStack*    stack_;
@@ -670,15 +670,17 @@ class StackSampler final : public backend::CoverageSampler {
   public:
     explicit StackSampler(const FontStack& stack) : stack_{&stack} {}
 
+    /// Returns the RAW atlas texel. Interpreting it — coverage as-is, or a
+    /// distance field that needs thresholding — is the renderer's job,
+    /// because only the renderer knows which kind of entry each instance
+    /// points at.
+    ///
+    /// Deciding here from `config().mode` was a bug: in hybrid mode a frame
+    /// contains BOTH kinds, so one rule applied to all of them ran small
+    /// bitmap text through an SDF threshold and snapped every antialiased
+    /// pixel to 0 or 1.
     [[nodiscard]] float sample(std::uint32_t, float u, float v) const override {
-        const float raw = stack_->atlas().sample(u, v);
-        // A bitmap entry stores coverage directly. An SDF entry stores a
-        // signed distance around 0.5, which must be thresholded back into
-        // coverage — the same `smoothstep` the GPU shader applies, so the CPU
-        // and GPU text paths produce the same pixels.
-        return stack_->config().mode == RenderMode::bitmap
-             ? raw
-             : num::smoothstep(0.46f, 0.54f, raw);
+        return stack_->atlas().sample(u, v);
     }
 
   private:

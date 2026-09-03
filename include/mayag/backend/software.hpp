@@ -171,6 +171,20 @@ class Software {
     }
 
   private:
+    /// Half-width of the SDF threshold band, in normalised field units.
+    ///
+    /// This is the antialiasing width for distance-field glyphs, and it has
+    /// to be at least half the field's change across ONE texel or the
+    /// smoothstep lands entirely between samples and every edge snaps hard.
+    ///
+    /// Measured: at the default 48 px raster size and 6 px spread, one texel
+    /// step changes the field by ~0.082. So 0.04 (the value this started at)
+    /// was narrower than a single texel and produced no gradient at all —
+    /// exactly the jagged look that a distance field is supposed to prevent.
+    /// 0.09 gives a ~2-texel ramp, which reads as a clean edge without the
+    /// blur that a wider band would introduce.
+    static constexpr float sdf_edge = 0.09f;
+
     [[nodiscard]] static Rect clamp_scissor(const Rect& clip, const Framebuffer& fb) {
         const Rect screen{0.0f, 0.0f, static_cast<float>(fb.width()),
                           static_cast<float>(fb.height())};
@@ -322,7 +336,13 @@ class Software {
                 // The atlas slot rides in the INSTANCE, not the batch, so
                 // glyphs and shapes share one batch. See DrawList::glyph.
                 (void)texture;
-                return sampler->sample(inst.texture_slot, u, v);
+                const float raw = sampler->sample(inst.texture_slot, u, v);
+
+                // A bitmap entry IS coverage; a distance-field entry has to be
+                // thresholded. Which one this is travels per instance, because
+                // hybrid mode mixes both within a single frame.
+                if ((inst.flags & instance_flags::glyph_sdf) == 0) return raw;
+                return num::smoothstep(0.5f - sdf_edge, 0.5f + sdf_edge, raw);
             }
 
             case ShapeKind::texture:

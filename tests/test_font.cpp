@@ -681,6 +681,74 @@ void test_rendering() {
         check(reddish > 50, "red text renders red (" + std::to_string(reddish) + " px)");
     }
 
+    // REGRESSION: glyphs must stay ANTIALIASED in every render mode.
+    //
+    // The sampler used to decide "is this a distance field?" from the
+    // stack's mode, but hybrid mode mixes bitmap and SDF entries within one
+    // frame. So small bitmap text was run through the SDF threshold, which
+    // snapped every partial pixel to 0 or 1 and destroyed the antialiasing —
+    // text looked eroded and ragged. The flag now travels per instance.
+    //
+    // Separately, the threshold band was NARROWER than one atlas texel
+    // (0.04 against a measured ~0.082 per-texel slope), so SDF edges snapped
+    // too. Both are covered here.
+    {
+        for (auto mode : {typo::RenderMode::bitmap,
+                          typo::RenderMode::hybrid,
+                          typo::RenderMode::sdf}) {
+            auto s = typo::system::default_stack(typo::FontConfig{.mode = mode});
+            if (s->empty()) continue;
+
+            const char* label = mode == typo::RenderMode::bitmap ? "bitmap"
+                              : mode == typo::RenderMode::hybrid ? "hybrid" : "sdf";
+
+            // A UI-sized run, the case that looked worst.
+            auto ui = v(text<"Recent deploys"> | font(13) | fg(colors::white)) | pad(4);
+            RenderOptions o;
+            o.background = colors::black;
+            o.fonts = s.get();
+
+            const auto px = render_to_pixels(ui, {160, 26}, o);
+            int lit = 0, partial = 0;
+            for (std::size_t i = 0; i < px.size(); i += 4) {
+                const float l = luminance(rgb8(px[i], px[i + 1], px[i + 2]));
+                if (l > 0.12f) { ++lit; if (l < 0.85f) ++partial; }
+            }
+
+            check(lit > 50, std::string{"text renders in "} + label + " mode");
+            // Hard-edged text sits near 0% partial; real antialiasing at this
+            // size is well over half.
+            check(lit > 0 && (100 * partial / lit) > 40,
+                  std::string{"glyphs are antialiased in "} + label + " mode (" +
+                  std::to_string(lit ? 100 * partial / lit : 0) + "% partial)");
+        }
+    }
+
+    // And the SDF edge itself must be a RAMP, not a cliff.
+    {
+        auto s = typo::system::default_stack(typo::FontConfig{.mode = typo::RenderMode::sdf});
+        if (!s->empty()) {
+            auto ui = v(text<"H"> | font(40) | fg(colors::white)) | pad(6);
+            RenderOptions o;
+            o.background = colors::black;
+            o.fonts = s.get();
+
+            const int W = 50, H = 60;
+            const auto px = render_to_pixels(ui, {static_cast<float>(W), static_cast<float>(H)}, o);
+
+            int intermediate = 0;
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    const int v8 = px[(static_cast<std::size_t>(y) * W + x) * 4];
+                    if (v8 > 25 && v8 < 230) ++intermediate;
+                }
+            }
+            check(intermediate > 40,
+                  "SDF glyph edges are a gradient, not a cliff (" +
+                  std::to_string(intermediate) + " intermediate px)");
+        }
+    }
+
     // The batching claim.
     {
         constexpr Theme t = themes::midnight;

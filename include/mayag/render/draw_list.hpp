@@ -79,6 +79,8 @@ inline constexpr std::uint32_t gradient_srgb     = 1u << 3;
 inline constexpr std::uint32_t stroke_only       = 1u << 4;   ///< hollow: border, no fill
 inline constexpr std::uint32_t inset             = 1u << 5;   ///< inner shadow
 inline constexpr std::uint32_t dashed            = 1u << 6;
+/// This glyph's atlas entry is a distance field, not coverage.
+inline constexpr std::uint32_t glyph_sdf         = 1u << 7;
 }  // namespace instance_flags
 
 /// A contiguous run of instances sharing render state.
@@ -269,13 +271,24 @@ class DrawList {
     /// batch key never changes.
     static constexpr std::uint32_t atlas_slot = 0xFFFF'FFFFu;
 
-    void glyph(const Rect& dst, const Rect& atlas_uv, Color<Srgb> c, std::uint32_t = atlas_slot) {
+    /// `sdf` selects how the sampler decodes the atlas texel: a bitmap entry
+    /// IS coverage and must be used as-is, while a distance-field entry has
+    /// to be thresholded back into coverage.
+    ///
+    /// This has to travel per INSTANCE, not per batch or per font: in hybrid
+    /// mode a single frame mixes both kinds (small text rasterised per size,
+    /// large text sharing one scale-free field), and decoding a bitmap entry
+    /// as if it were a distance field snaps every partial pixel to 0 or 1 —
+    /// which throws away the antialiasing and makes small text look eroded
+    /// and ragged. That was a real bug.
+    void glyph(const Rect& dst, const Rect& atlas_uv, Color<Srgb> c, bool sdf = false) {
         Instance i{};
         i.kind  = static_cast<std::uint32_t>(ShapeKind::glyph);
         i.rect  = {dst.origin.x, dst.origin.y, dst.size.x, dst.size.y};
         i.uv    = {atlas_uv.left(), atlas_uv.top(), atlas_uv.right(), atlas_uv.bottom()};
         i.color = premultiplied(c);
         i.texture_slot = atlas_slot;
+        if (sdf) i.flags |= instance_flags::glyph_sdf;
         // Texture 0 for batching purposes: the atlas is already bound.
         push(i, 0);
     }
