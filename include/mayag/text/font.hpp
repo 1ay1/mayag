@@ -26,7 +26,7 @@
 #include <string_view>
 #include <vector>
 
-namespace mayag::fonts {
+namespace mayag::strokefont {
 
 /// A stroke segment on the glyph's em box: coordinates in [0,1], y down.
 struct Seg {
@@ -269,4 +269,4 @@ class Font {
 /// Convenience: the built-in stroke font.
 [[nodiscard]] inline const Font& builtin_font() { return Font::builtin_font(); }
 
-}  // namespace mayag::fonts
+}  // namespace mayag::strokefont

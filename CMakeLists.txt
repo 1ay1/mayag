@@ -36,6 +36,16 @@ option(MAYAG_WITH_D3D12     "Build the D3D12 backend"      OFF)
 option(MAYAG_WITH_WEBGPU    "Build the WebGPU backend"     OFF)
 option(MAYAG_WITH_OPENGL    "Build the OpenGL backend"     OFF)
 
+# Windowing. Without a window backend mayag still builds and RUNS — the
+# headless platform is always available, which is what lets the full app
+# runtime be tested on a build server with no display. Default ON where a
+# native windowing system exists.
+if(APPLE)
+    option(MAYAG_WITH_COCOA "Build the macOS window backend" ON)
+else()
+    option(MAYAG_WITH_COCOA "Build the macOS window backend" OFF)
+endif()
+
 # `-march=native` bakes the BUILD host's microarchitecture into the binary and
 # SIGILLs on any older chip. Fine for local dev, never for a shipped artifact,
 # so it is opt-in rather than a Release default.
@@ -58,11 +68,25 @@ target_compile_features(mayag INTERFACE
     $<IF:$<CXX_COMPILER_ID:MSVC>,cxx_std_23,cxx_std_26>)
 
 # ── backend feature macros ───────────────────────────────────────────────
-foreach(backend VULKAN METAL D3D12 WEBGPU OPENGL)
+foreach(backend VULKAN METAL D3D12 WEBGPU OPENGL COCOA)
     if(MAYAG_WITH_${backend})
         target_compile_definitions(mayag INTERFACE MAYAG_WITH_${backend})
     endif()
 endforeach()
+
+# ── windowing ────────────────────────────────────────────────────────────
+#
+# The Cocoa backend talks to AppKit through the Objective-C runtime C API
+# rather than through an .mm file, which is what keeps mayag header-only.
+# It links Cocoa + CoreGraphics; both ship with every macOS.
+if(MAYAG_WITH_COCOA)
+    if(NOT APPLE)
+        message(FATAL_ERROR "mayag: MAYAG_WITH_COCOA requires macOS.")
+    endif()
+    find_library(COCOA_LIB Cocoa REQUIRED)
+    find_library(COREGRAPHICS_LIB CoreGraphics REQUIRED)
+    target_link_libraries(mayag INTERFACE ${COCOA_LIB} ${COREGRAPHICS_LIB} objc)
+endif()
 
 # ── warnings ─────────────────────────────────────────────────────────────
 if(MSVC)
@@ -124,6 +148,10 @@ if(MAYAG_BUILD_EXAMPLES)
         get_filename_component(example_name ${example_src} NAME_WE)
         add_executable(mayag_${example_name} ${example_src})
         target_link_libraries(mayag_${example_name} PRIVATE mayag)
+        # Examples share examples/harness.hpp, which gives each of them
+        # --window / --png / --headless from one main().
+        target_include_directories(mayag_${example_name}
+                                   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples)
         target_compile_options(mayag_${example_name} PRIVATE ${MAYAG_WARNINGS})
         set_target_properties(mayag_${example_name} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
@@ -136,10 +164,42 @@ endif()
 if(MAYAG_BUILD_TESTS)
     enable_testing()
 
+    # Rendering: numeric kernels, layout arithmetic, and real pixels.
     add_executable(mayag_tests tests/test_mayag.cpp)
     target_link_libraries(mayag_tests PRIVATE mayag)
     target_compile_options(mayag_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_tests COMMAND mayag_tests)
+
+    # The application runtime, driven through the headless platform. This is
+    # the SAME Runtime<P, W> that run<P>() instantiates on a real window, so
+    # these tests are evidence about shipped behaviour.
+    add_executable(mayag_app_tests tests/test_app.cpp)
+    target_link_libraries(mayag_app_tests PRIVATE mayag)
+    target_compile_options(mayag_app_tests PRIVATE ${MAYAG_WARNINGS})
+    # Force headless even on a machine with a window server: a test must never
+    # depend on a display being present.
+    target_compile_definitions(mayag_app_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
+    add_test(NAME mayag_app_tests COMMAND mayag_app_tests)
+
+    # The font engine, exercised against the REAL fonts on the machine:
+    # ~1300 system faces swept, plus 400 fuzzed/corrupted files that must be
+    # rejected without crashing.
+    add_executable(mayag_font_tests tests/test_font.cpp)
+    target_link_libraries(mayag_font_tests PRIVATE mayag)
+    target_compile_options(mayag_font_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_font_tests COMMAND mayag_font_tests)
+
+    # Every example doubles as an end-to-end test. `--headless` drives the
+    # SAME Program the windowed build runs, so a green test here is evidence
+    # about the shipped app rather than about a parallel harness.
+    if(MAYAG_BUILD_EXAMPLES)
+        foreach(demo counter gallery dashboard typography)
+            if(TARGET mayag_${demo})
+                add_test(NAME mayag_${demo}_headless
+                         COMMAND mayag_${demo} --headless)
+            endif()
+        endforeach()
+    endif()
 
     # Negative compilation tests: each of these MUST fail to compile. A
     # type-state DSL whose invalid states are only *supposed* to be
@@ -192,10 +252,16 @@ foreach(backend vulkan metal d3d12 webgpu opengl)
     endif()
 endforeach()
 
+set(MAYAG_WINDOWING "headless")
+if(MAYAG_WITH_COCOA)
+    set(MAYAG_WINDOWING "cocoa + headless")
+endif()
+
 message(STATUS "")
 message(STATUS "mayag ${PROJECT_VERSION}")
 message(STATUS "  standard    C++${CMAKE_CXX_STANDARD}")
 message(STATUS "  compiler    ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  build type  ${CMAKE_BUILD_TYPE}")
-message(STATUS "  backends    ${MAYAG_ENABLED_BACKENDS}")
+message(STATUS "  renderers   ${MAYAG_ENABLED_BACKENDS}")
+message(STATUS "  windowing   ${MAYAG_WINDOWING}")
 message(STATUS "")

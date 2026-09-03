@@ -292,9 +292,59 @@ inline constexpr auto text = Elem<NodeKind::text, caps::text>{ .content = S.view
     return e;
 }
 
-// ════════════════════════════════════════════════════════════════════════
+/// Wrap an already-built runtime `Node` so it can sit inside a DSL tree.
+///
+/// The DSL is compile-time, but real UIs have runtime-sized lists: table
+/// rows, search results, a chip per theme. `node()` is the seam — build the
+/// children however you like, then drop the result into `v(...)` / `h(...)`
+/// alongside static elements. Capabilities are `container`, because that is
+/// what a materialised subtree behaves like.
+struct NodeElem {
+    static constexpr NodeKind  kind = NodeKind::box;
+    static constexpr caps::Set capabilities = caps::container;
+
+    Style            style{};
+    std::string_view content{};
+    std::uint32_t    texture = 0;
+    std::tuple<>     kids{};
+
+    Node payload{};
+
+    [[nodiscard]] Node build() const {
+        Node n = payload;
+        // Style piped onto the wrapper wins over whatever the node carried,
+        // so `node(x) | pad(8)` behaves like any other element.
+        if (style != Style{}) {
+            const std::uint64_t keep_id = n.style().id != 0 ? n.style().id : style.id;
+            n.style() = style;
+            n.style().id = keep_id;
+        }
+        return n;
+    }
+
+    operator Node() const { return build(); }
+};
+
+/// Lift a runtime `Node` into the DSL.
+[[nodiscard]] inline auto node(Node n) {
+    NodeElem e{};
+    e.payload = std::move(n);
+    return e;
+}
+
+/// Build a container from a runtime-sized list of children.
+/// `list(Axis::horizontal, rows)` is the idiomatic "one row per record".
+[[nodiscard]] inline auto list(Axis axis, std::vector<Node> children, float gap_px = 0.0f) {
+    Node n{NodeKind::box};
+    n.style().layout.axis = axis;
+    n.style().layout.gap  = gap_px;
+    n.children() = std::move(children);
+    return node(std::move(n));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Modifiers — layout
-// ════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 
 struct Pad {
     MAYAG_MODIFIER(Pad, caps::none, caps::none, caps::none, "pad");
@@ -693,10 +743,12 @@ inline constexpr Ellipsis ellipsis{};
 // Identity
 // ════════════════════════════════════════════════════════════════════════
 
-namespace detail {
-/// FNV-1a — stable across runs and platforms, so an id computed in a test
-/// matches the id computed in the app.
-constexpr std::uint64_t fnv1a(std::string_view s) noexcept {
+/// Stable 64-bit id from a name. FNV-1a: identical across runs, platforms,
+/// and compilers, so an id computed in a test matches the one the app uses.
+///
+/// Public because widget subscriptions and `Ctx::hovered()` need it for
+/// runtime-generated names (list rows, tabs) where `id<"...">` cannot work.
+[[nodiscard]] constexpr std::uint64_t node_id(std::string_view s) noexcept {
     std::uint64_t hash = 1469598103934665603ull;
     for (unsigned char ch : s) {
         hash ^= ch;
@@ -704,6 +756,14 @@ constexpr std::uint64_t fnv1a(std::string_view s) noexcept {
     }
     return hash;
 }
+
+/// Compile-time form: `node_id_v<"save-btn">`.
+template <fixed_string Name>
+inline constexpr std::uint64_t node_id_v = node_id(Name.view());
+
+namespace detail {
+/// Retained spelling for internal callers.
+constexpr std::uint64_t fnv1a(std::string_view s) noexcept { return node_id(s); }
 }  // namespace detail
 
 struct Id {
@@ -712,8 +772,8 @@ struct Id {
     constexpr void apply(Style& s) const { s.id = v; }
 };
 template <fixed_string Name>
-inline constexpr Id id{detail::fnv1a(Name.view())};
-[[nodiscard]] constexpr Id id_of(std::string_view s) { return {detail::fnv1a(s)}; }
+inline constexpr Id id{node_id(Name.view())};
+[[nodiscard]] constexpr Id id_of(std::string_view s) { return {node_id(s)}; }
 
 // ════════════════════════════════════════════════════════════════════════
 // Composition

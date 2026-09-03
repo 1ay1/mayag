@@ -17,7 +17,8 @@
 
 - **Invalid UI does not compile.** `box() | border_color(red)` is a compile error that says *"it requires a border (add `| border(width, color)` first)"* — not a silent no-op you find three days later.
 - **Colour spaces are types.** `Color<Srgb>` and `Color<Linear>` are different types. Alpha blending is only *defined* on `Linear`. You cannot gamma-blend by accident because there is no overload for it.
-- **One shape kernel.** Buttons, cards, dividers, circles, rings, arcs, capsules, shadows, glyphs — every one is a signed distance field on the same instanced quad. A whole app frame is **1–3 draw calls**.
+- **A real font engine, from scratch.** TrueType and CFF parsing, composite glyphs, kerning from `kern` and `GPOS`, per-codepoint script fallback, analytic-coverage rasterisation, and a Euclidean-SDF atlas. No FreeType, no HarfBuzz, no stb.
+- **One shape kernel.** Buttons, cards, dividers, circles, rings, arcs, capsules, shadows, glyphs — every one is a signed distance field on the same instanced quad. A whole app frame is **1–3 draw calls**, text included.
 - **Analytic antialiasing.** No MSAA, no supersampling. The SDF has unit gradient, so coverage is exact at any zoom on any backend.
 - **Runs everywhere, immediately.** A pure-CPU reference rasteriser and a built-in vector font ship in the box. No GPU, no font file, no dependencies — `git clone && cmake --build` renders a PNG.
 - **Header-only.** `#include <mayag/mayag.hpp>`. No library to link, no ABI to match.
@@ -163,6 +164,79 @@ The kernel lives in [`render/sdf.hpp`](include/mayag/render/sdf.hpp) as constexp
 
 The vertex stage generates quads from `gl_VertexIndex` alone: no vertex buffer, no index buffer, no VAO churn. Just instances.
 
+## Running the examples
+
+Every example is three things at once, from one `main()`:
+
+```bash
+./build/examples/mayag_gallery                  # a live window
+./build/examples/mayag_gallery --png out.png    # one frame to a PNG
+./build/examples/mayag_gallery --headless       # scripted + asserted (CI)
+```
+
+They run the *same* `Program` in all three modes, so a screenshot in this
+README cannot drift from what the app actually does. All four are
+interactive: click widgets, drag the slider, press <kbd>space</kbd> to
+animate, <kbd>tab</kbd> to move focus, <kbd>esc</kbd> to quit.
+
+| Example | What it shows |
+|---------|---------------|
+| `counter` | the smallest complete Program — Model/Msg/init/update/view/subscribe |
+| `gallery` | every visual feature, 6 live themes, drag + hover + animation |
+| `dashboard` | a realistic app layout with a clickable sidebar |
+| `typography` | the font engine: type scale, kerning, script fallback |
+
+An idle mayag app **blocks** and measures **~0% CPU** — "am I animating" is
+derived from the subscriptions, not from a flag someone forgot to clear.
+
+## Typography
+
+mayag parses fonts itself. Not a wrapper — the OpenType tables, the glyph outlines, the kerning, and the rasteriser are all in `include/mayag/font/`.
+
+```cpp
+// Finds the platform UI font, a CJK face, and an emoji face, and chains them.
+auto fonts = typo::system::default_stack();
+
+RenderOptions opts{.fonts = fonts.get()};
+render_to_png(page, {900, 880}, "specimen.png", opts);
+```
+
+| Layer | What it does |
+|-------|--------------|
+| `opentype.hpp` | sfnt + TTC, `cmap` 0/4/6/12, `head`/`hhea`/`maxp`/`hmtx`/`name`/`OS/2` |
+| `outline.hpp` | `glyf` incl. composites, CFF/Type-2 charstrings, CID-keyed fonts |
+| `raster.hpp` | analytic-coverage scanline fill, 8SSEDT Euclidean SDF |
+| `atlas.hpp` | skyline packing, LRU eviction, dirty-rect upload |
+| `shape.hpp` | UTF-8, clusters, `kern` + `GPOS` pair kerning, UAX-14 break rules |
+| `system.hpp` | font discovery + per-codepoint fallback chains |
+
+**Kerning is real.** Measured on Arial at 32 px:
+
+| Pair | Kerned | Unkerned | Delta |
+|------|--------|----------|-------|
+| `To` | 33.80 | 37.34 | **−3.55** |
+| `AV` | 40.31 | 42.69 | **−2.38** |
+| `Wa` | 46.81 | 48.00 | **−1.19** |
+| `ll` | 14.22 | 14.22 | 0.00 |
+
+**Fallback is per codepoint, not per string.** `"CPU 温度 🔥"` draws from three files — and still lands in one atlas and one draw call.
+
+**SDF mode shares one atlas entry across every size.** A page with six type sizes rasterises each glyph once, not six times. That is why the typography specimen renders in **1 draw call**:
+
+```
+mayag_typography.png  1800x1760
+  nodes 61 · instances 650 · draw calls 1
+  atlas 125 glyphs, 18.3% of 1024x1024
+```
+
+### What it does not do
+
+No Arabic joining, no Indic reordering, no BiDi. Those are not "more of the same" — each is a distinct algorithm with a decade of conformance work behind it, and a half-implementation fails silently on text the developer cannot read. So mayag *detects* them (`ShapeResult::has_rtl`, `needs_complex`) and defines a `Shaper` interface for HarfBuzz to slot into. The atlas, SDF pipeline, and draw path are unchanged either way.
+
+### Untrusted input
+
+A font file arrives from a download or a user's disk. Every accessor is bounds-checked and returns a defined value when the file lies about its own structure. The test suite sweeps **all ~1300 faces installed on the machine** and feeds the parser **400 randomly corrupted fonts**; both must parse-or-reject without crashing, and both run clean under ASan and UBSan.
+
 ## Cross platform
 
 | Platform | Backend |
@@ -202,8 +276,10 @@ MSVC falls back to C++23; everything works, but DSL errors degrade to a generic 
 ## Tests
 
 ```
-PASS  103 checks, 0 failures     # numeric, layout, and PIXEL assertions
-100% tests passed, 6 of 6        # including 5 must-not-compile cases
+PASS  103 checks   # rendering: numeric kernels, layout, real pixels
+PASS   49 checks   # app runtime: interaction, effects, subscriptions
+PASS 4940 checks   # fonts: 1300 system faces + 400 fuzzed files
+100% tests passed, 12 of 12      # + 4 example apps, + 5 must-not-compile
 ```
 
 Three layers, matching the three ways this can be wrong: **numeric** (colour round-trips, SDF gradient magnitude, transfer curves), **layout** (flex arithmetic against hand-computed rects), and **pixel** (render a scene, sample actual pixels). The pixel layer is what catches "compiles, lays out, draws nothing" — and it caught three real bugs while this was being written:
@@ -228,6 +304,8 @@ Layout depends on a narrow `TextMeasurer` interface, never a font backend — so
 - `layout/` — flexbox and the text-measurement seam
 - `render/` — SDF kernel, draw list, painter, shader source
 - `backend/` — backend registry and the software rasteriser
+- `font/` — the OpenType engine: parsing, outlines, raster, atlas, shaping
+- `app/` — Program/Cmd/Sub, the runtime, interaction, the platform seam
 - `text/`, `image/` — built-in stroke font, dependency-free PNG encoder
 
 ## License

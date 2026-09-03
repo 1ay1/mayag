@@ -259,13 +259,25 @@ class DrawList {
         push(i);
     }
 
-    void glyph(const Rect& dst, const Rect& atlas_uv, Color<Srgb> c, std::uint32_t atlas) {
+    /// The glyph atlas occupies a RESERVED, permanently-bound texture slot.
+    ///
+    /// That is what lets text batch with everything else. If glyphs were
+    /// treated like an ordinary texture, a UI that alternates labels and
+    /// boxes (which is every UI) would break the batch on every switch and
+    /// turn one draw call into dozens. Instead the atlas is always bound to
+    /// its own sampler, the shader reads it when `kind == glyph`, and the
+    /// batch key never changes.
+    static constexpr std::uint32_t atlas_slot = 0xFFFF'FFFFu;
+
+    void glyph(const Rect& dst, const Rect& atlas_uv, Color<Srgb> c, std::uint32_t = atlas_slot) {
         Instance i{};
         i.kind  = static_cast<std::uint32_t>(ShapeKind::glyph);
         i.rect  = {dst.origin.x, dst.origin.y, dst.size.x, dst.size.y};
         i.uv    = {atlas_uv.left(), atlas_uv.top(), atlas_uv.right(), atlas_uv.bottom()};
         i.color = premultiplied(c);
-        push(i, atlas);
+        i.texture_slot = atlas_slot;
+        // Texture 0 for batching purposes: the atlas is already bound.
+        push(i, 0);
     }
 
     void textured(const Rect& dst, const Rect& src_uv, std::uint32_t texture,

@@ -57,9 +57,26 @@
 #include <mayag/backend/backend.hpp>
 #include <mayag/backend/software.hpp>
 
-// ── io ──────────────────────────────────────────────────────────────────
+// ── app runtime ─────────────────────────────────────────────────────────
+#include <mayag/app/event.hpp>
+#include <mayag/app/cmd.hpp>
+#include <mayag/app/sub.hpp>
+#include <mayag/app/interaction.hpp>
+#include <mayag/app/app.hpp>
+
+// ── io ─────────────────────────────────────────────────────────────
 #include <mayag/image/png.hpp>
+
+// ── text ───────────────────────────────────────────────────────────
+//
+// Two engines, one interface. `strokefont::Font` is the built-in stroke font —
+// no files, no dependencies, always available. `typo::FontStack` is the real
+// engine: TrueType/OpenType parsing, kerning, fallback chains, SDF atlas.
+// Both satisfy the same TextMeasurer/GlyphRenderer seam, so a program picks
+// one in RenderOptions and nothing else changes.
 #include <mayag/text/font.hpp>
+#include <mayag/font/font.hpp>
+#include <mayag/font/system.hpp>
 
 #include <string>
 #include <vector>
@@ -71,8 +88,19 @@ struct RenderOptions {
     Color<Srgb> background = rgb<0x0B0D10>;
     float       dpi_scale  = 1.0f;
     bool        debug_bounds = false;
-    const fonts::Font* font = nullptr;   ///< null = metric-only layout, no glyphs
+
+    /// The built-in stroke font — zero dependencies, always works.
+    const strokefont::Font* font = nullptr;
+
+    /// The real font engine. When set, this WINS over `font`: it has actual
+    /// typefaces, kerning, and script fallback.
+    typo::FontStack* fonts = nullptr;
 };
+
+namespace detail {
+// `StackBindings` lives in app/app.hpp — the runtime needs it too, and one
+// definition serves both the one-call helpers and the event loop.
+}  // namespace detail
 
 /// Lay out, paint, and rasterise a UI into an RGBA8 buffer.
 /// Accepts either a DSL expression or an already-built `Node`.
@@ -84,8 +112,14 @@ template <typename Ui>
         else return ui.build();
     }();
 
+    // The real engine takes precedence when both are supplied.
+    std::optional<detail::StackBindings> bound;
+    if (opts.fonts != nullptr) bound.emplace(*opts.fonts);
+
     const layout::TextMeasurer& measurer =
-        opts.font ? opts.font->measurer() : layout::default_measurer();
+        bound            ? static_cast<const layout::TextMeasurer&>(bound->measurer)
+      : opts.font        ? opts.font->measurer()
+                         : layout::default_measurer();
 
     layout::layout_tree(root, viewport, measurer);
 
@@ -94,14 +128,22 @@ template <typename Ui>
     po.dpi_scale    = opts.dpi_scale;
     po.measurer     = &measurer;
     po.debug_bounds = opts.debug_bounds;
-    po.glyphs       = opts.font ? &opts.font->glyph_renderer() : nullptr;
+    po.glyphs       = bound ? static_cast<const render::GlyphRenderer*>(&bound->glyphs)
+                    : opts.font ? &opts.font->glyph_renderer()
+                                : nullptr;
     render::paint(root, dl, po);
 
     const int w = static_cast<int>(viewport.x * opts.dpi_scale);
     const int h = static_cast<int>(viewport.y * opts.dpi_scale);
     backend::Framebuffer fb{w, h};
     fb.clear(opts.background);
-    backend::Software::render(dl, fb, opts.font ? &opts.font->sampler() : nullptr);
+
+    const backend::CoverageSampler* sampler =
+        bound     ? static_cast<const backend::CoverageSampler*>(&bound->sampler)
+      : opts.font ? &opts.font->sampler()
+                  : nullptr;
+
+    backend::Software::render(dl, fb, sampler);
     return fb.to_rgba8();
 }
 

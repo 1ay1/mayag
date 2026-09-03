@@ -1,0 +1,584 @@
+#pragma once
+// mayag::platform::MacWindow — a real Cocoa window, header-only
+//
+// Calls AppKit through the Objective-C runtime C API (`objc_msgSend`) rather
+// than through Objective-C++ source. That is a deliberate trade:
+//
+//   + mayag stays HEADER-ONLY — no .mm file, no separate build rule, no
+//     ARC/ObjC++ dialect flags leaking into consuming projects
+//   + it links against libobjc and AppKit, both present on every Mac
+//   - the call sites are uglier than `[window makeKeyAndOrderFront:nil]`
+//
+// The ugliness is contained in this one file, behind `msg<>()`.
+//
+// The window presents by handing the software rasteriser's framebuffer to a
+// CGImage and drawing it into the layer. That is not the fast path — the
+// Metal backend is — but it is the path that WORKS with zero GPU setup, and
+// it makes "does mayag actually open a window" answerable today.
+
+#include "../app/event.hpp"
+#include "../backend/software.hpp"
+#include "../render/draw_list.hpp"
+#include "types.hpp"
+
+#include <chrono>
+#include <objc/message.h>
+#include <objc/objc.h>
+#include <objc/runtime.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+// ── CoreGraphics, declared by hand ──────────────────────────────────────
+//
+// We deliberately do NOT `#include <ApplicationServices/...>`. Apple's
+// headers use the blocks extension (`int (^cb)(void)`), which Clang supports
+// and GCC does not — and mayag needs GCC on macOS because Apple Clang has no
+// C++26. Declaring the six symbols we actually call keeps this header
+// compiler-agnostic, and the ABI of these C functions is stable and public.
+
+extern "C" {
+
+struct CGPoint { double x, y; };
+struct CGSize  { double width, height; };
+struct CGRect  { CGPoint origin; CGSize size; };
+
+typedef struct CGColorSpace* CGColorSpaceRef;
+typedef struct CGContext*    CGContextRef;
+typedef struct CGImage*      CGImageRef;
+
+CGColorSpaceRef CGColorSpaceCreateDeviceRGB(void);
+void            CGColorSpaceRelease(CGColorSpaceRef);
+
+CGContextRef CGBitmapContextCreate(void* data, std::size_t width, std::size_t height,
+                                   std::size_t bitsPerComponent, std::size_t bytesPerRow,
+                                   CGColorSpaceRef space, std::uint32_t bitmapInfo);
+CGImageRef   CGBitmapContextCreateImage(CGContextRef);
+void         CGContextRelease(CGContextRef);
+void         CGImageRelease(CGImageRef);
+
+}  // extern "C"
+
+/// CGImageAlphaInfo::kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big.
+/// Matches the byte layout `Framebuffer::to_rgba8()` produces.
+inline constexpr std::uint32_t mayag_cg_rgba8 = 1u;
+
+inline CGRect mayag_cgrect(double x, double y, double w, double h) {
+    return CGRect{CGPoint{x, y}, CGSize{w, h}};
+}
+
+namespace mayag::platform {
+
+namespace objc {
+
+/// Typed `objc_msgSend`. The cast is required: `objc_msgSend` is declared
+/// variadic, but calling it that way has the wrong ABI for anything but
+/// integer args on arm64. Casting to the exact signature is the documented,
+/// correct way to invoke it.
+template <typename Ret, typename... Args>
+inline Ret msg(id self, SEL op, Args... args) {
+    using Fn = Ret (*)(id, SEL, Args...);
+    return reinterpret_cast<Fn>(&objc_msgSend)(self, op, args...);
+}
+
+template <typename Ret, typename... Args>
+inline Ret msg_cls(Class cls, SEL op, Args... args) {
+    using Fn = Ret (*)(Class, SEL, Args...);
+    return reinterpret_cast<Fn>(&objc_msgSend)(cls, op, args...);
+}
+
+inline id cls(const char* name) { return reinterpret_cast<id>(objc_getClass(name)); }
+inline SEL sel(const char* name) { return sel_registerName(name); }
+
+/// NSString from a UTF-8 C string.
+inline id nsstring(std::string_view s) {
+    const std::string owned{s};
+    return msg_cls<id>(objc_getClass("NSString"), sel("stringWithUTF8String:"), owned.c_str());
+}
+
+inline std::string from_nsstring(id str) {
+    if (str == nullptr) return {};
+    const char* c = msg<const char*>(str, sel("UTF8String"));
+    return c ? std::string{c} : std::string{};
+}
+
+}  // namespace objc
+
+// Cocoa constants we need, spelled out so we do not depend on the headers.
+inline constexpr unsigned long style_titled          = 1u << 0;
+inline constexpr unsigned long style_closable        = 1u << 1;
+inline constexpr unsigned long style_miniaturizable  = 1u << 2;
+inline constexpr unsigned long style_resizable       = 1u << 3;
+
+inline constexpr unsigned long long any_event_mask = ~0ull;
+
+/// NSEventType values.
+enum : unsigned long {
+    ev_left_down = 1, ev_left_up = 2, ev_right_down = 3, ev_right_up = 4,
+    ev_mouse_moved = 5, ev_left_dragged = 6, ev_right_dragged = 7,
+    ev_mouse_entered = 8, ev_mouse_exited = 9,
+    ev_key_down = 10, ev_key_up = 11, ev_flags_changed = 12,
+    ev_scroll_wheel = 22, ev_other_down = 25, ev_other_up = 26, ev_other_dragged = 27,
+};
+
+/// NSEventModifierFlags.
+enum : unsigned long long {
+    mod_shift = 1ull << 17, mod_control = 1ull << 18,
+    mod_option = 1ull << 19, mod_command = 1ull << 20,
+};
+
+class MacWindow {
+  public:
+    [[nodiscard]] static std::optional<MacWindow> open(const WindowConfig& cfg) {
+        using namespace objc;
+
+        // NSApplication must exist and be told it is a real, focusable app;
+        // without setActivationPolicy the window opens behind everything and
+        // never takes keyboard focus, which looks exactly like a hang.
+        id app = msg_cls<id>(objc_getClass("NSApplication"), sel("sharedApplication"));
+        if (app == nullptr) return std::nullopt;
+        msg<BOOL>(app, sel("setActivationPolicy:"), static_cast<long>(0));  // Regular
+
+        // `finishLaunching` is NOT optional when you drive the run loop
+        // yourself instead of calling `[NSApp run]`. Without it AppKit never
+        // completes its startup handshake, and the window is created but
+        // never mapped by the window server — the process sits there alive,
+        // consuming events, showing nothing. Costly to diagnose, one line to fix.
+        msg<void>(app, sel("finishLaunching"));
+
+        unsigned long style = style_titled | style_closable | style_miniaturizable;
+        if (cfg.resizable) style |= style_resizable;
+
+        const CGRect frame = mayag_cgrect(0, 0, cfg.size.x, cfg.size.y);
+
+        id win = msg_cls<id>(objc_getClass("NSWindow"), sel("alloc"));
+        win = msg<id>(win, sel("initWithContentRect:styleMask:backing:defer:"),
+                      frame, style, static_cast<unsigned long>(2) /* Buffered */,
+                      static_cast<BOOL>(NO));
+        if (win == nullptr) return std::nullopt;
+
+        msg<void>(win, sel("setTitle:"), nsstring(cfg.title));
+        msg<void>(win, sel("center"));
+        msg<void>(win, sel("setReleasedWhenClosed:"), static_cast<BOOL>(NO));
+        msg<void>(win, sel("setAcceptsMouseMovedEvents:"), static_cast<BOOL>(YES));
+        msg<void>(win, sel("makeKeyAndOrderFront:"), nullptr);
+        msg<void>(app, sel("activateIgnoringOtherApps:"), static_cast<BOOL>(YES));
+
+        // A layer-backed content view is what we blit the framebuffer into.
+        id view = msg<id>(win, sel("contentView"));
+        msg<void>(view, sel("setWantsLayer:"), static_cast<BOOL>(YES));
+
+        id layer = msg<id>(view, sel("layer"));
+        if (layer != nullptr) {
+            // Configure the layer ONCE, not per frame.
+            //
+            // Two settings that together cost ~70 ms/frame if left at their
+            // defaults on a wide-gamut display:
+            //
+            //  * `contentsGravity = resize` stops Core Animation from
+            //    re-deriving layout on every `setContents:`.
+            //  * opaque + no colour matching stops it from running a
+            //    synchronous sRGB -> Display P3 conversion over the whole
+            //    surface each time we hand it a new image.
+            //
+            // We already produce correctly-encoded sRGB, so that conversion
+            // is both expensive and unwanted.
+            msg<void>(layer, sel("setMagnificationFilter:"), nsstring("nearest"));
+            msg<void>(layer, sel("setMinificationFilter:"), nsstring("nearest"));
+            msg<void>(layer, sel("setContentsGravity:"), nsstring("resize"));
+            msg<void>(layer, sel("setOpaque:"), static_cast<BOOL>(YES));
+            msg<void>(layer, sel("setNeedsDisplayOnBoundsChange:"), static_cast<BOOL>(NO));
+            msg<void>(layer, sel("setDrawsAsynchronously:"), static_cast<BOOL>(NO));
+        }
+
+        MacWindow w;
+        w.app_   = app;
+        w.window_ = win;
+        w.view_  = view;
+        w.size_  = cfg.size;
+
+        // The CPU rasteriser is the fallback path, and a Retina display asks
+        // it for 4x the pixels: a 1020x880 window is 3.6 MP at 2x, which is
+        // ~25 ms per frame and pins a core at 60 fps. Until a GPU backend is
+        // bound we render at 1x and let the compositor upscale — slightly
+        // softer, and the difference between a smooth app and a hot laptop.
+        //
+        // `MAYAG_DPI` overrides this for screenshots and pixel comparisons.
+        const auto native = static_cast<float>(msg<double>(win, sel("backingScaleFactor")));
+        w.native_dpi_ = native > 0.0f ? native : 1.0f;
+        w.dpi_ = 1.0f;
+        if (const char* forced = std::getenv("MAYAG_DPI")) {
+            const float v = std::strtof(forced, nullptr);
+            if (v > 0.0f) w.dpi_ = v;
+        }
+
+        w.start_ = std::chrono::steady_clock::now();
+
+        // Animation frame rate. 60 is the default; `MAYAG_FPS=30` halves the
+        // software rasteriser's load, which matters on battery until a GPU
+        // backend lands.
+        if (const char* fps = std::getenv("MAYAG_FPS")) {
+            const double v = std::strtod(fps, nullptr);
+            if (v > 0.0 && v <= 480.0) w.frame_interval_ = 1.0 / v;
+        }
+
+        w.fb_    = backend::Framebuffer{static_cast<int>(cfg.size.x * w.dpi_),
+                                        static_cast<int>(cfg.size.y * w.dpi_)};
+        return w;
+    }
+
+    void close() {
+        if (window_ != nullptr) objc::msg<void>(window_, objc::sel("close"));
+        window_ = nullptr;
+        open_ = false;
+    }
+
+    [[nodiscard]] bool is_open() const noexcept { return open_; }
+    [[nodiscard]] Vec2  size() const noexcept { return size_; }
+    [[nodiscard]] float dpi_scale() const noexcept { return dpi_; }
+
+    [[nodiscard]] double now() const noexcept {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
+    }
+
+    // ── events ──────────────────────────────────────────────────────────
+
+    [[nodiscard]] std::vector<Event> poll_events(Wait wait, double timeout) {
+        using namespace objc;
+        std::vector<Event> out;
+
+        // Track live size, so a resize by the user is reported once.
+        const CGRect content = msg<CGRect>(view_, sel("frame"));
+        const Vec2 now_size{static_cast<float>(content.size.width),
+                            static_cast<float>(content.size.height)};
+        if (now_size != size_) {
+            size_ = now_size;
+            out.push_back(ResizeEvent{size_, dpi_});
+        }
+
+        // The deadline encodes the runtime's Wait decision.
+        //
+        // `poll` means "an animation is running", NOT "burn a core". Cocoa
+        // has no vsync primitive we can block on here, so we wait until the
+        // next frame boundary.
+        //
+        // NOTE ON CPU USE: with the SOFTWARE rasteriser a busy frame costs
+        // ~13 ms at 1020x880, so a 60 Hz animation genuinely consumes most
+        // of a core — that is the CPU doing 900k pixels of SDF evaluation,
+        // not the loop spinning (an idle mayag app measures 2%). The fix is
+        // a GPU backend, not a tighter loop. Until then `MAYAG_FPS` lets an
+        // app trade smoothness for battery.
+        id until = distant_future();
+        if (wait == Wait::poll) {
+            const double now_s = now();
+            const double next  = last_frame_ + frame_interval_;
+            const double sleep = next - now_s;
+            last_frame_ = sleep > 0.0 ? next : now_s;
+            until = (sleep > 0.0005)
+                ? msg_cls<id>(objc_getClass("NSDate"),
+                              sel("dateWithTimeIntervalSinceNow:"), sleep)
+                : msg_cls<id>(objc_getClass("NSDate"), sel("distantPast"));
+        } else if (wait == Wait::timeout) {
+            until = msg_cls<id>(objc_getClass("NSDate"),
+                                sel("dateWithTimeIntervalSinceNow:"), timeout);
+        }
+
+        id mode = nsstring("kCFRunLoopDefaultMode");
+
+        for (;;) {
+            id ev = msg<id>(app_, sel("nextEventMatchingMask:untilDate:inMode:dequeue:"),
+                            any_event_mask, until, mode, static_cast<BOOL>(YES));
+            if (ev == nullptr) break;
+
+            translate(ev, out);
+            msg<void>(app_, sel("sendEvent:"), ev);
+
+            // After the first (possibly blocking) wait, drain without waiting.
+            until = msg_cls<id>(objc_getClass("NSDate"), sel("distantPast"));
+        }
+
+        // Emit a frame tick so animations advance. The runtime only asks for
+        // `Wait::poll` when something is animating, so this is not generated
+        // for an idle app.
+        if (wait == Wait::poll) {
+            const double t = now();
+            out.push_back(FrameEvent{t, t - last_tick_ > 0.0 ? num::min(t - last_tick_, 0.1) : 1.0 / 60.0});
+            last_tick_ = t;
+        }
+
+        if (!msg<BOOL>(window_, sel("isVisible"))) {
+            open_ = false;
+            out.push_back(CloseRequest{});
+        }
+        return out;
+    }
+
+    // ── presentation ────────────────────────────────────────────────────
+
+    void present(const DrawList& dl, Color<Srgb> clear) {
+        const int w = static_cast<int>(size_.x * dpi_);
+        const int h = static_cast<int>(size_.y * dpi_);
+        if (w <= 0 || h <= 0) return;
+
+        if (fb_.width() != w || fb_.height() != h) {
+            fb_ = backend::Framebuffer{w, h};
+            pixels_.assign(static_cast<std::size_t>(w) * h * 4, 0);
+            release_context();
+        }
+        fb_.clear(clear);
+        backend::Software::render(dl, fb_, sampler_);
+
+        // Write straight into the buffer the cached CGContext points at,
+        // rather than allocating a fresh vector each frame.
+        fb_.write_rgba8(pixels_);
+        blit(w, h);
+    }
+
+    [[nodiscard]] std::vector<std::uint8_t> read_pixels() { return fb_.to_rgba8(); }
+
+    // ── services ────────────────────────────────────────────────────────
+
+    void set_title(std::string_view t) {
+        objc::msg<void>(window_, objc::sel("setTitle:"), objc::nsstring(t));
+    }
+
+    void set_cursor(CursorShape shape) {
+        using namespace objc;
+        const char* name = nullptr;
+        switch (shape) {
+            case CursorShape::text:        name = "IBeamCursor"; break;
+            case CursorShape::pointer:     name = "pointingHandCursor"; break;
+            case CursorShape::crosshair:   name = "crosshairCursor"; break;
+            case CursorShape::resize_h:    name = "resizeLeftRightCursor"; break;
+            case CursorShape::resize_v:    name = "resizeUpDownCursor"; break;
+            case CursorShape::grab:        name = "openHandCursor"; break;
+            case CursorShape::grabbing:    name = "closedHandCursor"; break;
+            case CursorShape::not_allowed: name = "operationNotAllowedCursor"; break;
+            default:                       name = "arrowCursor"; break;
+        }
+        id cursor = msg_cls<id>(objc_getClass("NSCursor"), sel(name));
+        if (cursor != nullptr) msg<void>(cursor, sel("set"));
+    }
+
+    void set_clipboard(std::string_view s) {
+        using namespace objc;
+        id pb = msg_cls<id>(objc_getClass("NSPasteboard"), sel("generalPasteboard"));
+        msg<long>(pb, sel("clearContents"));
+        msg<BOOL>(pb, sel("setString:forType:"), nsstring(s), nsstring("public.utf8-plain-text"));
+    }
+
+    [[nodiscard]] std::string get_clipboard() {
+        using namespace objc;
+        id pb = msg_cls<id>(objc_getClass("NSPasteboard"), sel("generalPasteboard"));
+        id s  = msg<id>(pb, sel("stringForType:"), nsstring("public.utf8-plain-text"));
+        return from_nsstring(s);
+    }
+
+    void set_coverage_sampler(const backend::CoverageSampler* s) { sampler_ = s; }
+
+  private:
+    [[nodiscard]] static id distant_future() {
+        return objc::msg_cls<id>(objc_getClass("NSDate"), objc::sel("distantFuture"));
+    }
+
+    /// Blit the RGBA8 framebuffer into the layer via a CGImage.
+    ///
+    /// The context and colour space are CACHED across frames. Creating a
+    /// fresh CGBitmapContext every frame cost ~79 ms at 1020x880 — an order
+    /// of magnitude more than rendering the frame — because each one
+    /// allocates, zeroes, and tears down a multi-megabyte buffer. Rebuilding
+    /// only on resize takes that to near zero.
+    void blit(int w, int h) {
+        using namespace objc;
+
+        if (ctx_ == nullptr || ctx_w_ != w || ctx_h_ != h) {
+            release_context();
+            cs_ = CGColorSpaceCreateDeviceRGB();
+            ctx_ = CGBitmapContextCreate(
+                pixels_.data(), static_cast<std::size_t>(w), static_cast<std::size_t>(h),
+                8, static_cast<std::size_t>(w) * 4, cs_, mayag_cg_rgba8);
+            ctx_w_ = w;
+            ctx_h_ = h;
+        }
+        if (ctx_ == nullptr) return;
+
+        CGImageRef img = CGBitmapContextCreateImage(ctx_);
+        if (img == nullptr) return;
+
+        // The layer was configured at open(); per frame we only swap the
+        // image. Wrapping the swap in a transaction with actions disabled
+        // prevents Core Animation from starting an implicit animation on
+        // every single frame.
+        id tx = reinterpret_cast<id>(objc_getClass("CATransaction"));
+        msg_cls<void>(objc_getClass("CATransaction"), sel("begin"));
+        msg_cls<void>(objc_getClass("CATransaction"), sel("setDisableActions:"),
+                      static_cast<BOOL>(YES));
+        (void)tx;
+
+        id layer = msg<id>(view_, sel("layer"));
+        msg<void>(layer, sel("setContents:"), reinterpret_cast<id>(img));
+
+        msg_cls<void>(objc_getClass("CATransaction"), sel("commit"));
+        CGImageRelease(img);
+    }
+
+    void release_context() {
+        if (ctx_ != nullptr) { CGContextRelease(ctx_); ctx_ = nullptr; }
+        if (cs_  != nullptr) { CGColorSpaceRelease(cs_); cs_ = nullptr; }
+    }
+
+    void translate(id ev, std::vector<Event>& out) {
+        using namespace objc;
+
+        const auto type  = msg<unsigned long>(ev, sel("type"));
+        const auto flags = msg<unsigned long long>(ev, sel("modifierFlags"));
+
+        Mods mods{};
+        mods.shift = (flags & mod_shift)   != 0;
+        mods.ctrl  = (flags & mod_control) != 0;
+        mods.alt   = (flags & mod_option)  != 0;
+        mods.super = (flags & mod_command) != 0;
+
+        // Cocoa's origin is bottom-left; mayag's is top-left.
+        const CGPoint loc = msg<CGPoint>(ev, sel("locationInWindow"));
+        const Vec2 p{static_cast<float>(loc.x), size_.y - static_cast<float>(loc.y)};
+
+        switch (type) {
+            case ev_mouse_moved:
+            case ev_left_dragged:
+            case ev_right_dragged:
+            case ev_other_dragged:
+                out.push_back(MouseMove{p, p - last_mouse_, mods});
+                last_mouse_ = p;
+                break;
+
+            case ev_left_down:
+                out.push_back(MouseDown{p, MouseButton::left, mods,
+                                        static_cast<int>(msg<long>(ev, sel("clickCount")))});
+                break;
+            case ev_left_up:
+                out.push_back(MouseUp{p, MouseButton::left, mods});
+                break;
+            case ev_right_down:
+                out.push_back(MouseDown{p, MouseButton::right, mods, 1});
+                break;
+            case ev_right_up:
+                out.push_back(MouseUp{p, MouseButton::right, mods});
+                break;
+            case ev_other_down:
+                out.push_back(MouseDown{p, MouseButton::middle, mods, 1});
+                break;
+            case ev_other_up:
+                out.push_back(MouseUp{p, MouseButton::middle, mods});
+                break;
+
+            case ev_scroll_wheel: {
+                // Trackpads report precise sub-pixel deltas; wheels report
+                // coarse "lines" that need scaling to feel right.
+                const bool precise = msg<BOOL>(ev, sel("hasPreciseScrollingDeltas")) != 0;
+                const double dx = msg<double>(ev, sel("scrollingDeltaX"));
+                const double dy = msg<double>(ev, sel("scrollingDeltaY"));
+                const float k = precise ? 1.0f : 16.0f;
+                const auto phase = msg<unsigned long>(ev, sel("momentumPhase"));
+                out.push_back(ScrollEvent{
+                    Vec2{static_cast<float>(dx) * k, static_cast<float>(dy) * k},
+                    p, mods, phase != 0});
+                break;
+            }
+
+            case ev_key_down: {
+                const auto code = msg<unsigned short>(ev, sel("keyCode"));
+                const bool repeat = msg<BOOL>(ev, sel("isARepeat")) != 0;
+                out.push_back(KeyEvent{key_from_code(code), mods, repeat});
+
+                // Printable input arrives separately, so a shortcut and the
+                // character it would type never both fire.
+                if (!mods.super && !mods.ctrl) {
+                    const std::string s = from_nsstring(msg<id>(ev, sel("characters")));
+                    if (!s.empty() && static_cast<unsigned char>(s[0]) >= 0x20 &&
+                        static_cast<unsigned char>(s[0]) != 0x7F) {
+                        out.push_back(TextEvent{s});
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    /// Virtual key codes are POSITIONAL on macOS (they describe where the key
+    /// is, not what it prints), so this table is layout-independent.
+    [[nodiscard]] static Key key_from_code(unsigned short c) {
+        switch (c) {
+            case 0:  return Key::a;  case 11: return Key::b;  case 8:  return Key::c;
+            case 2:  return Key::d;  case 14: return Key::e;  case 3:  return Key::f;
+            case 5:  return Key::g;  case 4:  return Key::h;  case 34: return Key::i;
+            case 38: return Key::j;  case 40: return Key::k;  case 37: return Key::l;
+            case 46: return Key::m;  case 45: return Key::n;  case 31: return Key::o;
+            case 35: return Key::p;  case 12: return Key::q;  case 15: return Key::r;
+            case 1:  return Key::s;  case 17: return Key::t;  case 32: return Key::u;
+            case 9:  return Key::v;  case 13: return Key::w;  case 7:  return Key::x;
+            case 16: return Key::y;  case 6:  return Key::z;
+
+            case 29: return Key::n0; case 18: return Key::n1; case 19: return Key::n2;
+            case 20: return Key::n3; case 21: return Key::n4; case 23: return Key::n5;
+            case 22: return Key::n6; case 26: return Key::n7; case 28: return Key::n8;
+            case 25: return Key::n9;
+
+            case 36:  return Key::enter;     case 48: return Key::tab;
+            case 49:  return Key::space;     case 51: return Key::backspace;
+            case 53:  return Key::escape;    case 117: return Key::del;
+            case 123: return Key::left;      case 124: return Key::right;
+            case 125: return Key::down;      case 126: return Key::up;
+            case 115: return Key::home;      case 119: return Key::end;
+            case 116: return Key::page_up;   case 121: return Key::page_down;
+
+            case 122: return Key::f1;  case 120: return Key::f2;  case 99:  return Key::f3;
+            case 118: return Key::f4;  case 96:  return Key::f5;  case 97:  return Key::f6;
+            case 98:  return Key::f7;  case 100: return Key::f8;  case 101: return Key::f9;
+            case 109: return Key::f10; case 103: return Key::f11; case 111: return Key::f12;
+
+            case 27: return Key::minus;         case 24: return Key::equal;
+            case 33: return Key::bracket_left;  case 30: return Key::bracket_right;
+            case 42: return Key::backslash;     case 41: return Key::semicolon;
+            case 39: return Key::quote;         case 43: return Key::comma;
+            case 47: return Key::period;        case 44: return Key::slash;
+            case 50: return Key::grave;
+            default: return Key::unknown;
+        }
+    }
+
+    id    app_    = nullptr;
+    id    window_ = nullptr;
+    id    view_   = nullptr;
+    bool  open_   = true;
+    Vec2  size_{1024, 640};
+    float dpi_ = 1.0f;
+    float native_dpi_ = 1.0f;   ///< what the display actually offers
+    Vec2  last_mouse_{};
+
+    /// Frame pacing for the animated path.
+    double frame_interval_ = 1.0 / 60.0;
+    double last_frame_ = 0.0;
+    double last_tick_  = 0.0;
+
+    backend::Framebuffer      fb_{1, 1};
+    std::vector<std::uint8_t> pixels_;
+    const backend::CoverageSampler* sampler_ = nullptr;
+
+    /// Cached across frames; rebuilt only when the surface resizes.
+    CGContextRef    ctx_ = nullptr;
+    CGColorSpaceRef cs_  = nullptr;
+    int             ctx_w_ = 0;
+    int             ctx_h_ = 0;
+
+    std::chrono::steady_clock::time_point start_{};
+};
+
+}  // namespace mayag::platform

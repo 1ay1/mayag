@@ -440,7 +440,7 @@ void test_pixels() {
         auto ui = v(text<"Hello mayag"> | font(24) | fg(colors::white)) | pad(10);
         RenderOptions o;
         o.background = colors::black;
-        o.font = &fonts::Font::builtin_font();
+        o.font = &strokefont::Font::builtin_font();
         const Image img = render(ui, {240, 60}, o);
         int lit = 0;
         for (int y = 0; y < img.h; ++y)
@@ -468,7 +468,7 @@ void test_determinism() {
                    text<"Body">  | font(12) | fg(colors::slate));
 
     RenderOptions o;
-    o.font = &fonts::Font::builtin_font();
+    o.font = &strokefont::Font::builtin_font();
     const auto a = render_to_pixels(ui, {200, 100}, o);
     const auto b = render_to_pixels(ui, {200, 100}, o);
     check(a == b, "rendering is deterministic across runs");
@@ -510,7 +510,7 @@ void test_batching() {
             | gap(12) | pad(16);
 
     Node n = ui.build();
-    const auto& font = fonts::Font::builtin_font();
+    const auto& font = strokefont::Font::builtin_font();
     layout::layout_tree(n, {400, 300}, font.measurer());
 
     DrawList dl;
