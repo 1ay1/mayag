@@ -81,6 +81,38 @@ struct TextEvent {
     friend bool operator==(const TextEvent&, const TextEvent&) = default;
 };
 
+/// Text being COMPOSED but not yet committed.
+///
+/// Typing Japanese, Chinese or Korean goes through an input method: the user
+/// types `konnichiwa`, the IME shows a growing preedit (k → ko → こん →
+/// こんにちは), offers candidates, and only on confirmation does committed
+/// text appear. Without this the framework cannot be used in those languages
+/// at all — the keystrokes arrive as Latin letters and the composition never
+/// happens.
+///
+/// Preedit is NOT model state. It belongs to the input method until it
+/// commits, which is why it arrives as an event carrying the whole current
+/// string rather than as incremental edits.
+struct ComposeEvent {
+    /// The full in-progress string, replacing any previous preedit.
+    std::string text;
+
+    /// Byte range within `text` the IME wants highlighted (the clause being
+    /// converted). Equal values mean no selection.
+    std::uint32_t selection_start = 0;
+    std::uint32_t selection_end   = 0;
+
+    /// Where the caret sits within the preedit, in bytes.
+    std::uint32_t caret = 0;
+
+    friend bool operator==(const ComposeEvent&, const ComposeEvent&) = default;
+};
+
+/// The input method abandoned or finished composition without committing.
+struct ComposeEndEvent {
+    friend constexpr bool operator==(ComposeEndEvent, ComposeEndEvent) = default;
+};
+
 // ── pointer ─────────────────────────────────────────────────────────────
 
 enum class MouseButton : std::uint8_t { left, right, middle, back, forward };
@@ -145,7 +177,7 @@ struct FrameEvent {
 // ── the sum ─────────────────────────────────────────────────────────────
 
 using Event = std::variant<
-    KeyEvent, TextEvent,
+    KeyEvent, TextEvent, ComposeEvent, ComposeEndEvent,
     MouseMove, MouseDown, MouseUp, ScrollEvent,
     ResizeEvent, FocusEvent, CloseRequest, FrameEvent>;
 

@@ -285,6 +285,7 @@ template <Element... Kids>
          | border(1, focused ? t.accent : t.border)
          | radius(t.radius_small)
          | clip
+         | cursor(CursorShape::text)
          | id_of_raw(nid);
 }
 

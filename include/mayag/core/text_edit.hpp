@@ -59,6 +59,61 @@ struct TextEditState {
     std::size_t goal_column = 0;
     bool        goal_valid = false;
 
+    // ── input-method composition ────────────────────────────────────────
+    //
+    // Preedit is text the IME is still working on: shown to the user,
+    // underlined, but NOT part of `text` until it commits. Keeping it
+    // separate is what makes composition cancellable — abandoning it simply
+    // clears this, with the committed text untouched.
+    std::string preedit;
+    std::uint32_t preedit_caret = 0;
+    std::uint32_t preedit_sel_start = 0;
+    std::uint32_t preedit_sel_end = 0;
+
+    [[nodiscard]] bool composing() const noexcept { return !preedit.empty(); }
+
+    /// What the user SEES: committed text with the preedit spliced in at the
+    /// caret. A view must render this, not `text`, or composition is
+    /// invisible and the user is typing blind.
+    [[nodiscard]] std::string display_text() const {
+        if (preedit.empty()) return text;
+        std::string out = text;
+        out.insert(num::min<std::size_t>(caret, out.size()), preedit);
+        return out;
+    }
+
+    /// Caret position within `display_text()`.
+    [[nodiscard]] std::size_t display_caret() const noexcept {
+        return preedit.empty() ? caret : caret + preedit_caret;
+    }
+
+    /// Replace the in-progress composition.
+    void set_preedit(std::string_view s, std::uint32_t caret_in_preedit = 0,
+                     std::uint32_t sel_start = 0, std::uint32_t sel_end = 0) {
+        // Starting a composition replaces the selection, exactly as typing
+        // would — otherwise confirming would leave the old text behind.
+        if (!preedit.empty() || !s.empty()) delete_selection();
+        preedit = std::string{s};
+        preedit_caret = caret_in_preedit;
+        preedit_sel_start = sel_start;
+        preedit_sel_end = sel_end;
+    }
+
+    /// Commit the composition into the document.
+    void commit_preedit() {
+        if (preedit.empty()) return;
+        const std::string committed = std::move(preedit);
+        preedit.clear();
+        preedit_caret = preedit_sel_start = preedit_sel_end = 0;
+        insert(committed);
+    }
+
+    /// Abandon it, leaving committed text untouched.
+    void cancel_preedit() {
+        preedit.clear();
+        preedit_caret = preedit_sel_start = preedit_sel_end = 0;
+    }
+
     bool multiline = false;
     /// Maximum bytes; 0 means unlimited.
     std::size_t max_length = 0;
@@ -292,6 +347,12 @@ struct TextEditState {
     ///
     /// Returns true when the key was consumed.
     bool handle_key(Key k, Mods mods) {
+        // While an input method is composing, the keys belong to IT: arrows
+        // pick candidates, Enter confirms, Escape abandons. Letting them
+        // reach the editor would move the caret out from under the preedit
+        // and corrupt the composition.
+        if (composing()) return false;
+
         const bool shift = mods.shift;
         const bool word  = mods.alt || (mods.ctrl && !mods.primary());
 

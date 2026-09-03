@@ -61,6 +61,10 @@ class Sub {
     /// Committed text (typing, IME, paste).
     struct OnText { std::function<std::optional<Msg>(std::string_view)> handler; };
 
+    /// In-progress input-method composition.
+    struct OnCompose { std::function<std::optional<Msg>(const ComposeEvent&)> handler; };
+    struct OnComposeEnd { Msg msg; };
+
     /// Wall-clock interval.
     struct Every {
         std::chrono::milliseconds interval{};
@@ -111,6 +115,7 @@ class Sub {
     struct OnFocusChange { std::function<Msg(bool)> handler; };
 
     using Alt = std::variant<None, Batch, OnEvent, OnKey, OnAnyKey, OnText,
+                             OnCompose, OnComposeEnd,
                              Every, EveryFrame, OnNode, OnNodeMotion,
                              OnResize, OnClose, OnFocusChange>;
 
@@ -167,6 +172,22 @@ class Sub {
     template <typename F>
     [[nodiscard]] static Sub on_text(F&& f) {
         return Sub{Alt{OnText{std::forward<F>(f)}}};
+    }
+
+    /// Input-method composition in progress.
+    ///
+    /// Without this, CJK input is impossible: the keystrokes for `konnichiwa`
+    /// arrive as Latin letters and the conversion to こんにちは never happens.
+    /// A text field subscribes to both this and `on_text` — preedit for what
+    /// is being composed, committed text for what was confirmed.
+    template <typename F>
+    [[nodiscard]] static Sub on_compose(F&& f) {
+        return Sub{Alt{OnCompose{std::forward<F>(f)}}};
+    }
+
+    /// Composition abandoned or finished.
+    [[nodiscard]] static Sub on_compose_end(Msg m) {
+        return Sub{Alt{OnComposeEnd{std::move(m)}}};
     }
 
     [[nodiscard]] static Sub every(std::chrono::milliseconds i, Msg m) {
@@ -359,6 +380,13 @@ class Sub {
                     if (auto m = h(s)) return f(*m);
                     return std::nullopt;
                 });
+            else if constexpr (std::is_same_v<T, OnCompose>)
+                return Out::on_compose([h = a.handler, f](const ComposeEvent& e) -> std::optional<decltype(f(std::declval<Msg>()))> {
+                    if (auto m = h(e)) return f(*m);
+                    return std::nullopt;
+                });
+            else if constexpr (std::is_same_v<T, OnComposeEnd>)
+                return Out::on_compose_end(f(a.msg));
             else if constexpr (std::is_same_v<T, Every>)
                 return Out::every(a.interval, f(a.msg));
             else if constexpr (std::is_same_v<T, EveryFrame>)

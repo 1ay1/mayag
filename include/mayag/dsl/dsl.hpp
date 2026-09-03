@@ -988,6 +988,20 @@ struct DescriptionMod {
 };
 [[nodiscard]] inline DescriptionMod description(std::string_view text) { return {text}; }
 
+/// Pointer shape while hovering.
+///
+/// Cursor feedback is how a UI tells you what is interactive BEFORE you click.
+/// A text field showing an arrow reads as decoration; an I-beam reads as
+/// "you can type here".
+struct CursorMod {
+    MAYAG_MODIFIER(CursorMod, caps::none, caps::none, caps::none, "cursor");
+    CursorShape v;
+    constexpr void apply(Style& s) const { s.cursor = v; }
+};
+[[nodiscard]] constexpr CursorMod cursor(CursorShape c) { return {c}; }
+inline constexpr CursorMod pointer_cursor{CursorShape::pointer};
+inline constexpr CursorMod text_cursor{CursorShape::text};
+
 /// Semantic state, announced alongside the role.
 struct StateMod {
     MAYAG_MODIFIER(StateMod, caps::none, caps::none, caps::none, "a11y_state");

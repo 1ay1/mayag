@@ -438,6 +438,53 @@ Anonymous layout wrappers are collapsed, because the visual tree's shape is an
 implementation detail and a screen-reader user should not walk six nested
 boxes to reach a label.
 
+## Input methods
+
+Typing Japanese, Chinese or Korean goes through an input method: the user
+types `konnichiwa`, an IME shows a growing preedit (k → ko → こん → こんにちは)
+and only on confirmation does committed text appear. Reading keystrokes
+directly gives ten Latin letters and the conversion never happens — the
+framework is simply unusable in those languages.
+
+mayag models composition as state separate from the document:
+
+```cpp
+Sub<Msg>::on_compose([](const ComposeEvent& e) { return Composing{e}; }),
+Sub<Msg>::on_text([](std::string_view s)       { return Typed{s}; }),
+
+m.field.set_preedit(e.text);   // shown, not committed
+m.field.commit_preedit();      // now it is in the document
+m.field.cancel_preedit();      // document untouched
+```
+
+`display_text()` splices the preedit in at the caret, so a view renders what
+the user is composing without it ever entering the model. While composing,
+keys belong to the input method — arrows pick candidates, they do not move the
+caret.
+
+The headless backend can script a full composition, so **CJK input is testable
+in CI** rather than only by someone with a Japanese keyboard. The macOS
+`NSTextInputClient` bridge is the remaining piece; the event model it plugs
+into is complete.
+
+## Undo/redo
+
+The Model is a value, so history is nearly free — but two things are easy to
+get wrong, and `History<T>` gets them right once:
+
+```cpp
+m.doc.edit([](Doc& d) { d.text += c; }, "typing");   // coalesces
+m.doc.undo();
+```
+
+- **Coalescing.** Typing ten characters is *one* undo, not ten. Without it a
+  user presses Cmd-Z and loses a letter.
+- **A bound.** Unbounded history of a large model is a leak that only bites in
+  long sessions — exactly when losing work hurts most.
+
+Editing after an undo discards the redo branch, because redoing into a future
+that no longer follows from the present is incoherent.
+
 ## Error boundary
 
 One bad frame should not end a session. When `update()` or `view()` throws,

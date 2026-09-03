@@ -123,6 +123,21 @@ class Headless {
 
     void type(std::string_view s) { push(TextEvent{std::string{s}}); }
 
+    /// Script an input-method composition, as a real IME produces it.
+    ///
+    /// Being able to drive this headlessly is what makes CJK input testable
+    /// at all — otherwise it can only be checked by a human with a Japanese
+    /// keyboard, which means in practice it is never checked.
+    void compose(std::string_view preedit, std::uint32_t caret = 0) {
+        push(ComposeEvent{std::string{preedit}, 0, 0,
+                          caret == 0 ? static_cast<std::uint32_t>(preedit.size()) : caret});
+    }
+    void commit(std::string_view final_text) {
+        push(ComposeEndEvent{});
+        push(TextEvent{std::string{final_text}});
+    }
+    void cancel_compose() { push(ComposeEndEvent{}); }
+
     void press_key(Key k, Mods m = {}) { push(KeyEvent{k, m, false}); }
 
     void scroll(Vec2 at, Vec2 delta) { push(ScrollEvent{delta, at, Mods{}, false}); }

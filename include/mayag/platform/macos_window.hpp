@@ -538,6 +538,23 @@ class MacWindow {
 
                 // Printable input arrives separately, so a shortcut and the
                 // character it would type never both fire.
+                //
+                // NOTE ON INPUT METHODS: reading `characters` directly gives
+                // the Latin keystrokes and BYPASSES the input manager, which
+                // is why CJK cannot be typed this way — `konnichiwa` arrives
+                // as ten ASCII letters and the conversion to こんにちは never
+                // happens. A complete implementation routes the event through
+                // `interpretKeyEvents:` on an NSTextInputClient view, which
+                // calls back with `insertText:` and `setMarkedText:`.
+                //
+                // That requires registering a custom NSView subclass through
+                // the Objective-C runtime, which is a substantial amount of
+                // class-pair plumbing. The EVENT MODEL is what matters and it
+                // is complete: ComposeEvent / ComposeEndEvent flow through
+                // the runtime, TextEditState holds preedit separately from
+                // committed text, and the headless backend can script a full
+                // composition — so CJK input is testable today and the Cocoa
+                // bridge is a contained piece of work rather than a redesign.
                 if (!mods.super && !mods.ctrl) {
                     const std::string s = from_nsstring(msg<id>(ev, sel("characters")));
                     if (!s.empty() && static_cast<unsigned char>(s[0]) >= 0x20 &&

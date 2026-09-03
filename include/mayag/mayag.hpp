@@ -37,6 +37,7 @@
 #include <mayag/core/text_edit.hpp>
 #include <mayag/core/animation.hpp>
 #include <mayag/core/motion.hpp>
+#include <mayag/core/history.hpp>
 
 // ── style & scene ───────────────────────────────────────────────────────
 #include <mayag/style/style.hpp>

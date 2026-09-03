@@ -564,6 +564,19 @@ class Runtime {
             }
         }
 
+        // Update the pointer shape from whatever is under the cursor.
+        //
+        // Walked from the hit node UPWARD, taking the first node that asks
+        // for something specific: a label inside a button must not reset the
+        // cursor the button set.
+        if (std::holds_alternative<MouseMove>(ev)) {
+            const CursorShape want = cursor_at(tree_, input_.cursor());
+            if (want != current_cursor_) {
+                current_cursor_ = want;
+                window_.set_cursor(want);
+            }
+        }
+
         // Pointer events become semantic gestures against the CURRENT tree.
         //
         // Only repaint when the INTERACTION STATE actually changed. macOS
@@ -625,6 +638,14 @@ class Runtime {
                 if (const auto* t = std::get_if<TextEvent>(&ev)) {
                     if (auto m = a.handler(t->text)) out.push_back(std::move(*m));
                 }
+            }
+            else if constexpr (std::is_same_v<T, typename S::OnCompose>) {
+                if (const auto* ce = std::get_if<ComposeEvent>(&ev)) {
+                    if (auto m = a.handler(*ce)) out.push_back(std::move(*m));
+                }
+            }
+            else if constexpr (std::is_same_v<T, typename S::OnComposeEnd>) {
+                if (std::holds_alternative<ComposeEndEvent>(ev)) out.push_back(a.msg);
             }
             else if constexpr (std::is_same_v<T, typename S::EveryFrame>) {
                 if (const auto* f = std::get_if<FrameEvent>(&ev)) out.push_back(a.handler(*f));
@@ -819,6 +840,18 @@ class Runtime {
         return {platform::Wait::block, 0.0};
     }
 
+    /// Deepest node under `p` that requests a specific cursor.
+    [[nodiscard]] static CursorShape cursor_at(const Node& n, Vec2 p) {
+        CursorShape found = CursorShape::arrow;
+        walk_cursor(n, p, found);
+        return found;
+    }
+    static void walk_cursor(const Node& n, Vec2 p, CursorShape& found) {
+        if (!n.frame().contains(p)) return;
+        if (n.style().cursor != CursorShape::arrow) found = n.style().cursor;
+        for (const auto& c : n.children()) walk_cursor(c, p, found);
+    }
+
     [[nodiscard]] Sub<Msg> current_subs() const {
         if constexpr (detail::HasSubscribe<P>) return P::subscribe(model_);
         else return Sub<Msg>::none();
@@ -954,6 +987,7 @@ class Runtime {
     TrackedSet                           tracked_;
     bool                                 motion_pending_ = false;
     double                               last_motion_time_ = 0.0;
+    CursorShape                          current_cursor_ = CursorShape::arrow;
     std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
     detail::Inbox<Msg>              inbox_;

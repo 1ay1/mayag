@@ -15,6 +15,7 @@
 #include "../core/geometry.hpp"
 #include "../core/scroll_state.hpp"
 #include "../scene/a11y_types.hpp"
+#include "../platform/types.hpp"
 
 #include <array>
 #include <cstdint>
@@ -329,6 +330,14 @@ struct Style {
     std::string a11y_label;
     std::string a11y_description;
     a11y::State a11y_state{};
+
+    /// Pointer shape while hovering this node.
+    ///
+    /// `arrow` means "inherit": a nested label inside a button should not
+    /// reset the cursor the button set. Only nodes that mean something
+    /// different override — a text field wants an I-beam, a link a pointer,
+    /// a resize handle a double arrow.
+    CursorShape cursor = CursorShape::arrow;
 
     /// Stable identity for hit-testing and animation matching. Zero means
     /// "anonymous"; the DSL assigns one when you name a node.

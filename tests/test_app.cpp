@@ -745,6 +745,130 @@ void test_error_boundary() {
     });
 }
 
+/// Input-method composition — CJK, Korean, and accented Latin.
+///
+/// Without this the framework cannot be used in those languages at all: the
+/// keystrokes for `konnichiwa` arrive as ten Latin letters and the conversion
+/// to こんにちは never happens.
+void test_ime_composition() {
+    section("input method");
+
+    TextEditState f;
+
+    // Preedit is displayed but NOT committed. That separation is what makes
+    // composition cancellable.
+    f.set_preedit("こん");
+    check(f.text.empty(), "preedit does not enter the document");
+    check(f.display_text() == "こん", "but the user sees it");
+    check(f.composing(), "and the field reports it is composing");
+
+    f.set_preedit("こんにちは");
+    check(f.text.empty(), "growing the preedit still commits nothing");
+    check(f.display_text() == "こんにちは", "and replaces the previous preedit");
+
+    f.commit_preedit();
+    check(f.text == "こんにちは", "commit inserts the composed text");
+    check(!f.composing(), "and composition ends");
+
+    // Cancelling must leave committed text untouched.
+    f.set_preedit("あ");
+    check(f.display_text() == "こんにちはあ", "a new composition appends at the caret");
+    f.cancel_preedit();
+    check(f.text == "こんにちは", "cancelling leaves the document unchanged");
+    check(f.display_text() == "こんにちは", "and the preedit disappears");
+
+    // While composing, keys belong to the INPUT METHOD: arrows pick
+    // candidates and Enter confirms. Letting them reach the editor would
+    // move the caret out from under the preedit.
+    f.set_preedit("か");
+    check(!f.handle_key(Key::left, Mods{}), "arrows are not consumed while composing");
+    check(!f.handle_key(Key::backspace, Mods{}), "nor is backspace");
+    f.cancel_preedit();
+    check(f.handle_key(Key::left, Mods{}), "but they work again once composition ends");
+
+    // Composition replaces a selection, exactly as typing would.
+    TextEditState g;
+    g.insert("hello");
+    g.select_all();
+    g.set_preedit("に");
+    check(g.text.empty(), "starting a composition replaces the selection");
+
+    // Driven through the runtime, as a real IME would.
+    run_headless<TestApp>(kCfg, [](auto& rt) {
+        rt.window().compose("こん");
+        rt.tick();
+        rt.window().commit("今日は");
+        rt.tick();
+        check(true, "a scripted composition flows through the runtime");
+    });
+}
+
+/// Undo/redo, generic over any Model.
+void test_history() {
+    section("undo/redo");
+
+    History<std::string> h{""};
+
+    // Typing must coalesce into ONE undo step. Without this, undo is
+    // unusable in a text field — Cmd-Z loses a single letter.
+    for (char c : std::string{"hello"}) {
+        h.edit([&](std::string& s) { s += c; }, "typing");
+    }
+    check(*h == "hello", "edits apply");
+    check(h.undo_depth() == 1, "and coalesce into one step (" +
+                               std::to_string(h.undo_depth()) + ")");
+
+    h.undo();
+    check(*h == "", "one undo reverts the whole run");
+
+    h.redo();
+    check(*h == "hello", "redo restores it");
+
+    // A different group starts a new step.
+    h.edit([](std::string& s) { s += " world"; }, "paste");
+    check(h.undo_depth() == 2, "a new group is a new step");
+    h.undo();
+    check(*h == "hello", "and undoes independently");
+
+    // Editing after an undo must discard the redo branch: redoing into a
+    // future that no longer follows from the present is incoherent.
+    h.edit([](std::string& s) { s += "!"; }, "");
+    check(!h.can_redo(), "editing after undo clears the redo branch");
+
+    // Bounded, or a long session leaks.
+    History<int> b{0};
+    b.set_max_depth(5);
+    for (int i = 1; i <= 20; ++i) b.set(i);
+    check(b.undo_depth() == 5, "history is bounded");
+    int steps = 0;
+    while (b.undo()) ++steps;
+    check(steps == 5 && *b == 15, "and drops the oldest states");
+}
+
+/// Cursor feedback tells a user what is interactive before they click.
+void test_cursor() {
+    section("cursor");
+
+    constexpr Theme th = themes::midnight;
+    TextEditState field;
+
+    auto ui = v(box() | size(100, 40) | bg(th.surface),
+                node(text_field(th, field, false, node_id("f")).build()))
+            | gap(4) | pad(8);
+
+    Node n = ui.build();
+    layout::layout_tree(n, {200, 200}, layout::default_measurer());
+
+    const Node* f = n.find(node_id("f"));
+    check(f != nullptr, "the field is in the tree");
+    if (f != nullptr) {
+        check(f->style().cursor == CursorShape::text,
+              "a text field asks for an I-beam, not an arrow");
+    }
+    check(n.children()[0].style().cursor == CursorShape::arrow,
+          "and a plain box inherits rather than overriding");
+}
+
 void test_render_economy() {
     section("render economy");
 
@@ -782,6 +906,9 @@ int main() {
     test_motion_does_not_spin();
     test_accessibility();
     test_error_boundary();
+    test_ime_composition();
+    test_history();
+    test_cursor();
     test_render_economy();
 
     std::printf("\n%s  %d checks, %d failures\n",
