@@ -70,6 +70,19 @@ struct Ctx {
     double time = 0.0;       ///< seconds since start, for animation
     Theme theme = themes::midnight;
 
+    /// The text measurer the frame will be laid out with.
+    ///
+    /// A view needs this whenever it must know a real size before layout runs
+    /// — measured virtualisation, custom truncation, a canvas that positions
+    /// against text. Exposing it removes the temptation to hardcode a
+    /// multiplier, which is the single most common source of "the box is
+    /// slightly too small" bugs.
+    const layout::TextMeasurer* text_measurer = nullptr;
+
+    [[nodiscard]] const layout::TextMeasurer& measurer() const {
+        return text_measurer != nullptr ? *text_measurer : layout::default_measurer();
+    }
+
     /// Where `view()` posts menus, modals and tooltips.
     ///
     /// Mutable because a view is a pure function of the MODEL — the overlay
@@ -748,7 +761,7 @@ class Runtime {
         // yet invisible to hit testing.
         overlays_.clear();
 
-        Ctx ctx{size_, dpi_, time_, cfg_.theme, &overlays_, &input_};
+        Ctx ctx{size_, dpi_, time_, cfg_.theme, measurer_, &overlays_, &input_};
 
         if constexpr (detail::ViewWithCtx<P>) {
             tree_ = P::view(model_, ctx);

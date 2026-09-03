@@ -250,13 +250,31 @@ template <Element... Kids>
     return detail::make_stack<Axis::horizontal>(kids...);
 }
 
-/// Z stack — children overlap, all pinned to the parent box. The layering
-/// primitive for badges, overlays, and glass panels.
+/// Z stack — children overlap, all pinned to the parent box.
+///
+/// The FIRST child stays in flow and therefore SIZES the stack; the rest are
+/// absolutely positioned over it. That asymmetry is deliberate and is what
+/// makes `z()` safe to use without an explicit size:
+///
+///     z(content, badge_over_it)   // sizes to `content`
+///
+/// Making every child absolute (as this once did) means the stack has nothing
+/// to size from, collapses, and — since z-stacks are usually clipped — crops
+/// its own contents. That is precisely how mayag's own text field ended up
+/// 19.6 px tall around 22.4 px of text.
+///
+/// Put the thing that defines the size first. If you genuinely want every
+/// child floating, give the stack an explicit size.
 template <Element... Kids>
 [[nodiscard]] constexpr auto z(Kids... kids) {
     auto e = detail::make_stack<Axis::vertical>(kids...);
     e.style.layout.align = Align::stretch;
-    std::apply([](auto&... k) { ((k.style.layout.position = Positioning::absolute), ...); }, e.kids);
+
+    [&]<std::size_t... I>(std::index_sequence<I...>) {
+        ((I == 0 ? void()
+                 : void(std::get<I>(e.kids).style.layout.position = Positioning::absolute)), ...);
+    }(std::index_sequence_for<Kids...>{});
+
     return e;
 }
 
@@ -448,6 +466,7 @@ struct Margin {
 };
 [[nodiscard]] constexpr Margin margin(float all) { return {Insets{all}}; }
 [[nodiscard]] constexpr Margin margin(float vertical, float horizontal) { return {Insets{vertical, horizontal}}; }
+[[nodiscard]] constexpr Margin margin(float t, float r, float b, float l) { return {Insets{t, r, b, l}}; }
 
 /// Spacing between children. Meaningless without children — hence the
 /// `container` requirement, which turns a silent no-op into a compile error.
@@ -602,6 +621,19 @@ inline constexpr Rigid rigid{};
 
 /// Position against the parent's padding box, out of flow. The reverse of
 /// `grow`'s ban, so the conflict is caught whichever order you write it in.
+/// Position against the parent's padding box, OUT OF FLOW.
+///
+/// Out of flow means the child does not contribute to the parent's size — so
+/// the parent must get its size from somewhere else. In practice that means
+/// one of:
+///
+///   * a sibling that IS in flow (the normal overlay case: content in flow,
+///     a badge or caret absolutely placed over it), or
+///   * an explicit size on the parent.
+///
+/// A container holding ONLY absolute children and no explicit size collapses
+/// to nothing, and — because such containers are usually `clip`ped — silently
+/// crops whatever was inside. `layout::audit()` reports both.
 struct Absolute {
     MAYAG_MODIFIER(Absolute, caps::none, caps::positioned, caps::flexible, "absolute");
     Vec2 at;
@@ -905,6 +937,23 @@ struct Ellipsis {
     constexpr void apply(Style& s) const { s.text.overflow = TextOverflow::ellipsis; }
 };
 inline constexpr Ellipsis ellipsis{};
+
+/// Opt IN to wrapping. For paragraphs and multi-line prose.
+///
+/// Text defaults to `ellipsis` because most UI text is a label, and a
+/// wrapping label in a tight row becomes an unreadable vertical ribbon.
+struct WrapText {
+    MAYAG_MODIFIER(WrapText, caps::text, caps::none, caps::none, "wrap_text");
+    constexpr void apply(Style& s) const { s.text.overflow = TextOverflow::wrap; }
+};
+inline constexpr WrapText wrap_text{};
+
+/// Hard clip with no ellipsis.
+struct ClipText {
+    MAYAG_MODIFIER(ClipText, caps::text, caps::none, caps::none, "clip_text");
+    constexpr void apply(Style& s) const { s.text.overflow = TextOverflow::clip; }
+};
+inline constexpr ClipText clip_text{};
 
 // ════════════════════════════════════════════════════════════════════════
 // Identity

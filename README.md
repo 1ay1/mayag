@@ -256,6 +256,9 @@ So mayag changes the defaults and adds a safety net:
 | Filling space implies giving way | `grow()` sets shrink too — `grow()` alone pushed a header to x=2976 in a 980px window |
 | Text never becomes a vertical ribbon | below ~2.5 glyph widths, boxes overflow visibly instead of wrapping to 1 char/line |
 | Opting out is explicit | `rigid`, `shrink(0)`, `grow(n, 0)` |
+| Labels degrade, never ribbon | text defaults to **ellipsis**; paragraphs opt in with `wrap_text` |
+| Stacks size to their content | `z()` keeps its FIRST child in flow, so it cannot collapse |
+| Widgets measure, never guess | `Ctx::measurer()` is available in `view()`; no hardcoded `font_size * 1.4` |
 | A size is specified once | a second `width()`/`height()` on one element is a compile error, not last-one-wins |
 | Text cannot dangle | `text_of()` on a temporary `std::string` is a compile error; use `text_owned()` |
 
@@ -273,6 +276,19 @@ std::printf("%s", layout::format_issues(issues).c_str());
 It reports collapsed nodes, overflow, unhonoured sizes, clipped text,
 degenerate wrapping, dead `grow()`, impossible constraints (`min > max`), and
 non-finite geometry — each located. Every shipped example must audit clean.
+
+The defaults are chosen so the *dangerous* option requires opting in. Four
+bugs shipped in mayag's own examples before this rule was applied, all the
+same shape — an API whose default was the risky choice, so being correct meant
+remembering to opt out. Each fix flipped a default rather than patching a call
+site:
+
+| Was | Now |
+|-----|-----|
+| text defaulted to `wrap` | defaults to `ellipsis`; a squeezed label truncates instead of becoming a vertical ribbon |
+| `z()` made every child absolute | first child stays in flow and sizes the stack |
+| widgets hardcoded `font_size * 1.4` | `Ctx::measurer()` gives views the real metrics |
+| absolute children escaped the overflow check | a *clipping* parent crops them, so they are checked |
 
 Between them, the compile-time bans and the auditor found **four real bugs in
 mayag's own examples**: a root element sized twice, swatches whose declared

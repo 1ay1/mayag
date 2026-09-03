@@ -214,11 +214,15 @@ struct Todo {
         // VIRTUALISED: only the rows on screen are built. The list would
         // behave identically with a million items, because the node count
         // depends on the viewport, not on the data.
-        constexpr float row_h = 38.0f;
-        auto rows_node = virtual_list(
-            m.list, static_cast<int>(vis.size()), row_h,
+        //
+        // The row height is MEASURED from a prototype rather than hardcoded.
+        // A guessed height makes the spacers disagree with the real rows, so
+        // the scrollbar lies and the content drifts — the same class of bug
+        // as a hand-computed widget height.
+        auto rows_node = virtual_list_measured(
+            m.list, static_cast<int>(vis.size()),
             [&](int slot) { return row(slot, vis[static_cast<std::size_t>(slot)]); },
-            4.0f);
+            c.measurer(), 4.0f);
 
         // ---- filter chips ----
         auto chip = [&](const char* label, Filter f) {
@@ -271,7 +275,7 @@ struct Todo {
                          // switching filters mid-slide continues smoothly
                          // instead of restarting.
                          node((box() | size(46, 2) | bg(t.accent) | radius(1)
-                                     | offset(m.indicator.value() * 52.0f, 0)).build()))
+                                     | margin(0, 0, 0, m.indicator.value() * 52.0f)).build()))
                        | gap(4)),
 
                  // input

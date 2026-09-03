@@ -237,41 +237,50 @@ template <Element... Kids>
 
 /// A single-line text field with caret and selection.
 ///
-/// Everything visible is derived from the state, so the widget is stateless
-/// and the model is the single source of truth. Focus comes from `Ctx`, which
-/// is why the field does not need to know whether it is focused — it asks.
+/// Sizes to its own TEXT. There is no hand-computed height here, and that is
+/// the point: a widget cannot know the font it will be rendered with, so any
+/// multiplier it invents is a guess that goes wrong the moment a caller uses
+/// a different size. The text sits in flow and defines the height; the caret
+/// and selection float over it.
+///
+/// This shipped the other way once — `height(font_size * 1.4)` with every
+/// child absolute — and produced a 19.6 px field around 22.4 px of text,
+/// visibly clipping its own placeholder.
+///
 /// `focused` is passed in rather than read from a Ctx, because widgets sit
-/// BELOW the app layer in the include graph — a widget cannot know what a
-/// runtime is. Callers write `text_field(t, m.name, c.focused<"name">(), ...)`.
+/// BELOW the app layer in the include graph. Callers write
+/// `text_field(t, m.name, c.focused<"name">(), node_id("name"))`.
 [[nodiscard]] inline auto text_field(const Theme& t, const TextEditState& state,
                                      bool focused, std::uint64_t nid,
-                                     std::string_view placeholder = {}) {
+                                     std::string_view placeholder = {},
+                                     float text_size = 0.0f) {
+    const float font_size = text_size > 0.0f ? text_size : t.font_size;
     const bool showing_placeholder = state.text.empty() && !placeholder.empty();
 
-    // The caret and selection are drawn as absolutely positioned boxes over
-    // the text, measured in the SAME font the text uses so they line up.
-    const float char_w = t.font_size * 0.55f;
+    // Caret and selection are positioned in the same units the text is laid
+    // out in. Approximate advance is acceptable here because it only moves a
+    // 1.5px caret; the HEIGHT, which is what clipped, now comes from layout.
+    const float char_w = font_size * 0.55f;
     const float caret_x = static_cast<float>(state.caret) * char_w;
     const float sel_x0  = static_cast<float>(state.selection_start()) * char_w;
     const float sel_w   = static_cast<float>(state.selection_end() -
                                              state.selection_start()) * char_w;
 
-    return z(// selection highlight, behind the text
-             node((box() | size(num::max(sel_w, 0.0f), t.font_size * 1.3f)
+    return z(// FIRST child is in flow and therefore sizes the field.
+             text_owned(showing_placeholder ? std::string{placeholder} : state.text)
+               | font(font_size)
+               | fg(showing_placeholder ? t.text_disabled : t.text_primary)
+               | ellipsis
+               | width(pct(100)),
+             // Selection highlight and caret float over it.
+             node((box() | size(num::max(sel_w, 0.0f), font_size * 1.25f)
                          | bg(t.accent.fade(state.has_selection() ? 0.30f : 0.0f))
                          | radius(2)
                          | absolute(sel_x0, 0)).build()),
-             node((text_owned(showing_placeholder ? std::string{placeholder} : state.text)
-                   | font(t.font_size)
-                   | fg(showing_placeholder ? t.text_disabled : t.text_primary)
-                   | ellipsis
-                   | absolute(0, 0)).build()),
-             // caret, only while focused
-             node((box() | size(1.5f, t.font_size * 1.2f)
+             node((box() | size(1.5f, font_size * 1.2f)
                          | bg(t.accent.fade(focused ? 1.0f : 0.0f))
                          | absolute(caret_x, 0)).build()))
-         | height(t.font_size * 1.4f)
-         | pad(8, 10)
+         | pad(9, 11)
          | bg(t.surface)
          | border(1, focused ? t.accent : t.border)
          | radius(t.radius_small)

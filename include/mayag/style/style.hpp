@@ -164,7 +164,19 @@ struct TextStyle {
     float        line_height = 1.4f;    ///< multiple of size
     float        letter_spacing = 0.0f;
     TextAlign    align       = TextAlign::left;
-    TextOverflow overflow    = TextOverflow::wrap;
+
+    /// DEFAULT IS ELLIPSIS, not wrap.
+    ///
+    /// Wrapping is right for paragraphs and wrong for everything else, and
+    /// UIs are mostly everything else: labels, buttons, chips, table cells,
+    /// menu entries. A wrapping label in a tight row does not degrade
+    /// gracefully — it becomes a vertical ribbon of letters that looks like
+    /// the text engine failed, when the real fault is upstream sizing.
+    ///
+    /// So the safe behaviour is the default and paragraphs opt IN with
+    /// `| wrap_text`. Every label in mayag's own examples that needed fixing
+    /// needed exactly this, which is the signal that the default was wrong.
+    TextOverflow overflow    = TextOverflow::ellipsis;
 
     friend constexpr bool operator==(const TextStyle&, const TextStyle&) = default;
     [[nodiscard]] constexpr float line_advance() const noexcept { return size * line_height; }

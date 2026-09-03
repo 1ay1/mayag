@@ -21,6 +21,7 @@
 
 #include "dsl.hpp"
 #include "../core/scroll_state.hpp"
+#include "../layout/flex.hpp"
 
 #include <functional>
 #include <vector>
@@ -90,6 +91,31 @@ struct VisibleRange {
     }
 
     return list(Axis::vertical, std::move(children), gap);
+}
+
+/// A virtualised vertical list with a MEASURED row height.
+///
+/// Pass a prototype row and the list measures it, instead of asking the
+/// caller to hardcode a number. A hand-written `row_h` is a guess about a
+/// font the caller cannot see: get it wrong and the spacers no longer match
+/// the real rows, so the scrollbar lies and the content drifts. That is the
+/// same class of bug as a hand-computed widget height.
+[[nodiscard]] inline auto virtual_list_measured(const ScrollState& scroll, int total,
+                                                const std::function<Node(int)>& build,
+                                                const layout::TextMeasurer& measurer,
+                                                float gap = 0.0f, int overscan = 2) {
+    // Measure row 0 at the viewport width. Uniform-height lists are the case
+    // virtualisation applies to, so one sample is the right cost.
+    float row_height = 0.0f;
+    if (total > 0) {
+        Node probe = build(0);
+        row_height = layout::measure(
+            probe, layout::Constraints{num::max(scroll.viewport.x, 1.0f), num::inf},
+            measurer).y;
+    }
+    if (row_height <= 0.0f) row_height = 1.0f;
+
+    return virtual_list(scroll, total, row_height, build, gap, overscan);
 }
 
 /// How many nodes a virtualised list will build. Useful in tests and in the

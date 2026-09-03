@@ -99,7 +99,7 @@ struct Typography {
                       "OpenType file by mayag itself, shaped with kerning from the "
                       "font's own GPOS table, and rasterised with exact analytic "
                       "coverage.")
-                | font(13) | fg(t.text_secondary) | line_height(1.5f))
+                | font(13) | fg(t.text_secondary) | line_height(1.5f) | wrap_text)
               | width(pct(48)),
             v(text_of("Text at or above the SDF threshold shares one scale-free "
                       "atlas entry across every size it appears at, so a heading "

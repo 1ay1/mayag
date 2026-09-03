@@ -784,6 +784,93 @@ void test_layout_guarantees() {
         check(layout::audit(n, &tm).empty(), "audit() is silent on a healthy tree");
     }
 
+    // ── DEFAULTS that make the failure mode impossible ──────────────────
+    //
+    // Four bugs shipped in mayag's own examples, all the same shape: an API
+    // whose DEFAULT was the dangerous choice, so getting it right required
+    // remembering to opt out. The fix each time was to flip the default, not
+    // to patch the call site.
+    {
+        // Text defaults to ellipsis, not wrap. A wrapping label in a tight
+        // row becomes an unreadable vertical ribbon that looks like the text
+        // engine failed.
+        TextStyle st;
+        check(st.overflow == TextOverflow::ellipsis,
+              "text defaults to ellipsis, so labels degrade gracefully");
+
+        auto para = text<"x"> | wrap_text;
+        check(para.style.text.overflow == TextOverflow::wrap,
+              "paragraphs opt IN to wrapping");
+    }
+
+    {
+        // z() sizes to its FIRST child. Making every child absolute leaves
+        // the stack nothing to size from, so it collapses — and since
+        // z-stacks are usually clipped, it crops its own contents.
+        // Nested, because a root element fills its viewport by definition;
+        // what matters is that the stack takes its size from the first child
+        // when it is free to.
+        auto ui = v(z(box() | size(100, 40), box() | size(20, 20)));
+        Node n = ui.build();
+        layout::layout_tree(n, {300, 200}, tm);
+
+        const Node& stack = n.children()[0];
+        near(stack.children()[0].frame().height(), 40.0f, 0.01f,
+             "z() keeps its first child in flow");
+        near(stack.frame().height(), 40.0f, 0.01f,
+             "so the stack sizes to it rather than collapsing");
+    }
+
+    {
+        // A clipping parent CROPS absolutely positioned children too, so
+        // they must be part of the overflow check. Excluding them hid the
+        // exact bug that shipped: a text field 19.6px tall around 22.4px of
+        // text, and the auditor said nothing.
+        auto bad = z(box() | size(10, 10),
+                     box() | size(200, 60) | absolute(0, 0))
+                 | size(100, 20) | clip;
+        Node n = bad.build();
+        layout::layout_tree(n, {300, 200}, tm);
+
+        bool found = false;
+        for (const auto& i : layout::audit(n, &tm)) {
+            if (i.kind == layout::Issue::Kind::overflow) found = true;
+        }
+        check(found, "audit() reports absolute children cropped by a clipping parent");
+    }
+
+    {
+        // Text taller than its box is reported in EVERY overflow mode, not
+        // just clip. The common fault is a parent that reserved a height
+        // using its own font size while the text renders at another.
+        auto bad = v(text<"Hello"> | font(16) | height(10));
+        Node n = bad.build();
+        layout::layout_tree(n, {200, 100}, tm);
+
+        bool found = false;
+        for (const auto& i : layout::audit(n, &tm)) {
+            if (i.kind == layout::Issue::Kind::text_clipped) found = true;
+        }
+        check(found, "audit() reports text taller than its own box");
+    }
+
+    {
+        // A scroll viewport is SUPPOSED to hold more than it shows, so
+        // overflow there is not a fault. An auditor that cries wolf on the
+        // most common container gets switched off.
+        ScrollState sc;
+        std::vector<Node> rows;
+        for (int i = 0; i < 20; ++i) rows.push_back((box() | size(80, 30)).build());
+        auto ui = list(Axis::vertical, std::move(rows)) | size(100, 100) | scroll(sc);
+        Node n = ui.build();
+        layout::layout_tree(n, {200, 200}, tm);
+
+        for (const auto& i : layout::audit(n, &tm)) {
+            check(i.kind != layout::Issue::Kind::overflow,
+                  "a scroll viewport is not reported as overflowing");
+        }
+    }
+
     // ── every shipped example must audit clean ──────────────────────────
     //
     // This is the test that would have caught the broken dashboard before it

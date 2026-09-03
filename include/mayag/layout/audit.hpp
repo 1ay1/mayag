@@ -172,13 +172,29 @@ struct Issue {
                         "width " + std::to_string(static_cast<int>(inner.width())) +
                         " cannot fit a glyph (" + std::to_string(static_cast<int>(one_line)) + ")"});
                 }
-            } else if (st.text.overflow == TextOverflow::clip) {
-                const float needed = measurer->advance(n.text(), st.text);
-                if (needed > inner.width() + 1.0f) {
-                    issues.push_back(Issue{Issue::Kind::text_clipped, st.id, f,
-                        "needs " + std::to_string(static_cast<int>(needed)) +
-                        "px, has " + std::to_string(static_cast<int>(inner.width()))});
-                }
+            }
+
+            // Text taller than its own box, in ANY overflow mode.
+            //
+            // Only the `clip` case used to be checked, which missed the far
+            // more common fault: a parent that RESERVED a height using its
+            // own font size while the text renders at a different one. That
+            // is what made the todo app's input field 19.6 px tall around
+            // 22.4 px of text — visibly clipped, and completely silent.
+            const Vec2 needs = measurer->measure(
+                n.text(), st.text,
+                st.text.overflow == TextOverflow::wrap ? inner.width() : num::inf);
+
+            if (needs.y > inner.height() + 1.0f) {
+                issues.push_back(Issue{Issue::Kind::text_clipped, st.id, f,
+                    "text is " + std::to_string(static_cast<int>(needs.y)) +
+                    "px tall in a " + std::to_string(static_cast<int>(inner.height())) +
+                    "px box"});
+            }
+            if (st.text.overflow == TextOverflow::clip && needs.x > inner.width() + 1.0f) {
+                issues.push_back(Issue{Issue::Kind::text_clipped, st.id, f,
+                    "needs " + std::to_string(static_cast<int>(needs.x)) +
+                    "px, has " + std::to_string(static_cast<int>(inner.width()))});
             }
         }
 
@@ -189,14 +205,29 @@ struct Issue {
             // Only meaningful when the node has a size of its own to
             // overflow. A content-sized box is SUPPOSED to be as big as its
             // children.
-            const bool bounded = st.clip ||
+            // A SCROLL VIEWPORT is supposed to hold more than it shows —
+            // that is what scrolling IS — so overflow there is not a fault.
+            const bool bounded = st.layout.scroll == nullptr &&
+                                (st.clip ||
                                  st.layout.width.unit  == Length::Unit::pixels ||
-                                 st.layout.height.unit == Length::Unit::pixels;
+                                 st.layout.height.unit == Length::Unit::pixels);
             (void)parent;
             if (bounded) {
+                // Absolutely positioned children are included when the
+                // parent CLIPS.
+                //
+                // Out of flow means "does not participate in sizing", not
+                // "may be silently cropped". A clipping parent cuts every
+                // child regardless of positioning, so excluding them here
+                // left the most common overlay bug invisible: a caret or
+                // label placed with absolute() inside a container whose
+                // height was guessed rather than measured. That is exactly
+                // how the todo app shipped an input field 19.6 px tall
+                // around 22.4 px of text, and the auditor said nothing.
                 Rect union_of_children{};
                 for (const auto& c : n.children()) {
-                    if (c.style().layout.position != Positioning::flow) continue;
+                    const bool in_flow = c.style().layout.position == Positioning::flow;
+                    if (!in_flow && !st.clip) continue;
                     union_of_children = union_of_children.unite(c.frame());
                 }
                 const Rect inner = deflate(f, st.layout.padding);
