@@ -210,4 +210,73 @@ template <Element... Kids>
     return v(kids...) | center | width(pct(100)) | height(pct(100));
 }
 
+// ── scrolling ───────────────────────────────────────────────────────────
+
+/// A scrollable region with an auto-hiding scrollbar.
+///
+/// The bar appears only when there is something to scroll, and its thumb is
+/// sized by the visible fraction — a long document gets a short thumb, which
+/// is the only honest signal of how much is off-screen.
+template <Element... Kids>
+[[nodiscard]] inline auto scroll_view(const Theme& t, ScrollState& state, Kids... kids) {
+    const Rect track{0, 0, 6, state.viewport.y};
+    const Rect thumb = state.thumb_v(track);
+
+    return z(node((v(kids...) | scroll(state)).build()),
+             // The bar is absolutely positioned so it floats over the content
+             // rather than stealing width from it.
+             node((box()
+                   | size(6, num::max(thumb.height(), 0.0f))
+                   | bg(t.text_disabled.fade(state.scrollable_y() ? 0.55f : 0.0f))
+                   | radius(3)
+                   | absolute(state.viewport.x - 10.0f, thumb.top())).build()))
+         | width(pct(100)) | height(pct(100));
+}
+
+// ── text input ──────────────────────────────────────────────────────────
+
+/// A single-line text field with caret and selection.
+///
+/// Everything visible is derived from the state, so the widget is stateless
+/// and the model is the single source of truth. Focus comes from `Ctx`, which
+/// is why the field does not need to know whether it is focused — it asks.
+/// `focused` is passed in rather than read from a Ctx, because widgets sit
+/// BELOW the app layer in the include graph — a widget cannot know what a
+/// runtime is. Callers write `text_field(t, m.name, c.focused<"name">(), ...)`.
+[[nodiscard]] inline auto text_field(const Theme& t, const TextEditState& state,
+                                     bool focused, std::uint64_t nid,
+                                     std::string_view placeholder = {}) {
+    const bool showing_placeholder = state.text.empty() && !placeholder.empty();
+
+    // The caret and selection are drawn as absolutely positioned boxes over
+    // the text, measured in the SAME font the text uses so they line up.
+    const float char_w = t.font_size * 0.55f;
+    const float caret_x = static_cast<float>(state.caret) * char_w;
+    const float sel_x0  = static_cast<float>(state.selection_start()) * char_w;
+    const float sel_w   = static_cast<float>(state.selection_end() -
+                                             state.selection_start()) * char_w;
+
+    return z(// selection highlight, behind the text
+             node((box() | size(num::max(sel_w, 0.0f), t.font_size * 1.3f)
+                         | bg(t.accent.fade(state.has_selection() ? 0.30f : 0.0f))
+                         | radius(2)
+                         | absolute(sel_x0, 0)).build()),
+             node((text_owned(showing_placeholder ? std::string{placeholder} : state.text)
+                   | font(t.font_size)
+                   | fg(showing_placeholder ? t.text_disabled : t.text_primary)
+                   | ellipsis
+                   | absolute(0, 0)).build()),
+             // caret, only while focused
+             node((box() | size(1.5f, t.font_size * 1.2f)
+                         | bg(t.accent.fade(focused ? 1.0f : 0.0f))
+                         | absolute(caret_x, 0)).build()))
+         | height(t.font_size * 1.4f)
+         | pad(8, 10)
+         | bg(t.surface)
+         | border(1, focused ? t.accent : t.border)
+         | radius(t.radius_small)
+         | clip
+         | id_of_raw(nid);
+}
+
 }  // namespace mayag::dsl

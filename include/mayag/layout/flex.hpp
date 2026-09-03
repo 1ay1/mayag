@@ -331,6 +331,60 @@ inline void arrange(Node& node, const Rect& frame, const TextMeasurer& tm) {
     node.set_frame(frame);
     if (node.children().empty()) return;
 
+    // ── scroll viewports ────────────────────────────────────────────────
+    //
+    // Children are laid out at their NATURAL size in an unbounded box, then
+    // shifted by the scroll offset. Doing it this way (rather than shrinking
+    // the children to fit) is what makes a scroll view show a slice of a
+    // larger document instead of a squashed version of it.
+    if (const ScrollState* sc = node.style().layout.scroll; sc != nullptr) {
+        const Rect content_box = deflate(frame, node.style().layout.padding);
+
+        // Measure the CHILDREN, not the node.
+        //
+        // `measure(node, ...)` would short-circuit on the viewport's own
+        // explicit size — which is exactly the 200px we are scrolling inside —
+        // and report that the content fits perfectly. The whole point is that
+        // the content is BIGGER than the viewport, so the scrolling axis must
+        // be unbounded and the viewport's own size must not participate.
+        Constraints cc = Constraints::tight(content_box.size);
+        if (sc->axis != ScrollAxis::horizontal) cc.max_height = num::inf;
+        if (sc->axis != ScrollAxis::vertical)   cc.max_width  = num::inf;
+
+        const Axis ax = node.style().layout.axis;
+        Vec2 natural{};
+        int  flow_kids = 0;
+        for (const auto& kid : node.children()) {
+            if (!detail::in_flow(kid)) continue;
+            const Vec2 ks = measure(kid, cc, tm) + kid.style().layout.margin.total();
+            if (ax == Axis::vertical) {
+                natural.y += ks.y;
+                natural.x  = num::max(natural.x, ks.x);
+            } else {
+                natural.x += ks.x;
+                natural.y  = num::max(natural.y, ks.y);
+            }
+            ++flow_kids;
+        }
+        if (flow_kids > 1) {
+            const float gaps = node.style().layout.gap * static_cast<float>(flow_kids - 1);
+            (ax == Axis::vertical ? natural.y : natural.x) += gaps;
+        }
+
+        sc->measured(content_box.size, natural);
+
+        // Lay the children out at natural size, then translate.
+        const Rect inner{content_box.origin - sc->offset,
+                         Vec2{num::max(natural.x, content_box.size.x),
+                              num::max(natural.y, content_box.size.y)}};
+        detail::arrange_children(node, inner, tm);
+
+        // A viewport always clips: content outside it is not merely hidden,
+        // it must not receive clicks either.
+        node.style().clip = true;
+        return;
+    }
+
     // Children live inside the padding box; corner radii are clamped now that
     // the real size is known, so `pill` becomes an actual pill.
     node.style().corners = node.style().corners.clamp_to(frame.size);

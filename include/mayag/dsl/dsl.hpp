@@ -377,10 +377,16 @@ struct NodeElem {
     [[nodiscard]] Node build() const {
         Node n = payload;
         // Style piped onto the wrapper wins over whatever the node carried,
-        // so `node(x) | pad(8)` behaves like any other element.
+        // so `node(x) | pad(8)` behaves like any other element. The payload's
+        // own children and layout axis survive, because those came from how
+        // the subtree was CONSTRUCTED, not from the pipeline.
         if (style != Style{}) {
+            const Axis axis = n.style().layout.axis;
+            const float gap = n.style().layout.gap;
             const std::uint64_t keep_id = n.style().id != 0 ? n.style().id : style.id;
             n.style() = style;
+            n.style().layout.axis = axis;
+            if (n.style().layout.gap == 0.0f) n.style().layout.gap = gap;
             n.style().id = keep_id;
         }
         return n;
@@ -388,6 +394,22 @@ struct NodeElem {
 
     operator Node() const { return build(); }
 };
+
+/// NodeElem participates in the modifier pipeline like any other element.
+///
+/// Without this, a runtime-built subtree could not be styled or sized, which
+/// defeats the point of having an escape hatch: real UIs need `list(...) |
+/// scroll(state) | size(...)`.
+template <Modifier M>
+[[nodiscard]] inline NodeElem operator|(NodeElem e, M m) {
+    static_assert((M::needs & ~NodeElem::capabilities) == 0,
+                  missing_capability(M::label,
+                      caps::first_missing(M::needs, NodeElem::capabilities)));
+    static_assert((M::bans & NodeElem::capabilities) == 0,
+                  forbidden_capability(M::label, M::bans & NodeElem::capabilities));
+    m.apply(e.style);
+    return e;
+}
 
 /// Lift a runtime `Node` into the DSL.
 [[nodiscard]] inline auto node(Node n) {
@@ -754,6 +776,24 @@ struct Opacity {
 };
 [[nodiscard]] constexpr Opacity opacity(float v) { return {v}; }
 
+/// Make this element a scroll viewport driven by `state`.
+///
+/// The state lives in YOUR model, so the offset is ordinary application data:
+/// saveable, restorable, assertable, and changed only by `update()`.
+struct Scroll {
+    MAYAG_MODIFIER(Scroll, caps::container, caps::clipped, caps::none, "scroll");
+    const ScrollState* state;
+    ScrollAxis         axis;
+    constexpr void apply(Style& s) const {
+        s.layout.scroll = state;
+        s.clip = true;
+        if (state != nullptr) state->axis = axis;
+    }
+};
+[[nodiscard]] inline Scroll scroll(const ScrollState& s, ScrollAxis axis = ScrollAxis::vertical) {
+    return {&s, axis};
+}
+
 struct Clip {
     MAYAG_MODIFIER(Clip, caps::container, caps::clipped, caps::none, "clip");
     constexpr void apply(Style& s) const { s.clip = true; }
@@ -901,6 +941,9 @@ struct Id {
 template <fixed_string Name>
 inline constexpr Id id{node_id(Name.view())};
 [[nodiscard]] constexpr Id id_of(std::string_view s) { return {node_id(s)}; }
+/// When the caller already hashed the name (a widget that took a node id as a
+/// parameter), skip re-hashing.
+[[nodiscard]] constexpr Id id_of_raw(std::uint64_t v) { return {v}; }
 
 // ════════════════════════════════════════════════════════════════════════
 // Composition

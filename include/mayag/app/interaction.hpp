@@ -197,13 +197,22 @@ class Interaction {
 
             else if constexpr (std::is_same_v<T, ScrollEvent>) {
                 cursor_ = e.position;
-                // Scroll targets the innermost scrollable ancestor; we report
-                // the hit node and let `update()` decide.
-                const std::uint64_t hit = identify(root, e.position);
-                if (hit != 0) {
-                    const Node* n = root.find(hit);
-                    const Vec2 local = n ? e.position - n->frame().origin : Vec2{};
-                    out.push_back(Gesture{Gesture::Kind::scroll, hit, e.position, local,
+
+                // A wheel event targets the innermost SCROLLABLE node under
+                // the cursor, not the innermost named one.
+                //
+                // The cursor is almost always over a leaf — a row, a label —
+                // and reporting that leaf means the scroll subscription on the
+                // enclosing list never fires. Every real UI bubbles the wheel
+                // to the nearest scrollable ancestor; without it, a list is
+                // unscrollable exactly when the pointer is over its content,
+                // which is always.
+                std::uint64_t target = 0;
+                Vec2 local{};
+                scroll_target(root, e.position, target, local);
+
+                if (target != 0) {
+                    out.push_back(Gesture{Gesture::Kind::scroll, target, e.position, local,
                                           e.delta});
                 }
             }
@@ -259,6 +268,21 @@ class Interaction {
     void set_multi_click_slop(float px) noexcept { multi_click_slop_ = px; }
 
   private:
+    /// Innermost node under `p` that is BOTH named and a scroll viewport.
+    ///
+    /// Falls back to the innermost named node when nothing scrolls, so a
+    /// non-scrolling region can still observe the wheel if it subscribes.
+    static void scroll_target(const Node& n, Vec2 p,
+                              std::uint64_t& best, Vec2& local) noexcept {
+        if (!n.frame().contains(p)) return;
+
+        if (n.style().id != 0 && n.style().layout.scroll != nullptr) {
+            best  = n.style().id;
+            local = p - n.frame().origin;
+        }
+        for (const auto& kid : n.children()) scroll_target(kid, p, best, local);
+    }
+
     /// Derive a click count from timing and distance.
     ///
     /// Only reached when the platform reports nothing. Deliberately generic:

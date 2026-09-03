@@ -33,6 +33,8 @@
 #include <mayag/core/math.hpp>
 #include <mayag/core/geometry.hpp>
 #include <mayag/core/color.hpp>
+#include <mayag/core/scroll_state.hpp>
+#include <mayag/core/text_edit.hpp>
 
 // ── style & scene ───────────────────────────────────────────────────────
 #include <mayag/style/style.hpp>

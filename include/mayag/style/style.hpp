@@ -13,6 +13,7 @@
 
 #include "../core/color.hpp"
 #include "../core/geometry.hpp"
+#include "../core/scroll_state.hpp"
 
 #include <array>
 #include <cstdint>
@@ -268,6 +269,15 @@ struct LayoutStyle {
     /// and shrinking is opt-in via `| shrink()` or `| flexible()`.
     float shrink = 0.0f;
     bool  wrap   = false;
+
+    /// When non-null this node is a SCROLL VIEWPORT: children are laid out
+    /// at their natural size, then translated by `-offset`, and the state's
+    /// limits are filled in from the measured content.
+    ///
+    /// A raw pointer into the caller's Model rather than owned state — the
+    /// scroll position belongs to the application, so it can be saved,
+    /// restored and asserted on. See core/scroll_state.hpp.
+    const ScrollState* scroll = nullptr;
 
     Positioning position = Positioning::flow;
     Vec2        offset{};  ///< used by absolute/fixed, and as a paint nudge in flow

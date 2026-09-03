@@ -185,6 +185,7 @@ animate, <kbd>tab</kbd> to move focus, <kbd>esc</kbd> to quit.
 | `gallery` | every visual feature, 6 live themes, drag + hover + animation |
 | `dashboard` | a realistic app layout with a clickable sidebar |
 | `typography` | the font engine: type scale, kerning, script fallback |
+| `todo` | a real app: text input, scrolling list, filters, keyboard |
 
 An idle mayag app **blocks** and measures **~0% CPU** — "am I animating" is
 derived from the subscriptions, not from a flag someone forgot to clear.
@@ -277,6 +278,38 @@ Between them, the compile-time bans and the auditor found **four real bugs in
 mayag's own examples**: a root element sized twice, swatches whose declared
 `size(92, 60)` was silently overridden, cell content overflowing its column,
 and a `text_of(std::to_string(x) + "%")` holding three NUL bytes.
+
+## State that belongs to you
+
+Scroll offsets and text-field contents are **application state**, not hidden
+properties of a widget. They live in your `Model`, they serialise, they can be
+restored, and only `update()` changes them.
+
+```cpp
+struct Model {
+    TextEditState input;   // text, caret, selection, undo-able by you
+    ScrollState   list;    // offset; limits filled in by layout
+};
+
+// view — pure, takes the model by const reference
+text_field(t, m.input, c.focused(node_id("input")), node_id("input"))
+list(Axis::vertical, std::move(rows)) | scroll(m.list) | id<"list">
+
+// update
+m.input.handle_key(k.key, k.mods);   // the whole standard keymap, once
+m.list.scroll_by(delta);
+```
+
+`TextEditState` moves in **graphemes** while storing **byte** offsets, so one
+press of Left never splits a multi-byte character and backspace never corrupts
+an emoji. `handle_key` implements word motion, shift-selection, Home/End,
+select-all and the platform's primary modifier in one place — so every field
+in every mayag app behaves the same instead of each author re-deriving it.
+
+`ScrollState` records its own limits during layout, clamps on content change
+(so deleting rows cannot leave you scrolled into blank space), and gives you
+thumb geometry for free. Wheel events bubble to the nearest scrollable
+ancestor, because the cursor is nearly always over a leaf.
 
 ## Clicks
 
