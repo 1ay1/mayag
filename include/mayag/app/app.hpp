@@ -226,6 +226,14 @@ struct AppConfig {
     /// you want to toggle it at runtime.
     bool debug_bounds = false;
 
+    /// Print the active renderer to stderr at startup.
+    ///
+    /// On by default because the GPU is selected by fallthrough and a
+    /// fallback to software is otherwise silent — the app still works, just
+    /// two orders of magnitude slower, which is precisely the failure worth
+    /// noticing. One line, once, at boot.
+    bool log_renderer = true;
+
     /// Latency policy. `immediate` by default — see LatencyMode.
     LatencyMode latency = LatencyMode::immediate;
 
@@ -345,6 +353,20 @@ class Runtime {
         size_ = window_.size();
         dpi_  = window_.dpi_scale();
 
+        // Say which path we are on, once, at startup.
+        //
+        // GPU selection is a deliberate silent fallthrough — no device, no
+        // backend in the build, or a shader that will not compile all end up
+        // on the software rasteriser rather than failing. That is correct,
+        // and it also means a user cannot tell what they got. One line at
+        // boot makes "is this actually using the GPU" answerable instead of
+        // assumed, and makes a silent fallback visible the day it happens.
+        if (cfg_.log_renderer) {
+            std::fprintf(stderr, "mayag: renderer %.*s\n",
+                         static_cast<int>(window_.renderer_name().size()),
+                         window_.renderer_name().data());
+        }
+
         // ---- pure: initial state -------------------------------------
         Cmd<Msg> boot_cmd = Cmd<Msg>::none();
         if constexpr (detail::HasEffectfulInit<P>) {
@@ -451,6 +473,18 @@ class Runtime {
 
     [[nodiscard]] W& window() noexcept { return window_; }
     [[nodiscard]] const Model& model() const noexcept { return model_; }
+
+    /// Which backend is actually presenting: "metal" or "software".
+    ///
+    /// Worth surfacing rather than leaving implicit, because GPU selection
+    /// is a silent fallthrough by design — a machine with no device, or a
+    /// build without the backend, degrades to software instead of failing.
+    /// That is the right behaviour and also the reason "it uses the GPU" is
+    /// unverifiable without asking. An app that cares can print this; the
+    /// examples do.
+    [[nodiscard]] std::string_view renderer_name() const noexcept {
+        return window_.renderer_name();
+    }
     [[nodiscard]] const Node& tree() const noexcept { return tree_; }
     [[nodiscard]] const Interaction& input() const noexcept { return input_; }
 
@@ -1113,6 +1147,9 @@ int run(AppConfig cfg = {}) {
 ///     });
 template <Program P, typename Driver>
 int run_headless(AppConfig cfg, Driver&& drive) {
+    // Headless is always software and always in CI, so the renderer banner
+    // would be noise on every test line.
+    cfg.log_renderer = false;
     Runtime<P, platform::Headless> rt{std::move(cfg)};
     if (!rt.boot()) return 1;
     drive(rt);

@@ -31,7 +31,24 @@ endif()
 option(MAYAG_BUILD_EXAMPLES "Build the examples"           ON)
 option(MAYAG_BUILD_TESTS    "Build the test suite"         ON)
 option(MAYAG_WITH_VULKAN    "Build the Vulkan backend"     OFF)
-option(MAYAG_WITH_METAL     "Build the Metal backend"      OFF)
+
+# mayag is a GPU framework, so the GPU backend is ON wherever the platform
+# has one. The software rasteriser does not go away — it is the reference
+# every GPU result is diffed against, and the fallback when a machine has no
+# device — but it stops being what apps get by DEFAULT.
+#
+# The measured difference is not marginal. Same 303-instance draw list, same
+# process, M1: 4.96 ms of CPU at 2000x1440 and 14.07 ms at 4K on the CPU
+# path, versus 0.04 ms on Metal at both. Shipping the 350x-slower default
+# because it is the safer-sounding one would be the wrong trade for a
+# framework whose whole design — one SDF kernel, one instance struct, one
+# draw call per batch — exists to feed a GPU.
+if(APPLE)
+    option(MAYAG_WITH_METAL "Build the Metal backend"      ON)
+else()
+    option(MAYAG_WITH_METAL "Build the Metal backend"      OFF)
+endif()
+
 option(MAYAG_WITH_D3D12     "Build the D3D12 backend"      OFF)
 option(MAYAG_WITH_WEBGPU    "Build the WebGPU backend"     OFF)
 option(MAYAG_WITH_OPENGL    "Build the OpenGL backend"     OFF)

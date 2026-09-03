@@ -654,13 +654,25 @@ regression, and measuring only CPU time would hide the compositor entirely.
 **The claim is falsifiable, which is the point.** "0.04 ms of CPU" is also
 exactly what a backend that draws *nothing* costs, so `tests/test_metal.cpp`
 renders the same draw list offscreen through Metal and through the software
-rasteriser and diffs the pixels: shape interiors must match exactly, clipped
-content must not escape its scissor rect, and whole-frame mean error must
-stay under 3/255. It currently measures **0.26/255**, with 0.59% of pixels
-differing by more than 8 — the antialiased edges, where hardware derivatives
-and the analytic footprint legitimately disagree.
+rasteriser and diffs the pixels. It covers the whole primitive set, because a
+backend can be perfect on rectangles and still be broken everywhere else:
 
-That test earned its place immediately. It caught
+| checked on GPU vs CPU | why it could diverge on its own |
+|---|---|
+| rounded boxes, circles | the shared SDF kernel |
+| **text** | needs the glyph atlas uploaded as a texture; the CPU path just calls back into the rasteriser |
+| linear / radial gradients | Oklch interpolation is transcribed separately into C++ and MSL |
+| shadows | the quad is grown in the vertex stage |
+| rings, strokes | different SDF branches |
+| clipping | per-batch scissor rects |
+
+Shape interiors must match exactly, clipped content must not escape its
+scissor, and whole-frame mean error must stay under 3/255. It currently
+measures **0.26/255**, with 0.59% of pixels differing by more than 8 — the
+antialiased edges, where hardware derivatives and the analytic footprint
+legitimately disagree by a step.
+
+That test earned its place twice over. It caught
 `MTLPrimitiveTypeTriangleStrip` being defined as 3 instead of 4 — 3 is
 `MTLPrimitiveTypeTriangle` — so every quad was rendering as the first half of
 itself. No Metal error, no validation warning, and the benchmark was perfectly
@@ -668,12 +680,41 @@ happy: drawing half a quad is *faster*. Only a pixel diff against a known-good
 rasteriser could see it, and what gave it away was the shape being in the
 right place with the right colour and 7739 of its 16000 pixels.
 
-Selection is a runtime fallthrough. `MAYAG_BACKEND=metal|software` forces a
-path; otherwise the window tries Metal and falls back to software if the
-build lacks it, the machine has no device, or the shader fails to compile. A
-failed GPU init restores the original `CALayer` — a half-attached
+Then, when the text case was added, it caught the atlas upload being gated on
+`valid_` — which means "attached to a window", not "has a device". Uploading a
+texture needs no window, so every offscreen render silently skipped it and
+text came out **completely blank** while every shape was pixel-perfect. Had
+GPU-by-default shipped before that check existed, every example would have
+rendered with invisible text.
+
+### GPU by default
+
+`MAYAG_WITH_METAL` is **ON** wherever the platform has a GPU. Running any
+example now prints which path it took:
+
+```
+$ ./build/examples/mayag_todo
+mayag: renderer metal
+```
+
+The software rasteriser has not gone anywhere — it is the reference every GPU
+result is diffed against, and the fallback when a machine has no device — but
+it is no longer what apps get by default. Shipping a 350x-slower default
+because it sounds safer would be the wrong trade for a framework whose entire
+design (one SDF kernel, one instance struct, one draw call per batch) exists
+to feed a GPU.
+
+Selection is a runtime fallthrough, and every step of it degrades rather than
+fails: no backend in the build, no device in the machine, or a shader that
+will not compile all end up on software. `MAYAG_BACKEND=metal|software`
+forces a path, which is also what makes the A/B benchmark possible. A failed
+GPU init restores the original `CALayer`, because a half-attached
 `CAMetalLayer` that nothing renders into is a black window that looks like a
-hang, which is a worse outcome than being slow.
+hang — a worse outcome than being slow.
+
+That fallthrough is exactly why the renderer is announced at boot: the app
+still works when it silently drops to software, just two orders of magnitude
+slower, and that is precisely the failure worth noticing.
 
 ## The rasteriser
 

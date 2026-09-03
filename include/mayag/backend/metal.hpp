@@ -309,9 +309,15 @@ class MetalDevice {
     }
 
     /// Upload the glyph atlas. Called when its generation changes.
+    ///
+    /// Guarded on the DEVICE, not on `valid_`. `valid_` means "attached to a
+    /// window", and creating a texture needs no window at all — gating this
+    /// on it made every offscreen render silently skip the upload, so text
+    /// came out blank while boxes and circles were perfect. Resource
+    /// ownership follows the device; only presentation follows the layer.
     void upload_atlas(const std::uint8_t* pixels, int width, int height) {
         using namespace mtl;
-        if (!valid_ || pixels == nullptr || width <= 0 || height <= 0) return;
+        if (device_ == nullptr || pixels == nullptr || width <= 0 || height <= 0) return;
 
         if (atlas_texture_ == nullptr || atlas_w_ != width || atlas_h_ != height) {
             id desc = msg_cls<id>(objc_getClass("MTLTextureDescriptor"),
@@ -345,7 +351,7 @@ class MetalDevice {
     /// the font engine — backends see pixels, never typefaces.
     template <typename AtlasT>
     void sync_atlas(AtlasT& atlas) {
-        if (!valid_) return;
+        if (device_ == nullptr) return;
 
         const bool realloc = !atlas_uploaded_ ||
                              atlas.generation() != atlas_generation_ ||
@@ -368,7 +374,7 @@ class MetalDevice {
     /// Upload a sub-rectangle of an existing atlas texture.
     void upload_region(const std::uint8_t* pixels, int atlas_width, const Rect& r) {
         using namespace mtl;
-        if (!valid_ || atlas_texture_ == nullptr || pixels == nullptr) return;
+        if (device_ == nullptr || atlas_texture_ == nullptr || pixels == nullptr) return;
 
         const int x = std::max(0, static_cast<int>(r.left()));
         const int y = std::max(0, static_cast<int>(r.top()));

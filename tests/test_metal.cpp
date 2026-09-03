@@ -165,6 +165,176 @@ int main() {
               "content inside the clip DID paint");
     }
 
+    // ── text ────────────────────────────────────────────────────────
+    //
+    // Every example is mostly text, and text is the ONE primitive that needs
+    // state the GPU does not get for free: the glyph atlas has to be
+    // uploaded to a texture and sampled, where the CPU path just calls back
+    // into the rasteriser. So a GPU backend can be perfect on boxes and
+    // circles and still render every app blank. That failure would be
+    // invisible to the shape checks above, which is exactly why it gets its
+    // own section.
+    section("text renders through the atlas texture");
+    {
+        auto fonts = typo::system::default_stack(typo::FontConfig{
+            .mode = typo::RenderMode::hybrid,
+            .sdf_threshold = 26.0f,
+            .atlas_size = 1024,
+        });
+
+        if (fonts == nullptr || fonts->empty()) {
+            std::printf("       (no system fonts; skipping)\n");
+        } else {
+            typo::StackGlyphRenderer glyphs{*fonts};
+            typo::StackSampler       cpu_sampler{*fonts};
+
+            DrawList tdl;
+            TextStyle ts{};
+            ts.size = 48.0f;
+            ts.color = rgb<0xFFFFFF>;
+            glyphs.draw_text(tdl, "Hamburgefonstiv", Rect{20, 100, 360, 60}, ts);
+
+            check(tdl.size() > 0, "the text produced glyph instances");
+
+            // Upload whatever the shaping just rasterised, then render.
+            gpu.sync_atlas(fonts->atlas());
+            const auto tg = gpu.render_offscreen(tdl, clear, w, h);
+
+            backend::Framebuffer tfb{w, h};
+            backend::Tiled::render(tdl, tfb, &cpu_sampler, &backend::shared_pool(), clear);
+            const auto tc = tfb.to_rgba8();
+
+            // "Did text draw at all" is the question that matters most: a
+            // missing atlas upload gives a perfectly clean, perfectly empty
+            // frame. Count lit pixels on both sides and compare.
+            const auto lit = [&](const std::vector<std::uint8_t>& px) {
+                std::size_t n = 0;
+                for (std::size_t i = 0; i + 3 < px.size(); i += 4) {
+                    if (px[i] > 90 && px[i + 1] > 90 && px[i + 2] > 90) ++n;
+                }
+                return n;
+            };
+            const std::size_t gpu_lit = lit(tg), cpu_lit = lit(tc);
+            std::printf("       lit pixels: gpu %zu, cpu %zu\n", gpu_lit, cpu_lit);
+
+            check(gpu_lit > 500, "the GPU drew visible glyph coverage");
+
+            // Both rasterise the same glyphs from the same atlas, so the
+            // amount of ink must agree closely. A large gap means the
+            // texture, the uv rects, or the SDF threshold is wrong.
+            if (cpu_lit > 0) {
+                const double ratio = static_cast<double>(gpu_lit) /
+                                     static_cast<double>(cpu_lit);
+                std::printf("       gpu/cpu ink ratio %.3f\n", ratio);
+                check(ratio > 0.75 && ratio < 1.35,
+                      "GPU and CPU agree on how much ink the text has");
+            }
+        }
+    }
+
+    // ── the rest of the primitive set ────────────────────────────────
+    //
+    // Boxes, circles and text cover most of a UI but not the parts most
+    // likely to diverge. Gradients interpolate through Oklch in BOTH the
+    // C++ kernel and the MSL one, and those are separate translations of the
+    // same maths — a transcription slip shows up as a subtly wrong ramp that
+    // no shape check would notice. Shadows grow their quad in the vertex
+    // stage. Rings and strokes take different branches of the SDF.
+    //
+    // Each of these is a place the two backends could disagree silently, so
+    // each gets rendered both ways and compared.
+    section("gradients, shadows, rings and strokes agree");
+    {
+        struct Case {
+            const char* name;
+            void (*build)(DrawList&);
+            int probe_x, probe_y;
+        };
+
+        const Case cases[] = {
+            {"linear gradient (Oklch)", [](DrawList& d) {
+                d.fill_rect(Rect{0, 0, 400, 300}, rgb<0x101418>);
+                Fill f{};
+                f.kind = FillKind::linear_gradient;
+                f.stops[0] = GradientStop{0.0f, rgb<0xEF4444>};
+                f.stops[1] = GradientStop{1.0f, rgb<0x3B82F6>};
+                f.stop_count = 2;
+                f.from = {0.0f, 0.0f};
+                f.to   = {1.0f, 0.0f};
+                d.fill_gradient(Rect{50, 50, 300, 200}, f);
+            }, 200, 150},
+            {"linear gradient (sRGB)", [](DrawList& d) {
+                d.fill_rect(Rect{0, 0, 400, 300}, rgb<0x101418>);
+                Fill f{};
+                f.kind = FillKind::linear_gradient;
+                f.stops[0] = GradientStop{0.0f, rgb<0xEF4444>};
+                f.stops[1] = GradientStop{1.0f, rgb<0x3B82F6>};
+                f.stop_count = 2;
+                f.from = {0.0f, 0.0f};
+                f.to   = {1.0f, 0.0f};
+                f.interpolate_srgb = true;
+                d.fill_gradient(Rect{50, 50, 300, 200}, f);
+            }, 200, 150},
+            {"radial gradient", [](DrawList& d) {
+                d.fill_rect(Rect{0, 0, 400, 300}, rgb<0x101418>);
+                Fill f{};
+                f.kind = FillKind::radial_gradient;
+                f.stops[0] = GradientStop{0.0f, rgb<0x22C55E>};
+                f.stops[1] = GradientStop{1.0f, rgb<0x1E1B4B>};
+                f.stop_count = 2;
+                f.from = {0.5f, 0.5f};
+                f.radius = 0.5f;
+                d.fill_gradient(Rect{50, 50, 300, 200}, f);
+            }, 200, 150},
+            {"drop shadow", [](DrawList& d) {
+                d.fill_rect(Rect{0, 0, 400, 300}, rgb<0x101418>);
+                Shadow sh{};
+                sh.offset = {0.0f, 0.0f};
+                sh.blur   = 18.0f;
+                sh.color  = Color<Srgb>{0.0f, 0.0f, 0.0f, 0.8f};
+                d.shadow(Rect{140, 100, 120, 100}, sh, Corners{12, 12, 12, 12});
+            }, 200, 150},
+            {"ring", [](DrawList& d) {
+                d.fill_rect(Rect{0, 0, 400, 300}, rgb<0x101418>);
+                d.ring(Vec2{200, 150}, 60.0f, 12.0f, rgb<0x22C55E>);
+            // Mid-BAND, not the edge: the ring spans y=89..96 at this x, and
+            // sampling its boundary compares two different antialiasing
+            // models rather than the shape they agree on. Verified by
+            // scanning the column — both backends put the band in exactly the
+            // same place with exactly the same colour, and differ by one
+            // step on the final edge pixel.
+            }, 200, 92},
+            {"stroked rounded rect", [](DrawList& d) {
+                d.fill_rect(Rect{0, 0, 400, 300}, rgb<0x101418>);
+                d.stroke_rect(Rect{100, 80, 200, 140}, 6.0f, rgb<0xF59E0B>,
+                              Corners{20, 20, 20, 20});
+            }, 100, 150},
+        };
+
+        for (const auto& cs : cases) {
+            DrawList d;
+            cs.build(d);
+
+            const auto g = gpu.render_offscreen(d, clear, w, h);
+            backend::Framebuffer f{w, h};
+            backend::Tiled::render(d, f, nullptr, &backend::shared_pool(), clear);
+            const auto c = f.to_rgba8();
+
+            const Rgba gp = pixel_at(g, w, cs.probe_x, cs.probe_y);
+            const Rgba cp = pixel_at(c, w, cs.probe_x, cs.probe_y);
+
+            // Gradients and shadows are smooth fields, so a couple of levels
+            // of difference is honest rounding rather than a bug. What must
+            // not happen is a different colour.
+            const bool ok = near(gp, cp, 6);
+            if (!ok) {
+                std::printf("       gpu(%d,%d,%d) vs cpu(%d,%d,%d) at %s\n",
+                            gp.r, gp.g, gp.b, cp.r, cp.g, cp.b, cs.name);
+            }
+            check(ok, cs.name);
+        }
+    }
+
     section("whole-frame agreement");
     // A global measure, so a difference the fixed probes miss still shows up.
     // Edge pixels are expected to differ slightly; large areas must not.
