@@ -1,0 +1,135 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ── the matrix that matters ──────────────────────────────────────────
+  #
+  # mayag claims to run everywhere out of the box. That claim is only worth
+  # something if it is mechanically checked on every push, on every OS, with
+  # both major compilers, and — critically — with NO GPU present. The software
+  # backend and the built-in font mean these runners need nothing installed.
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-gcc
+            os: ubuntu-24.04
+            cxx: g++-14
+            install: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+
+          - name: linux-clang
+            os: ubuntu-24.04
+            cxx: clang++-19
+            install: |
+              sudo apt-get update
+              sudo apt-get install -y ninja-build clang-19 libstdc++-14-dev
+
+          - name: macos-gcc
+            os: macos-14
+            cxx: g++-14
+            install: brew install gcc@14 ninja
+
+          - name: windows-msvc
+            os: windows-2022
+            cxx: cl
+            install: choco install ninja -y
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: ${{ matrix.install }}
+        shell: bash
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.name == 'windows-msvc'
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+        shell: bash
+
+      - name: Build
+        run: cmake --build build -j
+        shell: bash
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+        shell: bash
+
+      # Rendering with no GPU is the whole point of the software backend.
+      - name: Render examples headlessly
+        run: |
+          ./build/examples/mayag_dashboard || ./build/examples/mayag_dashboard.exe
+          ./build/examples/mayag_gallery   || ./build/examples/mayag_gallery.exe
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renders-${{ matrix.name }}
+          path: "*.png"
+
+  # ── determinism across platforms ─────────────────────────────────────
+  #
+  # The software rasteriser is the reference every GPU backend is measured
+  # against, so it must produce IDENTICAL bytes everywhere. If Linux and macOS
+  # disagree, the "reference" is not one.
+  determinism:
+    name: cross-platform determinism
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: renders-*, path: renders }
+      - name: Compare renders byte-for-byte
+        run: |
+          cd renders
+          for f in renders-linux-gcc/*.png; do
+            base=$(basename "$f")
+            for other in renders-*/; do
+              if ! cmp -s "$f" "$other$base"; then
+                echo "::error::$base differs between linux-gcc and $other"
+                exit 1
+              fi
+            done
+          done
+          echo "all backends agree byte-for-byte"
+
+  # ── warnings are errors, in the headers users actually include ───────
+  strict:
+    name: strict warnings
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build with -Werror
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_CXX_COMPILER=g++-14 \
+                -DCMAKE_CXX_FLAGS="-Werror"
+          cmake --build build -j
+
+  # ── sanitizers ───────────────────────────────────────────────────────
+  sanitize:
+    name: ${{ matrix.san }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        san: [address, undefined]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - name: Build and test with -fsanitize=${{ matrix.san }}
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                -DCMAKE_CXX_COMPILER=g++-14 \
+                -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.san }} -fno-omit-frame-pointer" \
+                -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.san }}"
+          cmake --build build -j --target mayag_tests
+          ./build/mayag_tests
