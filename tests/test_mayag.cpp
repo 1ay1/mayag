@@ -896,6 +896,47 @@ void test_layout_guarantees() {
     }
 }
 
+/// The GPU instance layout must match the shader's struct EXACTLY.
+///
+/// This is the one place a mistake is both silent and total: the buffer is
+/// uploaded raw, so a single wrong offset makes every frame garbage with no
+/// error anywhere. The MSL struct is 7 x float4 followed by 4 x uint.
+void test_gpu_layout() {
+    section("gpu layout");
+
+    static_assert(sizeof(Instance) == 128,
+                  "Instance must stay 128 bytes to match the shader struct");
+    static_assert(alignof(Instance) >= 16, "float4 fields need 16-byte alignment");
+
+    check(offsetof(Instance, rect)   ==   0, "rect at 0");
+    check(offsetof(Instance, radii)  ==  16, "radii at 16");
+    check(offsetof(Instance, color)  ==  32, "color at 32");
+    check(offsetof(Instance, color2) ==  48, "color2 at 48");
+    check(offsetof(Instance, axis)   ==  64, "axis at 64");
+    check(offsetof(Instance, uv)     ==  80, "uv at 80");
+    check(offsetof(Instance, params) ==  96, "params at 96");
+    check(offsetof(Instance, kind)   == 112, "kind at 112, after the float4 block");
+    check(offsetof(Instance, flags)  == 116, "flags at 116");
+    check(sizeof(Instance) == 128, "the whole instance is 128 bytes");
+
+    // The shader reads these as literals, so a renumbering would silently
+    // change what every instance draws.
+    check(static_cast<std::uint32_t>(ShapeKind::rounded_box) == 0, "rounded_box is kind 0");
+    check(static_cast<std::uint32_t>(ShapeKind::glyph)  == 4, "glyph is kind 4");
+    check(static_cast<std::uint32_t>(ShapeKind::shadow) == 6, "shadow is kind 6");
+    check(instance_flags::gradient  == 1u,   "gradient flag is bit 0");
+    check(instance_flags::stroke_only == 16u, "stroke flag is bit 4");
+    check(instance_flags::glyph_sdf == 128u, "glyph_sdf flag is bit 7");
+
+    // Both shader stages must exist in the source the backend compiles.
+    const std::string msl = std::string{render::shaders::msl_kernel} +
+                            std::string{render::shaders::msl_shaders};
+    check(msl.find("mayag_vertex") != std::string::npos, "MSL declares mayag_vertex");
+    check(msl.find("mayag_fragment") != std::string::npos, "MSL declares mayag_fragment");
+    check(msl.find("mg_rounded_box") != std::string::npos,
+          "and shares the SDF kernel with the CPU path");
+}
+
 int main() {
     std::printf("mayag test suite\n================");
 
@@ -909,6 +950,7 @@ int main() {
     test_batching();
     test_tiled_equivalence();
     test_layout_guarantees();
+    test_gpu_layout();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);

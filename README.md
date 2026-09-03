@@ -604,6 +604,37 @@ Three things this gets right that the obvious design does not:
   are two clicks. Otherwise a fast user clicking down a list triggers
   double-click actions.
 
+## Where the software rasteriser stops
+
+Being honest about the ceiling. 200 instances — a modest UI — on an M1:
+
+| surface | raster | encode | total | fps |
+|---------|--------|--------|-------|-----|
+| 800x600 | 0.79 ms | 0.41 ms | 1.20 ms | 832 |
+| 1440x900 | 1.90 ms | 1.02 ms | 2.93 ms | 342 |
+| 2880x1800 | 4.96 ms | 4.26 ms | 9.22 ms | 108 |
+| 3840x2160 | 6.81 ms | 6.80 ms | **13.61 ms** | 73 |
+
+At 4K that is **82% of a 60 Hz budget** for a UI doing almost nothing — and
+before the CGImage blit, which is another ~45% of present because it copies
+the whole surface on the CPU. The cost is per-PIXEL, so no amount of CPU
+tuning fixes it: a GPU does the same work in microseconds because it has
+thousands of lanes instead of eight.
+
+That is what `backend/metal.hpp` is for. The whole framework was designed
+around this moment — every primitive is a rounded-box SDF on one instanced
+quad, so a frame is **one draw call of N instances** and the fragment shader
+is the same kernel `render/sdf.hpp` implements in C++. No tessellation, no
+per-shape pipelines, no state changes.
+
+Verified on an M1: the MSL compiles, both stages resolve, and the 128-byte
+instance layout is asserted field-by-field against the shader struct — the
+one place a mistake would be both silent and total.
+
+Rendering into a `CAMetalLayer` also removes the CPU blit *and* lets the
+drawable be presented without waiting for a Core Animation transaction, which
+is where a full refresh of latency currently hides.
+
 ## The rasteriser
 
 The software backend is the reference every GPU backend is measured against,

@@ -326,6 +326,185 @@ inline float mg_shadow(float d, float blur) {
     if (blur <= 0.0f) return d <= 0.0f ? 1.0f : 0.0f;
     return smoothstep(blur, -blur, d);
 }
+
+// Perceptual gradient interpolation, mirroring Software::lerp_oklch.
+// POLAR, not Cartesian: a straight Oklab line between opposite hues passes
+// near the neutral axis and desaturates the midpoint almost as badly as RGB.
+inline float3 mg_linear_to_oklab(float3 c) {
+    float l = 0.4122214708*c.r + 0.5363325363*c.g + 0.0514459929*c.b;
+    float m = 0.2119034982*c.r + 0.6806995451*c.g + 0.1073969566*c.b;
+    float s = 0.0883024619*c.r + 0.2817188376*c.g + 0.6299787005*c.b;
+    float3 v = pow(max(float3(l, m, s), float3(0.0)), float3(1.0/3.0));
+    return float3(0.2104542553*v.x + 0.7936177850*v.y - 0.0040720468*v.z,
+                  1.9779984951*v.x - 2.4285922050*v.y + 0.4505937099*v.z,
+                  0.0259040371*v.x + 0.7827717662*v.y - 0.8086757660*v.z);
+}
+
+inline float3 mg_oklab_to_linear(float3 lab) {
+    float l_ = lab.x + 0.3963377774*lab.y + 0.2158037573*lab.z;
+    float m_ = lab.x - 0.1055613458*lab.y - 0.0638541728*lab.z;
+    float s_ = lab.x - 0.0894841775*lab.y - 1.2914855480*lab.z;
+    float3 c = float3(l_*l_*l_, m_*m_*m_, s_*s_*s_);
+    return max(float3( 4.0767416621*c.x - 3.3077115913*c.y + 0.2309699292*c.z,
+                      -1.2684380046*c.x + 2.6097574011*c.y - 0.3413193965*c.z,
+                      -0.0041960863*c.x - 0.7034186147*c.y + 1.7076147010*c.z), float3(0.0));
+}
+
+inline float4 mg_mix_oklch(float4 a, float4 b, float t) {
+    float3 ca = a.a > 1e-6 ? a.rgb / a.a : float3(0.0);
+    float3 cb = b.a > 1e-6 ? b.rgb / b.a : float3(0.0);
+    float3 la = mg_linear_to_oklab(ca);
+    float3 lb = mg_linear_to_oklab(cb);
+
+    float ch_a = length(la.yz), ch_b = length(lb.yz);
+    float ha = atan2(la.z, la.y), hb = atan2(lb.z, lb.y);
+
+    float dh = hb - ha;
+    if (dh >  3.14159265) dh -= 6.28318531;
+    if (dh < -3.14159265) dh += 6.28318531;
+
+    float L   = mix(la.x, lb.x, t);
+    float ch  = mix(ch_a, ch_b, t);
+    float hue = ha + dh * t;
+    float alpha = mix(a.a, b.a, t);
+
+    float3 lin = mg_oklab_to_linear(float3(L, ch * cos(hue), ch * sin(hue)));
+    return float4(lin * alpha, alpha);
+}
+)MSL";
+
+/// The Metal vertex and fragment stages.
+///
+/// Concatenated after `msl_kernel`, which supplies the SDF functions these
+/// call — the same functions `render/sdf.hpp` implements in C++, so the GPU
+/// and software paths cannot diverge without the shared source changing.
+inline constexpr std::string_view msl_shaders = R"MSL(
+
+struct Instance {
+    float4 rect;
+    float4 radii;
+    float4 color;
+    float4 color2;
+    float4 axis;
+    float4 uv;
+    float4 params;
+    uint   kind;
+    uint   flags;
+    uint   blend;
+    uint   texture_slot;
+};
+
+struct Varyings {
+    float4 position [[position]];
+    float2 local;
+    float2 norm;
+    float2 half_size;
+    float2 uv;
+    float4 color;
+    float4 color2;
+    float4 radii;
+    float4 axis;
+    float4 params;
+    uint   kind  [[flat]];
+    uint   flags [[flat]];
+};
+
+// One quad per instance, generated from the vertex id alone: no vertex
+// buffer, no index buffer, nothing to bind but the instance array.
+vertex Varyings mayag_vertex(uint vid [[vertex_id]],
+                             uint iid [[instance_id]],
+                             const device Instance* instances [[buffer(0)]],
+                             constant float2& viewport [[buffer(1)]]) {
+    const device Instance& I = instances[iid];
+
+    float2 corner = float2((vid << 1) & 2, vid & 2) * 0.5;
+
+    // Shadows need the quad grown so the blur is not clipped at the edge.
+    float pad = (I.kind == 6u) ? I.params.x * 3.0 + 2.0 : 1.0;
+
+    float2 half_size = I.rect.zw * 0.5 + float2(pad);
+    float2 centre    = I.rect.xy + I.rect.zw * 0.5;
+    float2 pos       = centre + (corner * 2.0 - 1.0) * half_size;
+
+    Varyings v;
+    v.local     = pos - centre;
+    v.norm      = (pos - I.rect.xy) / max(I.rect.zw, float2(1e-6));
+    v.half_size = I.rect.zw * 0.5;
+    v.uv        = mix(I.uv.xy, I.uv.zw, corner);
+    v.color     = I.color;
+    v.color2    = I.color2;
+    v.radii     = I.radii;
+    v.axis      = I.axis;
+    v.params    = I.params;
+    v.kind      = I.kind;
+    v.flags     = I.flags;
+
+    // Clip space, y down to match mayag's screen convention.
+    float2 ndc = pos / viewport * 2.0 - 1.0;
+    v.position = float4(ndc.x, -ndc.y, 0.0, 1.0);
+    return v;
+}
+
+fragment float4 mayag_fragment(Varyings v [[stage_in]],
+                               texture2d<float> atlas [[texture(0)]],
+                               sampler smp [[sampler(0)]]) {
+    constexpr uint KIND_ROUNDED_BOX = 0u, KIND_RING = 2u, KIND_LINE = 3u;
+    constexpr uint KIND_GLYPH = 4u, KIND_TEXTURE = 5u, KIND_SHADOW = 6u, KIND_ARC = 7u;
+    constexpr uint FLAG_GRADIENT = 1u, FLAG_RADIAL = 2u, FLAG_ANGULAR = 4u;
+    constexpr uint FLAG_SRGB = 8u, FLAG_STROKE = 16u, FLAG_INSET = 32u, FLAG_GLYPH_SDF = 128u;
+
+    // Pixel footprint from screen-space derivatives — what makes the
+    // antialiasing correct under any transform or zoom.
+    float px = max(length(fwidth(v.local)), 1e-6);
+
+    float cov;
+    if (v.kind == KIND_ROUNDED_BOX || v.kind == KIND_TEXTURE) {
+        float d = mg_rounded_box(v.local, v.half_size, v.radii);
+        if ((v.flags & FLAG_STROKE) != 0u) d = mg_outline(d + v.params.x * 0.5, v.params.x);
+        cov = mg_coverage(d, px);
+    } else if (v.kind == KIND_RING) {
+        cov = mg_coverage(mg_ring(v.local, min(v.half_size.x, v.half_size.y), v.params.x), px);
+    } else if (v.kind == KIND_LINE) {
+        cov = mg_coverage(mg_segment(v.local + (v.axis.xy + v.axis.zw) * 0.5,
+                                     v.axis.xy, v.axis.zw, v.params.x), px);
+    } else if (v.kind == KIND_SHADOW) {
+        float d = mg_rounded_box(v.local, v.half_size, v.radii);
+        cov = mg_shadow(d, max(v.params.x, 0.01));
+        if ((v.flags & FLAG_INSET) != 0u) cov = 1.0 - cov;
+    } else if (v.kind == KIND_GLYPH) {
+        float raw = atlas.sample(smp, v.uv).r;
+        // A bitmap entry IS coverage; an SDF entry must be thresholded. The
+        // flag travels per instance because hybrid mode mixes both.
+        cov = ((v.flags & FLAG_GLYPH_SDF) != 0u)
+            ? smoothstep(0.41, 0.59, raw)
+            : raw;
+    } else {
+        cov = mg_coverage(mg_rounded_box(v.local, v.half_size, v.radii), px);
+    }
+
+    if (cov <= 0.001) discard_fragment();
+
+    float4 color = v.color;
+    if ((v.flags & FLAG_GRADIENT) != 0u) {
+        float t;
+        if ((v.flags & FLAG_RADIAL) != 0u) {
+            t = clamp(length(v.norm - v.axis.xy) / max(v.params.z, 1e-4), 0.0, 1.0);
+        } else if ((v.flags & FLAG_ANGULAR) != 0u) {
+            float2 d = v.norm - v.axis.xy;
+            t = clamp((atan2(d.y, d.x) + 3.14159265) / 6.28318531, 0.0, 1.0);
+        } else {
+            float2 ab = v.axis.zw - v.axis.xy;
+            t = clamp(dot(v.norm - v.axis.xy, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+        }
+        color = ((v.flags & FLAG_SRGB) != 0u)
+              ? mix(v.color, v.color2, t)
+              : mg_mix_oklch(v.color, v.color2, t);
+    }
+
+    if (v.kind == KIND_TEXTURE) color *= atlas.sample(smp, v.uv);
+
+    return color * cov;
+}
 )MSL";
 
 /// WebGPU Shading Language kernel — same again, WGSL spelling.
