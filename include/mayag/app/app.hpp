@@ -45,6 +45,8 @@
 #include "sub.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <stdexcept>
 #include <thread>
 #include <chrono>
 #include <concepts>
@@ -203,6 +205,20 @@ struct AppConfig {
     /// Overlay every node's rect. Bound to a key in your own subscribe() if
     /// you want to toggle it at runtime.
     bool debug_bounds = false;
+
+    /// Keep running when `update()` or `view()` throws.
+    ///
+    /// A UI framework should not turn one bad frame into a lost session. With
+    /// this on, an exception from application code is caught, reported, and
+    /// the runtime falls back to the last good tree — the user sees a stale
+    /// frame instead of a vanished window, and their unsaved work survives.
+    ///
+    /// Off in tests and debug builds, where a crash at the point of failure
+    /// is far more useful than a swallowed one.
+    bool catch_exceptions = true;
+
+    /// Called when application code throws. Defaults to stderr.
+    void (*on_error)(std::string_view where, std::string_view what) = nullptr;
 };
 
 // ── the runtime ─────────────────────────────────────────────────────────
@@ -425,10 +441,43 @@ class Runtime {
     /// Model' = update(Model, Msg); then interpret the returned effects.
     /// This function is the ONLY place the model changes.
     void step(Msg msg) {
-        auto [next, cmd] = P::update(std::move(model_), std::move(msg));
-        model_ = std::move(next);
-        dirty_ = true;
-        interpret(cmd);
+        if (!cfg_.catch_exceptions) {
+            auto [next, cmd] = P::update(std::move(model_), std::move(msg));
+            model_ = std::move(next);
+            dirty_ = true;
+            interpret(cmd);
+            return;
+        }
+
+        // A throwing update must not take the app down.
+        //
+        // `update` takes the model BY VALUE, so a throw leaves `model_` in a
+        // moved-from state — which is exactly why the copy below exists. The
+        // model is restored and the app carries on with the last good state,
+        // having lost one message rather than the whole session.
+        Model snapshot = model_;
+        try {
+            auto [next, cmd] = P::update(std::move(model_), std::move(msg));
+            model_ = std::move(next);
+            dirty_ = true;
+            interpret(cmd);
+        } catch (const std::exception& e) {
+            model_ = std::move(snapshot);
+            report_error("update", e.what());
+        } catch (...) {
+            model_ = std::move(snapshot);
+            report_error("update", "unknown exception");
+        }
+    }
+
+    void report_error(std::string_view where, std::string_view what) {
+        if (cfg_.on_error != nullptr) {
+            cfg_.on_error(where, what);
+        } else {
+            std::fprintf(stderr, "mayag: %.*s threw: %.*s\n",
+                         static_cast<int>(where.size()), where.data(),
+                         static_cast<int>(what.size()), what.data());
+        }
     }
 
     // ── event -> message ────────────────────────────────────────────────
@@ -799,10 +848,23 @@ class Runtime {
 
         Ctx ctx{size_, dpi_, time_, cfg_.theme, measurer_, &tracked_, &overlays_, &input_};
 
-        if constexpr (detail::ViewWithCtx<P>) {
-            tree_ = P::view(model_, ctx);
+        // A throwing view keeps the LAST GOOD TREE on screen. A blank window
+        // tells the user nothing; a stale frame at least shows what was there
+        // and leaves the app usable enough to save.
+        if (cfg_.catch_exceptions) {
+            try {
+                if constexpr (detail::ViewWithCtx<P>) tree_ = P::view(model_, ctx);
+                else                                  tree_ = P::view(model_);
+            } catch (const std::exception& e) {
+                report_error("view", e.what());
+                if (tree_.children().empty()) return;   // nothing good to fall back to
+            } catch (...) {
+                report_error("view", "unknown exception");
+                if (tree_.children().empty()) return;
+            }
         } else {
-            tree_ = P::view(model_);
+            if constexpr (detail::ViewWithCtx<P>) tree_ = P::view(model_, ctx);
+            else                                  tree_ = P::view(model_);
         }
 
         layout::layout_tree(tree_, size_, *measurer_);

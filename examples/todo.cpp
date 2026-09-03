@@ -213,6 +213,11 @@ struct Todo {
                                 : t.surface.fade(0.0f))
                     | border(1, cursor ? t.accent : t.border.fade(0.0f))
                     | radius(t.radius_small)
+                    // Announced as "checkbox, Ship the rasteriser, checked"
+                    // rather than as an anonymous box.
+                    | role(a11y::Role::checkbox)
+                    | checked(it.done)
+                    | label(it.text)
                     | id_of("row-" + std::to_string(index))).build();
         };
 
@@ -240,6 +245,8 @@ struct Todo {
                                                         : t.surface.fade(0.0f))
                     | border(1, on ? t.accent : t.border)
                     | pill
+                    | role(a11y::Role::tab)
+                    | selected(on)
                     | id_of(std::string{"filter-"} + label)).build();
         };
 
@@ -277,7 +284,8 @@ struct Todo {
         }
 
         return v(// header
-                 split(v(text<"Todo"> | font(26) | bold | fg(t.text_primary),
+                 split(v(text<"Todo"> | font(26) | bold | fg(t.text_primary)
+                           | role(a11y::Role::heading),
                          text_owned(std::to_string(m.items.size() - static_cast<std::size_t>(done_count)) +
                                     " of " + std::to_string(m.items.size()) + " remaining")
                            | font(11) | fg(t.text_secondary)) | gap(2),
@@ -300,8 +308,10 @@ struct Todo {
                        | gap(4)),
 
                  // input
-                 node(text_field(t, m.input, c.focused(node_id("input")),
-                                 node_id("input"), "What needs doing?").build()),
+                 node((text_field(t, m.input, c.focused(node_id("input")),
+                                  node_id("input"), "What needs doing?")
+                       | role(a11y::Role::text_field)
+                       | label("New todo")).build()),
 
                  // the scrolling list
                  rows_node | scroll(m.list) | grow() | width(pct(100)) | dsl::id<"list">,

@@ -401,6 +401,57 @@ stiff spring explode.
 An animation that has settled stops requesting frames, so the app returns to
 0% CPU with no explicit stop call.
 
+## Accessibility
+
+A UI that exists only as pixels is unusable with a screen reader and
+untestable without comparing images. mayag exposes what each node **means**
+alongside how it looks:
+
+```cpp
+box() | role(a11y::Role::checkbox) | checked(done) | label(item.text)
+```
+
+Most nodes need nothing — a text node announces its own text, a named leaf is
+a button — so only ambiguous cases pay. The todo app's tree:
+
+```
+group
+  heading "Todo"
+  tab "all" [selected]
+  tab "active"
+  textfield "New todo"
+  group
+    checkbox "Ship the tiled rasteriser" [checked]
+    checkbox "Fix Retina contentsScale" [checked]
+```
+
+It is a plain queryable tree, not a platform bridge — so it works identically
+on every OS and in CI with no accessibility stack installed:
+
+```cpp
+auto tree = a11y::snapshot(root);
+tree.find_by_label("Save document");   // what a test should assert on
+tree.interactive();                    // everything reachable by keyboard
+```
+
+Anonymous layout wrappers are collapsed, because the visual tree's shape is an
+implementation detail and a screen-reader user should not walk six nested
+boxes to reach a label.
+
+## Error boundary
+
+One bad frame should not end a session. When `update()` or `view()` throws,
+the runtime reports it and carries on:
+
+- `update` takes the model **by value**, so a throw leaves it moved-from — the
+  runtime restores a snapshot, and the app loses one message rather than all
+  its state.
+- a throwing `view` keeps the **last good tree** on screen. A blank window
+  tells the user nothing; a stale frame at least stays usable enough to save.
+
+Off by default in tests, where a crash at the point of failure is more useful
+than a swallowed one.
+
 ## Clicks
 
 A click carries a **count**; there is no separate `double_click` gesture.

@@ -14,9 +14,11 @@
 #include "../core/color.hpp"
 #include "../core/geometry.hpp"
 #include "../core/scroll_state.hpp"
+#include "../scene/a11y_types.hpp"
 
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace mayag {
 
@@ -317,6 +319,17 @@ struct Style {
     bool    clip    = false;    ///< clip children to this box's rounded rect
     Affine  transform = Affine::identity();
 
+    // ── accessibility ───────────────────────────────────────────────────
+    //
+    // Carried on Style so any element can be annotated with the same pipe
+    // syntax as everything else. Most nodes need nothing: a text node is
+    // announced as its own text, a named leaf as a button. Only ambiguous
+    // cases pay.
+    a11y::Role  a11y_role = a11y::Role::none;
+    std::string a11y_label;
+    std::string a11y_description;
+    a11y::State a11y_state{};
+
     /// Stable identity for hit-testing and animation matching. Zero means
     /// "anonymous"; the DSL assigns one when you name a node.
     std::uint64_t id = 0;
@@ -346,7 +359,17 @@ struct Style {
 
 // ── compile-time sanity ─────────────────────────────────────────────────
 
-static_assert(std::is_trivially_copyable_v<Style>);
+// Style is no longer trivially copyable: accessibility labels are strings.
+//
+// That is a deliberate trade. The alternative — interning labels into a table
+// and storing an index — keeps Style a POD but makes the common case
+// (`| label("Save")`) require a registry, a lifetime, and a lookup on every
+// query. Labels are set once per node per frame and read by nothing on the
+// hot path, so the copy is not where time goes; the INSTANCE struct that
+// reaches the GPU is still trivially copyable, and that is the one that
+// matters for upload.
+static_assert(std::is_copy_constructible_v<Style>);
+static_assert(std::is_trivially_copyable_v<LayoutStyle>);
 static_assert(px(10).resolve(200.0f, 0.0f) == 10.0f);
 static_assert(pct(50).resolve(200.0f, 0.0f) == 100.0f);
 static_assert(auto_length.resolve(200.0f, 7.0f) == 7.0f);

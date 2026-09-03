@@ -956,6 +956,58 @@ struct ClipText {
 inline constexpr ClipText clip_text{};
 
 // ════════════════════════════════════════════════════════════════════════
+// Accessibility
+// ════════════════════════════════════════════════════════════════════════
+
+/// Declare what this element MEANS.
+///
+/// Most nodes need nothing: a text node announces its own text, a named leaf
+/// is treated as a button. Annotate only where the automatic answer would be
+/// wrong or ambiguous — an icon-only button, a checkbox drawn as a box, a
+/// group that should be announced as a list.
+struct RoleMod {
+    MAYAG_MODIFIER(RoleMod, caps::none, caps::none, caps::none, "role");
+    a11y::Role v;
+    constexpr void apply(Style& s) const { s.a11y_role = v; }
+};
+[[nodiscard]] constexpr RoleMod role(a11y::Role r) { return {r}; }
+
+/// What a screen reader announces. Essential for anything whose meaning is
+/// carried by an icon or a colour rather than by text.
+struct LabelMod {
+    MAYAG_MODIFIER(LabelMod, caps::none, caps::none, caps::none, "label");
+    std::string_view v;
+    void apply(Style& s) const { s.a11y_label = std::string{v}; }
+};
+[[nodiscard]] inline LabelMod label(std::string_view text) { return {text}; }
+
+struct DescriptionMod {
+    MAYAG_MODIFIER(DescriptionMod, caps::none, caps::none, caps::none, "description");
+    std::string_view v;
+    void apply(Style& s) const { s.a11y_description = std::string{v}; }
+};
+[[nodiscard]] inline DescriptionMod description(std::string_view text) { return {text}; }
+
+/// Semantic state, announced alongside the role.
+struct StateMod {
+    MAYAG_MODIFIER(StateMod, caps::none, caps::none, caps::none, "a11y_state");
+    a11y::State v;
+    constexpr void apply(Style& s) const { s.a11y_state = v; }
+};
+[[nodiscard]] constexpr StateMod checked(bool on = true) {
+    a11y::State st{}; st.checked = on; return {st};
+}
+[[nodiscard]] constexpr StateMod selected(bool on = true) {
+    a11y::State st{}; st.selected = on; return {st};
+}
+[[nodiscard]] constexpr StateMod disabled(bool on = true) {
+    a11y::State st{}; st.disabled = on; return {st};
+}
+[[nodiscard]] constexpr StateMod a11y_value(float v) {
+    a11y::State st{}; st.value = v; st.has_value = true; return {st};
+}
+
+// ════════════════════════════════════════════════════════════════════════
 // Identity
 // ════════════════════════════════════════════════════════════════════════
 

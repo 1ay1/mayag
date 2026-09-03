@@ -612,6 +612,139 @@ void test_motion_does_not_spin() {
     });
 }
 
+/// Every UI must expose what it MEANS, not just what it looks like.
+///
+/// Without this a screen reader user cannot use the app at all, and a test
+/// cannot ask "is there a Save button" without comparing pixels.
+void test_accessibility() {
+    section("accessibility");
+
+    run_headless<TestApp>(kCfg, [](auto& rt) {
+        const auto tree = a11y::snapshot(rt.tree(), rt.input().focused());
+
+        // Text is announced automatically — no annotation needed for the
+        // common case, or nobody would annotate anything.
+        check(tree.find_by_role(a11y::Role::text) != nullptr,
+              "text nodes appear in the semantic tree automatically");
+
+        // Named interactive nodes are reachable.
+        check(!tree.interactive().empty(),
+              "interactive elements are enumerable (" +
+              std::to_string(tree.interactive().size()) + ")");
+
+        // The tree must be SHALLOW: layout nesting is an implementation
+        // detail, and walking six anonymous boxes to reach a label makes an
+        // app unusable with a screen reader.
+        const auto depth = [](auto&& self, const a11y::Element& e) -> int {
+            int d = 0;
+            for (const auto& c : e.children) d = num::max(d, self(self, c));
+            return d + 1;
+        };
+        check(depth(depth, tree.root) <= 5,
+              "the semantic tree is shallow (depth " +
+              std::to_string(depth(depth, tree.root)) + ")");
+    });
+
+    // Explicit annotation, and the redundancy rules around it.
+    {
+        constexpr Theme th = themes::midnight;
+        auto ui = v(text<"Settings"> | font(20) | role(a11y::Role::heading),
+                    h(text<"Save"> | font(12)) | pad(6, 12) | bg(th.accent)
+                      | role(a11y::Role::button) | label("Save document")
+                      | dsl::id<"save">,
+                    box() | size(16, 16) | role(a11y::Role::checkbox)
+                          | checked(true) | label("Enable sync") | dsl::id<"sync">,
+                    box() | size(80, 6) | role(a11y::Role::progress)
+                          | a11y_value(0.4f) | label("Upload"))
+                | gap(6) | pad(8);
+
+        Node n = ui.build();
+        layout::layout_tree(n, {200, 200}, layout::default_measurer());
+        const auto tree = a11y::snapshot(n);
+
+        const auto* save = tree.find_by_label("Save document");
+        check(save != nullptr && save->role == a11y::Role::button,
+              "an explicit label wins over the node's own text");
+
+        const auto* sync = tree.find_by_label("Enable sync");
+        check(sync != nullptr && sync->state.checked,
+              "semantic state is carried (checked)");
+
+        const auto* prog = tree.find_by_role(a11y::Role::progress);
+        check(prog != nullptr && num::abs(prog->state.value - 0.4f) < 0.01f,
+              "a value-bearing role reports its value");
+
+        check(tree.find_by_role(a11y::Role::heading) != nullptr, "headings are found");
+
+        // A button whose label is its own text must not announce it twice.
+        int save_text_children = 0;
+        if (save != nullptr) {
+            for (const auto& c : save->children) {
+                if (c.label == save->label) ++save_text_children;
+            }
+        }
+        check(save_text_children == 0,
+              "a control does not repeat its own label as a child");
+    }
+}
+
+/// One bad frame must not end the session.
+void test_error_boundary() {
+    section("error boundary");
+
+    struct Fragile {
+        struct Model { int count = 0; bool poison = false; };
+        struct Inc {}; struct Explode {}; struct Poison {};
+        using Msg = std::variant<Inc, Explode, Poison>;
+
+        static Model init() { return {}; }
+
+        static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+            if (std::holds_alternative<Explode>(msg)) {
+                throw std::runtime_error("update failed");
+            }
+            if (std::holds_alternative<Poison>(msg)) { m.poison = true; return {m, {}}; }
+            m.count++;
+            return {m, Cmd<Msg>::none()};
+        }
+
+        static Node view(const Model& m, const Ctx& c) {
+            if (m.poison) throw std::runtime_error("view failed");
+            return (v(text_owned(std::to_string(m.count)) | font(14)
+                        | fg(c.theme.text_primary)) | pad(8)).build();
+        }
+        static Sub<Msg> subscribe(const Model&) { return Sub<Msg>::none(); }
+    };
+    static_assert(Program<Fragile>);
+
+    AppConfig cfg{.size = {200, 120}};
+    cfg.on_error = [](std::string_view, std::string_view) {};   // silence in tests
+
+    run_headless<Fragile>(cfg, [](auto& rt) {
+        rt.send(Fragile::Msg{Fragile::Inc{}});
+        rt.send(Fragile::Msg{Fragile::Inc{}});
+        check(rt.model().count == 2, "normal messages work");
+
+        // A throwing update must not kill the app, and must not corrupt the
+        // model: `update` takes it by value, so a throw leaves it moved-from
+        // unless the runtime restores a snapshot.
+        rt.send(Fragile::Msg{Fragile::Explode{}});
+        check(!rt.finished(), "a throwing update does not end the app");
+        check(rt.model().count == 2, "and the model survives intact");
+
+        rt.send(Fragile::Msg{Fragile::Inc{}});
+        check(rt.model().count == 3, "the app keeps processing messages");
+
+        // A throwing view keeps the last good tree on screen.
+        const std::size_t good_nodes = rt.tree().count();
+        rt.send(Fragile::Msg{Fragile::Poison{}});
+        rt.tick();
+        check(!rt.finished(), "a throwing view does not end the app either");
+        check(rt.tree().count() == good_nodes,
+              "and the last good frame stays on screen");
+    });
+}
+
 void test_render_economy() {
     section("render economy");
 
@@ -647,6 +780,8 @@ int main() {
     test_focus();
     test_never_sleeps_dirty();
     test_motion_does_not_spin();
+    test_accessibility();
+    test_error_boundary();
     test_render_economy();
 
     std::printf("\n%s  %d checks, %d failures\n",

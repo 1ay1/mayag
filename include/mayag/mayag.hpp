@@ -42,6 +42,7 @@
 #include <mayag/style/style.hpp>
 #include <mayag/style/theme.hpp>
 #include <mayag/scene/node.hpp>
+#include <mayag/scene/a11y.hpp>
 
 // ── the DSL ─────────────────────────────────────────────────────────────
 #include <mayag/dsl/dsl.hpp>
