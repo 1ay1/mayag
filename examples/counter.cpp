@@ -124,9 +124,9 @@ struct Counter {
             : 0.0f;
 
         auto readout =
-            v(text_of(std::to_string(m.count)) | font(72) | bold
+            v(text_owned(std::to_string(m.count)) | font(72) | bold
                                                | fg(m.celebrating ? t.success : t.text_primary),
-              text_of("step " + std::to_string(m.step)) | font(11) | fg(t.text_secondary)
+              text_owned("step " + std::to_string(m.step)) | font(11) | fg(t.text_secondary)
                                                         | tracking(1.5f))
             | gap(2) | center
             | size(240, 150)

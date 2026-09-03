@@ -195,10 +195,10 @@ struct Dashboard {
             | grow()
             | height(pct(100));
 
-        auto app = h(sidebar, main_column) | width(pct(100)) | height(pct(100));
-
-
-        return (app | width(pct(100)) | height(pct(100))).build();
+        // Sized ONCE. The DSL now rejects a second `width()`/`height()` on
+        // the same element, which caught this very line: it used to be sized
+        // here and again at the return, silently last-one-wins.
+        return (h(sidebar, main_column) | width(pct(100)) | height(pct(100))).build();
     }
 };
 

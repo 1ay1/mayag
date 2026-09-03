@@ -255,6 +255,8 @@ So mayag changes the defaults and adds a safety net:
 | Filling space implies giving way | `grow()` sets shrink too — `grow()` alone pushed a header to x=2976 in a 980px window |
 | Text never becomes a vertical ribbon | below ~2.5 glyph widths, boxes overflow visibly instead of wrapping to 1 char/line |
 | Opting out is explicit | `rigid`, `shrink(0)`, `grow(n, 0)` |
+| A size is specified once | a second `width()`/`height()` on one element is a compile error, not last-one-wins |
+| Text cannot dangle | `text_of()` on a temporary `std::string` is a compile error; use `text_owned()` |
 
 Some faults depend on runtime sizes and cannot be decided at compile time. For
 those there is an auditor:
@@ -268,9 +270,13 @@ std::printf("%s", layout::format_issues(issues).c_str());
 ```
 
 It reports collapsed nodes, overflow, unhonoured sizes, clipped text,
-degenerate wrapping, and non-finite geometry — each located. Every shipped
-example must audit clean, which is the test that would have caught the broken
-dashboard before it reached a screenshot.
+degenerate wrapping, dead `grow()`, impossible constraints (`min > max`), and
+non-finite geometry — each located. Every shipped example must audit clean.
+
+Between them, the compile-time bans and the auditor found **four real bugs in
+mayag's own examples**: a root element sized twice, swatches whose declared
+`size(92, 60)` was silently overridden, cell content overflowing its column,
+and a `text_of(std::to_string(x) + "%")` holding three NUL bytes.
 
 ## The rasteriser
 
@@ -354,11 +360,11 @@ MSVC falls back to C++23; everything works, but DSL errors degrade to a generic 
 ## Tests
 
 ```
-PASS  116 checks   # rendering: numeric kernels, layout, real pixels,
-                   #            tiled == scalar reference, bit for bit
+PASS  129 checks   # rendering: numeric kernels, layout guarantees, real
+                   #            pixels, tiled == scalar reference bit for bit
 PASS   49 checks   # app runtime: interaction, effects, subscriptions
 PASS 4940 checks   # fonts: 1300 system faces + 400 fuzzed files
-100% tests passed, 12 of 12      # + 4 example apps, + 5 must-not-compile
+100% tests passed, 15 of 15      # + 4 example apps, + 8 must-not-compile
 ```
 
 Three layers, matching the three ways this can be wrong: **numeric** (colour round-trips, SDF gradient magnitude, transfer curves), **layout** (flex arithmetic against hand-computed rects), and **pixel** (render a scene, sample actual pixels). The pixel layer is what catches "compiles, lays out, draws nothing" — and it caught three real bugs while this was being written:

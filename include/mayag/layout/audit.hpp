@@ -31,6 +31,8 @@ struct Issue {
         text_clipped,     ///< a text node is smaller than its own string
         degenerate_wrap,  ///< a text box so narrow it wraps to ~1 char/line
         nan_geometry,     ///< non-finite numbers reached the frame
+        dead_grow,        ///< grow() on an axis that is already pinned
+        contradiction,    ///< min > max, or similar impossible constraints
     };
 
     Kind          kind = Kind::collapsed;
@@ -47,6 +49,8 @@ struct Issue {
             case Kind::text_clipped:     s = "text does not fit its box"; break;
             case Kind::degenerate_wrap:  s = "text box too narrow to wrap sanely"; break;
             case Kind::nan_geometry:     s = "non-finite geometry"; break;
+            case Kind::dead_grow:        s = "grow() has no effect here"; break;
+            case Kind::contradiction:    s = "impossible size constraints"; break;
         }
         if (!detail.empty()) s += " — " + detail;
         return s;
@@ -104,6 +108,35 @@ struct Issue {
             }
         }
 
+        // ---- dead grow -------------------------------------------------
+        //
+        // `grow()` on an element whose MAIN-axis size is already pinned is
+        // dead code: the flex solver has nothing to distribute into it. The
+        // DSL cannot catch this because "which axis is main" is the PARENT's
+        // property and an element cannot see its parent — so it lands here,
+        // where the tree is assembled and the answer is known.
+        if (st.layout.grow > 0.0f && parent != nullptr) {
+            const bool horizontal = parent->style().layout.axis == Axis::horizontal;
+            const Length main_len = horizontal ? st.layout.width : st.layout.height;
+            if (main_len.unit == Length::Unit::pixels) {
+                issues.push_back(Issue{Issue::Kind::dead_grow, st.id, f,
+                    std::string{"grow() with an explicit "} +
+                    (horizontal ? "width" : "height") + " on the main axis"});
+            }
+        }
+
+        // ---- impossible constraints ------------------------------------
+        const auto contradictory = [](Length lo, Length hi) {
+            return lo.unit == Length::Unit::pixels && hi.unit == Length::Unit::pixels &&
+                   lo.value > hi.value;
+        };
+        if (contradictory(st.layout.min_width, st.layout.max_width)) {
+            issues.push_back(Issue{Issue::Kind::contradiction, st.id, f, "min_width > max_width"});
+        }
+        if (contradictory(st.layout.min_height, st.layout.max_height)) {
+            issues.push_back(Issue{Issue::Kind::contradiction, st.id, f, "min_height > max_height"});
+        }
+
         // ---- text fit --------------------------------------------------
         if (n.kind() == NodeKind::text && !n.text().empty() && measurer != nullptr) {
             const Rect inner = deflate(f, st.layout.padding);
@@ -111,8 +144,30 @@ struct Issue {
             if (st.text.overflow == TextOverflow::wrap && inner.width() > 0.0f) {
                 // A box narrower than a couple of glyphs cannot wrap into
                 // anything readable.
+                //
+                // Whitespace-only content is exempt: it has nothing to wrap,
+                // so a narrow box holding a single space is not a fault. That
+                // was a false positive worth removing — an auditor that cries
+                // wolf gets ignored, which costs more than the check is worth.
+                // Count CODEPOINTS, not bytes. A single em-dash is 3 bytes of
+                // UTF-8 but one glyph, and a box holding one glyph has nothing
+                // to wrap — flagging it is a false positive. An auditor that
+                // cries wolf gets ignored, which costs more than the check is
+                // worth.
+                std::size_t glyphs = 0;
+                bool all_space = true;
+                for (unsigned char ch : n.text()) {
+                    if ((ch & 0xC0) != 0x80) ++glyphs;          // not a continuation byte
+                    if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r' && ch < 0x80) {
+                        all_space = false;
+                    } else if (ch >= 0x80) {
+                        all_space = false;
+                    }
+                }
+
                 const float one_line = measurer->advance("M", st.text);
-                if (inner.width() < one_line * 1.5f) {
+                const bool trivial = all_space || glyphs <= 1;
+                if (!trivial && inner.width() < one_line * 1.5f) {
                     issues.push_back(Issue{Issue::Kind::degenerate_wrap, st.id, f,
                         "width " + std::to_string(static_cast<int>(inner.width())) +
                         " cannot fit a glyph (" + std::to_string(static_cast<int>(one_line)) + ")"});

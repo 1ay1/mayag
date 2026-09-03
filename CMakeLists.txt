@@ -210,7 +210,10 @@ if(MAYAG_BUILD_TESTS)
         bold_on_a_box
         gap_without_children
         grow_on_absolute
-        srgb_interp_without_gradient)
+        srgb_interp_without_gradient
+        duplicate_width
+        size_then_height
+        dangling_text)
 
     foreach(case ${MAYAG_MUST_FAIL})
         add_executable(mayag_nc_${case} EXCLUDE_FROM_ALL tests/negative/${case}.cpp)

@@ -30,6 +30,7 @@
 //     derivable from the subscriptions rather than a flag someone forgot
 
 #include "../layout/flex.hpp"
+#include "../layout/audit.hpp"
 #include "../render/painter.hpp"
 #include "../scene/node.hpp"
 #include "../style/theme.hpp"
@@ -636,6 +637,18 @@ class Runtime {
 
         layout::layout_tree(tree_, size_, *measurer_);
 
+        // With `--debug`, audit every frame whose tree actually changed and
+        // report new faults once. Layout bugs are cheap to fix and expensive
+        // to notice, so surfacing them during development is worth more than
+        // the microseconds it costs.
+        if (cfg_.debug_bounds) {
+            const auto issues = layout::audit(tree_, measurer_);
+            if (issues.size() != last_issue_count_) {
+                last_issue_count_ = issues.size();
+                std::fputs(layout::format_issues(issues).c_str(), stderr);
+            }
+        }
+
         draws_.clear();
         render::PaintOptions po{};
         po.dpi_scale    = dpi_;
@@ -662,6 +675,7 @@ class Runtime {
     const render::GlyphRenderer*         glyphs_   = nullptr;
     const backend::CoverageSampler*      sampler_  = nullptr;
     std::uint64_t                        frame_counter_ = 0;
+    std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
     detail::Inbox<Msg>              inbox_;
     std::vector<detail::Timer<Msg>> timers_;

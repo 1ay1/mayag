@@ -86,10 +86,19 @@ struct Gallery {
     static Node view(const Model& m, const Ctx& c) {
         const Theme& t = palette[static_cast<std::size_t>(m.theme_index)];
 
+        // A uniform cell: fixed column width, fixed swatch row so labels line
+        // up, content centred without being resized.
+        //
+        // The content keeps its OWN size — applying `height(72)` to it (as
+        // this used to) silently overrode each swatch's `size(92, 60)`, which
+        // the DSL now refuses to compile. The label is `ellipsis`, not the
+        // default wrap: a one-word caption in a narrow column must never break
+        // across lines.
         auto cell = [&](auto label, auto content) {
-            return v(content | height(72),
-                     label | font(10) | fg(t.text_secondary) | text_align(TextAlign::center))
-                 | gap(6) | align(Align::center) | width(132);
+            return v(v(content) | height(72) | width(pct(100)) | center,
+                     label | font(10) | fg(t.text_secondary)
+                           | text_align(TextAlign::center) | ellipsis)
+                 | gap(6) | align(Align::center) | width(136);
         };
 
         // ── shapes ──────────────────────────────────────────────────────
@@ -161,8 +170,8 @@ struct Gallery {
             cell(text<"breathe">,
                  box() | size(64, 64) | bg(t.danger) | radius(16)
                        | scale(0.75f + 0.25f * (num::cos(phase * 1.9f) * 0.5f + 0.5f))),
-            cell(text_of(m.animating ? "running — SPACE" : "paused — SPACE"),
-                 box() | size(112, 44)
+            cell(text_of(m.animating ? "running" : "paused"),
+                 box() | size(104, 44)
                        | bg(m.animating ? t.success.fade(0.18f) : t.surface_raised)
                        | border(1, m.animating ? t.success : t.border)
                        | radius(8) | margin(14, 0) | dsl::id<"anim">)
@@ -175,7 +184,7 @@ struct Gallery {
         };
 
         auto controls = h(
-            h(text_of("clicked " + std::to_string(m.clicks)) | font(13) | semibold
+            h(text_owned("clicked " + std::to_string(m.clicks)) | font(13) | semibold
                 | fg(t.on_accent))
               | center | pad(11, 20) | bg(hot(node_id("bump"), t.accent))
               | radius(t.radius_small) | elevation(3) | dsl::id<"bump">,
@@ -187,7 +196,7 @@ struct Gallery {
             z(box() | size(260.0f * m.slider, 10) | bg(t.accent) | radius(5) | absolute(0, 0))
               | size(260, 10) | bg(t.border) | radius(5) | dsl::id<"slider">,
 
-            text_of(std::to_string(static_cast<int>(m.slider * 100)) + "%")
+            text_owned(std::to_string(static_cast<int>(m.slider * 100)) + "%")
               | font(12) | fg(t.text_secondary)
         ) | gap(16) | align(Align::center);
 

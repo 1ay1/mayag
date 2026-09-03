@@ -732,6 +732,48 @@ void test_layout_guarantees() {
         check(found, "audit() reports children overflowing a clipped parent");
     }
 
+    // ── dead grow() is reported ─────────────────────────────────────────
+    //
+    // `grow()` on an element whose MAIN-axis size is pinned is dead code. The
+    // DSL cannot catch it (which axis is "main" is the PARENT's property, and
+    // an element cannot see its parent), so it belongs in the auditor.
+    {
+        auto ui = h(box() | width(200) | height(20) | grow(),
+                    box() | height(20) | grow()) | width(pct(100));
+        Node n = ui.build();
+        layout::layout_tree(n, {500, 100}, tm);
+
+        int dead = 0;
+        for (const auto& i : layout::audit(n, &tm)) {
+            if (i.kind == layout::Issue::Kind::dead_grow) ++dead;
+        }
+        check(dead == 1, "audit() reports grow() with a pinned main-axis size");
+    }
+
+    // The same size on the CROSS axis is legitimate and must stay silent.
+    {
+        auto ui = h(box() | height(20) | grow()) | width(pct(100));
+        Node n = ui.build();
+        layout::layout_tree(n, {500, 100}, tm);
+        for (const auto& i : layout::audit(n, &tm)) {
+            check(i.kind != layout::Issue::Kind::dead_grow,
+                  "a pinned CROSS-axis size does not trigger dead_grow");
+        }
+    }
+
+    // ── impossible constraints ──────────────────────────────────────────
+    {
+        auto ui = v(box() | min_size(200, 20) | max_size(100, 100) | height(20));
+        Node n = ui.build();
+        layout::layout_tree(n, {400, 100}, tm);
+
+        bool found = false;
+        for (const auto& i : layout::audit(n, &tm)) {
+            if (i.kind == layout::Issue::Kind::contradiction) found = true;
+        }
+        check(found, "audit() reports min_width > max_width");
+    }
+
     {
         // A healthy tree must be silent, or the auditor is useless.
         auto good = v(box() | size(80, 20) | bg(colors::blue),

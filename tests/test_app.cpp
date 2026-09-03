@@ -98,7 +98,7 @@ struct TestApp {
                    box() | size(80, 40) | bg(t.warning)  | id<"hoverme">) | gap(10),
                  box() | size(200, 24) | bg(t.surface) | id<"slider">,
                  text_of(m.text) | font(14) | fg(t.text_primary) | id<"label">,
-                 text_of(std::to_string(m.count)) | font(20) | fg(t.text_primary))
+                 text_owned(std::to_string(m.count)) | font(20) | fg(t.text_primary))
              | gap(12) | pad(20)
              | width(pct(100)) | height(pct(100))
              | bg(m.animating ? t.success : t.background);

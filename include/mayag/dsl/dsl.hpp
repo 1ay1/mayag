@@ -270,9 +270,69 @@ template <Element... Kids>
 template <fixed_string S>
 inline constexpr auto text = Elem<NodeKind::text, caps::text>{ .content = S.view() };
 
-/// Runtime text.
-[[nodiscard]] inline auto text_of(std::string_view s) {
-    return Elem<NodeKind::text, caps::text>{ .content = s };
+/// Runtime text that OUTLIVES the element.
+///
+/// Stores a `string_view`, which is free when the caller already owns the
+/// bytes: a string literal, a `const char*`, a member `std::string`, a span
+/// of a buffer.
+///
+/// A view onto a TEMPORARY string is rejected at compile time. Such an
+/// element outlives its bytes, and the symptom is not a crash but garbage
+/// rendered as glyphs — mayag shipped exactly that:
+/// `text_of(std::to_string(x) + "%")` produced a node holding three NUL
+/// bytes, and it only surfaced when the layout auditor flagged the resulting
+/// box as too narrow to wrap. Use `text_owned()` for strings built on the fly.
+template <typename S>
+[[nodiscard]] inline auto text_of(S&& s) {
+    static_assert(!(std::is_rvalue_reference_v<S&&> &&
+                    std::same_as<std::remove_cvref_t<S>, std::string>),
+        "mayag: text_of() stores a VIEW, and this string dies at the end of "
+        "the statement, so the text would dangle. Use text_owned() for a "
+        "string built on the fly.");
+    return Elem<NodeKind::text, caps::text>{ .content = std::string_view{s} };
+}
+
+/// Runtime text built on the fly, e.g. `text_owned(std::to_string(n) + "%")`.
+///
+/// Copies. An element that borrowed from a temporary would dangle the instant
+/// the full expression ended, and the symptom is the worst kind: not a crash
+/// but garbage bytes rendered as a glyph. mayag shipped exactly that —
+/// `text_of(std::to_string(x) + "%")` in the gallery produced a text node
+/// holding three NUL bytes, which the layout auditor eventually caught as a
+/// box too narrow to wrap.
+struct OwnedText {
+    static constexpr NodeKind  kind = NodeKind::text;
+    static constexpr caps::Set capabilities = caps::text;
+
+    Style            style{};
+    std::string_view content{};   ///< unused; the owned string below is the source
+    std::uint32_t    texture = 0;
+    std::tuple<>     kids{};
+
+    std::string owned;
+
+    [[nodiscard]] Node build() const { return Node::make_text(owned, style); }
+    operator Node() const { return build(); }
+};
+
+[[nodiscard]] inline OwnedText text_owned(std::string s) {
+    OwnedText t{};
+    t.owned = std::move(s);
+    return t;
+}
+
+/// OwnedText participates in the modifier pipeline exactly like `text<>`,
+/// with the same capability checks — it is a text element that happens to
+/// carry its own bytes.
+template <Modifier M>
+[[nodiscard]] inline OwnedText operator|(OwnedText e, M m) {
+    static_assert((M::needs & ~OwnedText::capabilities) == 0,
+                  missing_capability(M::label,
+                      caps::first_missing(M::needs, OwnedText::capabilities)));
+    static_assert((M::bans & OwnedText::capabilities) == 0,
+                  forbidden_capability(M::label, M::bans & OwnedText::capabilities));
+    m.apply(e.style);
+    return e;
 }
 
 /// Flexible empty space — the idiomatic way to push siblings apart.
@@ -406,11 +466,15 @@ struct Wrap {
 };
 inline constexpr Wrap wrap{};
 
-/// An explicit width. Grants `sized_x`, which lets later modifiers detect
-/// (and reject) combinations that would make the size meaningless.
-struct Width  { MAYAG_MODIFIER(Width,  caps::none, caps::sized_x, caps::none, "width");
+/// An explicit width.
+///
+/// Grants `sized_x` and BANS it, so specifying the width twice is a compile
+/// error rather than a silent last-one-wins. Two `width()` calls on one
+/// element always mean the author lost track of which is in effect — and the
+/// answer ("the last one") is invisible at the call site.
+struct Width  { MAYAG_MODIFIER(Width,  caps::none, caps::sized_x, caps::sized_x, "width");
                 Length v; constexpr void apply(Style& s) const { s.layout.width = v; } };
-struct Height { MAYAG_MODIFIER(Height, caps::none, caps::sized_y, caps::none, "height");
+struct Height { MAYAG_MODIFIER(Height, caps::none, caps::sized_y, caps::sized_y, "height");
                 Length v; constexpr void apply(Style& s) const { s.layout.height = v; } };
 
 [[nodiscard]] constexpr Width  width(Length l)  { return {l}; }
@@ -419,7 +483,8 @@ struct Height { MAYAG_MODIFIER(Height, caps::none, caps::sized_y, caps::none, "h
 [[nodiscard]] constexpr Height height(float v)  { return {px(v)}; }
 
 struct Size {
-    MAYAG_MODIFIER(Size, caps::none, caps::sized_x | caps::sized_y, caps::none, "size");
+    MAYAG_MODIFIER(Size, caps::none, caps::sized_x | caps::sized_y,
+                   caps::sized_x | caps::sized_y, "size");
     Length w, h;
     constexpr void apply(Style& s) const { s.layout.width = w; s.layout.height = h; }
 };
@@ -456,6 +521,11 @@ struct MaxSize {
 /// so "grow" has nothing to grow relative to, and silently ignoring it hides
 /// real layout bugs.
 struct Grow {
+    // Bans `sized_x | sized_y`: an element with BOTH dimensions pinned has no
+    // axis left to grow along, so `grow()` there is always dead code. A single
+    // fixed dimension is legitimate (a fixed-height row that grows in width),
+    // and which axis is "main" depends on the parent, which an element cannot
+    // see — so that case is left to `layout::audit()`.
     MAYAG_MODIFIER(Grow, caps::none, caps::flexible, caps::positioned, "grow");
     float g;
     float s;

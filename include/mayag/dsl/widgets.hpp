@@ -138,7 +138,10 @@ template <fixed_string Label>
 /// A pill-shaped label. `tone` drives the whole appearance.
 template <fixed_string Label>
 [[nodiscard]] constexpr auto badge(const Theme& t, Color<Srgb> tone) {
-    return h(text<Label> | font(t.font_size * 0.8f) | semibold | fg(tone))
+    // Single-word content: never wrap, and reserve room for at least the
+    // first glyph so a crowded row cannot crush it into a sliver.
+    return h(text<Label> | font(t.font_size * 0.8f) | semibold | fg(tone)
+                         | ellipsis | min_size(t.font_size * 0.7f, 0.0f))
          | center
          | pad(3.0f, 9.0f)
          | bg(tone.fade(0.16f))
@@ -153,7 +156,12 @@ template <fixed_string Label>
 /// should not depend on its caller leaving enough room.
 template <fixed_string Key>
 [[nodiscard]] constexpr auto kbd(const Theme& t) {
-    return h(text<Key> | font(t.font_size * 0.82f) | fg(t.text_secondary) | ellipsis)
+    // `ellipsis` rather than the default wrap: a key cap holds one or two
+    // characters and must never break across lines. Wrapping mode is also
+    // what makes a narrow cap look like a text-engine failure rather than a
+    // sizing one.
+    return h(text<Key> | font(t.font_size * 0.82f) | fg(t.text_secondary)
+                       | ellipsis | min_size(t.font_size * 0.7f, 0.0f))
          | center
          | min_size(t.font_size * 1.5f, t.font_size * 1.3f)
          | pad(2.0f, 7.0f)
