@@ -26,8 +26,12 @@ namespace mayag {
 
 /// A semantic gesture, resolved to a node.
 struct Gesture {
+    /// Note there is no separate `double_click`: a double click IS a click,
+    /// with `click_count == 2`. Emitting both (as an earlier version did)
+    /// meant an app handling each fired its single-click action on every
+    /// double — a bug the API invited rather than prevented.
     enum class Kind : std::uint8_t {
-        click, double_click, press, release, enter, leave, drag, scroll,
+        click, press, release, enter, leave, drag, scroll,
     };
 
     Kind          kind = Kind::click;
@@ -36,6 +40,14 @@ struct Gesture {
     Vec2          local{};           ///< relative to the node's frame origin
     Vec2          delta{};           ///< drag/scroll amount
     MouseButton   button = MouseButton::left;
+
+    /// How many clicks this one completes: 1 single, 2 double, 3 triple, ...
+    ///
+    /// Carried on the gesture rather than encoded in `kind` because the two
+    /// are orthogonal, and because a UI that only cares about "was clicked"
+    /// should not have to enumerate every count. A text field wanting
+    /// select-word on double and select-line on triple reads this directly.
+    int           click_count = 1;
 
     friend bool operator==(const Gesture&, const Gesture&) = default;
 };
@@ -108,10 +120,11 @@ class Interaction {
                 cursor_ = e.position;
                 const std::uint64_t hit = identify(root, e.position);
 
-                pressed_      = hit;
-                press_origin_ = e.position;
-                press_button_ = e.button;
-                dragged_      = false;
+                pressed_           = hit;
+                press_origin_      = e.position;
+                press_button_      = e.button;
+                press_click_count_ = e.click_count;
+                dragged_           = false;
 
                 // Clicking anywhere moves keyboard focus there — including to
                 // nothing, which is how you dismiss a text field.
@@ -146,19 +159,34 @@ class Interaction {
                     // IS a click, on every platform. An earlier version also
                     // required `!dragged_`, which broke exactly that case.
                     if (hit == was) {
-                        const bool is_double =
-                            (was == last_click_node_) &&
-                            (now_seconds - last_click_time_ < double_click_seconds) &&
-                            ((e.position - last_click_pos_).length() < double_click_slop);
+                        // The click COUNT comes from the platform when the
+                        // platform knows it.
+                        //
+                        // macOS, Windows and X11 all track click sequences
+                        // themselves, using the user's configured interval
+                        // and their own notion of proximity. Re-deriving it
+                        // from timestamps means fighting the OS and losing:
+                        // the threshold is a system preference, it changes
+                        // while the app runs, and accessibility settings can
+                        // stretch it dramatically. An earlier version
+                        // decoded `clickCount` from NSEvent and then threw
+                        // it away to recompute a worse answer.
+                        //
+                        // The fallback below exists for backends that give
+                        // us nothing (a raw framebuffer, a test harness).
+                        const int count = press_click_count_ > 0
+                            ? press_click_count_
+                            : synthesise_count(was, e.position, now_seconds);
 
-                        out.push_back(Gesture{is_double ? Gesture::Kind::double_click
-                                                        : Gesture::Kind::click,
-                                              was, e.position, local, Vec2{}, e.button});
+                        Gesture g{Gesture::Kind::click, was, e.position, local,
+                                  Vec2{}, e.button};
+                        g.click_count = count;
+                        out.push_back(g);
 
-                        // Reset on a double so a triple click is not two doubles.
-                        last_click_node_ = is_double ? 0 : was;
-                        last_click_time_ = now_seconds;
-                        last_click_pos_  = e.position;
+                        last_click_node_  = was;
+                        last_click_time_  = now_seconds;
+                        last_click_pos_   = e.position;
+                        last_click_count_ = count;
                     }
                 }
 
@@ -216,11 +244,35 @@ class Interaction {
 
     /// Movement beyond this (logical px) turns a press into a drag. Matches
     /// the platform convention that a slightly shaky click is still a click.
-    static constexpr float  drag_threshold       = 4.0f;
-    static constexpr double double_click_seconds = 0.4;
-    static constexpr float  double_click_slop    = 6.0f;
+    static constexpr float drag_threshold = 4.0f;
+
+    /// Multi-click window, used ONLY when the platform does not report a
+    /// click count. Settable so a backend can install the real system value
+    /// (macOS: `NSEvent.doubleClickInterval`, Windows: `GetDoubleClickTime`,
+    /// X11: the Xt multi-click time) instead of this fallback.
+    void set_multi_click_interval(double seconds) noexcept {
+        multi_click_seconds_ = seconds > 0.0 ? seconds : 0.5;
+    }
+    [[nodiscard]] double multi_click_interval() const noexcept { return multi_click_seconds_; }
+
+    /// How far the pointer may move between clicks of a sequence.
+    void set_multi_click_slop(float px) noexcept { multi_click_slop_ = px; }
 
   private:
+    /// Derive a click count from timing and distance.
+    ///
+    /// Only reached when the platform reports nothing. Deliberately generic:
+    /// it counts to any depth rather than stopping at "double", so a text
+    /// field can implement select-word / select-line / select-paragraph
+    /// without the interaction layer needing to know those concepts exist.
+    [[nodiscard]] int synthesise_count(std::uint64_t node, Vec2 p, double now) const noexcept {
+        const bool continues =
+            node == last_click_node_ &&
+            (now - last_click_time_) < multi_click_seconds_ &&
+            (p - last_click_pos_).length() < multi_click_slop_;
+        return continues ? last_click_count_ + 1 : 1;
+    }
+
     /// Topmost NAMED node containing `p`. Unnamed nodes are transparent to
     /// hit testing: a `v(...)` wrapper should not swallow clicks meant for
     /// the button inside it, and requiring an explicit `id<>` to be clickable
@@ -260,6 +312,13 @@ class Interaction {
     std::uint64_t last_click_node_ = 0;
     double        last_click_time_ = -1.0;
     Vec2          last_click_pos_{};
+    int           last_click_count_ = 0;
+    /// Click count reported by the platform on the current press; 0 when the
+    /// backend does not supply one.
+    int           press_click_count_ = 0;
+
+    double        multi_click_seconds_ = 0.5;
+    float         multi_click_slop_    = 6.0f;
 };
 
 }  // namespace mayag

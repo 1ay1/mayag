@@ -278,6 +278,33 @@ mayag's own examples**: a root element sized twice, swatches whose declared
 `size(92, 60)` was silently overridden, cell content overflowing its column,
 and a `text_of(std::to_string(x) + "%")` holding three NUL bytes.
 
+## Clicks
+
+A click carries a **count**; there is no separate `double_click` gesture.
+
+```cpp
+Sub<Msg>::on_click<"word">(SelectChar{}),        // single ONLY
+Sub<Msg>::on_double_click<"word">(SelectWord{}),
+Sub<Msg>::on_triple_click<"word">(SelectLine{}),
+Sub<Msg>::on_any_click<"btn">(Activate{}),       // fires regardless of count
+```
+
+Three things this gets right that the obvious design does not:
+
+- **One gesture per click.** Emitting `click` *and* `double_click` means an
+  app handling both fires its single-click action on every double. The count
+  is data on the gesture, so `on_click` matches singles only and a button
+  that should fire regardless says so with `on_any_click`.
+- **The platform's count is authoritative.** macOS, Windows and X11 all track
+  click sequences using the user's configured interval — which is an
+  accessibility setting, adjustable while the app runs. mayag decodes
+  `clickCount` and *uses* it; the timestamp-based synthesis is a fallback for
+  backends that report nothing, and it counts to arbitrary depth rather than
+  stopping at two.
+- **Distance matters as much as time.** Two rapid clicks in different places
+  are two clicks. Otherwise a fast user clicking down a list triggers
+  double-click actions.
+
 ## The rasteriser
 
 The software backend is the reference every GPU backend is measured against,
@@ -362,7 +389,7 @@ MSVC falls back to C++23; everything works, but DSL errors degrade to a generic 
 ```
 PASS  129 checks   # rendering: numeric kernels, layout guarantees, real
                    #            pixels, tiled == scalar reference bit for bit
-PASS   49 checks   # app runtime: interaction, effects, subscriptions
+PASS   61 checks   # app runtime: interaction, click counts, effects, subs
 PASS 4940 checks   # fonts: 1300 system faces + 400 fuzzed files
 100% tests passed, 15 of 15      # + 4 example apps, + 8 must-not-compile
 ```

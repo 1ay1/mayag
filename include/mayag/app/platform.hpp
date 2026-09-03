@@ -54,6 +54,8 @@ concept Window = requires(W w, const W cw, const DrawList& dl, Wait wait,
 
     // Services
     { cw.now() }               -> std::same_as<double>;   ///< monotonic seconds
+    /// The user's configured multi-click interval, in seconds.
+    { cw.double_click_interval() } -> std::same_as<double>;
     { w.set_title(text) }      -> std::same_as<void>;
     { w.set_cursor(CursorShape::arrow) } -> std::same_as<void>;
     { w.set_clipboard(text) }  -> std::same_as<void>;

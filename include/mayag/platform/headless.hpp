@@ -90,6 +90,9 @@ class Headless {
 
     [[nodiscard]] double now() const noexcept { return time_; }
 
+    /// Headless reports the conventional default; tests that care set it.
+    [[nodiscard]] double double_click_interval() const noexcept { return 0.5; }
+
     void set_title(std::string_view t) { title_ = std::string{t}; }
     void set_cursor(CursorShape c) { cursor_ = static_cast<int>(c); }
     void set_clipboard(std::string_view s) { clipboard_ = std::string{s}; }
@@ -105,9 +108,14 @@ class Headless {
     /// Queue a full click at `p`: move, down, up. Three events, because the
     /// interaction state machine must see the same sequence a real mouse
     /// produces — otherwise the test proves nothing about real input.
-    void click(Vec2 p, MouseButton b = MouseButton::left) {
+    /// Queue a full click: move, down, up.
+    ///
+    /// `click_count` is supplied the way a real platform supplies it, so the
+    /// interaction layer exercises its PRIMARY path in tests rather than the
+    /// synthesis fallback.
+    void click(Vec2 p, MouseButton b = MouseButton::left, int click_count = 1) {
         push(MouseMove{p, Vec2{}, Mods{}});
-        push(MouseDown{p, b, Mods{}, 1});
+        push(MouseDown{p, b, Mods{}, click_count});
         push(MouseUp{p, b, Mods{}});
     }
 
@@ -136,8 +144,16 @@ class Headless {
     void double_click(Vec2 p) {
         const double saved = tick_seconds_;
         tick_seconds_ = 0.01;
-        click(p);
-        click(p);
+        click(p, MouseButton::left, 1);
+        click(p, MouseButton::left, 2);
+        tick_seconds_ = saved;
+    }
+
+    /// An n-click sequence, counts supplied as a platform would.
+    void multi_click(Vec2 p, int times) {
+        const double saved = tick_seconds_;
+        tick_seconds_ = 0.01;
+        for (int i = 1; i <= times; ++i) click(p, MouseButton::left, i);
         tick_seconds_ = saved;
     }
 

@@ -74,14 +74,27 @@ class Sub {
     // ── widget-level (hit-tested by the runtime) ────────────────────────
 
     enum class Gesture : std::uint8_t {
-        click, double_click, press, release,
-        enter, leave, drag, scroll,
+        click, press, release, enter, leave, drag, scroll,
     };
 
     struct OnNode {
         std::uint64_t node_id = 0;
         Gesture       gesture = Gesture::click;
         Msg           msg;
+
+        /// Which click counts this subscription accepts.
+        ///
+        /// `on_click` matches a SINGLE click only, so a double click does not
+        /// also fire the single-click action — the bug the old
+        /// click-then-double_click pair invited. `on_any_click` opts back in
+        /// to "fired regardless of count" for the common case where a button
+        /// should activate however eagerly it was clicked.
+        int  count = 1;
+        bool any_count = false;
+
+        [[nodiscard]] constexpr bool accepts(int n) const noexcept {
+            return any_count || n == count;
+        }
     };
 
     /// Widget gesture with the pointer payload — for drags and scrolls.
@@ -156,9 +169,33 @@ class Sub {
     [[nodiscard]] static Sub on_click(Msg m) {
         return Sub{Alt{OnNode{dsl::node_id(Name.view()), Gesture::click, std::move(m)}}};
     }
+    /// A double click, and ONLY a double click.
     template <dsl::fixed_string Name>
     [[nodiscard]] static Sub on_double_click(Msg m) {
-        return Sub{Alt{OnNode{dsl::node_id(Name.view()), Gesture::double_click, std::move(m)}}};
+        return Sub{Alt{OnNode{dsl::node_id(Name.view()), Gesture::click, std::move(m), 2, false}}};
+    }
+
+    /// A triple click — select-line in a text field, select-paragraph in an
+    /// editor. Falls out of the count model for free.
+    template <dsl::fixed_string Name>
+    [[nodiscard]] static Sub on_triple_click(Msg m) {
+        return Sub{Alt{OnNode{dsl::node_id(Name.view()), Gesture::click, std::move(m), 3, false}}};
+    }
+
+    /// An exact click count, for anything deeper.
+    template <dsl::fixed_string Name>
+    [[nodiscard]] static Sub on_multi_click(int count, Msg m) {
+        return Sub{Alt{OnNode{dsl::node_id(Name.view()), Gesture::click, std::move(m),
+                              count, false}}};
+    }
+
+    /// Fires on a click of ANY count.
+    ///
+    /// What a plain button wants: clicking it twice quickly should activate
+    /// it twice, not activate once and then silently drop the second.
+    template <dsl::fixed_string Name>
+    [[nodiscard]] static Sub on_any_click(Msg m) {
+        return Sub{Alt{OnNode{dsl::node_id(Name.view()), Gesture::click, std::move(m), 0, true}}};
     }
     template <dsl::fixed_string Name>
     [[nodiscard]] static Sub on_press(Msg m) {
@@ -192,7 +229,10 @@ class Sub {
 
     /// Runtime-computed id, for lists whose items are not known at compile time.
     [[nodiscard]] static Sub on_click_id(std::uint64_t id, Msg m) {
-        return Sub{Alt{OnNode{id, Gesture::click, std::move(m)}}};
+        return Sub{Alt{OnNode{id, Gesture::click, std::move(m), 1, false}}};
+    }
+    [[nodiscard]] static Sub on_any_click_id(std::uint64_t id, Msg m) {
+        return Sub{Alt{OnNode{id, Gesture::click, std::move(m), 0, true}}};
     }
 
     template <typename F>
@@ -306,7 +346,8 @@ class Sub {
             else if constexpr (std::is_same_v<T, EveryFrame>)
                 return Out::every_frame([h = a.handler, f](FrameEvent e) { return f(h(e)); });
             else if constexpr (std::is_same_v<T, OnNode>)
-                return Out::on_click_id_gesture(a.node_id, a.gesture, f(a.msg));
+                return Out::on_click_id_gesture(a.node_id, a.gesture, f(a.msg),
+                                                a.count, a.any_count);
             else if constexpr (std::is_same_v<T, OnNodeMotion>)
                 return Out::on_node_motion(a.node_id, a.gesture,
                                            [h = a.handler, f](Vec2 v) { return f(h(v)); });
@@ -321,8 +362,9 @@ class Sub {
     }
 
     // Internal constructors used by map().
-    [[nodiscard]] static Sub on_click_id_gesture(std::uint64_t id, Gesture g, Msg m) {
-        return Sub{Alt{OnNode{id, g, std::move(m)}}};
+    [[nodiscard]] static Sub on_click_id_gesture(std::uint64_t id, Gesture g, Msg m,
+                                                 int count = 1, bool any = false) {
+        return Sub{Alt{OnNode{id, g, std::move(m), count, any}}};
     }
     template <typename F>
     [[nodiscard]] static Sub on_node_motion(std::uint64_t id, Gesture g, F&& f) {

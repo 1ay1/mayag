@@ -257,6 +257,17 @@ class MacWindow {
     [[nodiscard]] Vec2  size() const noexcept { return size_; }
     [[nodiscard]] float dpi_scale() const noexcept { return dpi_; }
 
+    /// The user's configured double-click interval.
+    ///
+    /// A system preference, not a constant: it is adjustable in Accessibility
+    /// settings and some users set it several times the default. Hardcoding
+    /// 0.4s means those users' double clicks are silently seen as two singles
+    /// — the app feels broken and they cannot tell you why.
+    [[nodiscard]] double double_click_interval() const {
+        return objc::msg_cls<double>(objc_getClass("NSEvent"),
+                                     objc::sel("doubleClickInterval"));
+    }
+
     [[nodiscard]] double now() const noexcept {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
     }

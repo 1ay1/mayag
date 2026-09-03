@@ -251,26 +251,114 @@ void test_interaction() {
     });
 }
 
-/// Double-click detection needs BOTH a time window and a distance window.
-void test_double_click() {
-    section("double click");
+/// The click model: ONE gesture per click, carrying its count.
+///
+/// The earlier design emitted `click` and then `double_click` as separate
+/// gestures, which meant an app handling both fired its single-click action
+/// on every double. It also had no notion of a triple click, and it
+/// recomputed the count from timestamps while THROWING AWAY the authoritative
+/// count the platform had already given it.
+void test_click_counts() {
+    section("click counts");
 
     run_headless<TestApp>(kCfg, [](auto& rt) {
         const int base = rt.model().count;
 
-        // Two clicks 10 ms apart at the same spot: the second is a
-        // double_click, not a second click, so `on_click` fires once.
+        // A double click must fire `on_click` EXACTLY ONCE (for the first
+        // click of the pair), not twice.
         rt.window().double_click(rt.center_of("inc"));
         rt.tick();
         check(rt.model().count == base + 1,
-              "a fast double-click delivers one `click` plus one `double_click`");
+              "a double click fires a single-click handler once, not twice");
 
-        // Two clicks far apart in TIME are two clicks.
+        // Separated clicks are independent singles.
         const int b2 = rt.model().count;
         rt.click("inc");
         rt.click("inc");
-        check(rt.model().count == b2 + 2, "slow clicks are separate");
+        check(rt.model().count == b2 + 2, "deliberate clicks are separate");
     });
+
+    // Counts are produced at the interaction layer, so test them directly:
+    // the runtime path above cannot show a triple.
+    {
+        Node root = (v(box() | size(100, 50) | bg(colors::red) | dsl::id<"b">)).build();
+        layout::layout_tree(root, {200, 100}, layout::default_measurer());
+        const Vec2 c = root.children()[0].frame().center();
+
+        // ---- the platform reports the count: use it verbatim ----
+        {
+            Interaction in;
+            std::vector<int> counts;
+            for (int n = 1; n <= 4; ++n) {
+                (void)in.handle(MouseDown{c, MouseButton::left, {}, n}, root, n * 0.1);
+                for (const auto& g : in.handle(MouseUp{c, MouseButton::left, {}}, root, n * 0.1)) {
+                    if (g.kind == Gesture::Kind::click) counts.push_back(g.click_count);
+                }
+            }
+            check(counts == std::vector<int>({1, 2, 3, 4}),
+                  "platform-reported click counts pass through unchanged");
+        }
+
+        // ---- no platform count: synthesise, to any depth ----
+        {
+            Interaction in;
+            std::vector<int> counts;
+            for (int n = 0; n < 4; ++n) {
+                (void)in.handle(MouseDown{c, MouseButton::left, {}, 0}, root, n * 0.05);
+                for (const auto& g : in.handle(MouseUp{c, MouseButton::left, {}}, root, n * 0.05)) {
+                    if (g.kind == Gesture::Kind::click) counts.push_back(g.click_count);
+                }
+            }
+            check(counts == std::vector<int>({1, 2, 3, 4}),
+                  "synthesised counts reach triple and beyond, not just double");
+        }
+
+        // ---- too slow: the sequence restarts ----
+        {
+            Interaction in;
+            std::vector<int> counts;
+            for (int n = 0; n < 3; ++n) {
+                (void)in.handle(MouseDown{c, MouseButton::left, {}, 0}, root, n * 2.0);
+                for (const auto& g : in.handle(MouseUp{c, MouseButton::left, {}}, root, n * 2.0)) {
+                    if (g.kind == Gesture::Kind::click) counts.push_back(g.click_count);
+                }
+            }
+            check(counts == std::vector<int>({1, 1, 1}), "slow clicks each count as 1");
+        }
+
+        // ---- fast but moving: also restarts ----
+        //
+        // Distance matters as much as time. Two rapid clicks in different
+        // places are two clicks, not a double — otherwise a fast user
+        // clicking down a list triggers double-click actions.
+        {
+            Interaction in;
+            std::vector<int> counts;
+            for (int n = 0; n < 3; ++n) {
+                const Vec2 p = c + Vec2{static_cast<float>(n) * 40.0f, 0.0f};
+                (void)in.handle(MouseDown{p, MouseButton::left, {}, 0}, root, n * 0.05);
+                for (const auto& g : in.handle(MouseUp{p, MouseButton::left, {}}, root, n * 0.05)) {
+                    if (g.kind == Gesture::Kind::click) counts.push_back(g.click_count);
+                }
+            }
+            check(counts.size() >= 1 && counts[0] == 1,
+                  "rapid clicks at different positions do not chain");
+            for (int n : counts) {
+                check(n == 1, "each moved click counts as 1");
+            }
+        }
+
+        // ---- exactly one gesture per click ----
+        {
+            Interaction in;
+            int clicks = 0;
+            (void)in.handle(MouseDown{c, MouseButton::left, {}, 2}, root, 0.1);
+            for (const auto& g : in.handle(MouseUp{c, MouseButton::left, {}}, root, 0.1)) {
+                if (g.kind == Gesture::Kind::click) ++clicks;
+            }
+            check(clicks == 1, "a double click emits ONE click gesture, not two");
+        }
+    }
 }
 
 /// Pointer capture: a drag keeps targeting the node it started on.
@@ -550,7 +638,7 @@ int main() {
     test_update_purity();
     test_functor_laws();
     test_interaction();
-    test_double_click();
+    test_click_counts();
     test_drag_capture();
     test_effects();
     test_subscriptions();

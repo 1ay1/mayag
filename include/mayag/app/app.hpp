@@ -253,6 +253,10 @@ class Runtime {
         }
         window_.set_coverage_sampler(sampler_);
 
+        // Adopt the platform's multi-click interval. Only used when a backend
+        // reports no click count itself, but a wrong fallback is still a bug.
+        input_.set_multi_click_interval(window_.double_click_interval());
+
         size_ = window_.size();
         dpi_  = window_.dpi_scale();
 
@@ -471,7 +475,12 @@ class Runtime {
             }
             else if constexpr (std::is_same_v<T, typename S::OnNode>) {
                 for (const auto& g : gestures) {
-                    if (g.node_id == a.node_id && matches(g.kind, a.gesture)) out.push_back(a.msg);
+                    // The click COUNT is part of the match, so a double click
+                    // does not also fire a single-click handler.
+                    if (g.node_id == a.node_id && matches(g.kind, a.gesture) &&
+                        (g.kind != Gesture::Kind::click || a.accepts(g.click_count))) {
+                        out.push_back(a.msg);
+                    }
                 }
             }
             else if constexpr (std::is_same_v<T, typename S::OnNodeMotion>) {
@@ -489,7 +498,6 @@ class Runtime {
         using G = typename Sub<Msg>::Gesture;
         switch (want) {
             case G::click:        return k == Gesture::Kind::click;
-            case G::double_click: return k == Gesture::Kind::double_click;
             case G::press:        return k == Gesture::Kind::press;
             case G::release:      return k == Gesture::Kind::release;
             case G::enter:        return k == Gesture::Kind::enter;
