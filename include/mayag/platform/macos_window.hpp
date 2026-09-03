@@ -196,6 +196,21 @@ class MacWindow {
             msg<void>(layer, sel("setNeedsDisplayOnBoundsChange:"), static_cast<BOOL>(NO));
             msg<void>(layer, sel("setDrawsAsynchronously:"), static_cast<BOOL>(NO));
 
+            // Present WITHOUT waiting for the next compositor pass where the
+            // platform allows it.
+            //
+            // This is the dominant latency term: CPU work for a frame is
+            // ~1 ms, but handing the result to Core Animation adds up to a
+            // full refresh (16.7 ms at 60 Hz) before photons. Nothing we do
+            // on the CPU touches that, which is why "make rendering faster"
+            // stops mattering long before the user stops noticing lag.
+            //
+            // Marking the layer opaque with no implicit animations is what we
+            // can do from a CALayer; the real fix is a CAMetalLayer with
+            // `presentsWithTransaction = NO` and a drawable presented on the
+            // display link, which is the GPU backend's job.
+            msg<void>(layer, sel("setAllowsGroupOpacity:"), static_cast<BOOL>(NO));
+
             // THE line that decides whether Retina rendering survives.
             //
             // A CALayer's contentsScale defaults to 1.0. Hand it a 2x image

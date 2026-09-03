@@ -41,6 +41,7 @@
 #include "cmd.hpp"
 #include "event.hpp"
 #include "interaction.hpp"
+#include "latency.hpp"
 #include "platform.hpp"
 #include "sub.hpp"
 
@@ -72,6 +73,13 @@ struct Ctx {
     float dpi_scale = 1.0f;
     double time = 0.0;       ///< seconds since start, for animation
     Theme theme = themes::midnight;
+
+    /// Last frame's measured budget.
+    ///
+    /// Available to `view()` so an app can DRAW its own latency — which is
+    /// the only honest way to claim a framework is fast, and the fastest way
+    /// to notice when it stops being.
+    const LatencyStats* latency = nullptr;
 
     /// The text measurer the frame will be laid out with.
     ///
@@ -188,6 +196,18 @@ concept Program =
 
 // ── configuration ───────────────────────────────────────────────────────
 
+/// How the runtime trades latency against CPU.
+enum class LatencyMode : std::uint8_t {
+    /// Render as soon as something changes. Lowest latency, and the right
+    /// default: the CPU cost of a frame is ~1 ms, so there is nothing to
+    /// save by waiting.
+    immediate,
+    /// Coalesce for a whole refresh interval before rendering. Fewer frames
+    /// on a burst of input, at the cost of up to one refresh of latency.
+    /// For battery-sensitive or very heavy views.
+    batched,
+};
+
 struct AppConfig {
     std::string title = "mayag";
     Vec2        size{1024, 640};
@@ -205,6 +225,9 @@ struct AppConfig {
     /// Overlay every node's rect. Bound to a key in your own subscribe() if
     /// you want to toggle it at runtime.
     bool debug_bounds = false;
+
+    /// Latency policy. `immediate` by default — see LatencyMode.
+    LatencyMode latency = LatencyMode::immediate;
 
     /// Keep running when `update()` or `view()` throws.
     ///
@@ -369,9 +392,36 @@ class Runtime {
 
         fire_due_timers(now);
 
-        for (const auto& ev : events) {
-            handle_event(ev, subs);
-            if (quit_) return;
+        // ── coalesce input ──────────────────────────────────────────────
+        //
+        // Every pending event is processed before ONE render, and redundant
+        // pointer motion is collapsed to the newest position.
+        //
+        // A trackpad delivers ~120 moves/second. Rendering each is 120 frames
+        // of work for 60 frames of visible result — and it makes the app FEEL
+        // slower, because the frame you finally see is several events stale.
+        // The correct behaviour is to render the LATEST state once, which is
+        // both less work and lower latency.
+        frame_.events_coalesced = static_cast<int>(events.size());
+
+        std::size_t last_move = events.size();
+        for (std::size_t i = events.size(); i-- > 0;) {
+            if (std::holds_alternative<MouseMove>(events[i])) { last_move = i; break; }
+        }
+
+        {
+            ScopedTimer t{frame_.input_ms};
+            for (std::size_t i = 0; i < events.size(); ++i) {
+                // Superseded motion changes nothing observable: only the most
+                // recent cursor position can affect hover, and a drag reads
+                // the accumulated delta from the position anyway.
+                if (std::holds_alternative<MouseMove>(events[i]) && i != last_move) {
+                    ++frame_.coalesced_moves;
+                    continue;
+                }
+                handle_event(events[i], subs);
+                if (quit_) return;
+            }
         }
 
         // Advance tracked motion. The runtime owns this so an app never has
@@ -400,6 +450,10 @@ class Runtime {
     [[nodiscard]] const Model& model() const noexcept { return model_; }
     [[nodiscard]] const Node& tree() const noexcept { return tree_; }
     [[nodiscard]] const Interaction& input() const noexcept { return input_; }
+
+    /// Where this frame's time went. Latency is a number, not a claim — an
+    /// app can print this, draw it, or assert on it in CI.
+    [[nodiscard]] const LatencyStats& latency() const noexcept { return latency_; }
     [[nodiscard]] bool finished() const noexcept { return quit_ || !window_.is_open(); }
 
     /// Rect of a named node in the CURRENT tree, or nullopt if it is not in
@@ -870,6 +924,7 @@ class Runtime {
 
         if (cfg_.fonts != nullptr) cfg_.fonts->begin_frame(frame_counter_);
         ++frame_counter_;
+        frame_.view_ms = frame_.layout_ms = frame_.paint_ms = frame_.render_ms = 0.0;
 
         // Clear BEFORE the view runs, or we erase the overlays it just
         // posted. The list then outlives this frame: input arrives between
@@ -879,7 +934,7 @@ class Runtime {
         tracked_.clear();
         clear_animation_request();
 
-        Ctx ctx{size_, dpi_, time_, cfg_.theme, measurer_, &tracked_, &overlays_, &input_};
+        Ctx ctx{size_, dpi_, time_, cfg_.theme, &latency_, measurer_, &tracked_, &overlays_, &input_};
 
         // A throwing view keeps the LAST GOOD TREE on screen. A blank window
         // tells the user nothing; a stale frame at least shows what was there
@@ -900,7 +955,7 @@ class Runtime {
             else                                  tree_ = P::view(model_);
         }
 
-        layout::layout_tree(tree_, size_, *measurer_);
+        { ScopedTimer t{frame_.layout_ms}; layout::layout_tree(tree_, size_, *measurer_); }
 
         // Tracked geometry is resolved AFTER layout, for the same reason
         // overlays are: a node's real rect is not known until the pass ends.
@@ -939,6 +994,7 @@ class Runtime {
         }
 
         draws_.clear();
+        ScopedTimer paint_timer{frame_.paint_ms};
         render::PaintOptions po{};
         po.dpi_scale    = dpi_;
         po.measurer     = measurer_;
@@ -965,7 +1021,16 @@ class Runtime {
         // view pass. Collected here and folded into the next wait decision.
         motion_pending_ = animation_was_requested() || tracked_.animating();
 
-        window_.present(draws_, cfg_.theme.background);
+        frame_.instances  = static_cast<std::uint32_t>(draws_.size());
+        frame_.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
+
+        {
+            ScopedTimer t{frame_.render_ms};
+            window_.present(draws_, cfg_.theme.background);
+        }
+
+        latency_.record(frame_);
+        frame_ = FrameTiming{};
     }
 
     AppConfig    cfg_;
@@ -988,6 +1053,8 @@ class Runtime {
     bool                                 motion_pending_ = false;
     double                               last_motion_time_ = 0.0;
     CursorShape                          current_cursor_ = CursorShape::arrow;
+    FrameTiming                          frame_{};
+    LatencyStats                         latency_{};
     std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
     detail::Inbox<Msg>              inbox_;

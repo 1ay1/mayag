@@ -71,6 +71,7 @@
 #include <mayag/app/cmd.hpp>
 #include <mayag/app/sub.hpp>
 #include <mayag/app/interaction.hpp>
+#include <mayag/app/latency.hpp>
 #include <mayag/app/app.hpp>
 
 // ── io ─────────────────────────────────────────────────────────────
