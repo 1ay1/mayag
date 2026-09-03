@@ -56,6 +56,7 @@
 // ── backends ────────────────────────────────────────────────────────────
 #include <mayag/backend/backend.hpp>
 #include <mayag/backend/software.hpp>
+#include <mayag/backend/tiled.hpp>
 
 // ── app runtime ─────────────────────────────────────────────────────────
 #include <mayag/app/event.hpp>
@@ -136,15 +137,19 @@ template <typename Ui>
     const int w = static_cast<int>(viewport.x * opts.dpi_scale);
     const int h = static_cast<int>(viewport.y * opts.dpi_scale);
     backend::Framebuffer fb{w, h};
-    fb.clear(opts.background);
 
     const backend::CoverageSampler* sampler =
         bound     ? static_cast<const backend::CoverageSampler*>(&bound->sampler)
       : opts.font ? &opts.font->sampler()
                   : nullptr;
 
-    backend::Software::render(dl, fb, sampler);
-    return fb.to_rgba8();
+    // Tiled + parallel. Bit-identical to the reference path (asserted by
+    // tests), so there is no reason to take the slow one.
+    backend::Tiled::render(dl, fb, sampler, &backend::shared_pool(), opts.background);
+
+    std::vector<std::uint8_t> out;
+    backend::Tiled::encode_parallel(fb, out, &backend::shared_pool());
+    return out;
 }
 
 /// Render straight to a .png file. The fastest way to see a mayag UI.

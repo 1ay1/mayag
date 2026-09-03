@@ -10,6 +10,7 @@
 //                  the layer that catches "compiles, lays out, draws nothing".
 
 #include <mayag/mayag.hpp>
+#include <mayag/backend/tiled.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -526,6 +527,117 @@ void test_batching() {
 
 }  // namespace
 
+/// The tiled parallel renderer must be BIT-IDENTICAL to the reference.
+///
+/// That equivalence is what makes it safe as the default: any divergence
+/// would be a rendering bug that only appears on some machines, at some core
+/// counts, in some tiles — the worst class of bug to chase. So it is checked
+/// mechanically on scenes that stress every path.
+void test_tiled_equivalence() {
+    section("tiled renderer");
+
+    std::printf("  simd=%s  threads=%zu\n",
+                backend::simd::backend_name(),
+                backend::shared_pool().worker_count() + 1);
+
+    constexpr Theme th = themes::midnight;
+
+    struct Scene { const char* name; Node root; };
+    std::vector<Scene> scenes;
+
+    // Shapes, shadows, gradients, clipping, blending, transparency — each is
+    // a different branch in the shading kernel.
+    scenes.push_back({"boxes + radii",
+        (v(box() | size(200, 90) | bg(th.accent) | radius(16),
+           box() | size(200, 90) | bg(th.success),
+           box() | size(200, 40) | bg(th.warning) | pill) | gap(10) | pad(12)).build()});
+
+    scenes.push_back({"shadows",
+        (v(box() | size(160, 80) | bg(th.surface) | radius(12) | elevation(24),
+           box() | size(160, 80) | bg(th.accent)  | radius(12)
+                 | shadow(28.0f, th.accent.fade(0.7f), {0, 10})) | gap(30) | pad(40)).build()});
+
+    scenes.push_back({"gradients",
+        (v(box() | size(240, 100) | radius(12)
+                 | linear_gradient(rgb<0x0090FF>, rgb<0xF76B15>, {0, 0}, {1, 0}),
+           box() | size(240, 100) | radius(12)
+                 | radial_gradient(colors::white, th.accent, {0.5f, 0.5f}, 0.6f))
+         | gap(10) | pad(12)).build()});
+
+    scenes.push_back({"clip + alpha",
+        (v(box() | size(400, 200) | bg(th.danger) | opacity(0.55f))
+         | size(120, 90) | clip | bg(th.surface) | radius(10) | pad(6)).build()});
+
+    scenes.push_back({"borders + blend",
+        (h(box() | size(90, 90) | border(6, th.accent) | radius(12),
+           box() | size(90, 90) | bg(th.success) | blend(BlendMode::additive),
+           box() | size(90, 90) | bg(th.warning) | blend(BlendMode::multiply))
+         | gap(8) | pad(10)).build()});
+
+    for (auto& sc : scenes) {
+        for (float scale : {1.0f, 2.0f}) {
+            const Vec2 viewport{320, 260};
+            Node root = sc.root;
+            layout::layout_tree(root, viewport, layout::default_measurer());
+
+            DrawList dl;
+            render::PaintOptions po;
+            po.dpi_scale = scale;
+            render::paint(root, dl, po);
+
+            const int w = static_cast<int>(viewport.x * scale);
+            const int h = static_cast<int>(viewport.y * scale);
+
+            backend::Framebuffer ref{w, h}, tiled{w, h};
+            ref.clear(th.background);
+            backend::Software::render(dl, ref, nullptr);
+            backend::Tiled::render(dl, tiled, nullptr, &backend::shared_pool(), th.background);
+
+            const auto a = ref.to_rgba8();
+            const auto b = tiled.to_rgba8();
+
+            std::size_t differing = 0;
+            int worst = 0;
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                const int d = std::abs(static_cast<int>(a[i]) - static_cast<int>(b[i]));
+                if (d != 0) { ++differing; worst = num::max(worst, d); }
+            }
+            check(differing == 0,
+                  std::string{"tiled == reference: "} + sc.name + " @" +
+                  std::to_string(static_cast<int>(scale)) + "x (" +
+                  std::to_string(differing) + " bytes differ, max " +
+                  std::to_string(worst) + ")");
+        }
+    }
+
+    // Parallel encode must match the serial one too.
+    {
+        backend::Framebuffer fb{200, 200};
+        fb.clear(rgb<0x336699>);
+        for (int y = 0; y < 200; ++y) {
+            for (int x = 0; x < 200; ++x) {
+                fb.at(x, y) = Vec4{x / 200.0f, y / 200.0f, 0.5f, (x + y) / 400.0f};
+            }
+        }
+        std::vector<std::uint8_t> serial, parallel;
+        fb.write_rgba8(serial);
+        backend::Tiled::encode_parallel(fb, parallel, &backend::shared_pool());
+        check(serial == parallel, "parallel encode == serial encode");
+    }
+
+    // A pool with zero workers must still produce the same answer.
+    {
+        backend::ThreadPool solo{0};
+        std::atomic<int> sum{0};
+        solo.parallel_for(100, [&](std::size_t i) { sum += static_cast<int>(i); });
+        check(sum == 4950, "an inline pool runs every index exactly once");
+
+        std::atomic<int> par{0};
+        backend::shared_pool().parallel_for(10000, [&](std::size_t) { ++par; });
+        check(par == 10000, "the shared pool runs every index exactly once");
+    }
+}
+
 int main() {
     std::printf("mayag test suite\n================");
 
@@ -537,6 +649,7 @@ int main() {
     test_determinism();
     test_png();
     test_batching();
+    test_tiled_equivalence();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);

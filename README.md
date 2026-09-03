@@ -237,6 +237,49 @@ No Arabic joining, no Indic reordering, no BiDi. Those are not "more of the same
 
 A font file arrives from a download or a user's disk. Every accessor is bounds-checked and returns a defined value when the file lies about its own structure. The test suite sweeps **all ~1300 faces installed on the machine** and feeds the parser **400 randomly corrupted fonts**; both must parse-or-reject without crashing, and both run clean under ASan and UBSan.
 
+## The rasteriser
+
+The software backend is the reference every GPU backend is measured against,
+so it has to be both **correct** and **fast**. It is tiled, parallel, and
+bit-identical to the scalar reference — that equivalence is asserted by tests
+across 5 scenes x 2 scales, because a divergence that only shows up on some
+core counts is the worst class of bug to chase.
+
+| Stage | Technique |
+|-------|-----------|
+| Binning | instances bucketed into 64x64 tiles; a tile shades only what can touch it |
+| Occlusion | an opaque tile-covering fill drops everything queued beneath it |
+| Parallelism | dynamic work-stealing over tiles — UI tiles vary hugely in cost |
+| Encode | linear->sRGB via a 4096-entry LUT, split across the same threads |
+
+Measured on an M1 (8 cores), a realistic dashboard frame with shadows,
+gradients and text:
+
+| | serial | tiled | |
+|---|---|---|---|
+| 1x (0.9 MP) | 7.09 ms | **1.96 ms** | 3.6x — 511 fps |
+| 2x Retina (3.6 MP) | 27.07 ms | **9.73 ms** | 2.8x — 103 fps |
+
+That is why mayag renders at native Retina scale rather than upscaling a 1x
+buffer. An idle window still blocks and measures **0% CPU**.
+
+## Text quality
+
+Three things beyond "rasterise the outline", each of which is visible:
+
+- **Analytic coverage.** Every pixel gets the true area of the glyph inside
+  it — not N supersamples. A coverage-conservation test asserts total area is
+  within 0.2% for axis-aligned, offset, fractional, and sub-pixel-thin shapes.
+- **Correct decode per glyph.** Bitmap entries are coverage; SDF entries are a
+  distance field. Which one travels per *instance*, because hybrid mode mixes
+  both in one frame. Getting this wrong snapped every antialiased pixel to
+  0 or 1 and made text look eroded.
+- **Stem darkening.** Linear-light compositing is physically right but
+  perceptually wrong for text: a 50%-covered white-on-dark pixel lands ~0.19
+  L* lighter than a human reads as "half", so light text looks thin. mayag
+  applies a contrast-dependent gamma to *coverage* (never colour, so hue
+  cannot shift) — the same correction FreeType and Skia make.
+
 ## Cross platform
 
 | Platform | Backend |
@@ -276,7 +319,8 @@ MSVC falls back to C++23; everything works, but DSL errors degrade to a generic 
 ## Tests
 
 ```
-PASS  103 checks   # rendering: numeric kernels, layout, real pixels
+PASS  116 checks   # rendering: numeric kernels, layout, real pixels,
+                   #            tiled == scalar reference, bit for bit
 PASS   49 checks   # app runtime: interaction, effects, subscriptions
 PASS 4940 checks   # fonts: 1300 system faces + 400 fuzzed files
 100% tests passed, 12 of 12      # + 4 example apps, + 5 must-not-compile

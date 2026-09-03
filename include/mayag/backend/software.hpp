@@ -115,9 +115,16 @@ class Framebuffer {
     /// would allocate and free several megabytes per frame.
     void write_rgba8(std::vector<std::uint8_t>& out) const {
         out.resize(pixels_.size() * 4);
-        std::uint8_t* dst = out.data();
+        encode_span(pixels_.data(), out.data(), pixels_.size());
+    }
 
-        for (const Vec4& p : pixels_) {
+    /// Encode a run of pixels. Public and static so the tiled renderer can
+    /// encode
+    /// tiles in parallel, on the thread that just rendered them and still has
+    /// them in cache.
+    static void encode_span(const Vec4* src, std::uint8_t* dst, std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            const Vec4& p = src[i];
             const float a = num::saturate(p.w);
 
             // Fully opaque is the overwhelmingly common case in a UI (the
@@ -170,7 +177,45 @@ class Software {
         }
     }
 
+    /// Render one instance into `fb`, clipped to `scissor`.
+    ///
+    /// Public so `Tiled` can drive the SAME shading kernel per tile. Sharing
+    /// this rather than duplicating it is what keeps the tiled output
+    /// bit-identical to the reference path.
+    static void draw_instance_public(const Instance& inst, Framebuffer& fb,
+                                     const Rect& scissor, std::uint32_t texture,
+                                     BlendMode blend, const CoverageSampler* sampler) {
+        draw_instance(inst, fb, scissor, texture, blend, sampler);
+    }
+
   private:
+    /// Perceptual correction for glyph coverage.
+    ///
+    /// `text_gamma_light` < 1 thickens light-on-dark strokes; the dark-on-
+    /// light case needs far less help, so its exponent sits near 1. Values
+    /// are the conventional ones (FreeType/Skia land in the same range) and
+    /// are deliberately mild: overcorrecting makes text look bold and muddy.
+    static constexpr float text_gamma_light = 0.80f;
+    static constexpr float text_gamma_dark  = 1.05f;
+
+    /// Coverage -> perceptually corrected coverage.
+    [[nodiscard]] static float apply_text_gamma(float cov, Vec4 premul_color) noexcept {
+        if (cov <= 0.0f || cov >= 1.0f) return cov;
+
+        // Luminance of the glyph colour, un-premultiplied. Bright text is the
+        // case that needs thickening.
+        const float a = premul_color.w > 1e-4f ? premul_color.w : 1.0f;
+        const float lum = (0.2126f * premul_color.x +
+                           0.7152f * premul_color.y +
+                           0.0722f * premul_color.z) / a;
+
+        // Blend between the two exponents by how light the text is, so a
+        // mid-grey label does not jump discontinuously between regimes.
+        const float t = num::saturate(lum * 2.0f);
+        const float gamma = num::lerp(text_gamma_dark, text_gamma_light, t);
+        return num::pow(cov, gamma);
+    }
+
     /// Half-width of the SDF threshold band, in normalised field units.
     ///
     /// This is the antialiasing width for distance-field glyphs, and it has
@@ -341,8 +386,28 @@ class Software {
                 // A bitmap entry IS coverage; a distance-field entry has to be
                 // thresholded. Which one this is travels per instance, because
                 // hybrid mode mixes both within a single frame.
-                if ((inst.flags & instance_flags::glyph_sdf) == 0) return raw;
-                return num::smoothstep(0.5f - sdf_edge, 0.5f + sdf_edge, raw);
+                const float cov = (inst.flags & instance_flags::glyph_sdf) == 0
+                    ? raw
+                    : num::smoothstep(0.5f - sdf_edge, 0.5f + sdf_edge, raw);
+
+                // ── stem darkening ──────────────────────────────────────
+                //
+                // Compositing in linear light is physically correct, but for
+                // TEXT it is perceptually wrong in a specific, measurable
+                // way: a 50%-covered pixel of white-on-dark lands ~0.19 L*
+                // lighter than a human reads as "half", so light text on a
+                // dark background looks thin and washed out. (Measured with
+                // Oklch against the linear blend.) Dark-on-light has the
+                // opposite, milder error.
+                //
+                // Every serious text renderer corrects for this — FreeType
+                // calls it stem darkening, Apple and Skia apply a
+                // contrast-dependent gamma. mayag raises coverage to a power
+                // chosen by the text/background polarity, which thickens
+                // light-on-dark and leaves dark-on-light essentially alone.
+                //
+                // Applied to COVERAGE, not colour, so it cannot shift hue.
+                return apply_text_gamma(cov, inst.color);
             }
 
             case ShapeKind::texture:

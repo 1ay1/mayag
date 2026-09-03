@@ -169,6 +169,7 @@ if(MAYAG_BUILD_TESTS)
     target_link_libraries(mayag_tests PRIVATE mayag)
     target_compile_options(mayag_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_tests COMMAND mayag_tests)
+    set_tests_properties(mayag_tests PROPERTIES TIMEOUT 120)
 
     # The application runtime, driven through the headless platform. This is
     # the SAME Runtime<P, W> that run<P>() instantiates on a real window, so
@@ -217,7 +218,14 @@ if(MAYAG_BUILD_TESTS)
         add_test(NAME mayag_rejects_${case}
                  COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
                                           --target mayag_nc_${case} --config $<CONFIG>)
-        set_tests_properties(mayag_rejects_${case} PROPERTIES WILL_FAIL TRUE)
+        # These drive a NESTED cmake build. Two of them running at once (or
+        # one running while the outer build is still going) contend for the
+        # same ninja lock and can stall for minutes. RUN_SERIAL keeps them
+        # one-at-a-time; each takes ~2 s.
+        set_tests_properties(mayag_rejects_${case} PROPERTIES
+                             WILL_FAIL TRUE
+                             RUN_SERIAL TRUE
+                             TIMEOUT 120)
     endforeach()
 endif()
 

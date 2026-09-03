@@ -18,6 +18,7 @@
 
 #include "../app/event.hpp"
 #include "../backend/software.hpp"
+#include "../backend/tiled.hpp"
 #include "../image/png.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
@@ -77,8 +78,7 @@ class Headless {
         if (fb_.width() != w || fb_.height() != h) {
             fb_ = backend::Framebuffer{w, h};
         }
-        fb_.clear(clear);
-        backend::Software::render(dl, fb_, sampler_);
+        backend::Tiled::render(dl, fb_, sampler_, &backend::shared_pool(), clear);
         ++frames_presented_;
 
         if (!record_dir_.empty()) {
