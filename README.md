@@ -358,7 +358,31 @@ both closes and activates what was behind it.
 Constant cost, because the node count depends on the viewport rather than the
 data. The todo example holds 412 items in 74 nodes.
 
-**Animation** is springs, not curves. `Animated<T>` is a value that knows
+**Animation follows real geometry.** The failure this prevents: an app
+animating a magic number that approximates a layout it cannot see. mayag's own
+todo example slid a filter underline with `indicator * 52.0f`, guessing the
+chips were 52px apart and 46px wide — they were at x=293/333/385 with widths
+34/51/47, so it drifted further wrong with every tab.
+
+```cpp
+struct Model { Tracked underline; };
+
+// view — name the node to follow; the runtime observes its REAL rect
+c.track(m.underline, node_id("filter-active"));
+box() | size(m.underline.rect().width(), 2)
+      | absolute(m.underline.rect().left(), m.underline.rect().bottom() + 2)
+```
+
+The spring chases a measured rect, so it cannot drift: change the font, the
+label, or the window size and the animation follows. It also animates the
+WIDTH, which a stride constant fundamentally cannot.
+
+The runtime steps tracked motion and requests frames itself — `update()` has
+no animation arm at all — and folds the request into the same "when do I next
+wake" decision it makes for timers, so an app can neither forget to start nor
+forget to stop.
+
+**Springs, not curves.** `Animated<T>` is a value that knows
 where it is going; `update()` advances it, `view()` reads it:
 
 ```cpp

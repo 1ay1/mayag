@@ -34,6 +34,7 @@
 #include "../render/painter.hpp"
 #include "../scene/node.hpp"
 #include "../scene/overlay.hpp"
+#include "../core/motion.hpp"
 #include "../style/theme.hpp"
 #include "../text/font.hpp"
 #include "../font/font.hpp"
@@ -81,6 +82,22 @@ struct Ctx {
 
     [[nodiscard]] const layout::TextMeasurer& measurer() const {
         return text_measurer != nullptr ? *text_measurer : layout::default_measurer();
+    }
+
+    /// Where `view()` registers geometry it wants to follow.
+    ///
+    /// A view calls `c.track(m.underline, node_id("filter-active"))`; after
+    /// layout the runtime records where that node ACTUALLY landed and the
+    /// spring chases it. The app never invents a coordinate, which is the
+    /// whole point — a hardcoded stride is a guess about a layout the app
+    /// cannot see, and it drifts the moment a label or font changes.
+    TrackedSet* tracked = nullptr;
+
+    /// Follow a node's measured rect.
+    void track(const Tracked& t, std::uint64_t node) const {
+        t.follow(node);
+        if (tracked != nullptr) tracked->register_tracked(&t);
+        if (t.animating()) request_animation_frame();
     }
 
     /// Where `view()` posts menus, modals and tooltips.
@@ -340,6 +357,17 @@ class Runtime {
             handle_event(ev, subs);
             if (quit_) return;
         }
+
+        // Advance tracked motion. The runtime owns this so an app never has
+        // to remember to step it, and — crucially — never has to remember to
+        // STOP: when every spring settles, the frame request stops with it.
+        if (tracked_.animating()) {
+            const double dt = last_motion_time_ > 0.0
+                ? num::clamp(now - last_motion_time_, 0.0, 0.1) : 1.0 / 60.0;
+            tracked_.step_all(dt);
+            dirty_ = true;
+        }
+        last_motion_time_ = now;
 
         // Messages that arrived from worker threads.
         for (auto& m : inbox_.drain()) {
@@ -724,6 +752,12 @@ class Runtime {
         // sleep still owing the screen a paint.
         if (dirty_) return {platform::Wait::immediate, 0.0};
 
+        // Motion in progress needs frames, exactly like an `every_frame`
+        // subscription. Folding it into the SAME decision is what keeps
+        // animation from needing a second clock — and what guarantees the app
+        // goes back to sleep the moment the last spring settles.
+        if (tracked_.animating() || motion_pending_) return {platform::Wait::poll, 0.0};
+
         if (subs.wants_frames()) return {platform::Wait::poll, 0.0};
         if (auto i = subs.min_interval()) {
             return {platform::Wait::timeout, std::chrono::duration<double>(*i).count()};
@@ -760,8 +794,10 @@ class Runtime {
         // renders, and an emptied list would mean a menu visible on screen
         // yet invisible to hit testing.
         overlays_.clear();
+        tracked_.clear();
+        clear_animation_request();
 
-        Ctx ctx{size_, dpi_, time_, cfg_.theme, measurer_, &overlays_, &input_};
+        Ctx ctx{size_, dpi_, time_, cfg_.theme, measurer_, &tracked_, &overlays_, &input_};
 
         if constexpr (detail::ViewWithCtx<P>) {
             tree_ = P::view(model_, ctx);
@@ -770,6 +806,12 @@ class Runtime {
         }
 
         layout::layout_tree(tree_, size_, *measurer_);
+
+        // Tracked geometry is resolved AFTER layout, for the same reason
+        // overlays are: a node's real rect is not known until the pass ends.
+        // This is what lets an animation follow a LAYOUT rather than a
+        // hardcoded coordinate.
+        tracked_.observe_all(tree_);
 
         // Overlays are laid out AFTER the main tree, because an overlay
         // positions itself against an anchor whose final rect is not known
@@ -824,6 +866,10 @@ class Runtime {
             }
         }
 
+        // A widget mid-motion called request_animation_frame() during the
+        // view pass. Collected here and folded into the next wait decision.
+        motion_pending_ = animation_was_requested() || tracked_.animating();
+
         window_.present(draws_, cfg_.theme.background);
     }
 
@@ -843,6 +889,9 @@ class Runtime {
     const backend::CoverageSampler*      sampler_  = nullptr;
     std::uint64_t                        frame_counter_ = 0;
     OverlayList                          overlays_;
+    TrackedSet                           tracked_;
+    bool                                 motion_pending_ = false;
+    double                               last_motion_time_ = 0.0;
     std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
     detail::Inbox<Msg>              inbox_;

@@ -36,6 +36,7 @@
 #include <mayag/core/scroll_state.hpp>
 #include <mayag/core/text_edit.hpp>
 #include <mayag/core/animation.hpp>
+#include <mayag/core/motion.hpp>
 
 // ── style & scene ───────────────────────────────────────────────────────
 #include <mayag/style/style.hpp>

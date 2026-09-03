@@ -31,8 +31,13 @@ struct Todo {
         Filter            filter = Filter::all;
         int               selected = -1;   ///< keyboard cursor into the view
 
-        /// The filter underline slides between chips instead of jumping.
-        AnimatedFloat     indicator{0.0f};
+        /// The filter underline FOLLOWS the selected chip's real rect.
+        ///
+        /// Not a number that approximates where the chip is. This used to be
+        /// `AnimatedFloat * 52.0f`, guessing the chips were 52px apart and
+        /// 46px wide — they are at x=293/333/385 with widths 34/51/47, so the
+        /// underline drifted further wrong with every tab.
+        Tracked           indicator{};
         /// Which row's context menu is open; 0 = none.
         std::uint64_t     menu_for = 0;
         int               menu_index = -1;
@@ -142,7 +147,6 @@ struct Todo {
             }
             else if constexpr (std::is_same_v<T, SetFilter>) {
                 m.filter = e.f;
-                m.indicator.to(static_cast<float>(static_cast<int>(e.f)));
                 m.selected = -1;
                 m.list.scroll_to_top();
                 return {std::move(m), Cmd<Msg>::none()};
@@ -155,7 +159,8 @@ struct Todo {
                 return {std::move(m), Cmd<Msg>::focus(node_id("input"))};
             }
             else if constexpr (std::is_same_v<T, Tick>) {
-                m.indicator.step(e.dt, Spring::snappy());
+                // The runtime steps tracked motion itself; this arm remains
+                // only for app-owned animations.
                 return {std::move(m), Cmd<Msg>::none()};
             }
             else if constexpr (std::is_same_v<T, OpenMenu>) {
@@ -238,6 +243,14 @@ struct Todo {
                     | id_of(std::string{"filter-"} + label)).build();
         };
 
+        // Follow the selected chip. `track` records the node id now and the
+        // runtime observes its real rect after layout, so the spring always
+        // chases geometry rather than an assumption.
+        const char* selected_chip =
+            m.filter == Filter::all ? "filter-all"
+          : m.filter == Filter::active ? "filter-active" : "filter-done";
+        c.track(m.indicator, node_id(selected_chip));
+
         // A context menu, posted as an OVERLAY: it escapes the list's scroll
         // clip, paints above everything, and swallows the click that
         // dismisses it. None of that is possible with an in-flow child.
@@ -271,11 +284,19 @@ struct Todo {
                        v(h(node(chip("all", Filter::all)),
                            node(chip("active", Filter::active)),
                            node(chip("done", Filter::done))) | gap(6),
-                         // A sliding underline. Its x is a SPRING, so
-                         // switching filters mid-slide continues smoothly
-                         // instead of restarting.
-                         node((box() | size(46, 2) | bg(t.accent) | radius(1)
-                                     | margin(0, 0, 0, m.indicator.value() * 52.0f)).build()))
+                         // The underline follows the SELECTED CHIP's measured
+                         // rect. No stride, no width constant — it cannot
+                         // drift, because it never had a number of its own.
+                         // Nothing to follow until layout has measured the
+                         // chip at least once, so frame zero draws no
+                         // underline rather than a zero-width sliver.
+                         node(m.indicator.ready()
+                              ? (box()
+                                 | size(m.indicator.rect().width(), 2)
+                                 | bg(t.accent) | radius(1)
+                                 | absolute(m.indicator.rect().left(),
+                                            m.indicator.rect().bottom() + 2.0f)).build()
+                              : Node{}))
                        | gap(4)),
 
                  // input
@@ -437,20 +458,38 @@ int main(int argc, char** argv) {
                std::to_string(nodes_after) + " nodes");
         }
 
-        // ── animation ───────────────────────────────────────────────────
+        // ── animation follows real geometry ─────────────────────────────
+        //
+        // The underline must land EXACTLY on the selected chip, at its real
+        // x and its real width. This used to be `indicator * 52.0f` against
+        // chips at x=293/333/385 with widths 34/51/47, so it drifted further
+        // wrong with every tab — visibly, in a screenshot.
         {
-            rt.click("filter-active");
-            ok(rt.model().indicator.animating(), "switching filters starts the spring");
-            ok(Todo::subscribe(rt.model()).wants_frames(),
-               "and the app requests frames only while it moves");
+            for (const char* name : {"filter-active", "filter-done", "filter-all"}) {
+                rt.click(name);
 
-            rt.window().drive_frames(true);
-            for (int i = 0; i < 200 && rt.model().indicator.animating(); ++i) rt.tick();
-            rt.window().drive_frames(false);
+                // Let the spring settle.
+                rt.window().drive_frames(true);
+                for (int i = 0; i < 300 && rt.model().indicator.animating(); ++i) rt.tick();
+                rt.window().drive_frames(false);
+                rt.tick();
+
+                const auto chip = rt.node_rect(name);
+                const Rect ind = rt.model().indicator.rect();
+                ok(chip.has_value(), std::string{"chip "} + name + " is laid out");
+                if (!chip) continue;
+
+                ok(num::abs(chip->left() - ind.left()) < 1.5f,
+                   std::string{"underline x matches "} + name + " (" +
+                   std::to_string(static_cast<int>(ind.left())) + " vs " +
+                   std::to_string(static_cast<int>(chip->left())) + ")");
+                ok(num::abs(chip->width() - ind.width()) < 1.5f,
+                   std::string{"underline WIDTH matches "} + name + " (" +
+                   std::to_string(static_cast<int>(ind.width())) + " vs " +
+                   std::to_string(static_cast<int>(chip->width())) + ")");
+            }
 
             ok(!rt.model().indicator.animating(), "the spring settles on its own");
-            ok(!Todo::subscribe(rt.model()).wants_frames(),
-               "and the frame subscription disappears with it");
         }
 
         // ── overlay ─────────────────────────────────────────────────────
