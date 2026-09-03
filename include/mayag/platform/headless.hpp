@@ -197,6 +197,18 @@ class Headless {
 
     void set_coverage_sampler(const backend::CoverageSampler* s) { sampler_ = s; }
 
+    /// The headless window rasterises on the CPU, which reads the atlas
+    /// through the coverage sampler — there is no texture to upload. Present
+    /// so the runtime can call it unconditionally instead of branching on
+    /// which window it was compiled against.
+    template <typename AtlasT>
+    void set_atlas_source(AtlasT*) noexcept {}
+
+    [[nodiscard]] static constexpr std::string_view renderer_name() noexcept {
+        return "software";
+    }
+    [[nodiscard]] static constexpr bool gpu_active() noexcept { return false; }
+
   private:
     [[nodiscard]] static std::string pad6(std::uint64_t n) {
         std::string s = std::to_string(n);

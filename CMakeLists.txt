@@ -190,6 +190,17 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_font_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_font_tests COMMAND mayag_font_tests)
 
+    # The GPU backend, checked against the software rasteriser pixel by pixel.
+    # A timing benchmark cannot distinguish a fast backend from one that draws
+    # nothing; this can, so the performance claim stays falsifiable. Skips
+    # itself cleanly when the machine has no Metal device.
+    if(MAYAG_WITH_METAL)
+        add_executable(mayag_metal_tests tests/test_metal.cpp)
+        target_link_libraries(mayag_metal_tests PRIVATE mayag)
+        target_compile_options(mayag_metal_tests PRIVATE ${MAYAG_WARNINGS})
+        add_test(NAME mayag_metal_tests COMMAND mayag_metal_tests)
+    endif()
+
     # Every example doubles as an end-to-end test. `--headless` drives the
     # SAME Program the windowed build runs, so a green test here is evidence
     # about the shipped app rather than about a parallel harness.

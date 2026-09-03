@@ -615,7 +615,7 @@ Being honest about the ceiling. 200 instances — a modest UI — on an M1:
 | 2880x1800 | 4.96 ms | 4.26 ms | 9.22 ms | 108 |
 | 3840x2160 | 6.81 ms | 6.80 ms | **13.61 ms** | 73 |
 
-At 4K that is **82% of a 60 Hz budget** for a UI doing almost nothing — and
+At 4K that is **84% of a 60 Hz budget** for a UI doing almost nothing — and
 before the CGImage blit, which is another ~45% of present because it copies
 the whole surface on the CPU. The cost is per-PIXEL, so no amount of CPU
 tuning fixes it: a GPU does the same work in microseconds because it has
@@ -623,17 +623,57 @@ thousands of lanes instead of eight.
 
 That is what `backend/metal.hpp` is for. The whole framework was designed
 around this moment — every primitive is a rounded-box SDF on one instanced
-quad, so a frame is **one draw call of N instances** and the fragment shader
+quad, so a batch is **one draw call of N instances** and the fragment shader
 is the same kernel `render/sdf.hpp` implements in C++. No tessellation, no
 per-shape pipelines, no state changes.
 
-Verified on an M1: the MSL compiles, both stages resolve, and the 128-byte
-instance layout is asserted field-by-field against the shader struct — the
-one place a mistake would be both silent and total.
+### What the GPU path actually costs
 
-Rendering into a `CAMetalLayer` also removes the CPU blit *and* lets the
-drawable be presented without waiting for a Core Animation transaction, which
-is where a full refresh of latency currently hides.
+Measured by `examples/present_bench.cpp`, which opens a real window, builds
+one draw list, and submits it through **both** backends in the same process —
+same scene, same machine, no cross-run drift. 303 instances in 3 batches,
+400 frames after 60 discarded as warmup, on an M1:
+
+| surface | software CPU | Metal CPU | ratio |
+|---------|-------------|-----------|-------|
+| 2000x1440 | 4.96 ms | **0.04 ms** | 124x |
+| 3840x2160 | 14.07 ms | **0.04 ms** | 352x |
+
+The software column grows with pixel count; the Metal column does not move,
+because the CPU's job there is `memcpy` the instance buffer and encode three
+draw calls. Scene complexity barely registers either — 2000 instances instead
+of 303 costs 0.05 ms.
+
+**The wall-clock number is different and it matters.** Metal's *wall* time per
+present is 9.96 ms, because `nextDrawable` blocks until the display is ready
+and this monitor runs at 100 Hz — a 10.00 ms frame. That is correct pacing,
+not slowness, and it is why the benchmark reports thread CPU time next to
+wall time: measuring only wall time would make working vsync look like a
+regression, and measuring only CPU time would hide the compositor entirely.
+
+**The claim is falsifiable, which is the point.** "0.04 ms of CPU" is also
+exactly what a backend that draws *nothing* costs, so `tests/test_metal.cpp`
+renders the same draw list offscreen through Metal and through the software
+rasteriser and diffs the pixels: shape interiors must match exactly, clipped
+content must not escape its scissor rect, and whole-frame mean error must
+stay under 3/255. It currently measures **0.26/255**, with 0.59% of pixels
+differing by more than 8 — the antialiased edges, where hardware derivatives
+and the analytic footprint legitimately disagree.
+
+That test earned its place immediately. It caught
+`MTLPrimitiveTypeTriangleStrip` being defined as 3 instead of 4 — 3 is
+`MTLPrimitiveTypeTriangle` — so every quad was rendering as the first half of
+itself. No Metal error, no validation warning, and the benchmark was perfectly
+happy: drawing half a quad is *faster*. Only a pixel diff against a known-good
+rasteriser could see it, and what gave it away was the shape being in the
+right place with the right colour and 7739 of its 16000 pixels.
+
+Selection is a runtime fallthrough. `MAYAG_BACKEND=metal|software` forces a
+path; otherwise the window tries Metal and falls back to software if the
+build lacks it, the machine has no device, or the shader fails to compile. A
+failed GPU init restores the original `CALayer` — a half-attached
+`CAMetalLayer` that nothing renders into is a black window that looks like a
+hang, which is a worse outcome than being slow.
 
 ## The rasteriser
 

@@ -327,6 +327,9 @@ class Runtime {
             measurer_ = &bindings_->measurer;
             glyphs_   = &bindings_->glyphs;
             sampler_  = &bindings_->sampler;
+            // The GPU path samples a texture rather than calling back into
+            // the CPU sampler, so it needs the atlas itself to upload.
+            window_.set_atlas_source(&cfg_.fonts->atlas());
         } else {
             stroke_font_ = cfg_.font ? cfg_.font : &strokefont::Font::builtin_font();
             measurer_ = &stroke_font_->measurer();

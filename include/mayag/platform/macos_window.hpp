@@ -12,15 +12,21 @@
 // The ugliness is contained in this one file, behind `msg<>()`.
 //
 // The window presents by handing the software rasteriser's framebuffer to a
-// CGImage and drawing it into the layer. That is not the fast path — the
-// Metal backend is — but it is the path that WORKS with zero GPU setup, and
-// it makes "does mayag actually open a window" answerable today.
+// CGImage and drawing it into the layer. That is the ALWAYS-WORKS path, and
+// it makes "does mayag actually open a window" answerable with zero GPU
+// setup. When the Metal backend is compiled in and a device is available, the
+// window instead hands the draw list straight to the GPU and the whole
+// rasterise + encode + CGImage + blit chain disappears.
 
 #include "../app/event.hpp"
 #include "../backend/software.hpp"
 #include "../backend/tiled.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
+
+#if defined(MAYAG_WITH_METAL)
+#include "../backend/metal.hpp"
+#endif
 
 #include <chrono>
 #include <objc/message.h>
@@ -30,6 +36,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -259,8 +266,34 @@ class MacWindow {
 
         w.fb_    = backend::Framebuffer{static_cast<int>(cfg.size.x * w.dpi_),
                                         static_cast<int>(cfg.size.y * w.dpi_)};
+
+        // ── GPU, when it is both compiled in and actually available ──────
+        //
+        // Attaching REPLACES the view's CALayer with a CAMetalLayer, so it
+        // has to happen after the software layer above is configured and
+        // before the first present. Everything is a fallthrough rather than
+        // an error: no Metal in the build, no device in the machine, a
+        // shader that fails to compile, a VM with no GPU — each leaves
+        // `gpu_` invalid and the window keeps using the path that always
+        // works. A missing driver should cost frame time, not the app.
+        //
+        // MAYAG_BACKEND=software forces the CPU path, which is what makes
+        // the two comparable on the same machine: the whole point of the GPU
+        // claim is a measured A/B, and that needs a switch.
+        w.gpu_enabled_ = w.init_gpu();
+
         return w;
     }
+
+    /// Which path this window is actually presenting through.
+    [[nodiscard]] std::string_view renderer_name() const noexcept {
+#if defined(MAYAG_WITH_METAL)
+        if (gpu_enabled_) return "metal";
+#endif
+        return "software";
+    }
+
+    [[nodiscard]] bool gpu_active() const noexcept { return gpu_enabled_; }
 
     void close() {
         if (window_ != nullptr) objc::msg<void>(window_, objc::sel("close"));
@@ -367,6 +400,22 @@ class MacWindow {
         const int h = static_cast<int>(size_.y * dpi_);
         if (w <= 0 || h <= 0) return;
 
+#if defined(MAYAG_WITH_METAL)
+        if (gpu_enabled_) {
+            // The GPU path is four steps shorter than the CPU one: no
+            // framebuffer, no per-pixel shading, no sRGB encode pass, no
+            // CGImage wrap, no whole-surface blit. The draw list goes to a
+            // buffer and the compositor already owns the target texture.
+            if (gpu_size_ != Vec2{static_cast<float>(w), static_cast<float>(h)}) {
+                gpu_.resize(size_, dpi_);
+                gpu_size_ = Vec2{static_cast<float>(w), static_cast<float>(h)};
+            }
+            if (atlas_sync_) atlas_sync_(gpu_);
+            gpu_.submit(dl, clear);
+            return;
+        }
+#endif
+
         if (fb_.width() != w || fb_.height() != h) {
             fb_ = backend::Framebuffer{w, h};
             pixels_.assign(static_cast<std::size_t>(w) * h * 4, 0);
@@ -423,6 +472,23 @@ class MacWindow {
 
     void set_coverage_sampler(const backend::CoverageSampler* s) { sampler_ = s; }
 
+    /// Give the window the glyph atlas the GPU path must keep in sync.
+    ///
+    /// The software rasteriser reads the atlas through `CoverageSampler` on
+    /// the CPU, so it needs nothing here. The GPU samples a texture, which
+    /// has to be uploaded — but the window must not learn what a FontStack
+    /// is to do that. Taking the atlas as a template parameter and storing a
+    /// closure keeps the dependency pointing the right way: the runtime,
+    /// which already knows about fonts, tells the window how to sync; the
+    /// window just calls it. On a software build this compiles to nothing.
+    template <typename AtlasT>
+    void set_atlas_source([[maybe_unused]] AtlasT* atlas) {
+#if defined(MAYAG_WITH_METAL)
+        if (atlas == nullptr) { atlas_sync_ = nullptr; return; }
+        atlas_sync_ = [atlas](backend::MetalDevice& d) { d.sync_atlas(*atlas); };
+#endif
+    }
+
   private:
     /// Longest the event loop will sleep with nothing to do.
     ///
@@ -432,6 +498,41 @@ class MacWindow {
     /// code, an atlas that wants collecting. Waking a few times a second
     /// costs nothing measurable (an idle app still reads ~0% CPU) and means
     /// the runtime can never be wedged by a state change it did not see.
+
+    /// Bring up the GPU backend, or report that we are staying on the CPU.
+    ///
+    /// Every failure is a fallthrough. The one thing this must NOT do is
+    /// half-attach: `MetalDevice::attach` swaps the view's layer as one of
+    /// its first steps, so if a later step fails (shader compile, sampler)
+    /// the view is left with a CAMetalLayer that nothing renders into — a
+    /// black window that looks like a hang. Restoring the software layer on
+    /// failure is what keeps the fallback honest.
+    [[nodiscard]] bool init_gpu() {
+#if defined(MAYAG_WITH_METAL)
+        if (const char* forced = std::getenv("MAYAG_BACKEND")) {
+            if (std::string_view{forced} != "metal") return false;
+        }
+
+        id saved_layer = objc::msg<id>(view_, objc::sel("layer"));
+
+        if (gpu_.attach(view_, dpi_)) {
+            gpu_.resize(size_, dpi_);
+            gpu_size_ = Vec2{size_.x * dpi_, size_.y * dpi_};
+            return true;
+        }
+
+        // Put the CALayer back, so a failed GPU init is invisible rather
+        // than fatal.
+        if (saved_layer != nullptr) {
+            objc::msg<void>(view_, objc::sel("setLayer:"), saved_layer);
+            objc::msg<void>(view_, objc::sel("setWantsLayer:"), static_cast<BOOL>(YES));
+        }
+        return false;
+#else
+        return false;
+#endif
+    }
+
     [[nodiscard]] static id block_deadline() {
         return objc::msg_cls<id>(objc_getClass("NSDate"),
                                  objc::sel("dateWithTimeIntervalSinceNow:"), 0.25);
@@ -643,6 +744,16 @@ class MacWindow {
     backend::Framebuffer      fb_{1, 1};
     std::vector<std::uint8_t> pixels_;
     const backend::CoverageSampler* sampler_ = nullptr;
+
+    bool gpu_enabled_ = false;
+    Vec2 gpu_size_{};
+#if defined(MAYAG_WITH_METAL)
+    backend::MetalDevice gpu_{};
+    /// Set by the runtime when a font engine is bound. Type-erased so this
+    /// header keeps knowing nothing about the font stack — the window moves
+    /// pixels, it does not understand typefaces.
+    std::function<void(backend::MetalDevice&)> atlas_sync_;
+#endif
 
     /// Cached across frames; rebuilt only when the surface resizes.
     CGContextRef    ctx_ = nullptr;

@@ -36,9 +36,15 @@
 #include <objc/objc.h>
 #include <objc/runtime.h>
 
+// Public runtime entry points, but not declared by <objc/objc.h> on every SDK.
+extern "C" void* objc_autoreleasePoolPush(void);
+extern "C" void  objc_autoreleasePoolPop(void*);
+
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -67,8 +73,22 @@ inline id nsstring(const char* s) {
 }
 inline id nsstring(const std::string& s) { return nsstring(s.c_str()); }
 
-/// MTLPixelFormatBGRA8Unorm — what a CAMetalLayer uses by default.
-inline constexpr std::uint64_t pixel_format_bgra8 = 80;
+/// MTLPixelFormatBGRA8Unorm_sRGB.
+///
+/// The _sRGB variant, not the plain one, and this is not cosmetic. Every
+/// instance colour that reaches a backend is LINEAR premultiplied — that is
+/// the contract `render/draw_list.hpp` sets and the software rasteriser
+/// honours by running `encode_parallel` (a linear->sRGB transfer) over the
+/// framebuffer on the way out.
+///
+/// A GPU surface has no such pass. With plain BGRA8Unorm the shader's linear
+/// output is stored as if it were already encoded, and every colour comes out
+/// far too dark: mid-grey 0.216 linear displays as 0.216 sRGB, which is 50%
+/// grey rendered as 25% grey. Asking for the _sRGB format makes the hardware
+/// do the encode on write and the decode on read, so blending still happens
+/// in linear light exactly like the software path — the two backends agree
+/// instead of merely resembling each other.
+inline constexpr std::uint64_t pixel_format_bgra8_srgb = 81;
 
 /// MTLResourceStorageModeShared: one allocation the CPU writes and the GPU
 /// reads. On Apple silicon memory is unified, so there is no upload at all —
@@ -80,7 +100,38 @@ inline constexpr std::uint64_t load_action_clear = 2;
 inline constexpr std::uint64_t store_action_store = 1;
 
 /// MTLPrimitiveTypeTriangleStrip.
-inline constexpr std::uint64_t primitive_triangle_strip = 3;
+///
+/// FOUR, not three — three is MTLPrimitiveTypeTriangle. The enum runs
+/// point, line, lineStrip, triangle, triangleStrip, so an off-by-one here is
+/// both easy to write and nearly invisible: the draw call succeeds, Metal
+/// reports no error, and every quad renders as the FIRST HALF of itself.
+/// A rectangle comes out as the triangle through its top-left, top-right and
+/// bottom-left corners, which at a glance still looks like "something drew".
+/// Caught by diffing GPU output against the software rasteriser: the shape
+/// was in the right place with the right colour and only 7739 of its 16000
+/// pixels.
+inline constexpr std::uint64_t primitive_triangle_strip = 4;
+
+/// MTLSamplerMinMagFilterLinear / MTLSamplerAddressModeClampToEdge.
+inline constexpr std::uint64_t filter_linear = 1;
+inline constexpr std::uint64_t address_clamp_to_edge = 0;
+
+/// A scoped autorelease pool.
+///
+/// Not optional, and its absence is invisible until it is fatal. Almost every
+/// object a frame touches — the drawable, the command buffer, the render pass
+/// descriptor — is returned AUTORELEASED. With no pool on the stack there is
+/// nothing to drain them into, so a 60 fps app accumulates 180 live objects a
+/// second, including drawables the display cannot reclaim. The window's event
+/// loop drives the run loop by hand, so it never crosses AppKit's own pool
+/// boundary either: this has to be here.
+struct AutoreleasePool {
+    AutoreleasePool() : token_{objc_autoreleasePoolPush()} {}
+    ~AutoreleasePool() { objc_autoreleasePoolPop(token_); }
+    AutoreleasePool(const AutoreleasePool&) = delete;
+    AutoreleasePool& operator=(const AutoreleasePool&) = delete;
+    void* token_;
+};
 
 }  // namespace mtl
 
@@ -112,7 +163,7 @@ class MetalDevice {
         if (layer_ == nullptr) return false;
 
         msg<void>(layer_, sel("setDevice:"), device_);
-        msg<void>(layer_, sel("setPixelFormat:"), pixel_format_bgra8);
+        msg<void>(layer_, sel("setPixelFormat:"), pixel_format_bgra8_srgb);
         msg<void>(layer_, sel("setFramebufferOnly:"), static_cast<BOOL>(YES));
         msg<void>(layer_, sel("setContentsScale:"), static_cast<double>(dpi_scale));
 
@@ -126,9 +177,27 @@ class MetalDevice {
         msg<void>(view, sel("setLayer:"), layer_);
 
         if (!build_pipeline()) return false;
+        if (!build_sampler()) return false;
 
         dpi_ = dpi_scale;
         valid_ = true;
+        return true;
+    }
+
+    /// Bring up a device with NO window, for offscreen rendering.
+    ///
+    /// `attach` needs a view because it swaps in a CAMetalLayer; a
+    /// correctness test needs neither. Splitting them lets CI verify the GPU
+    /// output on a headless machine, which is the only place the check will
+    /// actually be run often enough to catch a regression.
+    [[nodiscard]] bool init_offscreen() {
+        using namespace mtl;
+        device_ = create_system_default_device();
+        if (device_ == nullptr) return false;
+        queue_ = msg<id>(device_, sel("newCommandQueue"));
+        if (queue_ == nullptr) return false;
+        if (!build_pipeline()) return false;
+        if (!build_sampler()) return false;
         return true;
     }
 
@@ -143,25 +212,42 @@ class MetalDevice {
         viewport_ = logical;
     }
 
-    /// Render one frame. The whole draw list becomes ONE instanced draw call.
+    /// Render one frame: one draw call per batch, each with its own scissor.
+    ///
+    /// The earlier version issued a single draw for the whole list and never
+    /// set a scissor rect. That is wrong in a way nothing catches: a scroll
+    /// viewport's clip lives in `Batch::clip`, so ignoring it lets list rows
+    /// paint straight over the header and off the window. A typical frame is
+    /// still 1-3 batches, so honouring the clip costs a draw call, not a pass.
     void submit(const DrawList& list, Color<Srgb> clear) {
         using namespace mtl;
+        AutoreleasePool pool;
         if (!valid_ || list.empty()) { present_empty(clear); return; }
 
         id drawable = msg<id>(layer_, sel("nextDrawable"));
         if (drawable == nullptr) return;   // display disconnected mid-frame
 
+        id texture = msg<id>(drawable, sel("texture"));
+        encode_pass(texture, list, clear, viewport_.x * dpi_, viewport_.y * dpi_,
+                    drawable, /*wait=*/false);
+    }
+
+    /// Encode and submit one render pass. Shared by the window path and the
+    /// offscreen path so the thing CI verifies is the thing the window runs —
+    /// a correctness test against a parallel implementation proves nothing.
+    void encode_pass(id target, const DrawList& list, Color<Srgb> clear,
+                     float vw, float vh, id present_drawable, bool wait) {
+        using namespace mtl;
+
         upload_instances(list);
 
-        // ---- render pass ----
         id desc = msg_cls<id>(objc_getClass("MTLRenderPassDescriptor"),
                               sel("renderPassDescriptor"));
         id attachments = msg<id>(desc, sel("colorAttachments"));
         id color0 = msg<id>(attachments, sel("objectAtIndexedSubscript:"),
                             static_cast<std::uint64_t>(0));
 
-        id texture = msg<id>(drawable, sel("texture"));
-        msg<void>(color0, sel("setTexture:"), texture);
+        msg<void>(color0, sel("setTexture:"), target);
         msg<void>(color0, sel("setLoadAction:"), load_action_clear);
         msg<void>(color0, sel("setStoreAction:"), store_action_store);
 
@@ -178,7 +264,7 @@ class MetalDevice {
         msg<void>(enc, sel("setVertexBuffer:offset:atIndex:"),
                   instance_buffer_, static_cast<std::uint64_t>(0), static_cast<std::uint64_t>(0));
 
-        struct { float x, y; } vp{viewport_.x * dpi_, viewport_.y * dpi_};
+        struct { float x, y; } vp{vw, vh};
         msg<void>(enc, sel("setVertexBytes:length:atIndex:"),
                   &vp, sizeof(vp), static_cast<std::uint64_t>(1));
 
@@ -186,18 +272,39 @@ class MetalDevice {
             msg<void>(enc, sel("setFragmentTexture:atIndex:"),
                       atlas_texture_, static_cast<std::uint64_t>(0));
         }
+        if (sampler_ != nullptr) {
+            msg<void>(enc, sel("setFragmentSamplerState:atIndex:"),
+                      sampler_, static_cast<std::uint64_t>(0));
+        }
 
-        // ONE draw call. Four vertices, N instances — the entire frame.
-        msg<void>(enc, sel("drawPrimitives:vertexStart:vertexCount:instanceCount:"),
-                  primitive_triangle_strip,
-                  static_cast<std::uint64_t>(0), static_cast<std::uint64_t>(4),
-                  static_cast<std::uint64_t>(list.size()));
+        std::uint32_t draws = 0;
+        for (const Batch& batch : list.batches()) {
+            if (batch.count == 0) continue;
+
+            // Metal validates scissor rects against the drawable and aborts
+            // the process on a violation, so clamping is a hard requirement
+            // rather than defensive tidiness: the draw list's default clip is
+            // an infinite rect, and an unbounded one resizes to garbage.
+            const auto sc = clamp_scissor(batch.clip, vw, vh);
+            if (!sc) continue;    // fully offscreen — nothing to draw
+            msg<void>(enc, sel("setScissorRect:"), *sc);
+
+            msg<void>(enc, sel("drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:"),
+                      primitive_triangle_strip,
+                      static_cast<std::uint64_t>(0), static_cast<std::uint64_t>(4),
+                      static_cast<std::uint64_t>(batch.count),
+                      static_cast<std::uint64_t>(batch.first));
+            ++draws;
+        }
 
         msg<void>(enc, sel("endEncoding"));
-        msg<void>(cmd, sel("presentDrawable:"), drawable);
+        if (present_drawable != nullptr) {
+            msg<void>(cmd, sel("presentDrawable:"), present_drawable);
+        }
         msg<void>(cmd, sel("commit"));
+        if (wait) msg<void>(cmd, sel("waitUntilCompleted"));
 
-        last_draw_calls_ = 1;
+        last_draw_calls_ = draws;
         last_instances_  = static_cast<std::uint32_t>(list.size());
     }
 
@@ -225,6 +332,128 @@ class MetalDevice {
                   static_cast<std::uint64_t>(width));
     }
 
+    /// Upload only what changed since the last frame.
+    ///
+    /// Re-uploading a 1024x1024 atlas every frame is 1 MB of pointless
+    /// traffic; text mostly does not change. Two signals make that cheap:
+    /// `generation()` bumps on reallocation (upload everything), and
+    /// `dirty_region()` reports the rect newly rasterised glyphs touched
+    /// (upload just that). Both come from the atlas, so this stays correct
+    /// without the backend tracking glyph identity.
+    ///
+    /// Templated on the atlas type so the GPU backend keeps no dependency on
+    /// the font engine — backends see pixels, never typefaces.
+    template <typename AtlasT>
+    void sync_atlas(AtlasT& atlas) {
+        if (!valid_) return;
+
+        const bool realloc = !atlas_uploaded_ ||
+                             atlas.generation() != atlas_generation_ ||
+                             atlas.width() != atlas_w_ || atlas.height() != atlas_h_;
+
+        if (realloc) {
+            upload_atlas(atlas.pixels().data(), atlas.width(), atlas.height());
+            atlas_generation_ = atlas.generation();
+            atlas_uploaded_   = true;
+            atlas.clear_dirty();
+            return;
+        }
+
+        const Rect& d = atlas.dirty_region();
+        if (d.empty()) return;
+        upload_region(atlas.pixels().data(), atlas.width(), d);
+        atlas.clear_dirty();
+    }
+
+    /// Upload a sub-rectangle of an existing atlas texture.
+    void upload_region(const std::uint8_t* pixels, int atlas_width, const Rect& r) {
+        using namespace mtl;
+        if (!valid_ || atlas_texture_ == nullptr || pixels == nullptr) return;
+
+        const int x = std::max(0, static_cast<int>(r.left()));
+        const int y = std::max(0, static_cast<int>(r.top()));
+        const int w = std::min(static_cast<int>(r.width()),  atlas_w_ - x);
+        const int h = std::min(static_cast<int>(r.height()), atlas_h_ - y);
+        if (w <= 0 || h <= 0) return;
+
+        // The source is a row of the FULL atlas, so bytesPerRow is the atlas
+        // width even though we upload a narrow slice — Metal strides through
+        // the original buffer rather than needing a packed copy.
+        const std::uint8_t* origin =
+            pixels + static_cast<std::size_t>(y) * atlas_width + x;
+
+        struct { std::uint64_t x, y, z, w, h, d; } region{
+            static_cast<std::uint64_t>(x), static_cast<std::uint64_t>(y), 0,
+            static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h), 1};
+        msg<void>(atlas_texture_, sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
+                  region, static_cast<std::uint64_t>(0), origin,
+                  static_cast<std::uint64_t>(atlas_width));
+    }
+
+    /// Render a draw list into an offscreen texture and read it back as
+    /// RGBA8 — the same format `Framebuffer::to_rgba8` produces.
+    ///
+    /// This exists to make the GPU path FALSIFIABLE. "Metal costs 0.04 ms of
+    /// CPU" is also exactly what a backend that draws nothing costs, and a
+    /// benchmark cannot tell those apart. Rendering offscreen and diffing
+    /// against the software rasteriser can: if the two agree pixel-for-pixel
+    /// within antialiasing tolerance, the GPU is genuinely doing the work.
+    ///
+    /// It needs no window and no drawable, so CI can run it headless.
+    [[nodiscard]] std::vector<std::uint8_t>
+    render_offscreen(const DrawList& list, Color<Srgb> clear, int w, int h) {
+        using namespace mtl;
+        AutoreleasePool pool;
+        if (device_ == nullptr || w <= 0 || h <= 0) return {};
+
+        // MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead.
+        constexpr std::uint64_t usage_render_target = 4, usage_shader_read = 1;
+
+        id desc = msg_cls<id>(objc_getClass("MTLTextureDescriptor"),
+            sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
+            pixel_format_bgra8_srgb,
+            static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h),
+            static_cast<BOOL>(NO));
+        if (desc == nullptr) return {};
+        msg<void>(desc, sel("setUsage:"), usage_render_target | usage_shader_read);
+        // Managed/shared storage, so the CPU can read the result back.
+        msg<void>(desc, sel("setStorageMode:"), static_cast<std::uint64_t>(0));
+
+        id target = msg<id>(device_, sel("newTextureWithDescriptor:"), desc);
+        if (target == nullptr) return {};
+
+        // The viewport the vertex shader divides by must match this texture,
+        // not the window — otherwise every position is scaled wrong.
+        const Vec2 saved_vp = viewport_;
+        const float saved_dpi = dpi_;
+        viewport_ = Vec2{static_cast<float>(w), static_cast<float>(h)};
+        dpi_ = 1.0f;
+
+        encode_pass(target, list, clear, static_cast<float>(w), static_cast<float>(h),
+                    /*present=*/nullptr, /*wait=*/true);
+
+        viewport_ = saved_vp;
+        dpi_ = saved_dpi;
+
+        // Read back and swizzle BGRA -> RGBA.
+        std::vector<std::uint8_t> bgra(static_cast<std::size_t>(w) * h * 4);
+        struct { std::uint64_t x, y, z, w, h, d; } region{
+            0, 0, 0, static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h), 1};
+        msg<void>(target, sel("getBytes:bytesPerRow:fromRegion:mipmapLevel:"),
+                  bgra.data(), static_cast<std::uint64_t>(w) * 4, region,
+                  static_cast<std::uint64_t>(0));
+        msg<void>(target, sel("release"));
+
+        std::vector<std::uint8_t> rgba(bgra.size());
+        for (std::size_t i = 0; i < bgra.size(); i += 4) {
+            rgba[i + 0] = bgra[i + 2];
+            rgba[i + 1] = bgra[i + 1];
+            rgba[i + 2] = bgra[i + 0];
+            rgba[i + 3] = bgra[i + 3];
+        }
+        return rgba;
+    }
+
     [[nodiscard]] std::uint32_t last_instances() const noexcept { return last_instances_; }
     [[nodiscard]] std::uint32_t last_draw_calls() const noexcept { return last_draw_calls_; }
     [[nodiscard]] std::string adapter_name() const {
@@ -235,6 +464,51 @@ class MetalDevice {
     }
 
   private:
+    /// Clamp a batch's clip rect to a valid MTLScissorRect, or nothing when
+    /// it lies entirely offscreen.
+    ///
+    /// Three separate hazards, all fatal rather than cosmetic: the draw
+    /// list's default clip is an INFINITE rect (float -> uint64 conversion is
+    /// undefined), a scroll container can push a clip whose origin is
+    /// negative, and Metal terminates the process when a scissor exceeds the
+    /// attachment. Clamping into the drawable handles all three.
+    struct ScissorRect { std::uint64_t x, y, w, h; };
+
+    [[nodiscard]] static std::optional<ScissorRect>
+    clamp_scissor(const Rect& clip, float vw, float vh) {
+        const float x0 = std::max(clip.left(),   0.0f);
+        const float y0 = std::max(clip.top(),    0.0f);
+        const float x1 = std::min(clip.right(),  vw);
+        const float y1 = std::min(clip.bottom(), vh);
+        if (!(x1 > x0) || !(y1 > y0)) return std::nullopt;
+
+        return ScissorRect{static_cast<std::uint64_t>(x0),
+                           static_cast<std::uint64_t>(y0),
+                           static_cast<std::uint64_t>(x1 - x0),
+                           static_cast<std::uint64_t>(y1 - y0)};
+    }
+
+    /// The glyph sampler.
+    ///
+    /// The fragment shader takes `sampler smp [[sampler(0)]]` and nothing was
+    /// ever binding one — text would have sampled with undefined state.
+    /// Linear filtering is what the software path's bilinear `Atlas::sample`
+    /// does, and clamp-to-edge stops a glyph at the atlas border bleeding in
+    /// its neighbour from the opposite side.
+    [[nodiscard]] bool build_sampler() {
+        using namespace mtl;
+        id desc = msg<id>(msg_cls<id>(objc_getClass("MTLSamplerDescriptor"),
+                                      sel("alloc")), sel("init"));
+        if (desc == nullptr) return false;
+        msg<void>(desc, sel("setMinFilter:"), filter_linear);
+        msg<void>(desc, sel("setMagFilter:"), filter_linear);
+        msg<void>(desc, sel("setSAddressMode:"), address_clamp_to_edge);
+        msg<void>(desc, sel("setTAddressMode:"), address_clamp_to_edge);
+        sampler_ = msg<id>(device_, sel("newSamplerStateWithDescriptor:"), desc);
+        msg<void>(desc, sel("release"));
+        return sampler_ != nullptr;
+    }
+
     [[nodiscard]] static id create_system_default_device() {
         // MTLCreateSystemDefaultDevice is a C function, not a class method.
         using Fn = id (*)();
@@ -270,7 +544,7 @@ class MetalDevice {
         id attachments = msg<id>(desc, sel("colorAttachments"));
         id color0 = msg<id>(attachments, sel("objectAtIndexedSubscript:"),
                             static_cast<std::uint64_t>(0));
-        msg<void>(color0, sel("setPixelFormat:"), pixel_format_bgra8);
+        msg<void>(color0, sel("setPixelFormat:"), pixel_format_bgra8_srgb);
 
         // Premultiplied source-over. The CPU already premultiplies every
         // instance colour, so the blend factors are (1, 1-srcA) and the GPU
@@ -332,11 +606,14 @@ class MetalDevice {
     id    queue_ = nullptr;
     id    layer_ = nullptr;
     id    pipeline_ = nullptr;
+    id    sampler_ = nullptr;
     id    instance_buffer_ = nullptr;
     id    atlas_texture_ = nullptr;
 
     std::size_t   instance_capacity_ = 0;
     int           atlas_w_ = 0, atlas_h_ = 0;
+    std::uint32_t atlas_generation_ = 0;
+    bool          atlas_uploaded_ = false;
     Vec2          viewport_{};
     float         dpi_ = 1.0f;
     bool          valid_ = false;
