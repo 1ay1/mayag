@@ -29,7 +29,13 @@ namespace mayag::platform {
 /// idle app uses 0% CPU.
 enum class Wait {
     block,     ///< sleep until something happens
-    poll,      ///< return immediately (an animation is running)
+    /// Return IMMEDIATELY. Used when a repaint is already owed: the loop has
+    /// work to do and must not sleep before doing it.
+    immediate,
+    /// Pace to the display refresh. Used while an animation is running — the
+    /// loop wants the NEXT frame, not this instant, so sleeping until the
+    /// frame boundary is correct and keeps CPU down.
+    poll,
     timeout,   ///< block, but wake by a deadline (a timer is pending)
 };
 

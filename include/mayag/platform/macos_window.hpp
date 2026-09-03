@@ -286,8 +286,11 @@ class MacWindow {
         // the tiled renderer, so 60 Hz animation is comfortable. An idle app
         // blocks here and measures ~1%. `MAYAG_FPS` trades smoothness for
         // battery if an app wants it.
-        id until = distant_future();
-        if (wait == Wait::poll) {
+        id until = block_deadline();
+        if (wait == Wait::immediate) {
+            // No sleeping: the runtime owes the screen a frame.
+            until = msg_cls<id>(objc_getClass("NSDate"), sel("distantPast"));
+        } else if (wait == Wait::poll) {
             const double now_s = now();
             const double next  = last_frame_ + frame_interval_;
             const double sleep = next - now_s;
@@ -395,6 +398,19 @@ class MacWindow {
     void set_coverage_sampler(const backend::CoverageSampler* s) { sampler_ = s; }
 
   private:
+    /// Longest the event loop will sleep with nothing to do.
+    ///
+    /// `distantFuture` is the textbook answer and it is subtly wrong here: it
+    /// makes the loop unable to notice anything that did not arrive as a
+    /// window event — a worker thread's result, a `send()` from application
+    /// code, an atlas that wants collecting. Waking a few times a second
+    /// costs nothing measurable (an idle app still reads ~0% CPU) and means
+    /// the runtime can never be wedged by a state change it did not see.
+    [[nodiscard]] static id block_deadline() {
+        return objc::msg_cls<id>(objc_getClass("NSDate"),
+                                 objc::sel("dateWithTimeIntervalSinceNow:"), 0.25);
+    }
+
     [[nodiscard]] static id distant_future() {
         return objc::msg_cls<id>(objc_getClass("NSDate"), objc::sel("distantFuture"));
     }

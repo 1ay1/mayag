@@ -455,6 +455,75 @@ void test_focus() {
 }
 
 /// The runtime only repaints when something changed.
+/// The runtime must never go to sleep owing the screen a frame.
+///
+/// This is the "pressed a theme chip and it hung" bug. The loop is
+/// wait -> events -> update -> render, so a message from ANYWHERE other than
+/// the window (a worker thread, a timer, application code calling send())
+/// leaves the model changed and dirty_ set — and then the loop blocks for a
+/// window event that may never arrive. The frame sits unrendered and the app
+/// looks frozen until the user happens to jiggle the mouse.
+void test_never_sleeps_dirty() {
+    section("responsiveness");
+
+    run_headless<TestApp>(kCfg, [](auto& rt) {
+        const auto before = rt.window().frames_presented();
+
+        // A state change that did NOT come from a window event.
+        rt.send(TestApp::Msg{TestApp::Inc{}});
+        check(rt.model().count == 1, "send() updated the model");
+
+        // One tick must be enough to get it on screen. If the runtime chose
+        // to block here, this frame would never be presented.
+        rt.tick();
+        check(rt.window().frames_presented() > before,
+              "a repaint owed after send() is presented on the very next tick");
+    });
+
+    // And once the screen is caught up, the runtime must go back to sleep
+    // rather than spinning — the opposite failure, equally bad.
+    run_headless<TestApp>(kCfg, [](auto& rt) {
+        for (int i = 0; i < 5; ++i) rt.tick();      // settle
+        const auto settled = rt.window().frames_presented();
+        for (int i = 0; i < 20; ++i) rt.tick();
+        check(rt.window().frames_presented() == settled,
+              "an idle runtime presents nothing (" +
+              std::to_string(rt.window().frames_presented() - settled) + " extra frames)");
+    });
+}
+
+/// Hover motion that changes nothing must not force a repaint.
+///
+/// macOS delivers a mouse-moved event per pixel of cursor travel — 117 across
+/// 200 polls in a measurement. Repainting on each turned idle mouse movement
+/// into a 650 fps spin that pinned a core.
+void test_motion_does_not_spin() {
+    section("motion economy");
+
+    run_headless<TestApp>(kCfg, [](auto& rt) {
+        // Park the cursor over empty space and settle.
+        rt.window().move_to({460, 300});
+        rt.tick();
+        for (int i = 0; i < 3; ++i) rt.tick();
+        const auto settled = rt.window().frames_presented();
+
+        // Wiggle WITHIN the same empty region: hover state never changes.
+        for (int i = 0; i < 30; ++i) {
+            rt.window().move_to({460.0f + static_cast<float>(i % 3), 300.0f});
+            rt.tick();
+        }
+        check(rt.window().frames_presented() == settled,
+              "motion that does not change hover state does not repaint (" +
+              std::to_string(rt.window().frames_presented() - settled) + " frames)");
+
+        // Moving ONTO a widget must repaint, or hover styling would not work.
+        rt.window().move_to(rt.center_of("hoverme"));
+        rt.tick();
+        check(rt.window().frames_presented() > settled,
+              "but crossing into a widget does repaint");
+    });
+}
+
 void test_render_economy() {
     section("render economy");
 
@@ -488,6 +557,8 @@ int main() {
     test_determinism();
     test_view_purity();
     test_focus();
+    test_never_sleeps_dirty();
+    test_motion_does_not_spin();
     test_render_economy();
 
     std::printf("\n%s  %d checks, %d failures\n",

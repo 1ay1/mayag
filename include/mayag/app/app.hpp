@@ -396,8 +396,24 @@ class Runtime {
         }
 
         // Pointer events become semantic gestures against the CURRENT tree.
+        //
+        // Only repaint when the INTERACTION STATE actually changed. macOS
+        // delivers a mouse-moved event for every pixel of cursor travel — 117
+        // of them across 200 polls in a measurement — and treating each as a
+        // reason to redraw turns idle mouse movement into a 650 fps spin that
+        // pins a core. What matters is whether the hovered/pressed/focused
+        // node changed, because that is all a view can observe through Ctx.
+        const std::uint64_t before_hover   = input_.hovered();
+        const std::uint64_t before_pressed = input_.pressed();
+        const std::uint64_t before_focus   = input_.focused();
+
         const auto gestures = input_.handle(ev, tree_, time_);
-        if (!gestures.empty()) dirty_ = true;
+
+        if (input_.hovered() != before_hover ||
+            input_.pressed() != before_pressed ||
+            input_.focused() != before_focus) {
+            dirty_ = true;
+        }
 
         // Dispatch: raw event subscriptions first, then gesture ones.
         collect_and_step(subs, ev, gestures);
@@ -596,6 +612,21 @@ class Runtime {
     // ── waiting ─────────────────────────────────────────────────────────
 
     [[nodiscard]] std::pair<platform::Wait, double> decide_wait(const Sub<Msg>& subs) const {
+        // NEVER block while a repaint is owed.
+        //
+        // The loop is wait -> handle events -> update -> render. If a message
+        // arrives from anywhere other than the window (a worker thread's
+        // Cmd::task result, a timer, a `send()` from application code) the
+        // model changes and `dirty_` is set — but the NEXT thing the loop does
+        // is block for a window event that may never come. The new frame sits
+        // unrendered and the app looks frozen until the user happens to move
+        // the mouse.
+        //
+        // That is exactly the "pressed a theme chip and it hung" report: the
+        // click was handled, the model updated, and then the loop went to
+        // sleep still owing the screen a paint.
+        if (dirty_) return {platform::Wait::immediate, 0.0};
+
         if (subs.wants_frames()) return {platform::Wait::poll, 0.0};
         if (auto i = subs.min_interval()) {
             return {platform::Wait::timeout, std::chrono::duration<double>(*i).count()};
