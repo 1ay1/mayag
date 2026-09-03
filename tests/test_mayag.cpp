@@ -11,6 +11,7 @@
 
 #include <mayag/mayag.hpp>
 #include <mayag/backend/tiled.hpp>
+#include <mayag/layout/audit.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -638,6 +639,134 @@ void test_tiled_equivalence() {
     }
 }
 
+/// The layout guarantees mayag promises.
+///
+/// Each of these encodes a specific way UIs break in practice. They exist
+/// because mayag's own dashboard shipped with a sidebar squeezed from 196px
+/// to 63px, labels wrapping one character per line, and a header pushed to
+/// x=2976 in a 980px window — all from flex defaults inherited from CSS.
+void test_layout_guarantees() {
+    section("layout guarantees");
+
+    const auto& tm = layout::default_measurer();
+
+    // ── an explicit size is a GUARANTEE, not a suggestion ───────────────
+    {
+        auto ui = h(box() | width(196) | height(100),
+                    v(box() | width(800) | height(100)) | grow())
+                | width(pct(100));
+        Node n = ui.build();
+        layout::layout_tree(n, {500, 200}, tm);
+        near(n.children()[0].frame().width(), 196.0f, 0.01f,
+             "a fixed sidebar keeps its width beside an oversized sibling");
+    }
+
+    // The same, several levels deep — the real dashboard shape.
+    {
+        auto ui = h(v(box() | height(20), box() | height(20)) | width(196) | pad(16),
+                    v(box() | width(900) | height(50)) | grow() | pad(24))
+                | width(pct(100)) | height(pct(100));
+        Node n = ui.build();
+        layout::layout_tree(n, {600, 300}, tm);
+        near(n.children()[0].frame().width(), 196.0f, 0.01f,
+             "and keeps it when nested inside padded containers");
+    }
+
+    // ── grow() must also SHRINK ─────────────────────────────────────────
+    //
+    // A node that fills leftover space is the one that should compress when
+    // there is none. `grow()` alone silently overflowed and pushed content
+    // hundreds of pixels off-screen.
+    {
+        auto ui = h(box() | width(200) | height(50),
+                    v(box() | width(600) | height(50)) | grow())
+                | width(pct(100));
+        Node n = ui.build();
+        layout::layout_tree(n, {400, 100}, tm);
+        const Rect grown = n.children()[1].frame();
+        check(grown.right() <= 401.0f,
+              "grow() compresses rather than overflowing (right edge " +
+              std::to_string(static_cast<int>(grown.right())) + " of 400)");
+    }
+
+    // ── opting OUT is still possible ────────────────────────────────────
+    {
+        auto ui = h(box() | width(300) | height(50) | rigid,
+                    box() | width(300) | height(50) | rigid)
+                | width(pct(100));
+        Node n = ui.build();
+        layout::layout_tree(n, {400, 100}, tm);
+        near(n.children()[0].frame().width(), 300.0f, 0.01f,
+             "rigid children refuse to compress, and overflow visibly instead");
+    }
+
+    // ── text never wraps into an unreadable ribbon ──────────────────────
+    {
+        TextStyle ts;
+        ts.size = 13.0f;
+        ts.overflow = TextOverflow::wrap;
+
+        const float sane = tm.measure("Overview Pipelines", ts, 200.0f).y;
+        for (float w : {12.0f, 4.0f, 1.0f, 0.0f}) {
+            const float h = tm.measure("Overview Pipelines", ts, w).y;
+            check(h <= sane * 4.0f,
+                  "a " + std::to_string(static_cast<int>(w)) +
+                  "px box does not wrap to one char per line");
+        }
+    }
+
+    // ── the auditor finds real faults ───────────────────────────────────
+    {
+        // A deliberately broken tree: a rigid child far wider than its
+        // clipping parent.
+        auto bad = v(box() | size(500, 50) | bg(colors::red) | rigid)
+                 | size(100, 60) | clip | bg(colors::black);
+        Node n = bad.build();
+        layout::layout_tree(n, {200, 100}, tm);
+
+        const auto issues = layout::audit(n, &tm);
+        bool found = false;
+        for (const auto& i : issues) {
+            if (i.kind == layout::Issue::Kind::overflow) found = true;
+        }
+        check(found, "audit() reports children overflowing a clipped parent");
+    }
+
+    {
+        // A healthy tree must be silent, or the auditor is useless.
+        auto good = v(box() | size(80, 20) | bg(colors::blue),
+                      box() | size(80, 20) | bg(colors::green))
+                  | gap(8) | pad(10) | size(120, 90) | bg(colors::black);
+        Node n = good.build();
+        layout::layout_tree(n, {200, 150}, tm);
+        check(layout::audit(n, &tm).empty(), "audit() is silent on a healthy tree");
+    }
+
+    // ── every shipped example must audit clean ──────────────────────────
+    //
+    // This is the test that would have caught the broken dashboard before it
+    // ever reached a screenshot.
+    {
+        constexpr Theme th = themes::midnight;
+        auto page = v(h(v(text<"mayag"> | font(16) | bold | fg(th.text_primary),
+                          text<"Overview"> | font(13) | fg(th.text_secondary),
+                          text<"Pipelines"> | font(13) | fg(th.text_secondary))
+                        | gap(6) | pad(16) | width(196) | bg(th.surface),
+                        v(text<"Overview"> | font(22) | bold | fg(th.text_primary),
+                          progress(th, 0.6f),
+                          h(badge<"live">(th, th.success), kbd<"T">(th)) | gap(8))
+                        | gap(12) | pad(24) | grow())
+                      | height(pct(100)))
+                    | width(pct(100)) | height(pct(100)) | bg(th.background);
+
+        Node n = page.build();
+        layout::layout_tree(n, {900, 500}, tm);
+        const auto issues = layout::audit(n, &tm);
+        check(issues.empty(),
+              "a realistic app layout audits clean:\n" + layout::format_issues(issues));
+    }
+}
+
 int main() {
     std::printf("mayag test suite\n================");
 
@@ -650,6 +779,7 @@ int main() {
     test_png();
     test_batching();
     test_tiled_equivalence();
+    test_layout_guarantees();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);

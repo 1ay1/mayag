@@ -32,11 +32,18 @@ template <Element... Kids>
     return box() | size(d, d) | bg(c) | radius(d * 0.5f);
 }
 
-/// A filled progress track.
-[[nodiscard]] constexpr auto progress(const Theme& t, float fraction, float w = 200.0f,
-                                      float h = 6.0f) {
-    return h_(box() | size(w * num::saturate(fraction), h) | bg(t.accent) | radius(h * 0.5f))
-         | size(w, h) | bg(t.border) | radius(h * 0.5f) | clip;
+/// A filled progress track that fills whatever width it is given.
+///
+/// The fill is an ABSOLUTE child sized as a percentage of the track, so the
+/// widget works at any width without the caller having to know the pixel
+/// number. The previous signature took an explicit width, which meant callers
+/// passed sentinels like 999 and then overrode it with `width(pct(100))` —
+/// two sources of truth, and the loser overflowed its parent.
+[[nodiscard]] constexpr auto progress(const Theme& t, float fraction, float h = 6.0f) {
+    return z(box() | width(pct(num::saturate(fraction) * 100.0f)) | height(h)
+                   | bg(t.accent) | radius(h * 0.5f))
+         | width(pct(100)) | height(h)
+         | bg(t.border) | radius(h * 0.5f) | clip;
 }
 
 // ── surfaces ────────────────────────────────────────────────────────────
@@ -140,10 +147,15 @@ template <fixed_string Label>
 }
 
 /// A key cap — for shortcut hints.
+///
+/// `min_size` is what keeps a single-character cap from being squeezed to
+/// nothing by a crowded toolbar: a 6px-wide "T" is unreadable, and a widget
+/// should not depend on its caller leaving enough room.
 template <fixed_string Key>
 [[nodiscard]] constexpr auto kbd(const Theme& t) {
-    return h(text<Key> | font(t.font_size * 0.82f) | fg(t.text_secondary))
+    return h(text<Key> | font(t.font_size * 0.82f) | fg(t.text_secondary) | ellipsis)
          | center
+         | min_size(t.font_size * 1.5f, t.font_size * 1.3f)
          | pad(2.0f, 7.0f)
          | bg(t.background)
          | border(1, t.border_strong)

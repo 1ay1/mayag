@@ -183,7 +183,7 @@ struct Dashboard {
             card(t,
                  split(text<"Build minutes"> | font(14) | semibold | fg(t.text_primary),
                        text<"72%"> | font(12) | fg(t.text_secondary)),
-                 progress(t, 0.72f, 999.0f, 8.0f) | width(pct(100)),
+                 progress(t, 0.72f, 8.0f),
                  h(caption<"4,320 of 6,000 used">(t), spacer(),
                    toggle(t, true)) | align(Align::center))
             | gap(12);

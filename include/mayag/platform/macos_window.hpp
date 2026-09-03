@@ -195,6 +195,19 @@ class MacWindow {
             msg<void>(layer, sel("setOpaque:"), static_cast<BOOL>(YES));
             msg<void>(layer, sel("setNeedsDisplayOnBoundsChange:"), static_cast<BOOL>(NO));
             msg<void>(layer, sel("setDrawsAsynchronously:"), static_cast<BOOL>(NO));
+
+            // THE line that decides whether Retina rendering survives.
+            //
+            // A CALayer's contentsScale defaults to 1.0. Hand it a 2x image
+            // without setting this and Core Animation treats the buffer as
+            // low-resolution content for a 1x layer: it DOWNSCALES to the
+            // layer's point size, then the compositor scales back up for the
+            // display. Every ounce of the extra resolution is destroyed in a
+            // round trip, and the result looks exactly like soft 1x output —
+            // which is what made the window look blurry while the very same
+            // draw list produced pixel-perfect PNGs.
+            const auto scale = msg<double>(win, sel("backingScaleFactor"));
+            msg<void>(layer, sel("setContentsScale:"), scale);
         }
 
         MacWindow w;

@@ -56,6 +56,8 @@ inline constexpr Set stroke      = 1u << 5;   ///< a border has been established
 inline constexpr Set shadow      = 1u << 6;
 inline constexpr Set positioned  = 1u << 7;   ///< absolute/fixed: out of flow
 inline constexpr Set flexible    = 1u << 8;   ///< grow/shrink set: in flow
+inline constexpr Set sized_x     = 1u << 12;  ///< explicit width
+inline constexpr Set sized_y     = 1u << 13;  ///< explicit height
 inline constexpr Set clipped     = 1u << 9;
 inline constexpr Set named       = 1u << 10;  ///< has a stable id
 inline constexpr Set interactive = 1u << 11;
@@ -75,6 +77,8 @@ constexpr std::string_view name_of(Set bit) noexcept {
         case clipped:     return "clipping enabled";
         case named:       return "a name (add `| id(...)` first)";
         case interactive: return "interactivity";
+        case sized_x:     return "an explicit width";
+        case sized_y:     return "an explicit height";
         default:          return "an unknown capability";
     }
 }
@@ -402,9 +406,11 @@ struct Wrap {
 };
 inline constexpr Wrap wrap{};
 
-struct Width  { MAYAG_MODIFIER(Width,  caps::none, caps::none, caps::none, "width");
+/// An explicit width. Grants `sized_x`, which lets later modifiers detect
+/// (and reject) combinations that would make the size meaningless.
+struct Width  { MAYAG_MODIFIER(Width,  caps::none, caps::sized_x, caps::none, "width");
                 Length v; constexpr void apply(Style& s) const { s.layout.width = v; } };
-struct Height { MAYAG_MODIFIER(Height, caps::none, caps::none, caps::none, "height");
+struct Height { MAYAG_MODIFIER(Height, caps::none, caps::sized_y, caps::none, "height");
                 Length v; constexpr void apply(Style& s) const { s.layout.height = v; } };
 
 [[nodiscard]] constexpr Width  width(Length l)  { return {l}; }
@@ -413,7 +419,7 @@ struct Height { MAYAG_MODIFIER(Height, caps::none, caps::none, caps::none, "heig
 [[nodiscard]] constexpr Height height(float v)  { return {px(v)}; }
 
 struct Size {
-    MAYAG_MODIFIER(Size, caps::none, caps::none, caps::none, "size");
+    MAYAG_MODIFIER(Size, caps::none, caps::sized_x | caps::sized_y, caps::none, "size");
     Length w, h;
     constexpr void apply(Style& s) const { s.layout.width = w; s.layout.height = h; }
 };
@@ -434,22 +440,73 @@ struct MaxSize {
 };
 [[nodiscard]] constexpr MaxSize max_size(float w, float hgt) { return {px(w), px(hgt)}; }
 
-/// Take a share of the leftover main-axis space. Forbidden on an absolutely
-/// positioned element: such a node is out of flow, so "grow" has nothing to
-/// grow relative to, and silently ignoring it hides real layout bugs.
+/// Take a share of the leftover main-axis space.
+///
+/// Also makes the node SHRINKABLE. A node that fills the leftover room is,
+/// by construction, the one that should give way when there is no leftover
+/// room — and `grow()` without `shrink()` is a trap: the row silently
+/// overflows instead of compressing, and the content ends up hundreds of
+/// pixels off-screen. mayag's own dashboard shipped that bug: `grow()` on the
+/// main column pushed its header to x=2976 in a 980px window.
+///
+/// Pass `grow(n, 0.0f)` for the rare node that must fill space but never
+/// compress; `rigid` says the same thing more loudly.
+///
+/// Forbidden on an absolutely positioned element: such a node is out of flow,
+/// so "grow" has nothing to grow relative to, and silently ignoring it hides
+/// real layout bugs.
 struct Grow {
     MAYAG_MODIFIER(Grow, caps::none, caps::flexible, caps::positioned, "grow");
-    float v;
-    constexpr void apply(Style& s) const { s.layout.grow = v; }
+    float g;
+    float s;
+    constexpr void apply(Style& st) const {
+        st.layout.grow   = g;
+        st.layout.shrink = s;
+    }
 };
-[[nodiscard]] constexpr Grow grow(float v = 1.0f) { return {v}; }
+[[nodiscard]] constexpr Grow grow(float v = 1.0f, float shrink_ = 1.0f) {
+    return {v, shrink_};
+}
 
+/// Opt in to absorbing overflow.
+///
+/// mayag defaults `shrink` to 0 so an explicit size is a guarantee rather
+/// than a suggestion (see LayoutStyle::shrink). Reach for this on the ONE
+/// child that should give way when a row runs out of room — typically the
+/// text-bearing pane next to a fixed sidebar.
 struct Shrink {
     MAYAG_MODIFIER(Shrink, caps::none, caps::flexible, caps::positioned, "shrink");
     float v;
     constexpr void apply(Style& s) const { s.layout.shrink = v; }
 };
 [[nodiscard]] constexpr Shrink shrink(float v = 1.0f) { return {v}; }
+
+/// Take leftover space AND give way under pressure — `grow() | shrink()`.
+///
+/// This is what most "fill the remaining room" children actually want, and
+/// naming it once stops the common bug of writing `grow()` alone and then
+/// wondering why the row overflows instead of compressing.
+struct Flexible {
+    MAYAG_MODIFIER(Flexible, caps::none, caps::flexible, caps::positioned, "flexible");
+    float g, s;
+    constexpr void apply(Style& st) const {
+        st.layout.grow   = g;
+        st.layout.shrink = s;
+    }
+};
+[[nodiscard]] constexpr Flexible flexible(float grow_ = 1.0f, float shrink_ = 1.0f) {
+    return {grow_, shrink_};
+}
+
+/// Never shrink, never grow — an explicit "this size is final".
+///
+/// Redundant given the defaults, but worth having: it documents intent at the
+/// call site and survives a later refactor that adds `flexible()` to a parent.
+struct Rigid {
+    MAYAG_MODIFIER(Rigid, caps::none, caps::none, caps::none, "rigid");
+    constexpr void apply(Style& s) const { s.layout.grow = 0.0f; s.layout.shrink = 0.0f; }
+};
+inline constexpr Rigid rigid{};
 
 /// Position against the parent's padding box, out of flow. The reverse of
 /// `grow`'s ban, so the conflict is caught whichever order you write it in.

@@ -46,6 +46,7 @@
 // ── layout ──────────────────────────────────────────────────────────────
 #include <mayag/layout/text_metrics.hpp>
 #include <mayag/layout/flex.hpp>
+#include <mayag/layout/audit.hpp>
 
 // ── render ──────────────────────────────────────────────────────────────
 #include <mayag/render/sdf.hpp>

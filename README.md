@@ -237,6 +237,41 @@ No Arabic joining, no Indic reordering, no BiDi. Those are not "more of the same
 
 A font file arrives from a download or a user's disk. Every accessor is bounds-checked and returns a defined value when the file lies about its own structure. The test suite sweeps **all ~1300 faces installed on the machine** and feeds the parser **400 randomly corrupted fonts**; both must parse-or-reject without crashing, and both run clean under ASan and UBSan.
 
+## Layout you cannot get wrong
+
+CSS defaults `flex-shrink` to 1, which makes an explicit `width(196)` a
+*suggestion*: put it beside a sibling with wide content and the sidebar
+silently becomes 147px, its labels wrap one character per line, and the UI
+looks broken in a way that points at the wrong file. mayag shipped exactly
+that bug in its own dashboard. CSS authors have learned to type
+`flex-shrink: 0` reflexively — a DSL that claims layout correctness should
+not require a ritual to get the obvious behaviour.
+
+So mayag changes the defaults and adds a safety net:
+
+| Guarantee | Mechanism |
+|-----------|-----------|
+| A size you ask for is a size you get | `shrink` defaults to **0**, not 1 |
+| Filling space implies giving way | `grow()` sets shrink too — `grow()` alone pushed a header to x=2976 in a 980px window |
+| Text never becomes a vertical ribbon | below ~2.5 glyph widths, boxes overflow visibly instead of wrapping to 1 char/line |
+| Opting out is explicit | `rigid`, `shrink(0)`, `grow(n, 0)` |
+
+Some faults depend on runtime sizes and cannot be decided at compile time. For
+those there is an auditor:
+
+```cpp
+auto issues = layout::audit(tree, &measurer);
+std::printf("%s", layout::format_issues(issues).c_str());
+// layout: 2 issue(s)
+//   [870,40 6x16] text box too narrow to wrap sanely — width 6 cannot fit a glyph (9)
+//   [236,560 704x8] children overflow their parent — by 15x0px
+```
+
+It reports collapsed nodes, overflow, unhonoured sizes, clipped text,
+degenerate wrapping, and non-finite geometry — each located. Every shipped
+example must audit clean, which is the test that would have caught the broken
+dashboard before it reached a screenshot.
+
 ## The rasteriser
 
 The software backend is the reference every GPU backend is measured against,

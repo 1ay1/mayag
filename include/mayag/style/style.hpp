@@ -251,7 +251,22 @@ struct LayoutStyle {
     Length max_height{};
 
     float grow   = 0.0f;   ///< share of leftover main-axis space
-    float shrink = 1.0f;   ///< share of overflow to absorb
+    /// Share of overflow this node absorbs.
+    ///
+    /// DEFAULT IS ZERO, unlike CSS. This is a deliberate divergence.
+    ///
+    /// With CSS's `flex-shrink: 1` default an explicit `width(196)` is only
+    /// a SUGGESTION: place it beside a sibling with wide content and the
+    /// sidebar silently becomes 147 px, its labels wrap to one character per
+    /// line, and the UI looks broken in a way that points at the wrong file.
+    /// That is not hypothetical — it is exactly what happened to mayag's own
+    /// dashboard example.
+    ///
+    /// CSS authors have learned to type `flex-shrink: 0` reflexively. A DSL
+    /// that claims layout correctness should not need a ritual to get the
+    /// obvious behaviour, so in mayag a size you ASK for is a size you GET,
+    /// and shrinking is opt-in via `| shrink()` or `| flexible()`.
+    float shrink = 0.0f;
     bool  wrap   = false;
 
     Positioning position = Positioning::flow;

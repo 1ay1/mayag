@@ -69,7 +69,12 @@ class MonospaceMetrics final : public TextMeasurer {
         // Greedy wrap at word boundaries; a word longer than the line breaks
         // mid-word rather than overflowing, which is what users expect from
         // a URL in a narrow panel.
-        const bool wrapping = st.overflow == TextOverflow::wrap && max_width > 0.0f &&
+        // Below ~2.5 glyph widths, wrapping cannot produce more than one or
+        // two characters per line. Such a box must NOT wrap: that produces an unreadable vertical ribbon,
+        // arbitrarily tall, which looks like the text engine failed when the
+        // real fault is upstream sizing. Overflowing is the lesser evil — it
+        // is obviously wrong and points at the actual problem.
+        const bool wrapping = st.overflow == TextOverflow::wrap && max_width >= cw * 2.5f &&
                               !num::is_inf(max_width);
         const auto cols = wrapping
             ? num::max(static_cast<std::size_t>(max_width / num::max(cw, 0.001f)), std::size_t{1})

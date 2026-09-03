@@ -227,8 +227,21 @@ enum class RenderMode : std::uint8_t {
 
 struct FontConfig {
     RenderMode mode = RenderMode::hybrid;
-    /// Sizes at or above this use SDF in hybrid mode.
-    float      sdf_threshold = 20.0f;
+
+    /// DEVICE pixel size at or above which hybrid mode switches to SDF.
+    ///
+    /// Set high on purpose. A distance field is resampled by construction,
+    /// so it is never as sharp as a bitmap rasterised at the exact size it
+    /// is drawn at — it wins only when one entry has to serve many sizes,
+    /// i.e. large display type. At UI sizes the sharper bitmap is worth the
+    /// extra atlas entries.
+    ///
+    /// This is compared against DEVICE pixels (logical size x DPI), so a
+    /// 12 pt label is a 24 px bitmap on Retina rather than being pushed
+    /// into SDF purely because the display is dense. Making the mode depend
+    /// on the monitor was a real bug: the same UI rendered differently on
+    /// different screens.
+    float      sdf_threshold = 56.0f;
     /// SDF is generated at this pixel size and scaled; larger means better
     /// fidelity at large display sizes and a bigger atlas footprint.
     float      sdf_raster_size = 48.0f;
@@ -377,9 +390,14 @@ class FontStack : public Shaper {
         key.glyph_id = gid;
         // The payoff of SDF: every size collapses to one bucket, so a page
         // with ten type sizes rasterises each glyph once instead of ten times.
+        // SDF entries are scale-free, so every size collapses to one bucket.
+        // Bitmap entries are rasterised for the size they are drawn at, and
+        // quantising to QUARTER pixels keeps the cache from exploding while
+        // staying far finer than the eye can resolve.
         key.size_bucket = use_sdf
             ? 0
-            : static_cast<std::uint16_t>(num::clamp(size_px * 4.0f, 1.0f, 65000.0f));
+            : static_cast<std::uint16_t>(num::clamp(num::round(size_px * 4.0f),
+                                                    1.0f, 65000.0f));
         key.flags = use_sdf ? glyph_flags::sdf : glyph_flags::none;
 
         if (const CachedGlyph* hit = atlas_.find(key)) return hit;
@@ -399,7 +417,10 @@ class FontStack : public Shaper {
                                  raster_scale, config_.sdf_spread, true);
         }
 
-        const float scale = face.scale_for(size_px);
+        // Rasterise at the size the KEY represents, not the raw request, so
+        // two calls that share a cache slot also share identical pixels.
+        const float quantised = static_cast<float>(key.size_bucket) * 0.25f;
+        const float scale = face.scale_for(quantised);
         auto r = rasterize(o, scale, 1);
         return atlas_.insert(key, r.bitmap, r.offset, advance, scale, 0.0f, false);
     }
@@ -491,6 +512,21 @@ class StackMeasurer final : public layout::TextMeasurer {
                                                       float max_width) {
         std::vector<Line> lines;
         if (shaped.glyphs.empty()) return lines;
+
+        // A box too narrow for even one glyph must NOT wrap to one character
+        // per line. That produces a vertical ribbon of letters that is
+        // unreadable, arbitrarily tall, and — worst — makes the layout look
+        // like the text engine failed when the real fault is upstream sizing.
+        //
+        // Overflowing horizontally is the lesser evil: it is obviously wrong,
+        // it points at the actual problem, and `clip` still contains it. So
+        // below the width of the widest single glyph we stop wrapping.
+        float widest_glyph = 0.0f;
+        for (const auto& g : shaped.glyphs) widest_glyph = num::max(widest_glyph, g.advance);
+        if (max_width < widest_glyph * 2.5f) {
+            lines.push_back(Line{0, shaped.glyphs.size(), shaped.width});
+            return lines;
+        }
 
         std::size_t line_start = 0;
         std::size_t last_break = std::string_view::npos;
@@ -644,18 +680,36 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
         // A bitmap entry was made for this exact size, so the ratio is 1.
         float k = 1.0f;
         if (g.is_sdf && g.raster_scale > 0.0f) {
-            const Face* face = nullptr;
-            for (std::size_t i = 0; i < 8; ++i) {
-                face = stack_->face_at(i);
-                if (face != nullptr) break;
+            if (const Face* face = stack_->face_at(0); face != nullptr) {
+                k = face->scale_for(st.size) / g.raster_scale;
             }
-            if (face != nullptr) k = face->scale_for(st.size) / g.raster_scale;
         }
 
-        const Rect dst{pen.x + g.bearing.x * k,
-                       pen.y + g.bearing.y * k,
-                       g.size.x * k,
-                       g.size.y * k};
+        Rect dst{pen.x + g.bearing.x * k,
+                 pen.y + g.bearing.y * k,
+                 g.size.x * k,
+                 g.size.y * k};
+
+        // ── snap bitmap glyphs to the pixel grid ────────────────────────
+        //
+        // A bitmap entry was rasterised at EXACTLY this pixel size, so its
+        // texels map 1:1 onto the framebuffer — but only if the destination
+        // starts on an integer pixel. Landing at x=44.484 makes every texel
+        // straddle two pixels, and the bilinear fetch averages them: the
+        // glyph comes out blurred, and no amount of rasteriser quality can
+        // recover it. Measured on the real UI, EVERY glyph was fractional.
+        //
+        // So round the origin to the pixel grid and keep the integer size.
+        // Horizontal position quantises to whole pixels (which is what makes
+        // stems crisp); the accumulated sub-pixel error stays in the pen, not
+        // in the glyph, so advances and kerning are unaffected.
+        //
+        // SDF entries are resampled by design and must NOT be snapped —
+        // that is the whole point of a scale-free field.
+        if (!g.is_sdf) {
+            dst = Rect{num::round(dst.origin.x), num::round(dst.origin.y),
+                       g.size.x, g.size.y};
+        }
 
         dl.glyph(dst, g.uv, st.color, g.is_sdf);
     }
