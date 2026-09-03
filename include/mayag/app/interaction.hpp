@@ -32,6 +32,9 @@ struct Gesture {
     /// double — a bug the API invited rather than prevented.
     enum class Kind : std::uint8_t {
         click, press, release, enter, leave, drag, scroll,
+        /// Enter/Space on the focused node. Delivered exactly like a click so
+        /// a control needs one handler, not two.
+        activate,
     };
 
     Kind          kind = Kind::click;

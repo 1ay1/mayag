@@ -75,6 +75,8 @@ class Sub {
 
     enum class Gesture : std::uint8_t {
         click, press, release, enter, leave, drag, scroll,
+        /// Keyboard activation of the focused node (Enter / Space).
+        activate,
     };
 
     struct OnNode {
@@ -130,6 +132,22 @@ class Sub {
     [[nodiscard]] static Sub on_key(Key k, Mods mods, Msg m) {
         return Sub{Alt{OnKey{k, mods, std::move(m)}}};
     }
+    /// Fires when the FOCUSED node is activated by keyboard.
+    ///
+    /// Enter and Space activate the focused control on every platform. Having
+    /// the runtime translate that into the same message a click produces is
+    /// what makes an app keyboard-navigable without the author writing a
+    /// parallel key handler for every button — and it is the single biggest
+    /// accessibility win available for the least code.
+    template <dsl::fixed_string Name>
+    [[nodiscard]] static Sub on_activate(Msg m) {
+        return Sub{Alt{OnNode{dsl::node_id(Name.view()), Gesture::activate,
+                              std::move(m), 0, true}}};
+    }
+    [[nodiscard]] static Sub on_activate_id(std::uint64_t id, Msg m) {
+        return Sub{Alt{OnNode{id, Gesture::activate, std::move(m), 0, true}}};
+    }
+
     /// Platform-primary accelerator (Cmd on macOS, Ctrl elsewhere).
     [[nodiscard]] static Sub on_shortcut(Key k, Msg m) {
         Mods mods{};

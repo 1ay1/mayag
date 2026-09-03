@@ -35,6 +35,7 @@
 #include <mayag/core/color.hpp>
 #include <mayag/core/scroll_state.hpp>
 #include <mayag/core/text_edit.hpp>
+#include <mayag/core/animation.hpp>
 
 // ── style & scene ───────────────────────────────────────────────────────
 #include <mayag/style/style.hpp>
@@ -44,6 +45,7 @@
 // ── the DSL ─────────────────────────────────────────────────────────────
 #include <mayag/dsl/dsl.hpp>
 #include <mayag/dsl/widgets.hpp>
+#include <mayag/dsl/virtual_list.hpp>
 
 // ── layout ──────────────────────────────────────────────────────────────
 #include <mayag/layout/text_metrics.hpp>

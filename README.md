@@ -185,7 +185,7 @@ animate, <kbd>tab</kbd> to move focus, <kbd>esc</kbd> to quit.
 | `gallery` | every visual feature, 6 live themes, drag + hover + animation |
 | `dashboard` | a realistic app layout with a clickable sidebar |
 | `typography` | the font engine: type scale, kerning, script fallback |
-| `todo` | a real app: text input, scrolling list, filters, keyboard |
+| `todo` | a real app: text input, virtualised list, overlays, springs |
 
 An idle mayag app **blocks** and measures **~0% CPU** — "am I animating" is
 derived from the subscriptions, not from a flag someone forgot to clear.
@@ -310,6 +310,56 @@ in every mayag app behaves the same instead of each author re-deriving it.
 (so deleting rows cannot leave you scrolled into blank space), and gives you
 thumb geometry for free. Wheel events bubble to the nearest scrollable
 ancestor, because the cursor is nearly always over a leaf.
+
+## Overlays, virtualisation, animation
+
+Three more things every real app needs, each solved once rather than by every
+author:
+
+**Overlays** are a separate layer, not a flag on a node. A menu, modal or
+tooltip must escape its parent's clip, paint above every sibling, and capture
+input — none of which flow layout can provide. They are posted from `view()`
+and laid out *after* the main tree, so an overlay can position against an
+anchor whose rect is not known until layout finishes:
+
+```cpp
+c.overlay(Overlay{.content = menu, .anchor_id = row_id,
+                  .placement = Placement::below_start});
+```
+
+Placement flips when there is no room below and slides back on screen at the
+edges. Clicking outside dismisses *and consumes* the click, so a menu never
+both closes and activates what was behind it.
+
+**Virtualised lists** build only what is visible:
+
+```
+      100 rows -> 26 nodes  layout 0.007 ms
+    10000 rows -> 26 nodes  layout 0.003 ms
+  1000000 rows -> 26 nodes  layout 0.003 ms
+```
+
+Constant cost, because the node count depends on the viewport rather than the
+data. The todo example holds 412 items in 74 nodes.
+
+**Animation** is springs, not curves. `Animated<T>` is a value that knows
+where it is going; `update()` advances it, `view()` reads it:
+
+```cpp
+m.indicator.to(target);        // in update()
+m.indicator.step(dt);
+box() | offset(m.indicator.value(), 0)   // in view()
+```
+
+Springs carry velocity across retargets, so a user toggling a panel mid-flight
+gets continuous motion rather than a restart — the reason iOS and Android both
+moved away from duration tweens. Integration is sub-stepped at a fixed 1/240 s,
+which makes the motion identical at 30, 120 or any other frame rate (measured:
+`delta=0.0000`) and stable across a 250 ms hitch that would otherwise make a
+stiff spring explode.
+
+An animation that has settled stops requesting frames, so the app returns to
+0% CPU with no explicit stop call.
 
 ## Clicks
 

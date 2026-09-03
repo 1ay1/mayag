@@ -33,6 +33,7 @@
 #include "../layout/audit.hpp"
 #include "../render/painter.hpp"
 #include "../scene/node.hpp"
+#include "../scene/overlay.hpp"
 #include "../style/theme.hpp"
 #include "../text/font.hpp"
 #include "../font/font.hpp"
@@ -68,6 +69,18 @@ struct Ctx {
     float dpi_scale = 1.0f;
     double time = 0.0;       ///< seconds since start, for animation
     Theme theme = themes::midnight;
+
+    /// Where `view()` posts menus, modals and tooltips.
+    ///
+    /// Mutable because a view is a pure function of the MODEL — the overlay
+    /// list is an output channel, not state. Two identical models still
+    /// produce identical overlays, which is the property that matters.
+    OverlayList* overlays = nullptr;
+
+    /// Post an overlay from anywhere in the view.
+    void overlay(Overlay o) const {
+        if (overlays != nullptr) overlays->add(std::move(o));
+    }
 
     /// Live interaction state, so a view can style its own hover/press
     /// without storing any of it in the Model. This is the GPU-UI equivalent
@@ -397,6 +410,68 @@ class Runtime {
                 input_.focus_next(tree_, k->mods.shift);
                 dirty_ = true;
             }
+
+            // Enter and Space activate the focused control, exactly as a
+            // click would. Every mayag app is keyboard-navigable for free;
+            // without this each author writes a parallel key handler per
+            // button and most simply do not.
+            //
+            // The key is CONSUMED when it actually activated something.
+            // Otherwise Space would both activate the focused button and fall
+            // through to the app's own Space binding — which is how this
+            // broke the typography example the moment it was added.
+            if ((k->key == Key::enter || k->key == Key::space) &&
+                input_.focused() != 0 && k->mods.none()) {
+                const Node* n = tree_.find(input_.focused());
+                std::vector<Gesture> g{Gesture{Gesture::Kind::activate, input_.focused(),
+                                               n ? n->frame().center() : Vec2{}}};
+
+                std::vector<Msg> produced;
+                match(subs, ev, g, produced);
+                if (!produced.empty()) {
+                    for (auto& m : produced) {
+                        step(std::move(m));
+                        if (quit_) return;
+                    }
+                    dirty_ = true;
+                    return;   // consumed: no fall-through to plain key handlers
+                }
+            }
+        }
+
+        // ── overlays get first refusal on pointer input ─────────────────
+        //
+        // A modal must swallow clicks aimed at what is behind it, and a click
+        // outside a menu should DISMISS it rather than activating whatever
+        // happens to be under the cursor. Both are the same rule: the overlay
+        // layer sees the event first and may consume it.
+        if (!overlays_.empty()) {
+            if (const auto pos = event_position(ev)) {
+                const bool is_press = std::holds_alternative<MouseDown>(ev);
+
+                if (const Overlay* over = overlays_.hit(*pos)) {
+                    // Inside an overlay: route the gesture against the OVERLAY
+                    // tree, not the main one.
+                    const auto gestures = input_.handle(ev, over->content, time_);
+                    if (!gestures.empty()) dirty_ = true;
+                    collect_and_step(subs, ev, gestures);
+                    return;
+                }
+
+                if (is_press) {
+                    const auto to_dismiss = overlays_.dismissed_by(*pos);
+                    if (!to_dismiss.empty()) {
+                        for (std::uint64_t id : to_dismiss) {
+                            const auto gestures = std::vector<Gesture>{
+                                Gesture{Gesture::Kind::leave, id, *pos}};
+                            collect_and_step(subs, ev, gestures);
+                        }
+                        dirty_ = true;
+                        return;   // the click is CONSUMED by the dismissal
+                    }
+                    if (overlays_.captures_input()) return;   // modal blocks
+                }
+            }
         }
 
         // Pointer events become semantic gestures against the CURRENT tree.
@@ -504,6 +579,7 @@ class Runtime {
             case G::leave:        return k == Gesture::Kind::leave;
             case G::drag:         return k == Gesture::Kind::drag;
             case G::scroll:       return k == Gesture::Kind::scroll;
+            case G::activate:     return k == Gesture::Kind::activate;
         }
         return false;
     }
@@ -666,7 +742,13 @@ class Runtime {
         if (cfg_.fonts != nullptr) cfg_.fonts->begin_frame(frame_counter_);
         ++frame_counter_;
 
-        Ctx ctx{size_, dpi_, time_, cfg_.theme, &input_};
+        // Clear BEFORE the view runs, or we erase the overlays it just
+        // posted. The list then outlives this frame: input arrives between
+        // renders, and an emptied list would mean a menu visible on screen
+        // yet invisible to hit testing.
+        overlays_.clear();
+
+        Ctx ctx{size_, dpi_, time_, cfg_.theme, &overlays_, &input_};
 
         if constexpr (detail::ViewWithCtx<P>) {
             tree_ = P::view(model_, ctx);
@@ -675,6 +757,24 @@ class Runtime {
         }
 
         layout::layout_tree(tree_, size_, *measurer_);
+
+        // Overlays are laid out AFTER the main tree, because an overlay
+        // positions itself against an anchor whose final rect is not known
+        // until layout finishes. That ordering is what makes "attach a menu
+        // to this button" work regardless of how deeply the button is nested.
+        for (auto& o : overlays_.items()) {
+            const Rect anchor = o.anchor_id != 0
+                ? (tree_.find(o.anchor_id) ? tree_.find(o.anchor_id)->frame() : Rect{})
+                : Rect{Vec2{}, size_};
+
+            // Measure at natural size against the viewport, then place.
+            const Vec2 natural = layout::measure(
+                o.content, layout::Constraints{size_.x, size_.y}, *measurer_);
+
+            const Rect placed = overlay::resolve(o.placement, anchor, natural, size_,
+                                                 o.offset, input_.cursor());
+            layout::arrange(o.content, placed, *measurer_);
+        }
 
         // With `--debug`, audit every frame whose tree actually changed and
         // report new faults once. Layout bugs are cheap to fix and expensive
@@ -696,6 +796,21 @@ class Runtime {
         po.debug_bounds = cfg_.debug_bounds;
         render::paint(tree_, draws_, po);
 
+        // Overlays paint last, outside every clip, in layer order — which is
+        // exactly the three things a menu needs and normal flow cannot give.
+        if (!overlays_.empty()) {
+            auto sorted = overlays_.items();
+            std::stable_sort(sorted.begin(), sorted.end(),
+                             [](const Overlay& a, const Overlay& b) { return a.layer < b.layer; });
+            for (const auto& o : sorted) {
+                if (o.scrim > 0.0f) {
+                    draws_.fill_rect(Rect{Vec2{}, size_ * dpi_},
+                                     colors::black.fade(o.scrim));
+                }
+                render::paint(o.content, draws_, po);
+            }
+        }
+
         window_.present(draws_, cfg_.theme.background);
     }
 
@@ -714,6 +829,7 @@ class Runtime {
     const render::GlyphRenderer*         glyphs_   = nullptr;
     const backend::CoverageSampler*      sampler_  = nullptr;
     std::uint64_t                        frame_counter_ = 0;
+    OverlayList                          overlays_;
     std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
     detail::Inbox<Msg>              inbox_;

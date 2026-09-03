@@ -30,6 +30,12 @@ struct Todo {
         ScrollState       list;
         Filter            filter = Filter::all;
         int               selected = -1;   ///< keyboard cursor into the view
+
+        /// The filter underline slides between chips instead of jumping.
+        AnimatedFloat     indicator{0.0f};
+        /// Which row's context menu is open; 0 = none.
+        std::uint64_t     menu_for = 0;
+        int               menu_index = -1;
     };
 
     // ── messages ────────────────────────────────────────────────────────
@@ -42,10 +48,13 @@ struct Todo {
     struct SetFilter { Filter f; };
     struct Scrolled  { Vec2 delta; };
     struct FocusInput {};
+    struct Tick      { double dt; };
+    struct OpenMenu  { int index; };
+    struct CloseMenu {};
     struct Quit    {};
 
-    using Msg = std::variant<Typed, KeyDown, Add, Toggle, Remove,
-                             SetFilter, Scrolled, FocusInput, Quit>;
+    using Msg = std::variant<Typed, KeyDown, Add, Toggle, Remove, SetFilter,
+                             Scrolled, FocusInput, Tick, OpenMenu, CloseMenu, Quit>;
 
     static std::pair<Model, Cmd<Msg>> init() {
         Model m;
@@ -127,10 +136,13 @@ struct Todo {
                 if (e.index >= 0 && e.index < static_cast<int>(m.items.size())) {
                     m.items.erase(m.items.begin() + e.index);
                 }
+                m.menu_for = 0;
+                m.menu_index = -1;
                 return {std::move(m), Cmd<Msg>::none()};
             }
             else if constexpr (std::is_same_v<T, SetFilter>) {
                 m.filter = e.f;
+                m.indicator.to(static_cast<float>(static_cast<int>(e.f)));
                 m.selected = -1;
                 m.list.scroll_to_top();
                 return {std::move(m), Cmd<Msg>::none()};
@@ -141,6 +153,20 @@ struct Todo {
             }
             else if constexpr (std::is_same_v<T, FocusInput>) {
                 return {std::move(m), Cmd<Msg>::focus(node_id("input"))};
+            }
+            else if constexpr (std::is_same_v<T, Tick>) {
+                m.indicator.step(e.dt, Spring::snappy());
+                return {std::move(m), Cmd<Msg>::none()};
+            }
+            else if constexpr (std::is_same_v<T, OpenMenu>) {
+                m.menu_for = node_id("row-" + std::to_string(e.index));
+                m.menu_index = e.index;
+                return {std::move(m), Cmd<Msg>::none()};
+            }
+            else if constexpr (std::is_same_v<T, CloseMenu>) {
+                m.menu_for = 0;
+                m.menu_index = -1;
+                return {std::move(m), Cmd<Msg>::none()};
             }
             else {
                 return {std::move(m), Cmd<Msg>::quit()};
@@ -185,11 +211,14 @@ struct Todo {
                     | id_of("row-" + std::to_string(index))).build();
         };
 
-        std::vector<Node> rows;
-        rows.reserve(vis.size());
-        for (int slot = 0; slot < static_cast<int>(vis.size()); ++slot) {
-            rows.push_back(row(slot, vis[static_cast<std::size_t>(slot)]));
-        }
+        // VIRTUALISED: only the rows on screen are built. The list would
+        // behave identically with a million items, because the node count
+        // depends on the viewport, not on the data.
+        constexpr float row_h = 38.0f;
+        auto rows_node = virtual_list(
+            m.list, static_cast<int>(vis.size()), row_h,
+            [&](int slot) { return row(slot, vis[static_cast<std::size_t>(slot)]); },
+            4.0f);
 
         // ---- filter chips ----
         auto chip = [&](const char* label, Filter f) {
@@ -205,25 +234,52 @@ struct Todo {
                     | id_of(std::string{"filter-"} + label)).build();
         };
 
+        // A context menu, posted as an OVERLAY: it escapes the list's scroll
+        // clip, paints above everything, and swallows the click that
+        // dismisses it. None of that is possible with an in-flow child.
+        if (m.menu_for != 0 && m.menu_index >= 0) {
+            const auto entry = [&](const char* label, Color<Srgb> tone, const char* id_name) {
+                return (h(text_owned(label) | font(12) | fg(tone))
+                        | pad(8, 14) | width(pct(100))
+                        | bg(c.hovered(node_id(id_name)) ? t.surface_raised
+                                                         : t.surface.fade(0.0f))
+                        | radius(4)
+                        | id_of(id_name)).build();
+            };
+            c.overlay(Overlay{
+                .content = (v(node(entry("Toggle", t.text_primary, "menu-toggle")),
+                              node(entry("Delete", t.danger, "menu-delete")))
+                            | gap(2) | pad(4) | width(140)
+                            | bg(t.overlay) | border(1, t.border_strong)
+                            | radius(t.radius_medium) | elevation(16)).build(),
+                .id = node_id("row-menu"),
+                .anchor_id = m.menu_for,
+                .placement = Placement::below_start,
+                .dismiss = Dismiss::on_click_outside,
+            });
+        }
+
         return v(// header
                  split(v(text<"Todo"> | font(26) | bold | fg(t.text_primary),
                          text_owned(std::to_string(m.items.size() - static_cast<std::size_t>(done_count)) +
                                     " of " + std::to_string(m.items.size()) + " remaining")
                            | font(11) | fg(t.text_secondary)) | gap(2),
-                       h(node(chip("all", Filter::all)),
-                         node(chip("active", Filter::active)),
-                         node(chip("done", Filter::done))) | gap(6)),
+                       v(h(node(chip("all", Filter::all)),
+                           node(chip("active", Filter::active)),
+                           node(chip("done", Filter::done))) | gap(6),
+                         // A sliding underline. Its x is a SPRING, so
+                         // switching filters mid-slide continues smoothly
+                         // instead of restarting.
+                         node((box() | size(46, 2) | bg(t.accent) | radius(1)
+                                     | offset(m.indicator.value() * 52.0f, 0)).build()))
+                       | gap(4)),
 
                  // input
                  node(text_field(t, m.input, c.focused(node_id("input")),
                                  node_id("input"), "What needs doing?").build()),
 
                  // the scrolling list
-                 node((list(Axis::vertical, std::move(rows), 4.0f)
-                       | scroll(m.list)
-                       | grow()
-                       | width(pct(100))
-                       | dsl::id<"list">).build()),
+                 rows_node | scroll(m.list) | grow() | width(pct(100)) | dsl::id<"list">,
 
                  // footer
                  h(text<"enter"> | font(10) | fg(t.text_disabled),
@@ -248,17 +304,31 @@ struct Todo {
             Sub<Msg>::on_any_key([](const KeyEvent& k) { return Msg{KeyDown{k}}; }),
             Sub<Msg>::on_scroll<"list">([](Vec2 d) { return Msg{Scrolled{d}}; }),
             Sub<Msg>::on_click<"input">(FocusInput{}),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
+            Sub<Msg>::on_key(Key::escape, m.menu_for != 0 ? Msg{CloseMenu{}} : Msg{Quit{}}),
             Sub<Msg>::on_close(Quit{}),
+            // The indicator only requests frames while it is actually moving,
+            // so a settled UI goes back to 0% CPU with no explicit stop.
+            when(m.indicator.animating(),
+                 Sub<Msg>::every_frame([](FrameEvent f) { return Msg{Tick{f.delta}}; })),
         };
+
+        // Menu entries, live only while the menu is open.
+        if (m.menu_index >= 0) {
+            subs.push_back(Sub<Msg>::on_click_id(node_id("menu-toggle"), Toggle{m.menu_index}));
+            subs.push_back(Sub<Msg>::on_click_id(node_id("menu-delete"), Remove{m.menu_index}));
+            // Clicking outside sends `leave` for the dismissed overlay.
+            subs.push_back(Sub<Msg>::on_click_id_gesture(
+                node_id("row-menu"), Sub<Msg>::Gesture::leave, Msg{CloseMenu{}}, 0, true));
+        }
 
         // A click toggles; a DOUBLE click deletes. The count model makes that
         // two lines instead of a state machine.
         for (int i = 0; i < static_cast<int>(m.items.size()); ++i) {
             const auto nid = node_id("row-" + std::to_string(i));
             subs.push_back(Sub<Msg>::on_click_id(nid, Toggle{i}));
+            // Double click opens the row's context menu.
             subs.push_back(Sub<Msg>::on_click_id_gesture(
-                nid, Sub<Msg>::Gesture::click, Msg{Remove{i}}, 2, false));
+                nid, Sub<Msg>::Gesture::click, Msg{OpenMenu{i}}, 2, false));
         }
 
         subs.push_back(Sub<Msg>::on_click_id(node_id("filter-all"),    SetFilter{Filter::all}));
@@ -287,8 +357,9 @@ int main(int argc, char** argv) {
     return demo::run<Todo>(opts, cfg, [](auto& rt) {
         std::printf("todo headless\n");
         int fails = 0;
-        const auto ok = [&](bool c, const char* what) {
-            std::printf("  %s  %s\n", c ? "ok  " : "FAIL", what);
+        const auto ok = [&](bool c, std::string_view what) {
+            std::printf("  %s  %.*s\n", c ? "ok  " : "FAIL",
+                        static_cast<int>(what.size()), what.data());
             if (!c) ++fails;
         };
 
@@ -344,6 +415,59 @@ int main(int argc, char** argv) {
         }
         ok(rt.model().list.offset.y > before, "the wheel scrolls the list");
         ok(rt.model().list.max_offset.y > 0.0f, "and the list knows it overflows");
+
+        // ── virtualisation ──────────────────────────────────────────────
+        //
+        // The node count must depend on the VIEWPORT, not the data.
+        {
+            const std::size_t nodes_now = rt.tree().count();
+            for (int i = 0; i < 400; ++i) {
+                rt.send(Todo::Msg{Todo::Typed{"x"}});
+                rt.send(Todo::Msg{Todo::Add{}});
+            }
+            rt.tick();
+            ok(rt.model().items.size() > 400, "the list holds 400+ items");
+            const std::size_t nodes_after = rt.tree().count();
+            ok(nodes_after < nodes_now * 3,
+               "but the tree stayed small: " + std::to_string(nodes_now) + " -> " +
+               std::to_string(nodes_after) + " nodes");
+        }
+
+        // ── animation ───────────────────────────────────────────────────
+        {
+            rt.click("filter-active");
+            ok(rt.model().indicator.animating(), "switching filters starts the spring");
+            ok(Todo::subscribe(rt.model()).wants_frames(),
+               "and the app requests frames only while it moves");
+
+            rt.window().drive_frames(true);
+            for (int i = 0; i < 200 && rt.model().indicator.animating(); ++i) rt.tick();
+            rt.window().drive_frames(false);
+
+            ok(!rt.model().indicator.animating(), "the spring settles on its own");
+            ok(!Todo::subscribe(rt.model()).wants_frames(),
+               "and the frame subscription disappears with it");
+        }
+
+        // ── overlay ─────────────────────────────────────────────────────
+        {
+            rt.click("filter-all");
+            ok(rt.model().menu_for == 0, "no menu initially");
+
+            const Vec2 row = rt.center_of("row-0");
+            rt.window().double_click(row);
+            rt.tick();
+            ok(rt.model().menu_for != 0, "double-clicking a row opens its menu");
+
+            // A click well outside must DISMISS, and must not toggle whatever
+            // is underneath.
+            const bool done_before = rt.model().items[0].done;
+            rt.window().click({5, 5});
+            rt.tick();
+            ok(rt.model().menu_for == 0, "clicking outside dismisses the menu");
+            ok(rt.model().items[0].done == done_before,
+               "and that click is CONSUMED, not passed through");
+        }
 
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
         if (fails > 0) std::exit(1);
