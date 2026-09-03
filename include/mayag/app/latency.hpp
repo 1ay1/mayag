@@ -148,6 +148,57 @@ class LatencyStats {
     std::size_t count_ = 0;
 };
 
+/// Detects an app that never stops rendering.
+///
+/// The single most common way a UI framework produces something that "looks
+/// hung" is not a deadlock — it is an app that renders continuously and pins
+/// a core, so the window is technically alive but the machine is unusable.
+/// mayag shipped exactly that: a demo whose animation flag defaulted to true
+/// rendered 60 fps from launch, forever.
+///
+/// A deadlock is easy to notice. A busy loop is not, because everything
+/// keeps working — which is why it needs a detector rather than an assertion.
+class BusyLoopDetector {
+  public:
+    /// Call once per presented frame.
+    void frame_presented(double now_seconds) {
+        if (window_start_ <= 0.0) { window_start_ = now_seconds; frames_ = 0; }
+        ++frames_;
+
+        const double elapsed = now_seconds - window_start_;
+        if (elapsed >= window_seconds) {
+            rate_ = static_cast<double>(frames_) / elapsed;
+            sustained_ = (rate_ > threshold_hz);
+            window_start_ = now_seconds;
+            frames_ = 0;
+        }
+    }
+
+    /// Call when a frame was SKIPPED because nothing changed. Resets the
+    /// window — an app that goes quiet is behaving correctly.
+    void idle() noexcept {
+        window_start_ = 0.0;
+        frames_ = 0;
+        sustained_ = false;
+    }
+
+    /// True when the app has rendered continuously for several seconds.
+    /// Not necessarily a bug — a game or a visualiser genuinely animates —
+    /// but always worth surfacing, because the alternative is a user
+    /// reporting "the app is hung".
+    [[nodiscard]] bool busy() const noexcept { return sustained_; }
+    [[nodiscard]] double frame_rate() const noexcept { return rate_; }
+
+  private:
+    static constexpr double window_seconds = 3.0;
+    static constexpr double threshold_hz   = 30.0;
+
+    double window_start_ = 0.0;
+    int    frames_ = 0;
+    double rate_ = 0.0;
+    bool   sustained_ = false;
+};
+
 /// Scoped timer writing into a double, in milliseconds.
 class ScopedTimer {
   public:

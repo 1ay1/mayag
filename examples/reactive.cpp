@@ -34,7 +34,18 @@ struct Reactive {
 
         std::array<float, bars> spectrum{};
         double t = 0.0;
-        bool   running = true;
+
+        /// Off by default.
+        ///
+        /// A demo that animates from launch pins a core forever and looks
+        /// like a hang — which is exactly what it did. An app should be
+        /// still until asked to move. Press SPACE.
+        bool   running = false;
+
+        /// Frames still owed after the pointer stopped, so the trail settles
+        /// instead of freezing mid-flight. Counted DOWN, so the app returns
+        /// to idle on its own rather than animating forever.
+        int    settle_frames = 0;
 
         /// Rolling stats, copied out of the runtime each frame so the view
         /// can render them like any other model data.
@@ -64,10 +75,15 @@ struct Reactive {
 
             if constexpr (std::is_same_v<T, Moved>) {
                 m.cursor = e.p;
+                // Pointer motion earns a short burst of frames so the trail
+                // can catch up, then the app goes quiet again. Without a
+                // BUDGET this would animate forever after the first move.
+                m.settle_frames = 45;
                 return {std::move(m), Cmd<Msg>::none()};
             }
             else if constexpr (std::is_same_v<T, Tick>) {
                 m.t += e.dt;
+                if (m.settle_frames > 0) --m.settle_frames;
                 // The measurements the runtime just took are available on the
                 // NEXT frame; a one-frame-old number is fine for a readout
                 // and keeps the model a pure function of its messages.
@@ -241,7 +257,10 @@ struct Reactive {
             Sub<Msg>::on_close(Quit{}),
             // Frames are requested only while running — pause it and the app
             // drops to 0% CPU with no explicit stop.
-            when(m.running,
+            // Frames are requested while the spectrum is running OR the
+            // trail is still catching up — and NOT otherwise, so an
+            // untouched window sits at 0% CPU instead of looking hung.
+            when(m.running || m.settle_frames > 0,
                  Sub<Msg>::every_frame([](FrameEvent f) { return Msg{Tick{f.delta}}; })));
     }
 
@@ -321,12 +340,42 @@ int main(int argc, char** argv) {
         ok(L.missed_frames() == 0,
            "no missed frames (" + std::to_string(L.missed_frames()) + ")");
 
-        // ── idles when paused ───────────────────────────────────────────
+        // ── idles unless something is moving ────────────────────────────
+        //
+        // The failure this guards: a demo that animates from launch pins a
+        // core forever and looks exactly like a hang. It should be still
+        // until asked to move.
+        ok(!rt.model().running, "the app starts still, not animating");
+
         rt.window().press_key(Key::space);
         rt.tick();
-        ok(!rt.model().running, "space pauses");
+        ok(rt.model().running, "space starts it");
+        ok(Reactive::subscribe(rt.model()).wants_frames(),
+           "and a running app requests frames");
+
+        rt.window().press_key(Key::space);
+        rt.tick();
+        ok(!rt.model().running, "space stops it again");
+
+        // Let any trail settle-budget expire.
+        rt.window().drive_frames(true);
+        for (int i = 0; i < 120; ++i) rt.tick();
+        rt.window().drive_frames(false);
+
         ok(!Reactive::subscribe(rt.model()).wants_frames(),
-           "and a paused app requests no frames at all");
+           "and a stopped app requests NO frames, so it idles at 0% CPU");
+
+        // Pointer motion earns a burst of frames, then quiet again.
+        rt.window().push(MouseMove{{300, 300}, {1, 1}, {}});
+        rt.tick();
+        ok(Reactive::subscribe(rt.model()).wants_frames(),
+           "moving the pointer wakes it so the trail can catch up");
+
+        rt.window().drive_frames(true);
+        for (int i = 0; i < 120; ++i) rt.tick();
+        rt.window().drive_frames(false);
+        ok(!Reactive::subscribe(rt.model()).wants_frames(),
+           "and it goes back to sleep on its own");
 
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
         if (fails > 0) std::exit(1);

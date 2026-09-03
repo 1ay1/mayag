@@ -869,6 +869,51 @@ void test_cursor() {
           "and a plain box inherits rather than overriding");
 }
 
+/// An app that never stops rendering is the commonest way a UI framework
+/// produces something users call "hung": the window responds, events flow,
+/// and a core is pinned. Harder to notice than a deadlock, because
+/// everything keeps working.
+void test_busy_loop_detection() {
+    section("busy loop");
+
+    BusyLoopDetector d;
+
+    // A steady 60 fps for several seconds is what a runaway app looks like.
+    for (int i = 0; i < 400; ++i) d.frame_presented(i / 60.0);
+    check(d.busy(), "sustained rendering is detected");
+    check(d.frame_rate() > 50.0 && d.frame_rate() < 70.0,
+          "and the rate is reported (" + std::to_string(static_cast<int>(d.frame_rate())) + ")");
+
+    // Going quiet clears it: an app that settles is behaving correctly.
+    d.idle();
+    check(!d.busy(), "going idle clears the warning");
+
+    // A brief animation must NOT trip it. Every app animates sometimes, and a
+    // detector that fires on normal motion gets ignored.
+    BusyLoopDetector b;
+    for (int i = 0; i < 30; ++i) b.frame_presented(i / 60.0);
+    check(!b.busy(), "a short burst of animation is not flagged");
+
+    // And the real thing: an app whose animation ends must return to idle.
+    run_headless<TestApp>(kCfg, [](auto& rt) {
+        rt.window().press_key(Key::space);      // starts TestApp's animation
+        rt.tick();
+        check(TestApp::subscribe(rt.model()).wants_frames(), "animation requests frames");
+
+        rt.window().drive_frames(true);
+        for (int i = 0; i < 200 && rt.model().animating; ++i) rt.tick();
+        rt.window().drive_frames(false);
+
+        check(!TestApp::subscribe(rt.model()).wants_frames(),
+              "and stops requesting them once it settles");
+
+        const auto settled = rt.window().frames_presented();
+        for (int i = 0; i < 30; ++i) rt.tick();
+        check(rt.window().frames_presented() == settled,
+              "so the app presents nothing while idle");
+    });
+}
+
 void test_render_economy() {
     section("render economy");
 
@@ -909,6 +954,7 @@ int main() {
     test_ime_composition();
     test_history();
     test_cursor();
+    test_busy_loop_detection();
     test_render_economy();
 
     std::printf("\n%s  %d checks, %d failures\n",

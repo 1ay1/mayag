@@ -450,6 +450,35 @@ steadily taking 8 ms — the hitch is what a user notices.
 
 `examples/reactive.cpp` draws all of this while you interact with it.
 
+### Apps must idle
+
+The commonest way a UI framework produces something users call **"hung"** is
+not a deadlock — it is an app that renders continuously and pins a core. The
+window responds and events flow, so it is much harder to notice than a
+deadlock, and mayag's own reactive demo shipped exactly that bug.
+
+So the runtime detects it and says something actionable:
+
+```
+mayag: rendering continuously at 60 fps for several seconds.
+       If this is not a game or a visualiser, something is requesting
+       frames that should not be:
+         * a Sub::every_frame whose condition is always true
+         * an Animated<T> that never settles
+         * a view that marks itself dirty every frame
+       An idle mayag app should sit at 0% CPU.
+```
+
+Measured on every shipped example, after startup settles:
+
+| | idle CPU |
+|--|--|
+| todo, gallery, dashboard, typography, counter, **reactive** | **0.0%** |
+
+An animation earns a *budget* of frames rather than an open-ended
+subscription — the reactive demo's cursor trail wakes for 45 frames and then
+lets the app fall asleep again on its own.
+
 ## Accessibility
 
 A UI that exists only as pixels is unusable with a screen reader and

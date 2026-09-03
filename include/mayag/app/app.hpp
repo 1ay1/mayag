@@ -916,7 +916,7 @@ class Runtime {
     void render() {
         // view -> layout -> paint -> present. Skipped entirely when nothing
         // changed, which is what keeps an idle window at zero GPU load.
-        if (!dirty_) return;
+        if (!dirty_) { busy_.idle(); return; }
         dirty_ = false;
 
         size_ = window_.size();
@@ -1031,6 +1031,27 @@ class Runtime {
 
         latency_.record(frame_);
         frame_ = FrameTiming{};
+
+        // Warn ONCE about an app that never stops rendering.
+        //
+        // A continuously-rendering app is not technically broken — the window
+        // responds, events flow — but it pins a core and users reasonably
+        // report it as "hung". It is far harder to notice than a deadlock,
+        // because everything keeps working, so it gets a detector rather than
+        // an assertion. mayag's own reactive demo shipped this way.
+        busy_.frame_presented(time_);
+        if (busy_.busy() && !busy_warned_) {
+            busy_warned_ = true;
+            std::fprintf(stderr,
+                "mayag: rendering continuously at %.0f fps for several seconds.\n"
+                "       If this is not a game or a visualiser, something is "
+                "requesting frames that should not be:\n"
+                "         * a Sub::every_frame whose condition is always true\n"
+                "         * an Animated<T> that never settles\n"
+                "         * a view that marks itself dirty every frame\n"
+                "       An idle mayag app should sit at 0%% CPU.\n",
+                busy_.frame_rate());
+        }
     }
 
     AppConfig    cfg_;
@@ -1055,6 +1076,8 @@ class Runtime {
     CursorShape                          current_cursor_ = CursorShape::arrow;
     FrameTiming                          frame_{};
     LatencyStats                         latency_{};
+    BusyLoopDetector                     busy_{};
+    bool                                 busy_warned_ = false;
     std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
     detail::Inbox<Msg>              inbox_;
