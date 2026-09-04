@@ -868,6 +868,36 @@ void test_italic() {
           "italic slants the glyph geometry");
 }
 
+/// Synthetic italic: a STATIC font (no slnt/ital axis) still slants via a
+/// raster-time shear, so `italic` works everywhere. The sheared glyph is wider
+/// but the same height, and caches in its own atlas bucket.
+void test_synthetic_italic() {
+    section("synthetic italic");
+
+    // Find a static (non-variable) face — the common desktop case.
+    std::shared_ptr<typo::Face> sf;
+    for (const auto& e : typo::system::Database::instance().entries()) {
+        auto f = typo::Face::from_file(e.path, e.face_index);
+        if (f && !f->is_variable() && f->has_glyph(U'H') && f->has_outlines()) { sf = f; break; }
+    }
+    if (!sf) { check(true, "no static outline font — skipping"); return; }
+    check(!sf->has_slant_axis(), "static face has no slant axis (needs synthesis)");
+
+    typo::FontStack stack;
+    stack.add(sf);
+    const std::uint16_t g = sf->glyph_for('H');
+    const typo::CachedGlyph* up = stack.glyph(0, g, 64.0f, 400.0f, {}, /*italic*/false);
+    if (up == nullptr) { check(false, "upright glyph rasterises"); return; }
+    const Vec2 up_size = up->size;   // copy before the next insert may realloc
+    const bool up_valid = up->valid;
+    const typo::CachedGlyph* it = stack.glyph(0, g, 64.0f, 400.0f, {}, /*italic*/true);
+    if (it == nullptr) { check(false, "italic glyph rasterises"); return; }
+
+    check(it->size.x > up_size.x, "synthetic italic widens the raster (shear)");
+    check(num::abs(it->size.y - up_size.y) <= 1.5f, "synthetic italic keeps the height");
+    check(up_valid && it->valid, "both upright and italic cache independently");
+}
+
 /// Justified text: every line but the last is stretched to the box edge by
 /// spreading slack across inter-word spaces. The bar: a wrapped justified
 /// paragraph paints glyphs reaching closer to the right edge than the same
@@ -1201,6 +1231,7 @@ int main() {
     test_variations();
     test_caret();
     test_italic();
+    test_synthetic_italic();
     test_justify();
     test_ligatures();
     test_color_glyphs();

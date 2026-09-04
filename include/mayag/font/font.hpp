@@ -273,6 +273,14 @@ class Face {
     /// The design axes (tag + min/def/max in user units); empty if static.
     [[nodiscard]] const std::vector<var::Axis>& axes() const noexcept { return axes_; }
 
+    /// True when this face can express italic through its OWN design space (a
+    /// slnt or ital axis). If false, `italic` must be synthesised by shearing.
+    [[nodiscard]] bool has_slant_axis() const noexcept {
+        for (const auto& a : axes_)
+            if (a.tag == var::tag_slnt || a.tag == var::tag_ital) return true;
+        return false;
+    }
+
     /// Current value of one axis in USER units, or NaN if the tag is unknown.
     [[nodiscard]] float variation(std::uint32_t tag) const noexcept {
         for (std::size_t i = 0; i < axes_.size(); ++i)
@@ -581,11 +589,25 @@ class FontStack : public Shaper {
             ? 0
             : static_cast<std::uint16_t>(num::clamp(num::round(size_px * 4.0f),
                                                     1.0f, 65000.0f));
+        // Synthesise italic by shearing when the font can't slant itself
+        // (static faces, or variable faces with no slnt/ital axis). Variable
+        // faces WITH a slant axis already did it for real in pin_variations,
+        // so we must not shear those on top.
+        const bool synth_italic = italic && !face.has_slant_axis();
+
         key.flags = use_sdf ? glyph_flags::sdf : glyph_flags::none;
+        if (synth_italic) key.flags |= glyph_flags::synthetic_italic;
 
         if (const CachedGlyph* hit = atlas_.find(key)) return hit;
 
-        const Outline o = face.outline(gid);
+        Outline o = face.outline(gid);
+        if (synth_italic) {
+            // Shear ~12deg: x' = x + shear * y (font units, y-up), pivoting on
+            // the baseline so ascenders lean right and descenders left — the
+            // classic faux-oblique every browser falls back to.
+            constexpr float shear = 0.2125f;   // tan(12deg)
+            o.transform(Affine{1.0f, 0.0f, shear, 1.0f, 0.0f, 0.0f});
+        }
         const float advance = face.advance(gid, size_px);
 
         // Colour glyph (emoji): the face has no outline, but a CBDT/sbix
