@@ -30,7 +30,17 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────
 option(MAYAG_BUILD_EXAMPLES "Build the examples"           ON)
 option(MAYAG_BUILD_TESTS    "Build the test suite"         ON)
-option(MAYAG_WITH_VULKAN    "Build the Vulkan backend"     OFF)
+# Vulkan is the default GPU backend everywhere except Apple (which uses Metal).
+# Like the Wayland backend it links NOTHING: libvulkan is dlopen'd at runtime
+# and the ABI is transcribed by hand, so there is no Vulkan SDK build
+# dependency and a binary built with it still runs where Vulkan is absent (it
+# falls back to the software rasteriser). ON by default so the GPU path is the
+# default on every platform.
+if(APPLE)
+    option(MAYAG_WITH_VULKAN "Build the Vulkan backend" OFF)
+else()
+    option(MAYAG_WITH_VULKAN "Build the Vulkan backend" ON)
+endif()
 
 # mayag is a GPU framework, so the GPU backend is ON wherever the platform
 # has one. The software rasteriser does not go away — it is the reference
@@ -63,6 +73,17 @@ else()
     option(MAYAG_WITH_COCOA "Build the macOS window backend" OFF)
 endif()
 
+# Wayland is the native Linux/BSD backend. It is ON by default because it
+# costs nothing to enable: the client library is resolved with dlopen() at
+# RUNTIME, so there is no build-time dependency, nothing to find_package, and
+# a binary built with it still runs on a machine with no Wayland at all (the
+# loader fails, open() returns nullopt, and the app falls back to headless).
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD")
+    option(MAYAG_WITH_WAYLAND "Build the Wayland window backend" ON)
+else()
+    option(MAYAG_WITH_WAYLAND "Build the Wayland window backend" OFF)
+endif()
+
 # `-march=native` bakes the BUILD host's microarchitecture into the binary and
 # SIGILLs on any older chip. Fine for local dev, never for a shipped artifact,
 # so it is opt-in rather than a Release default.
@@ -85,7 +106,7 @@ target_compile_features(mayag INTERFACE
     $<IF:$<CXX_COMPILER_ID:MSVC>,cxx_std_23,cxx_std_26>)
 
 # ── backend feature macros ───────────────────────────────────────────────
-foreach(backend VULKAN METAL D3D12 WEBGPU OPENGL COCOA)
+foreach(backend VULKAN METAL D3D12 WEBGPU OPENGL COCOA WAYLAND)
     if(MAYAG_WITH_${backend})
         target_compile_definitions(mayag INTERFACE MAYAG_WITH_${backend})
     endif()
@@ -103,6 +124,19 @@ if(MAYAG_WITH_COCOA)
     find_library(COCOA_LIB Cocoa REQUIRED)
     find_library(COREGRAPHICS_LIB CoreGraphics REQUIRED)
     target_link_libraries(mayag INTERFACE ${COCOA_LIB} ${COREGRAPHICS_LIB} objc)
+endif()
+
+# The Wayland backend links libdl and libpthread only — NOT libwayland-client.
+# Every Wayland symbol is resolved through dlopen/dlsym at startup, so mayag
+# keeps its "depends on nothing" property: no wayland-scanner, no generated
+# protocol sources, no version skew between the headers on the build machine
+# and the .so on the user's.
+if(MAYAG_WITH_WAYLAND)
+    if(NOT CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD")
+        message(FATAL_ERROR "mayag: MAYAG_WITH_WAYLAND requires Linux or FreeBSD.")
+    endif()
+    find_package(Threads REQUIRED)
+    target_link_libraries(mayag INTERFACE ${CMAKE_DL_LIBS} Threads::Threads)
 endif()
 
 # ── warnings ─────────────────────────────────────────────────────────────
@@ -139,9 +173,39 @@ if(MAYAG_WITH_METAL)
     target_link_libraries(mayag INTERFACE ${METAL_LIB} ${QUARTZCORE_LIB} ${FOUNDATION_LIB})
 endif()
 
+# The Vulkan backend links libdl only — NOT libvulkan. Every Vulkan symbol is
+# resolved through dlopen/dlsym at startup and the ABI is redeclared by hand,
+# so there is no Vulkan SDK build dependency, no header/loader version skew,
+# and a Vulkan-enabled binary still runs on a box with no Vulkan (it falls
+# back to software). The one shader is compiled to SPIR-V at configure time
+# when glslc is available; the result is checked in, so a build with no shader
+# compiler still has a working GPU path.
 if(MAYAG_WITH_VULKAN)
-    find_package(Vulkan REQUIRED)
-    target_link_libraries(mayag INTERFACE Vulkan::Vulkan)
+    if(APPLE)
+        message(FATAL_ERROR "mayag: use MAYAG_WITH_METAL on Apple, not Vulkan.")
+    endif()
+    find_package(Threads REQUIRED)
+    target_link_libraries(mayag INTERFACE ${CMAKE_DL_LIBS} Threads::Threads)
+
+    find_program(MAYAG_GLSLC NAMES glslc glslcValidator)
+    if(MAYAG_GLSLC)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            message(STATUS "mayag: regenerating SPIR-V with ${MAYAG_GLSLC}")
+            execute_process(
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
+                        ${MAYAG_GLSLC}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/include/mayag/render/spirv_generated.hpp
+                RESULT_VARIABLE MAYAG_SPIRV_RC
+                OUTPUT_VARIABLE MAYAG_SPIRV_OUT)
+            if(MAYAG_SPIRV_RC EQUAL 0)
+                message(STATUS "mayag: ${MAYAG_SPIRV_OUT}")
+            else()
+                message(WARNING "mayag: SPIR-V regeneration failed; using checked-in header")
+            endif()
+        endif()
+    endif()
 endif()
 
 if(MAYAG_WITH_D3D12)
@@ -207,6 +271,15 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_font_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_font_tests COMMAND mayag_font_tests)
 
+    # Font discovery + the synthesized last-resort face. The last-resort checks
+    # need no files and run everywhere; the discovery checks assert invariants
+    # ("if a face covers a script, covering() finds it") rather than the
+    # presence of any particular font, so they hold on a minimal CI image too.
+    add_executable(mayag_discovery_tests tests/test_discovery.cpp)
+    target_link_libraries(mayag_discovery_tests PRIVATE mayag)
+    target_compile_options(mayag_discovery_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_discovery_tests COMMAND mayag_discovery_tests)
+
     # The GPU backend, checked against the software rasteriser pixel by pixel.
     # A timing benchmark cannot distinguish a fast backend from one that draws
     # nothing; this can, so the performance claim stays falsifiable. Skips
@@ -216,6 +289,29 @@ if(MAYAG_BUILD_TESTS)
         target_link_libraries(mayag_metal_tests PRIVATE mayag)
         target_compile_options(mayag_metal_tests PRIVATE ${MAYAG_WARNINGS})
         add_test(NAME mayag_metal_tests COMMAND mayag_metal_tests)
+    endif()
+
+    # The Vulkan backend, checked against the software rasteriser exactly like
+    # Metal. Skips itself when no Vulkan device (nor llvmpipe) is present, so a
+    # GPU-less CI runner stays green while a machine with a GPU verifies the
+    # cross-platform default renderer for real.
+    if(MAYAG_WITH_VULKAN)
+        add_executable(mayag_vulkan_tests tests/test_vulkan.cpp)
+        target_link_libraries(mayag_vulkan_tests PRIVATE mayag)
+        target_compile_options(mayag_vulkan_tests PRIVATE ${MAYAG_WARNINGS})
+        add_test(NAME mayag_vulkan_tests COMMAND mayag_vulkan_tests)
+    endif()
+
+    # The Linux backend. The protocol tables, the evdev keymap and the damage
+    # arithmetic are pure logic and run everywhere — they are where the real
+    # bugs were, since a wrong signature or a shifted argument is invisible
+    # until it corrupts the wire. The live-window half skips itself cleanly
+    # when there is no compositor, so CI stays green on a headless runner.
+    if(MAYAG_WITH_WAYLAND)
+        add_executable(mayag_wayland_tests tests/test_wayland.cpp)
+        target_link_libraries(mayag_wayland_tests PRIVATE mayag)
+        target_compile_options(mayag_wayland_tests PRIVATE ${MAYAG_WARNINGS})
+        add_test(NAME mayag_wayland_tests COMMAND mayag_wayland_tests)
     endif()
 
     # Every example doubles as an end-to-end test. `--headless` drives the
@@ -294,6 +390,9 @@ endforeach()
 set(MAYAG_WINDOWING "headless")
 if(MAYAG_WITH_COCOA)
     set(MAYAG_WINDOWING "cocoa + headless")
+endif()
+if(MAYAG_WITH_WAYLAND)
+    set(MAYAG_WINDOWING "wayland + headless")
 endif()
 
 message(STATUS "")

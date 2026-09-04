@@ -75,6 +75,65 @@ jobs:
           name: renders-${{ matrix.name }}
           path: "*.png"
 
+  # ── the Linux backend, against a REAL compositor ─────────────────────
+  #
+  # The protocol tables are the risky part of the Wayland backend: libwayland
+  # does not export xdg-shell, so mayag transcribes those interface
+  # descriptors by hand, and a wrong signature or opcode is not a compile
+  # error — it is a wire desync that only shows up against a live server.
+  # The other jobs run the pure-logic half of the test; this one runs a
+  # headless compositor (weston, offscreen) so the live half executes too,
+  # exercising the real handshake: bind, configure, attach, damage, commit.
+  wayland:
+    name: linux-wayland
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compositor and toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14 ninja-build weston \
+            libwayland-client0 libxkbcommon0 \
+            glslc mesa-vulkan-drivers libvulkan1 vulkan-tools
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=g++-14
+      - name: Build
+        run: cmake --build build -j --target mayag_wayland_tests mayag_vulkan_tests mayag_counter
+
+      # No compositor: the backend must degrade, not crash. This is the
+      # property that lets the same binary ship to every Linux box.
+      - name: Degrades without a compositor
+        run: |
+          env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET ./build/mayag_wayland_tests
+          env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET ./build/examples/mayag_counter --headless
+
+      # The GPU-vs-software equivalence test, against Mesa's software Vulkan
+      # device (lavapipe). Proves the Vulkan backend produces the reference
+      # image — the default renderer must be correct, not just present.
+      - name: Vulkan matches software (lavapipe)
+        run: |
+          # lavapipe registers its own ICD in the default search path; forcing a
+          # filename is fragile across Mesa versions, so rely on discovery.
+          export VK_LOADER_DRIVERS_SELECT="*lvp*"
+          ./build/mayag_vulkan_tests
+
+      # With a compositor: the live half of the suite runs for real, and the
+      # window brings up a real Vulkan swapchain on lavapipe.
+      - name: Test against weston
+        run: |
+          export XDG_RUNTIME_DIR=/tmp/wl-run
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          weston --backend=headless --socket=wayland-ci --idle-time=0 &
+          for i in $(seq 1 50); do
+            [ -S "$XDG_RUNTIME_DIR/wayland-ci" ] && break
+            sleep 0.2
+          done
+          export WAYLAND_DISPLAY=wayland-ci
+          # lavapipe registers its own ICD in the default search path; forcing a
+          # filename is fragile across Mesa versions, so rely on discovery.
+          export VK_LOADER_DRIVERS_SELECT="*lvp*"
+          ./build/mayag_wayland_tests
+
   # ── determinism across platforms ─────────────────────────────────────
   #
   # The software rasteriser is the reference every GPU backend is measured

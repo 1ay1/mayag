@@ -17,10 +17,10 @@
 
 - **Invalid UI does not compile.** `box() | border_color(red)` is a compile error that says *"it requires a border (add `| border(width, color)` first)"* — not a silent no-op you find three days later.
 - **Colour spaces are types.** `Color<Srgb>` and `Color<Linear>` are different types. Alpha blending is only *defined* on `Linear`. You cannot gamma-blend by accident because there is no overload for it.
-- **A real font engine, from scratch.** TrueType and CFF parsing, composite glyphs, kerning from `kern` and `GPOS`, per-codepoint script fallback, analytic-coverage rasterisation, and a Euclidean-SDF atlas. No FreeType, no HarfBuzz, no stb.
+- **A real font engine, from scratch.** TrueType and CFF parsing, colour/bitmap faces (CBDT/sbix/COLR), composite glyphs, kerning from `kern` and `GPOS`, per-codepoint script fallback across 30+ scripts, analytic-coverage rasterisation, and a Euclidean-SDF atlas. No FreeType, no HarfBuzz, no stb, no fontconfig.
 - **One shape kernel.** Buttons, cards, dividers, circles, rings, arcs, capsules, shadows, glyphs — every one is a signed distance field on the same instanced quad. A whole app frame is **1–3 draw calls**, text included.
 - **Analytic antialiasing.** No MSAA, no supersampling. The SDF has unit gradient, so coverage is exact at any zoom on any backend.
-- **Runs everywhere, immediately.** A pure-CPU reference rasteriser and a built-in vector font ship in the box. No GPU, no font file, no dependencies — `git clone && cmake --build` renders a PNG.
+- **Runs everywhere, immediately.** A pure-CPU reference rasteriser ships in the box, font discovery finds the platform's typefaces with no configuration, and a synthesized last-resort face keeps text legible even on a machine with no fonts at all. `git clone && cmake --build` renders a PNG.
 - **Header-only.** `#include <mayag/mayag.hpp>`. No library to link, no ABI to match.
 
 ## Quickstart
@@ -193,24 +193,56 @@ derived from the subscriptions, not from a flag someone forgot to clear.
 
 ## Typography
 
-mayag parses fonts itself. Not a wrapper — the OpenType tables, the glyph outlines, the kerning, and the rasteriser are all in `include/mayag/font/`.
+mayag parses fonts itself. Not a wrapper — the OpenType tables, the glyph outlines, the kerning, the discovery, and the rasteriser are all in `include/mayag/font/`.
 
 ```cpp
-// Finds the platform UI font, a CJK face, and an emoji face, and chains them.
+// Discovers the platform UI font and chains a covering face for EVERY script
+// the machine has a font for — plus colour emoji — so nothing renders as tofu.
 auto fonts = typo::system::default_stack();
 
-RenderOptions opts{.fonts = fonts.get()};
+RenderOptions opts{.fonts = fonts};
 render_to_png(page, {900, 880}, "specimen.png", opts);
 ```
 
 | Layer | What it does |
 |-------|--------------|
-| `opentype.hpp` | sfnt + TTC, `cmap` 0/4/6/12, `head`/`hhea`/`maxp`/`hmtx`/`name`/`OS/2` |
+| `opentype.hpp` | sfnt + TTC, `cmap` 0/4/6/12, `head`/`hhea`/`maxp`/`hmtx`/`name`/`OS/2`, colour/bitmap tables |
 | `outline.hpp` | `glyf` incl. composites, CFF/Type-2 charstrings, CID-keyed fonts |
 | `raster.hpp` | analytic-coverage scanline fill, 8SSEDT Euclidean SDF |
 | `atlas.hpp` | skyline packing, LRU eviction, dirty-rect upload |
 | `shape.hpp` | UTF-8, clusters, `kern` + `GPOS` pair kerning, UAX-14 break rules |
-| `system.hpp` | font discovery + per-codepoint fallback chains |
+| `system.hpp` | font discovery + a complete per-script fallback chain |
+| `last_resort.hpp` | a TrueType face synthesized in memory — the always-available floor |
+
+### Discovery is state of the art, and needs no built-in font
+
+mayag used to ship a second, hardcoded stroke font as the "always works"
+fallback. It has been **deleted**. Discovery is now good enough that it is never
+needed — and on the pathological font-less machine, a *real* TrueType face is
+synthesized in memory and fed through the same engine, so there is exactly one
+text path instead of two.
+
+Three things make discovery never fall to tofu:
+
+- **Colour and bitmap faces load.** An emoji font (`NotoColorEmoji`, Apple
+  Color Emoji) has no `glyf`/`CFF ` table at all — only `CBDT`/`sbix`/`COLR`
+  strikes — and the parser used to reject it outright, so emoji was tofu even
+  though the font was installed. It now parses, and its cmap defines real
+  coverage.
+- **Coverage is a full script bitset, not five booleans.** Every face is
+  probed against a representative codepoint for **30+ scripts** — Devanagari,
+  Hebrew, Thai, Hangul, Greek, Armenian, Ethiopic and the rest — at scan time.
+  The old model knew only Latin/Cyrillic/Arabic/CJK/emoji, so everything else
+  fell straight through.
+- **The default stack covers everything installed.** `default_stack()` walks
+  every script and adds the best covering face — the most *specialised* one at
+  a regular weight, so a dedicated Devanagari face beats a 44k-glyph
+  pan-Unicode fallback that merely includes it. If a codepoint has any font on
+  the machine, it is in the chain.
+
+Measured on a desktop with 816 faces: `default_stack()` assembles a **32-face
+chain** and resolves Latin, CJK, Cyrillic, Arabic, Devanagari, Hebrew, Thai,
+Korean and emoji with **zero tofu**.
 
 **Kerning is real.** Measured on Arial at 32 px:
 
@@ -687,14 +719,15 @@ text came out **completely blank** while every shape was pixel-perfect. Had
 GPU-by-default shipped before that check existed, every example would have
 rendered with invisible text.
 
-### GPU by default
+### GPU by default, on every platform
 
-`MAYAG_WITH_METAL` is **ON** wherever the platform has a GPU. Running any
-example now prints which path it took:
+The GPU backend is **ON everywhere the platform has one** — Metal on Apple,
+Vulkan on Linux, BSD and Windows — and it is what apps get with no
+configuration. Running any example prints which path it took:
 
 ```
 $ ./build/examples/mayag_todo
-mayag: renderer metal
+mayag: renderer vulkan (wayland)
 ```
 
 The software rasteriser has not gone anywhere — it is the reference every GPU
@@ -704,13 +737,31 @@ because it sounds safer would be the wrong trade for a framework whose entire
 design (one SDF kernel, one instance struct, one draw call per batch) exists
 to feed a GPU.
 
+The Vulkan backend is built the same way as the Wayland one, for the same
+reason: **it links nothing.** `libvulkan.so.1` / `vulkan-1.dll` is `dlopen`'d
+at startup and the slice of the Vulkan ABI mayag uses is transcribed by hand,
+so there is no Vulkan SDK build dependency and no header/loader version skew.
+The one shader is compiled to SPIR-V at configure time when `glslc` is present
+and the result is checked in, so a build with no shader compiler still has a
+working GPU path — there is no runtime GLSL and no `shaderc` dependency. A
+Vulkan-enabled binary still runs on a box with no Vulkan; the loader fails and
+it falls back to software.
+
 Selection is a runtime fallthrough, and every step of it degrades rather than
 fails: no backend in the build, no device in the machine, or a shader that
-will not compile all end up on software. `MAYAG_BACKEND=metal|software`
-forces a path, which is also what makes the A/B benchmark possible. A failed
-GPU init restores the original `CALayer`, because a half-attached
-`CAMetalLayer` that nothing renders into is a black window that looks like a
+will not compile all end up on software. `MAYAG_BACKEND=vulkan|metal|software`
+forces a path, which is also what makes the A/B benchmark possible. On Linux a
+failed GPU init leaves the shm surfaces already prepared, so the window simply
+presents on the CPU instead of showing a black rectangle that looks like a
 hang — a worse outcome than being slow.
+
+The GPU output is not taken on faith. `mayag_vulkan_tests` renders the same
+scenes through Vulkan and through the software rasteriser and asserts they
+agree: a solid fill differs by a mean of **0.08/255**, gradients by 0.12, and
+full shape scenes by 0.44 with disagreement confined to the ~1% of pixels on
+antialiased edges. Two GPU renders of one scene are bit-identical. The test
+skips itself where no device exists, so it is meaningful on a GPU box and
+silent on a headless runner.
 
 That fallthrough is exactly why the renderer is announced at boot: the app
 still works when it silently drops to software, just two orders of magnitude
@@ -761,15 +812,67 @@ Three things beyond "rasterise the outline", each of which is visible:
 
 ## Cross platform
 
-| Platform | Backend |
-|----------|---------|
-| macOS, iOS | Metal |
-| Linux, Android | Vulkan |
-| Windows | D3D12 / Vulkan |
-| Web | WebGPU |
-| anything with a compiler | **software** (always) |
+| Platform | Renderer | Windowing |
+|----------|----------|-----------|
+| macOS, iOS | **Metal** | Cocoa |
+| **Linux, BSD** | **Vulkan** (→ software) | Wayland |
+| Windows | **Vulkan** / D3D12 | Win32 |
+| Web | WebGPU | canvas |
+| anything with a compiler | **software** (always) | headless |
 
-Selection is `MAYAG_BACKEND` env var → platform native → portable → software. A backend that fails to initialise falls through to the next, so a missing driver costs you frames, not a crash. The backend interface is four methods — `resize`, `submit`, `upload_texture`, `read_pixels` — and never sees a widget, a style, or a colour space.
+Selection is `MAYAG_BACKEND` env var → platform native GPU → software. A backend that fails to initialise falls through to the next, so a missing driver costs you frames, not a crash. The backend interface is four things — bring up a device, own a swapchain, upload the instance buffer, issue N instanced draws — and never sees a widget, a style, or a colour space.
+
+### Linux, in detail
+
+The Linux backend is Wayland, and it **links nothing**. `libwayland-client.so.0`
+is resolved with `dlopen` at startup, and the `xdg-shell` interface tables —
+which libwayland does not export, and which every other client generates with
+`wayland-scanner` — are transcribed by hand in `platform/wayland_protocol.hpp`.
+So there is no `find_package`, no `pkg-config`, no code generator, no generated
+sources in your build tree, and no version skew between the `.xml` on the build
+machine and the `.so` on the user's. One binary spans libwayland 1.19 → 1.26,
+and a binary built *with* Wayland still runs on a machine that has none — the
+loader fails, `open()` returns `nullopt`, and the runtime falls back to headless
+instead of dying at process start with a missing shared object.
+
+What makes it fast is that a CPU renderer and Wayland's buffer model fit
+together exactly: the client allocates shared memory and the compositor maps
+**the same pages**, so presenting is a pointer handoff with no upload and no
+server-side copy. mayag renders into that memory directly.
+
+- **Zero-copy present.** The obvious implementation renders to a `Vec4`
+  framebuffer, encodes to an RGBA `vector`, `memcpy`s into the shm buffer, then
+  swizzles to BGRA — three full-frame passes and ~14 MB of allocation at 1440p.
+  mayag does none of it: the sRGB encode and the BGRA swizzle happen in **one
+  parallel pass writing final bytes to their final address**. Per-frame
+  allocation is zero.
+- **Damage-bounded encode.** The draw list already knows every rect it touched,
+  so only changed rows are encoded and only changed pixels are sent as
+  `damage_buffer`. Buffer-age tracking makes this safe with buffers in flight.
+  Measured: **2.06 ms → 1.35 ms** per present when a label changes rather than
+  the whole window.
+- **Triple buffering** with release tracking, so `present` never waits on the
+  compositor; a frame is dropped rather than torn, and drops are counted.
+- **Frame callbacks as the vsync source.** The compositor says when it wants the
+  next frame, so no frame is rendered that will be discarded and an occluded
+  window costs nothing.
+- **Idle means idle.** `Wait::block` is a real `poll()` on the Wayland fd, using
+  libwayland's `prepare_read`/`read_events` handshake to close the classic
+  check-then-block race. Measured **0.0% CPU** while idle.
+
+It also uses the modern protocols when the compositor offers them, and works
+without them when it doesn't: `xdg-decoration` for real server-side title bars,
+`fractional-scale` + `viewporter` to rasterise at exactly 1.25× or 1.5× instead
+of rounding and resampling, and `cursor-shape-v1` for themed cursors — which
+replaces the several hundred lines of `XCURSOR_THEME` parsing and cursor-surface
+management that clients usually carry.
+
+Keyboard input maps **evdev scancodes**, which are positional, so shortcuts land
+on the same physical keys on QWERTY, AZERTY, Dvorak and Colemak. Text is
+resolved through `libxkbcommon` when present (dead keys, AltGr, IME-adjacent
+layouts) and degrades to "keys work, exotic text doesn't" when it is absent.
+
+Built by default on Linux and BSD; `-DMAYAG_WITH_WAYLAND=OFF` opts out.
 
 ## Building
 
@@ -827,9 +930,10 @@ Layout depends on a narrow `TextMeasurer` interface, never a font backend — so
 - `layout/` — flexbox and the text-measurement seam
 - `render/` — SDF kernel, draw list, painter, shader source
 - `backend/` — backend registry and the software rasteriser
-- `font/` — the OpenType engine: parsing, outlines, raster, atlas, shaping
+- `font/` — the OpenType engine, discovery, and the synthesized last-resort face
 - `app/` — Program/Cmd/Sub, the runtime, interaction, the platform seam
-- `text/`, `image/` — built-in stroke font, dependency-free PNG encoder
+- `platform/` — the concrete windows: Wayland (Linux/BSD), Cocoa (macOS), headless
+- `image/` — dependency-free PNG encoder
 
 ## License
 
