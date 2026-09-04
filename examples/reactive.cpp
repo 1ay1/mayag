@@ -70,24 +70,19 @@ struct Reactive {
     // ── update ──────────────────────────────────────────────────────────
 
     static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        return std::visit([&](auto&& e) -> std::pair<Model, Cmd<Msg>> {
-            using T = std::decay_t<decltype(e)>;
-
-            if constexpr (std::is_same_v<T, Moved>) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](const Moved& e) -> R {
                 m.cursor = e.p;
                 // Pointer motion earns a short burst of frames so the trail
                 // can catch up, then the app goes quiet again. Without a
                 // BUDGET this would animate forever after the first move.
                 m.settle_frames = 45;
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Tick>) {
+            },
+            [&](const Tick& e) -> R {
                 m.t += e.dt;
                 if (m.settle_frames > 0) --m.settle_frames;
-                // The measurements the runtime just took are available on the
-                // NEXT frame; a one-frame-old number is fine for a readout
-                // and keeps the model a pure function of its messages.
-
 
                 // The trail: each point chases the one ahead of it. A stiff
                 // follow means the tail is only a few frames behind, which is
@@ -111,20 +106,14 @@ struct Reactive {
                         (num::sin(phase) * 0.5f + 0.5f) * env;
                 }
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Toggle>) {
-                m.running = !m.running;
-                return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Stats>) {
+            },
+            [&](Toggle) -> R { m.running = !m.running; return {std::move(m), Cmd<Msg>::none()}; },
+            [&](const Stats& e) -> R {
                 m.cpu_ms = e.cpu; m.worst_ms = e.worst;
                 m.coalesced = e.coalesced; m.missed = e.missed;
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else {
-                return {std::move(m), Cmd<Msg>::quit()};
-            }
-        }, msg);
+            },
+            [&](Quit) -> R { return {std::move(m), Cmd<Msg>::quit()}; });
     }
 
     // ── view ────────────────────────────────────────────────────────────
@@ -156,7 +145,7 @@ struct Reactive {
                                   | bg(mix_perceptual(t.accent, t.danger, f)
                                         .fade(0.85f * (1.0f - f)))
                                   | radius(r)).build(),
-                .id = node_id("trail-" + std::to_string(i)),
+                .id = node_id("trail", static_cast<std::size_t>(i)),
                 .anchor_id = 0,
                 .placement = Placement::cursor,
                 .dismiss = Dismiss::never,

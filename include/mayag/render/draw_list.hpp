@@ -314,13 +314,20 @@ class DrawList {
     /// as if it were a distance field snaps every partial pixel to 0 or 1 —
     /// which throws away the antialiasing and makes small text look eroded
     /// and ragged. That was a real bug.
-    void glyph(const Rect& dst, const Rect& atlas_uv, Color<Srgb> c, bool sdf = false) {
+    void glyph(const Rect& dst, const Rect& atlas_uv, Color<Srgb> c, bool sdf = false,
+               float sdf_edge = 0.0f) {
         Instance i{};
         i.kind  = static_cast<std::uint32_t>(ShapeKind::glyph);
         i.rect  = {dst.origin.x, dst.origin.y, dst.size.x, dst.size.y};
         i.uv    = {atlas_uv.left(), atlas_uv.top(), atlas_uv.right(), atlas_uv.bottom()};
         i.color = premultiplied(c);
         i.texture_slot = atlas_slot;
+        // params.x carries the SDF antialiasing half-band in normalised field
+        // units. 0 => the renderer falls back to its constant default. The
+        // caller sets it so the band tracks ~1 display pixel no matter how far
+        // the glyph is scaled from its raster size (otherwise magnified SDF
+        // text blurs and shrunk text aliases).
+        i.params = {sdf_edge, 0.0f, 0.0f, 0.0f};
         if (sdf) i.flags |= instance_flags::glyph_sdf;
         // Texture 0 for batching purposes: the atlas is already bound.
         push(i, 0);

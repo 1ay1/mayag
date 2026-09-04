@@ -432,10 +432,14 @@ class Software {
 
                 // A bitmap entry IS coverage; a distance-field entry has to be
                 // thresholded. Which one this is travels per instance, because
-                // hybrid mode mixes both within a single frame.
+                // hybrid mode mixes both within a single frame. params.x is
+                // the scale-correct half-band the emitter computed for THIS
+                // glyph (so magnified text stays crisp); fall back to the
+                // constant when it wasn't set.
+                const float band = inst.params.x > 0.0f ? inst.params.x : sdf_edge;
                 const float cov = (inst.flags & instance_flags::glyph_sdf) == 0
                     ? raw
-                    : num::smoothstep(0.5f - sdf_edge, 0.5f + sdf_edge, raw);
+                    : num::smoothstep(0.5f - band, 0.5f + band, raw);
 
                 // ── stem darkening ──────────────────────────────────────
                 //

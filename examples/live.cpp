@@ -86,10 +86,9 @@ struct Live {
     }
 
     static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        return std::visit([&](auto&& e) -> std::pair<Model, Cmd<Msg>> {
-            using T = std::decay_t<decltype(e)>;
-
-            if constexpr (std::is_same_v<T, Sample>) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](const Sample& e) -> R {
                 m.current = num::clamp(e.load, 0.0f, 1.0f);
                 m.history[m.head] = m.current;
                 m.head = (m.head + 1) % kHistory;
@@ -97,11 +96,8 @@ struct Live {
                 m.peak = num::max(m.peak, m.current);
                 ++m.samples;
                 return {m, Cmd<Msg>::none()};
-            }
-            else {
-                return {m, Cmd<Msg>::quit()};
-            }
-        }, msg);
+            },
+            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
     }
 
     static Node view(const Model& m, const Ctx& c) {

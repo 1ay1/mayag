@@ -40,6 +40,13 @@ struct Gallery {
     using Msg = std::variant<PickTheme, ToggleAnimation, Tick, Bump,
                              FlipA, FlipB, DragSlider, Quit>;
 
+    // Fixed clickables: id + message declared once, reused in view and
+    // subscribe so they can't drift.
+    static inline const auto bump   = action(node_id("bump"),     Msg{Bump{}});
+    static inline const auto flip_a = action(node_id("toggle-a"), Msg{FlipA{}});
+    static inline const auto flip_b = action(node_id("toggle-b"), Msg{FlipB{}});
+    static inline const auto anim   = action(node_id("anim"),     Msg{ToggleAnimation{}});
+
     static constexpr std::array<Theme, 6> palette{
         themes::midnight, themes::ember, themes::forest,
         themes::orchid,   themes::daylight, themes::paper,
@@ -55,30 +62,22 @@ struct Gallery {
     // ── update ──────────────────────────────────────────────────────────
 
     static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        return std::visit([&](auto&& e) -> std::pair<Model, Cmd<Msg>> {
-            using T = std::decay_t<decltype(e)>;
-
-            if constexpr (std::is_same_v<T, PickTheme>) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](const PickTheme& e) -> R {
                 m.theme_index = num::clamp(e.index, 0, static_cast<int>(palette.size()) - 1);
                 return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, ToggleAnimation>) {
-                m.animating = !m.animating;
-                return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Tick>) {
-                m.t += e.dt;
-                return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Bump>)  { m.clicks++;            return {m, Cmd<Msg>::none()}; }
-            else if constexpr (std::is_same_v<T, FlipA>) { m.toggle_a = !m.toggle_a; return {m, Cmd<Msg>::none()}; }
-            else if constexpr (std::is_same_v<T, FlipB>) { m.toggle_b = !m.toggle_b; return {m, Cmd<Msg>::none()}; }
-            else if constexpr (std::is_same_v<T, DragSlider>) {
+            },
+            [&](ToggleAnimation) -> R { m.animating = !m.animating; return {m, Cmd<Msg>::none()}; },
+            [&](const Tick& e) -> R { m.t += e.dt; return {m, Cmd<Msg>::none()}; },
+            [&](Bump) -> R  { m.clicks++;            return {m, Cmd<Msg>::none()}; },
+            [&](FlipA) -> R { m.toggle_a = !m.toggle_a; return {m, Cmd<Msg>::none()}; },
+            [&](FlipB) -> R { m.toggle_b = !m.toggle_b; return {m, Cmd<Msg>::none()}; },
+            [&](const DragSlider& e) -> R {
                 m.slider = num::saturate(e.x / 260.0f);
                 return {m, Cmd<Msg>::none()};
-            }
-            else { return {m, Cmd<Msg>::quit()}; }
-        }, msg);
+            },
+            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
     }
 
     // ── view ────────────────────────────────────────────────────────────
@@ -174,7 +173,7 @@ struct Gallery {
                  box() | size(104, 44)
                        | bg(m.animating ? t.success.fade(0.18f) : t.surface_raised)
                        | border(1, m.animating ? t.success : t.border)
-                       | radius(8) | margin(14, 0) | dsl::id<"anim">)
+                       | radius(8) | margin(14, 0) | anim.on)
         ) | gap(6);
 
         // ── interactive controls ────────────────────────────────────────
@@ -187,10 +186,10 @@ struct Gallery {
             h(text_owned("clicked " + std::to_string(m.clicks)) | font(13) | semibold
                 | fg(t.on_accent))
               | center | pad(11, 20) | bg(hot(node_id("bump"), t.accent))
-              | radius(t.radius_small) | elevation(3) | dsl::id<"bump">,
+              | radius(t.radius_small) | elevation(3) | bump.on,
 
-            toggle(t, m.toggle_a) | dsl::id<"toggle-a">,
-            toggle(t, m.toggle_b) | dsl::id<"toggle-b">,
+            toggle(t, m.toggle_a) | flip_a.on,
+            toggle(t, m.toggle_b) | flip_b.on,
 
             // Drag the track: `on_drag` reports node-local coordinates.
             z(box() | size(260.0f * m.slider, 10) | bg(t.accent) | radius(5) | absolute(0, 0))
@@ -204,7 +203,7 @@ struct Gallery {
         std::vector<Node> chips;
         for (std::size_t i = 0; i < palette.size(); ++i) {
             const bool active = (static_cast<int>(i) == m.theme_index);
-            const auto nid = node_id(std::string{"theme-"} + std::to_string(i));
+            const auto nid = node_id("theme", static_cast<std::size_t>(i));
             chips.push_back(
                 (h(box() | size(12, 12) | bg(palette[i].accent) | radius(6),
                    text_of(palette_names[i]) | font(11)
@@ -215,11 +214,11 @@ struct Gallery {
                      : c.hovered(nid) ? t.surface : t.surface.fade(0.0f))
                  | border(1, active ? t.accent : t.border)
                  | radius(t.radius_small)
-                 | id_of(std::string{"theme-"} + std::to_string(i))).build());
+                 | id_of_raw(nid)).build());
         }
 
         // A runtime-sized list lifted into the compile-time DSL.
-        auto chip_row = list(Axis::horizontal, std::move(chips), 8.0f);
+        auto chip_row = h_list(std::move(chips), 8.0f);
 
         auto section = [&](auto title_, auto content) {
             return v(title_ | font(10) | semibold | fg(t.text_secondary) | tracking(2.0f),
@@ -251,10 +250,10 @@ struct Gallery {
 
     static Sub<Msg> subscribe(const Model& m) {
         std::vector<Sub<Msg>> subs{
-            Sub<Msg>::on_click<"bump">(Bump{}),
-            Sub<Msg>::on_click<"toggle-a">(FlipA{}),
-            Sub<Msg>::on_click<"toggle-b">(FlipB{}),
-            Sub<Msg>::on_click<"anim">(ToggleAnimation{}),
+            bump.click(),
+            flip_a.click(),
+            flip_b.click(),
+            anim.click(),
             Sub<Msg>::on_drag<"slider">([](Vec2 local) { return Msg{DragSlider{local.x}}; }),
             Sub<Msg>::on_key(Key::space, ToggleAnimation{}),
             Sub<Msg>::on_key(Key::escape, Quit{}),
@@ -266,7 +265,7 @@ struct Gallery {
         };
         for (int i = 0; i < static_cast<int>(palette.size()); ++i) {
             subs.push_back(Sub<Msg>::on_click_id(
-                node_id(std::string{"theme-"} + std::to_string(i)), PickTheme{i}));
+                node_id("theme", static_cast<std::size_t>(i)), PickTheme{i}));
         }
         return Sub<Msg>::batch(std::move(subs));
     }
@@ -303,7 +302,7 @@ int main(int argc, char** argv) {
         rt.click("toggle-a");
         ok(!rt.model().toggle_a, "toggle flips");
 
-        rt.click("theme-2");
+        rt.click(node_id("theme", 2));
         ok(rt.model().theme_index == 2, "theme chip switches the palette");
 
         // Drag the slider from its left edge to well past its right.

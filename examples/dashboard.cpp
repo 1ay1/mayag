@@ -39,17 +39,16 @@ struct Dashboard {
     }
 
     static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        return std::visit([&](auto&& e) -> std::pair<Model, Cmd<Msg>> {
-            using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<T, Select>)     { m.selected = e.index; return {m, Cmd<Msg>::none()}; }
-            else if constexpr (std::is_same_v<T, NextTheme>) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](const Select& e) -> R { m.selected = e.index; return {m, Cmd<Msg>::none()}; },
+            [&](NextTheme) -> R {
                 m.theme_index = (m.theme_index + 1) % static_cast<int>(palette.size());
                 return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, ToggleLive>) { m.live = !m.live; return {m, Cmd<Msg>::none()}; }
-            else if constexpr (std::is_same_v<T, Tick>)  { m.t += e.dt; return {m, Cmd<Msg>::none()}; }
-            else { return {m, Cmd<Msg>::quit()}; }
-        }, msg);
+            },
+            [&](ToggleLive) -> R { m.live = !m.live; return {m, Cmd<Msg>::none()}; },
+            [&](const Tick& e) -> R { m.t += e.dt; return {m, Cmd<Msg>::none()}; },
+            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
     }
 
     static Sub<Msg> subscribe(const Model& m) {
@@ -64,7 +63,7 @@ struct Dashboard {
         };
         for (int i = 0; i < static_cast<int>(nav.size()); ++i) {
             subs.push_back(Sub<Msg>::on_click_id(
-                node_id(std::string{"nav-"} + std::to_string(i)), Select{i}));
+                node_id("nav", static_cast<std::size_t>(i)), Select{i}));
         }
         return Sub<Msg>::batch(std::move(subs));
     }
@@ -77,7 +76,7 @@ struct Dashboard {
         // One row per entry, keyed so `subscribe` can bind clicks to it.
         // Hover styling reads from Ctx, so it costs nothing in the Model.
         auto nav_item = [&](int index) {
-            const auto nid = node_id(std::string{"nav-"} + std::to_string(index));
+            const auto nid = node_id("nav", static_cast<std::size_t>(index));
             const bool active = (index == m.selected);
             const bool hot    = c.hovered(nid);
             return (h(dot(active ? t.accent : t.text_disabled, 6.0f),
@@ -90,7 +89,7 @@ struct Dashboard {
                         : hot   ? t.surface_raised.fade(0.5f)
                                 : t.surface.fade(0.0f))
                     | radius(t.radius_small)
-                    | id_of(std::string{"nav-"} + std::to_string(index))).build();
+                    | id_of_raw(nid)).build();
         };
 
         auto sidebar =
@@ -224,8 +223,8 @@ int main(int argc, char** argv) {
             std::printf("  %s  %s\n", c ? "ok  " : "FAIL", what);
             if (!c) ++fails;
         };
-        ok(rt.node_rect("nav-1").has_value(), "nav rows laid out");
-        rt.click("nav-1");
+        ok(rt.node_rect(node_id("nav", 1)).has_value(), "nav rows laid out");
+        rt.click(node_id("nav", 1));
         ok(rt.model().selected == 1, "clicking a nav row selects it");
         rt.click("theme");
         ok(rt.model().theme_index == 1, "theme button cycles");

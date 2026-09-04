@@ -224,6 +224,7 @@ const uint FLAG_ANGULAR    = 4u;
 const uint FLAG_SRGB       = 8u;
 const uint FLAG_STROKE     = 16u;
 const uint FLAG_INSET      = 32u;
+const uint FLAG_GLYPH_SDF  = 128u;
 
 void main() {
     uint kind  = v_meta.x;
@@ -251,7 +252,17 @@ void main() {
         cov = mg_shadow(d, max(v_params.x, 0.01));
         if ((flags & FLAG_INSET) != 0u) cov = 1.0 - cov;
     } else if (kind == KIND_GLYPH) {
-        cov = texture(u_atlas, v_uv).r;
+        float raw = texture(u_atlas, v_uv).r;
+        if ((flags & FLAG_GLYPH_SDF) != 0u) {
+            // Distance-field entry: 0.5 is the edge. Antialias with the
+            // screen-space derivative of the sampled field so the ramp is
+            // ~1 pixel wide at ANY magnification (a fixed band blurs when the
+            // glyph is scaled up and aliases when scaled down).
+            float w = max(fwidth(raw), 1e-5);
+            cov = smoothstep(0.5 - w, 0.5 + w, raw);
+        } else {
+            cov = raw;   // bitmap entry: already coverage
+        }
     } else if (kind == KIND_COLOR_GLYPH) {
         // Colour glyph (emoji): sample the RGBA colour atlas and emit it
         // verbatim, tinted only by opacity (v_color.a), never by hue. The

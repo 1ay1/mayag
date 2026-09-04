@@ -95,14 +95,13 @@ struct Todo {
     // ── update: pure ────────────────────────────────────────────────────
 
     static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        return std::visit([&](auto&& e) -> std::pair<Model, Cmd<Msg>> {
-            using T = std::decay_t<decltype(e)>;
-
-            if constexpr (std::is_same_v<T, Typed>) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](const Typed& e) -> R {
                 m.input.insert(e.s);
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, KeyDown>) {
+            },
+            [&](const KeyDown& e) -> R {
                 // The text field's own key map handles motion, selection and
                 // editing. Only what it declines reaches the app.
                 if (m.input.handle_key(e.k.key, e.k.mods)) {
@@ -122,61 +121,58 @@ struct Todo {
                     return update(std::move(m), Toggle{vis[static_cast<std::size_t>(m.selected)]});
                 }
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Add>) {
+            },
+            [&](Add) -> R {
                 if (!m.input.text.empty()) {
                     m.items.push_back(Item{m.input.text, false});
                     m.input.clear();
                     m.list.scroll_to_bottom();
                 }
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Toggle>) {
+            },
+            [&](const Toggle& e) -> R {
                 if (e.index >= 0 && e.index < static_cast<int>(m.items.size())) {
                     m.items[static_cast<std::size_t>(e.index)].done ^= true;
                 }
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Remove>) {
+            },
+            [&](const Remove& e) -> R {
                 if (e.index >= 0 && e.index < static_cast<int>(m.items.size())) {
                     m.items.erase(m.items.begin() + e.index);
                 }
                 m.menu_for = 0;
                 m.menu_index = -1;
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, SetFilter>) {
+            },
+            [&](const SetFilter& e) -> R {
                 m.filter = e.f;
                 m.selected = -1;
                 m.list.scroll_to_top();
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Scrolled>) {
+            },
+            [&](const Scrolled& e) -> R {
                 m.list.scroll_by(e.delta);
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, FocusInput>) {
+            },
+            [&](FocusInput) -> R {
                 return {std::move(m), Cmd<Msg>::focus(node_id("input"))};
-            }
-            else if constexpr (std::is_same_v<T, Tick>) {
+            },
+            [&](Tick) -> R {
                 // The runtime steps tracked motion itself; this arm remains
                 // only for app-owned animations.
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, OpenMenu>) {
+            },
+            [&](const OpenMenu& e) -> R {
                 m.menu_for = node_id("row", static_cast<std::size_t>(e.index));
                 m.menu_index = e.index;
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, CloseMenu>) {
+            },
+            [&](CloseMenu) -> R {
                 m.menu_for = 0;
                 m.menu_index = -1;
                 return {std::move(m), Cmd<Msg>::none()};
-            }
-            else {
-                return {std::move(m), Cmd<Msg>::quit()};
-            }
-        }, msg);
+            },
+            [&](Quit) -> R { return {std::move(m), Cmd<Msg>::quit()}; });
     }
 
     // ── view: pure ──────────────────────────────────────────────────────

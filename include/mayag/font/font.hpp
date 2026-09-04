@@ -1186,8 +1186,19 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             // Colour glyph: sample RGBA verbatim, tinted only by the run's
             // opacity (from the text colour's alpha), never by its hue.
             dl.color_glyph(dst, g.uv, st.color.a);
+        } else if (g.is_sdf) {
+            // The SDF field changes by ~1/(2*spread) per RASTER texel; one
+            // DISPLAY pixel spans 1/k raster texels, so the field moves
+            // 1/(2*spread*k) per display pixel. Size the smoothstep half-band
+            // to about one display pixel so a magnified glyph (k>1) gets a
+            // thin crisp edge instead of a fat blur, and a shrunk one still
+            // antialiases. Clamp so a texel-scale ramp never vanishes.
+            const float spread = g.spread > 0.0f ? g.spread : 4.0f;
+            const float per_px = 1.0f / (2.0f * spread * num::max(k, 0.01f));
+            const float edge = num::clamp(per_px * 0.75f, 0.01f, 0.25f);
+            dl.glyph(dst, g.uv, st.color, true, edge);
         } else {
-            dl.glyph(dst, g.uv, st.color, g.is_sdf);
+            dl.glyph(dst, g.uv, st.color, false);
         }
     }
 
