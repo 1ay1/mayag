@@ -960,6 +960,29 @@ void test_variations() {
         vf->set_variation(typo::var::tag_wght, lo);
         vf->set_variation(typo::var::tag_wght, hi);
         check(vf->id() == id_a, "returning to a weight restores its stable face id");
+
+        // The DSL numeric weight modifier drives the axis continuously: a
+        // style built with weight(150) must measure narrower than weight(850),
+        // and a mid value must land between — proving TextStyle::variations +
+        // effective_weight() flow through measurement.
+        using namespace mayag::dsl;
+        Style thin_s, mid_s, black_s;
+        weight(150).apply(thin_s);  thin_s.text.size  = 100.0f;
+        weight(500).apply(mid_s);   mid_s.text.size   = 100.0f;
+        weight(850).apply(black_s); black_s.text.size = 100.0f;
+        const float d_thin  = meas.advance("Hamburgefons", thin_s.text);
+        const float d_mid   = meas.advance("Hamburgefons", mid_s.text);
+        const float d_black = meas.advance("Hamburgefons", black_s.text);
+        check(d_black > d_thin, "DSL weight(number) drives the wght axis");
+        check(d_mid > d_thin && d_mid < d_black, "DSL numeric weight interpolates");
+
+        // A font_axis override on wght must win over the FontWeight enum.
+        Style ov;
+        ov.text.weight = FontWeight::thin;
+        font_axis("wght", 900.0f).apply(ov);
+        ov.text.size = 100.0f;
+        check(meas.advance("Hamburgefons", ov.text) > d_thin,
+              "font_axis(\"wght\") overrides the FontWeight enum");
     }
 
     vf->reset_variations();

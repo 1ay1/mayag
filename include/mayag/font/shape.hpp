@@ -24,6 +24,7 @@
 #include "../core/geometry.hpp"
 
 #include <cstdint>
+#include <array>
 #include <string_view>
 #include <vector>
 
@@ -517,6 +518,14 @@ struct ShapeParams {
     bool  kerning       = true;
     bool  ligatures     = true;
     float weight        = 400.0f;   ///< drives a variable font's wght axis
+
+    /// Extra variable-font axis overrides beyond weight (opsz, wdth, slnt,
+    /// custom). Kept as a tiny inline array so ShapeParams stays a value type
+    /// with no dependency on the style layer.
+    struct Axis { std::uint32_t tag = 0; float value = 0.0f; };
+    static constexpr std::size_t max_axes = 4;
+    std::array<Axis, max_axes> axes{};
+    std::uint8_t axis_count = 0;
 };
 
 /// The seam. `SimpleShaper` below is the default; a HarfBuzz-backed

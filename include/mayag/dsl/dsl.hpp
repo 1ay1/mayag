@@ -884,6 +884,54 @@ inline constexpr Weight bold{FontWeight::bold};
 inline constexpr Weight semibold{FontWeight::semi_bold};
 inline constexpr Weight light{FontWeight::light};
 
+// ---- variable fonts: continuous axes ----
+//
+// A variable font is a continuous design space. weight(number) drives the
+// wght axis to ANY value (not just the nine FontWeight steps) and interpolates
+// smoothly — perfect for animation. variation()/optical_size()/font_width()/
+// slant() drive the other registered axes, and font_axis("abcd", v) reaches a
+// custom one. All are plain values, so animate them straight off model state.
+
+/// Compile-time 4-char-code -> big-endian axis tag, e.g. axis_tag("wght").
+[[nodiscard]] constexpr std::uint32_t axis_tag(const char (&t)[5]) {
+    return (static_cast<std::uint32_t>(static_cast<unsigned char>(t[0])) << 24) |
+           (static_cast<std::uint32_t>(static_cast<unsigned char>(t[1])) << 16) |
+           (static_cast<std::uint32_t>(static_cast<unsigned char>(t[2])) << 8)  |
+            static_cast<std::uint32_t>(static_cast<unsigned char>(t[3]));
+}
+
+/// weight(number): a continuous wght override (100..900+, interpolates).
+struct WeightValue {
+    MAYAG_MODIFIER(WeightValue, caps::text, caps::none, caps::none, "weight");
+    float w;
+    constexpr void apply(Style& s) const { s.text.variations.wght = w; }
+};
+[[nodiscard]] constexpr WeightValue weight(float w) { return {w}; }
+[[nodiscard]] constexpr WeightValue weight(int w) { return {static_cast<float>(w)}; }
+
+/// variation(tag, value): drive any variable-font axis in USER units.
+struct Variation {
+    MAYAG_MODIFIER(Variation, caps::text, caps::none, caps::none, "variation");
+    std::uint32_t tag;
+    float value;
+    constexpr void apply(Style& s) const {
+        if (tag == axis_tag("wght")) s.text.variations.wght = value;
+        else                         s.text.variations.set(tag, value);
+    }
+};
+[[nodiscard]] constexpr Variation variation(std::uint32_t tag, float value) {
+    return {tag, value};
+}
+[[nodiscard]] constexpr Variation font_axis(const char (&tag)[5], float value) {
+    return {axis_tag(tag), value};
+}
+/// Optical size (opsz): tune the design for its rendered size.
+[[nodiscard]] constexpr Variation optical_size(float v) { return {axis_tag("opsz"), v}; }
+/// Width (wdth): condensed <100 < normal < expanded.
+[[nodiscard]] constexpr Variation font_width(float v) { return {axis_tag("wdth"), v}; }
+/// Slant (slnt): oblique angle in degrees (usually negative).
+[[nodiscard]] constexpr Variation slant(float v) { return {axis_tag("slnt"), v}; }
+
 struct Italic {
     MAYAG_MODIFIER(Italic, caps::text, caps::none, caps::none, "italic");
     constexpr void apply(Style& s) const { s.text.italic = true; }

@@ -499,7 +499,8 @@ class FontStack : public Shaper {
             auto [face_idx, gid] = resolve(cp);
             const bool missing = (gid == 0);
             const Face& face = *faces_[face_idx];
-            pin_weight(faces_[face_idx].get(), params.weight);
+            pin_variations(faces_[face_idx].get(), params.weight,
+                           {params.axes.data(), params.axis_count});
 
             ShapedGlyph g;
             g.glyph_id   = gid;
@@ -540,12 +541,15 @@ class FontStack : public Shaper {
 
     // ── glyph rasterisation and caching ─────────────────────────────────
 
-    /// Fetch (rasterising on demand) the atlas entry for a glyph.
+    /// Fetch (rasterising on demand) the atlas entry for a glyph. `weight`
+    /// drives the wght axis; `axes` carries any further variable-font axis
+    /// overrides (opsz, wdth, ...) so the raster matches the shaped run.
     [[nodiscard]] const CachedGlyph* glyph(std::size_t face_index, std::uint16_t gid,
-                                           float size_px, float weight = 400.0f) {
+                                           float size_px, float weight = 400.0f,
+                                           std::span<const ShapeParams::Axis> axes = {}) {
         if (face_index >= faces_.size()) return nullptr;
         const Face& face = *faces_[face_index];
-        pin_weight(faces_[face_index].get(), weight);
+        pin_variations(faces_[face_index].get(), weight, axes);
 
         const bool use_sdf = should_use_sdf(size_px);
 
@@ -635,13 +639,23 @@ class FontStack : public Shaper {
         return atlas_.insert(key, r.bitmap, r.offset, advance, scale, 0.0f, false);
     }
 
-    // Set a variable face's weight axis before we shape or rasterise with it.
-    // A no-op for static faces or ones without a wght axis. Face guards its own
-    // variation state, and set_variation early-outs when nothing moves, so
-    // this is cheap to call per glyph and safe on the shared face.
-    static void pin_weight(Face* face, float weight) {
-        if (face != nullptr && face->is_variable())
-            face->set_variation(var::tag_wght, weight);
+    // Pin a variable face to a run's axis position before we shape or
+    // rasterise with it: the wght axis plus any extra overrides (opsz, wdth,
+    // custom). A no-op for static faces. Face guards its own variation state
+    // and set_variations early-outs when nothing moves, so this is cheap to
+    // call per run and safe on the shared face.
+    static void pin_variations(Face* face, float weight,
+                               std::span<const ShapeParams::Axis> axes) {
+        if (face == nullptr || !face->is_variable()) return;
+        std::array<std::pair<std::uint32_t, float>, ShapeParams::max_axes + 1> vals;
+        std::size_t n = 0;
+        vals[n++] = {var::tag_wght, weight};
+        for (const auto& a : axes) {
+            if (n >= vals.size()) break;
+            if (a.tag == var::tag_wght) { vals[0].second = a.value; continue; }
+            vals[n++] = {a.tag, a.value};
+        }
+        face->set_variations({vals.data(), n});
     }
 
     [[nodiscard]] bool should_use_sdf(float size_px) const noexcept {
@@ -665,14 +679,33 @@ class FontStack : public Shaper {
 
 /// The `layout::TextMeasurer` implementation. Layout asks this how big a
 /// string is before there is a GPU or a window.
+namespace detail {
+
+/// Build the per-run shaping inputs from a text style: size, spacing, the
+/// effective wght (numeric override or the FontWeight enum), and any extra
+/// variable-font axis overrides. One place, so measure/draw stay in sync.
+[[nodiscard]] inline ShapeParams shape_params_of(const TextStyle& st) {
+    ShapeParams p;
+    p.size_px        = st.size;
+    p.letter_spacing = st.letter_spacing;
+    p.kerning        = true;
+    p.ligatures      = true;
+    p.weight         = st.effective_weight();
+    for (std::uint8_t i = 0; i < st.variations.count && p.axis_count < ShapeParams::max_axes; ++i) {
+        const auto& a = st.variations.axes[i];
+        p.axes[p.axis_count++] = ShapeParams::Axis{a.tag, a.value};
+    }
+    return p;
+}
+
+}  // namespace detail
+
 class StackMeasurer final : public layout::TextMeasurer {
   public:
     explicit StackMeasurer(const FontStack& stack) : stack_{&stack} {}
 
     [[nodiscard]] float advance(std::string_view s, const TextStyle& st) const override {
-        ShapeParams p{st.size, st.letter_spacing, true, true,
-                      static_cast<float>(st.weight)};
-        return stack_->shape(s, p).width;
+        return stack_->shape(s, detail::shape_params_of(st)).width;
     }
 
     [[nodiscard]] float ascent(const TextStyle& st) const override {
@@ -686,9 +719,7 @@ class StackMeasurer final : public layout::TextMeasurer {
 
         if (s.empty()) return {0.0f, line_h};
 
-        ShapeParams p{st.size, st.letter_spacing, true, true,
-                      static_cast<float>(st.weight)};
-        const ShapeResult shaped = stack_->shape(s, p);
+        const ShapeResult shaped = stack_->shape(s, detail::shape_params_of(st));
 
         const bool wrapping = st.overflow == TextOverflow::wrap &&
                               max_width > 0.0f && !num::is_inf(max_width);
@@ -849,9 +880,8 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
         const FaceMetrics fm = stack_->metrics(st.size);
         const float line_h = st.line_height > 0.0f ? st.size * st.line_height : fm.line_height;
 
-        ShapeParams p{st.size, st.letter_spacing, true, true,
-                      static_cast<float>(st.weight)};
-        const ShapeResult shaped = stack_->shape(s, p);
+        const ShapeParams sp = detail::shape_params_of(st);
+        const ShapeResult shaped = stack_->shape(s, sp);
 
         const bool wrapping = st.overflow == TextOverflow::wrap && box.width() > 0.0f;
         const auto lines = wrapping
@@ -874,7 +904,8 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                 if (g.glyph_id == 0 && g.advance == 0.0f) continue;   // newline marker
 
                 const CachedGlyph* cached = stack_->glyph(g.face_index, g.glyph_id, st.size,
-                                                           static_cast<float>(st.weight));
+                                                           st.effective_weight(),
+                                                           {sp.axes.data(), sp.axis_count});
                 if (cached != nullptr && cached->size.x > 0.0f) {
                     emit(dl, *cached, Vec2{pen_x, baseline_y} + g.offset, st);
                 }

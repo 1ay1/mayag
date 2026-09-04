@@ -157,6 +157,40 @@ enum class FontWeight : std::uint16_t {
 enum class TextAlign : std::uint8_t { left, center, right, justify };
 enum class TextOverflow : std::uint8_t { clip, ellipsis, wrap };
 
+/// Continuous variable-font axis settings carried on a TextStyle.
+///
+/// A variable font is a continuous design space; `FontWeight` only names nine
+/// points on the `wght` axis. This lets a style request ANY axis at ANY value
+/// — wght 372, opsz 28, a custom axis — while staying a small, trivially
+/// comparable value (so TextStyle change-detection keeps working). Unset axes
+/// fall back to the FontWeight enum (for wght) or the font's default.
+struct FontVariations {
+    /// One (tag, value) override in USER units. tag is a big-endian 4CC.
+    struct Axis {
+        std::uint32_t tag = 0;
+        float value = 0.0f;
+        friend constexpr bool operator==(const Axis&, const Axis&) = default;
+    };
+
+    static constexpr std::size_t max_axes = 4;
+    std::array<Axis, max_axes> axes{};
+    std::uint8_t count = 0;
+    /// Numeric wght override (0 = none => use the FontWeight enum instead).
+    float wght = 0.0f;
+
+    friend constexpr bool operator==(const FontVariations&, const FontVariations&) = default;
+
+    [[nodiscard]] constexpr bool empty() const noexcept { return count == 0 && wght == 0.0f; }
+
+    /// Set an axis (replacing any existing entry with the same tag). Silently
+    /// drops the request past max_axes — four covers wght+wdth+opsz+slnt.
+    constexpr void set(std::uint32_t tag, float value) noexcept {
+        for (std::uint8_t i = 0; i < count; ++i)
+            if (axes[i].tag == tag) { axes[i].value = value; return; }
+        if (count < max_axes) axes[count++] = Axis{tag, value};
+    }
+};
+
 struct TextStyle {
     float        size        = 16.0f;
     FontWeight   weight      = FontWeight::regular;
@@ -181,8 +215,20 @@ struct TextStyle {
     /// needed exactly this, which is the signal that the default was wrong.
     TextOverflow overflow    = TextOverflow::ellipsis;
 
+    /// Continuous variable-font axis overrides. Empty by default — a static
+    /// font ignores this, and a variable font uses `weight` (the enum) unless
+    /// an axis here overrides it.
+    FontVariations variations{};
+
     friend constexpr bool operator==(const TextStyle&, const TextStyle&) = default;
     [[nodiscard]] constexpr float line_advance() const noexcept { return size * line_height; }
+
+    /// The wght value to drive a variable font with: the numeric override if
+    /// set, otherwise the numeric value of the FontWeight enum (100..900).
+    [[nodiscard]] constexpr float effective_weight() const noexcept {
+        return variations.wght != 0.0f ? variations.wght
+                                       : static_cast<float>(weight);
+    }
 };
 
 // ── effects ─────────────────────────────────────────────────────────────
