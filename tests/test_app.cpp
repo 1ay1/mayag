@@ -118,7 +118,7 @@ struct TestApp {
             Sub<Msg>::on_text([](std::string_view s) { return Msg{Typed{std::string{s}}}; }),
             Sub<Msg>::on_close(Quit{}),
             when(m.animating,
-                 Sub<Msg>::every_frame([](FrameEvent f) { return Msg{Tick{f.delta}}; })));
+                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
     }
 };
 

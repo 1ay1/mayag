@@ -226,6 +226,20 @@ class Sub {
         return Sub{Alt{EveryFrame{std::forward<F>(f)}}};
     }
 
+    /// Per-frame tick, minus the ceremony. `fn` maps the frame's delta seconds
+    /// (a float) straight to a Msg, so an animation subscription reads:
+    ///
+    ///   Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })
+    ///
+    /// instead of unpacking a FrameEvent and wrapping the variant by hand.
+    /// Pair with `when(model.animating(), …)` so frames only run while moving.
+    template <typename F>
+    [[nodiscard]] static Sub on_frame(F fn) {
+        return every_frame([fn = std::move(fn)](FrameEvent f) -> Msg {
+            return Msg{fn(static_cast<float>(f.delta))};
+        });
+    }
+
     /// A declarative external source — the subscription form of `Cmd::stream`.
     /// `id` must be stable across frames (a string literal is ideal); the
     /// producer runs while this subscription is present and is stopped and

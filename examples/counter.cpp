@@ -170,7 +170,7 @@ struct Counter {
             Sub<Msg>::on_close(Quit{}),
 
             when(m.celebrating,
-                 Sub<Msg>::every_frame([](FrameEvent f) { return Tick{f.delta}; })));
+                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
     }
 };
 
