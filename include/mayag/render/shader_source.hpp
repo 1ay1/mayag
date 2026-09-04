@@ -99,6 +99,16 @@ vec3 mg_oklab_to_linear(vec3 lab) {
         -0.0041960863*c.x - 0.7034186147*c.y + 1.7076147010*c.z), vec3(0.0));
 }
 
+// Linear -> sRGB (the exact piecewise transfer). The pipeline composites in
+// linear light and the swapchain is a UNORM (raw) surface, so the shader must
+// apply this encode itself — exactly what the software renderer does. Without
+// it every colour is written un-gamma'd and the whole UI looks far too dark.
+vec3 mg_linear_to_srgb(vec3 c) {
+    vec3 lo = c * 12.92;
+    vec3 hi = 1.055 * pow(max(c, vec3(0.0)), vec3(1.0/2.4)) - 0.055;
+    return mix(hi, lo, step(c, vec3(0.0031308)));
+}
+
 vec4 mg_mix_oklch(vec4 a, vec4 b, float t) {
     // Un-premultiply; interpolating premultiplied chroma is meaningless.
     vec3 ca = a.a > 1e-6 ? a.rgb / a.a : vec3(0.0);
@@ -327,7 +337,11 @@ void main() {
 
     if (kind == KIND_TEXTURE) color *= texture(u_atlas, v_uv);
 
-    o_color = color * cov;
+    // Encode linear -> sRGB on the straight colour, then re-premultiply for
+    // the UNORM swapchain (which stores bytes raw).
+    vec4 pm = color * cov;
+    vec3 straight = pm.a > 1e-6 ? pm.rgb / pm.a : vec3(0.0);
+    o_color = vec4(mg_linear_to_srgb(straight) * pm.a, pm.a);
 }
 )GLSL";
 
