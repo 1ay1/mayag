@@ -458,6 +458,54 @@ void test_subscriptions() {
     });
 }
 
+// A minimal app whose only subscription is a wall-clock interval, gated on a
+// model flag. Exercises `Sub::every` — which fired NEVER before the interval
+// timers were wired into the tick, because `interval_timers_` was populated by
+// a method (`sync_interval_timers`) that nothing called.
+struct IntervalApp {
+    struct Model { int ticks = 0; bool running = true; };
+    struct Tick {};
+    struct Stop {};
+    using Msg = std::variant<Tick, Stop>;
+
+    static Model init() { return {}; }
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        if (std::holds_alternative<Stop>(msg)) m.running = false;
+        else                                   m.ticks += 1;
+        return {m, Cmd<Msg>::none()};
+    }
+    static Node view(const Model&) { return dsl::box().build(); }
+    static Sub<Msg> subscribe(const Model& m) {
+        return when(m.running,
+                    Sub<Msg>::every(std::chrono::milliseconds(100), Tick{}));
+    }
+};
+static_assert(Program<IntervalApp>);
+
+void test_interval_timers() {
+    section("interval timers");
+
+    run_headless<IntervalApp>(kCfg, [](auto& rt) {
+        // Drive the clock in 100 ms steps so each poll crosses one interval.
+        rt.window().set_tick_seconds(0.1);
+
+        for (int i = 0; i < 10; ++i) rt.tick();
+        const int fired = rt.model().ticks;
+        check(fired >= 8, std::string{"Sub::every fires on schedule ("} +
+                          std::to_string(fired) + " of ~10)");
+
+        // The subscription is declarative: dropping it from the model must
+        // stop the timer. Send Stop, then pump more ticks and confirm the
+        // count is frozen.
+        rt.send(IntervalApp::Stop{});
+        rt.tick();                              // sync_interval_timers drops it
+        const int after_stop = rt.model().ticks;
+        for (int i = 0; i < 5; ++i) rt.tick();
+        check(rt.model().ticks == after_stop,
+              "an interval whose condition went false stops firing");
+    });
+}
+
 /// Same events in, same pixels out.
 void test_determinism() {
     section("determinism");
@@ -944,6 +992,7 @@ int main() {
     test_drag_capture();
     test_effects();
     test_subscriptions();
+    test_interval_timers();
     test_determinism();
     test_view_purity();
     test_focus();

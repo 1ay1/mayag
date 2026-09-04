@@ -445,6 +445,12 @@ class Runtime {
         // connect/disconnect in `update`.
         sync_sources(subs);
 
+        // Reconcile wall-clock interval subscriptions (`Sub::every`) the same
+        // declarative way: the live set is recomputed from the model, so an
+        // interval whose condition went false stops firing. Without this call
+        // `interval_timers_` stayed empty and `Sub::every` never fired at all.
+        sync_interval_timers(subs);
+
         // How to wait is DERIVED from the subscriptions, not from a flag.
         // No frame subscription and no timer means block — and a blocked app
         // costs nothing.
@@ -922,6 +928,23 @@ class Runtime {
                 ++it;
             }
         }
+
+        // Interval subscriptions (`Sub::every`) live in a separate list because
+        // they are reconciled against the model each tick rather than created
+        // once. They always re-arm (interval > 0), never erase. A timer that
+        // fell many intervals behind (the app was blocked on another event)
+        // fires ONCE and catches its deadline up, rather than delivering a
+        // burst — a periodic poll wants "it is time again", not a backlog.
+        for (auto& t : interval_timers_) {
+            if (now >= t.deadline) {
+                due.push_back(t.msg);
+                if (t.interval > 0.0) {
+                    t.deadline += t.interval;
+                    if (t.deadline < now) t.deadline = now + t.interval;
+                }
+            }
+        }
+
         for (auto& m : due) {
             step(std::move(m));
             if (quit_) return;
