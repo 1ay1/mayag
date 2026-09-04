@@ -932,6 +932,16 @@ struct Variation {
 /// Slant (slnt): oblique angle in degrees (usually negative).
 [[nodiscard]] constexpr Variation slant(float v) { return {axis_tag("slnt"), v}; }
 
+/// Toggle GSUB ligatures (fi, ffi, ...). On by default; `no_ligatures` is the
+/// one code/monospace UIs reach for so every character stays distinct.
+struct Ligatures {
+    MAYAG_MODIFIER(Ligatures, caps::text, caps::none, caps::none, "ligatures");
+    bool on;
+    constexpr void apply(Style& s) const { s.text.ligatures = on; }
+};
+[[nodiscard]] constexpr Ligatures ligatures(bool on = true) { return {on}; }
+inline constexpr Ligatures no_ligatures{false};
+
 struct Italic {
     MAYAG_MODIFIER(Italic, caps::text, caps::none, caps::none, "italic");
     constexpr void apply(Style& s) const { s.text.italic = true; }

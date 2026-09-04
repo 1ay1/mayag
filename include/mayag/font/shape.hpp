@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <array>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace mayag::typo {
@@ -448,6 +449,152 @@ class KernTable {
     }
 
     std::vector<Pair> pairs_;
+};
+
+// ══ GSUB ligatures ════════════════════════════════════════════════
+
+/// Ligature substitution from GSUB (`liga`, lookup type 4): fi -> ﬁ, ffi -> ﬃ,
+/// and any font-defined multi-glyph -> single-glyph rule. The default `liga`
+/// feature is on in virtually every text font, so this is the correct default,
+/// not an opt-in nicety. Parsed once per face; applied as a greedy left-to-
+/// right longest-match pass over a shaped run.
+class LigatureTable {
+  public:
+    LigatureTable() = default;
+    explicit LigatureTable(const ot::FontFile& f) { parse(f); }
+
+    [[nodiscard]] bool empty() const noexcept { return sets_.empty(); }
+
+    /// One ligature rule: the trailing components (after the first, which is
+    /// the map key) and the glyph they combine into.
+    struct Rule {
+        std::vector<std::uint16_t> rest;   // components 2..N
+        std::uint16_t lig = 0;
+    };
+
+    /// Longest ligature starting at glyphs[i] (gids), or 0 with count unset.
+    /// On a hit, `consumed` is how many input glyphs the ligature replaces.
+    [[nodiscard]] std::uint16_t match(const std::vector<std::uint16_t>& gids,
+                                      std::size_t i, std::size_t& consumed) const {
+        auto it = sets_.find(gids[i]);
+        if (it == sets_.end()) return 0;
+        std::uint16_t best_lig = 0;
+        std::size_t   best_len = 0;
+        for (const auto& rule : it->second) {
+            const std::size_t need = rule.rest.size();
+            if (i + 1 + need > gids.size()) continue;   // not enough glyphs left
+            bool ok = true;
+            for (std::size_t k = 0; k < need; ++k)
+                if (gids[i + 1 + k] != rule.rest[k]) { ok = false; break; }
+            if (ok && need + 1 > best_len) { best_len = need + 1; best_lig = rule.lig; }
+        }
+        if (best_lig != 0) { consumed = best_len; return best_lig; }
+        return 0;
+    }
+
+  private:
+    void parse(const ot::FontFile& f) {
+        const auto data = f.table(ot::tags::gsub);
+        if (data.size() < 10) return;
+        ot::Reader r{data, 0};
+        const std::uint16_t feature_list_off = r.u16_at(6);
+        const std::uint16_t lookup_list_off  = r.u16_at(8);
+        if (feature_list_off == 0 || lookup_list_off == 0) return;
+
+        // Collect lookup indices referenced by any 'liga' feature.
+        std::vector<std::uint16_t> liga_lookups;
+        const std::uint16_t n_features = r.u16_at(feature_list_off);
+        for (std::uint16_t i = 0; i < n_features; ++i) {
+            const std::size_t rec = feature_list_off + 2 + static_cast<std::size_t>(i) * 6;
+            const std::uint32_t ftag = r.u32_at(rec);   // FeatureRecord tag
+            if (ftag != tag4('l', 'i', 'g', 'a')) continue;
+            const std::size_t foff = feature_list_off + r.u16_at(rec + 4);
+            const std::uint16_t n_idx = r.u16_at(foff + 2);
+            for (std::uint16_t k = 0; k < n_idx; ++k)
+                liga_lookups.push_back(r.u16_at(foff + 4 + k * 2));
+        }
+        if (liga_lookups.empty()) return;
+
+        const std::uint16_t n_lookups = r.u16_at(lookup_list_off);
+        for (std::uint16_t li : liga_lookups) {
+            if (li >= n_lookups) continue;
+            const std::size_t loff = lookup_list_off + r.u16_at(lookup_list_off + 2 + li * 2);
+            const std::uint16_t type = r.u16_at(loff);
+            const std::uint16_t n_subs = r.u16_at(loff + 4);
+            for (std::uint16_t s = 0; s < n_subs; ++s) {
+                const std::size_t sub = loff + r.u16_at(loff + 6 + s * 2);
+                if (type == 4) parse_ligature_subst(r, sub, data.size());
+                // (Extension lookup type 7 -> forwards to the real subtable.)
+                else if (type == 7) {
+                    const std::uint16_t ext_fmt = r.u16_at(sub);
+                    const std::uint16_t ext_type = r.u16_at(sub + 2);
+                    if (ext_fmt == 1 && ext_type == 4) {
+                        const std::uint32_t delta = r.u32_at(sub + 4);
+                        parse_ligature_subst(r, sub + delta, data.size());
+                    }
+                }
+            }
+        }
+    }
+
+    void parse_ligature_subst(ot::Reader& r, std::size_t off, std::size_t limit) {
+        if (off + 6 > limit) return;
+        const std::uint16_t format = r.u16_at(off);
+        if (format != 1) return;
+        const std::uint16_t cov_off = r.u16_at(off + 2);
+        const std::uint16_t n_sets  = r.u16_at(off + 4);
+        const auto cov = read_coverage(r, off + cov_off, limit);
+        for (std::uint16_t i = 0; i < n_sets && i < cov.size(); ++i) {
+            const std::size_t set = off + r.u16_at(off + 6 + i * 2);
+            if (set + 2 > limit) continue;
+            const std::uint16_t n_lig = r.u16_at(set);
+            const std::uint16_t first = cov[i];
+            for (std::uint16_t k = 0; k < n_lig; ++k) {
+                const std::size_t lig = set + r.u16_at(set + 2 + k * 2);
+                if (lig + 4 > limit) continue;
+                const std::uint16_t lig_glyph = r.u16_at(lig);
+                const std::uint16_t comp_count = r.u16_at(lig + 2);
+                if (comp_count < 1 || comp_count > 32) continue;
+                Rule rule;
+                rule.lig = lig_glyph;
+                // componentGlyphIDs lists components 2..N (first is `first`).
+                for (std::uint16_t c = 1; c < comp_count; ++c)
+                    rule.rest.push_back(r.u16_at(lig + 4 + (c - 1) * 2));
+                sets_[first].push_back(std::move(rule));
+            }
+        }
+    }
+
+    [[nodiscard]] static std::uint32_t tag4(char a, char b, char c, char d) noexcept {
+        return (static_cast<std::uint32_t>(static_cast<unsigned char>(a)) << 24) |
+               (static_cast<std::uint32_t>(static_cast<unsigned char>(b)) << 16) |
+               (static_cast<std::uint32_t>(static_cast<unsigned char>(c)) << 8)  |
+                static_cast<std::uint32_t>(static_cast<unsigned char>(d));
+    }
+
+    [[nodiscard]] static std::vector<std::uint16_t> read_coverage(const ot::Reader& r,
+                                                                  std::size_t off,
+                                                                  std::size_t limit) {
+        std::vector<std::uint16_t> out;
+        if (off + 4 > limit) return out;
+        const std::uint16_t format = r.u16_at(off);
+        const std::uint16_t count  = r.u16_at(off + 2);
+        if (format == 1) {
+            for (std::uint16_t i = 0; i < count; ++i)
+                out.push_back(r.u16_at(off + 4 + static_cast<std::size_t>(i) * 2));
+        } else if (format == 2) {
+            for (std::uint16_t i = 0; i < count; ++i) {
+                const std::size_t rec = off + 4 + static_cast<std::size_t>(i) * 6;
+                const std::uint16_t start = r.u16_at(rec);
+                const std::uint16_t end   = r.u16_at(rec + 2);
+                for (std::uint32_t g = start; g <= end && out.size() < 65536; ++g)
+                    out.push_back(static_cast<std::uint16_t>(g));
+            }
+        }
+        return out;
+    }
+
+    std::unordered_map<std::uint16_t, std::vector<Rule>> sets_;
 };
 
 // ════════════════════════════════════════════════════════════════════════

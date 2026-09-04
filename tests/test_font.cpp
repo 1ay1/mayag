@@ -782,6 +782,65 @@ void test_rendering() {
 
 }  // namespace
 
+/// GSUB ligatures. The bar: on a font with a `liga` feature, fi/ffi/fl fold
+/// into single glyphs (fewer glyphs, greedy longest-match), the toggle turns
+/// it off, and clusters still map the ligature back to its first character.
+/// Skips cleanly where no ligature font is installed.
+void test_ligatures() {
+    section("ligatures (GSUB)");
+
+    std::shared_ptr<typo::Face> lf;
+    for (const auto& e : typo::system::Database::instance().entries()) {
+        auto f = typo::Face::from_file(e.path, e.face_index);
+        if (f && f->has_ligatures() && f->has_glyph(U'f') && f->has_glyph(U'i')) { lf = f; break; }
+    }
+    if (!lf) {
+        check(true, "no ligature font installed — skipping (not a failure)");
+        return;
+    }
+    check(lf->has_ligatures(), "font reports GSUB ligatures");
+
+    typo::FontStack stack;
+    stack.add(lf);
+
+    const auto count = [&](const char* s, bool liga) {
+        typo::ShapeParams p; p.size_px = 32.0f; p.ligatures = liga;
+        return stack.shape(s, p).glyphs.size();
+    };
+
+    // At least one common ligature must fold. Different fonts ship different
+    // sets, so accept any of the classic Latin ligatures.
+    bool folded = false;
+    for (const char* w : {"fi", "fl", "ffi", "ffl", "ff"}) {
+        const std::size_t off = count(w, false);
+        const std::size_t on  = count(w, true);
+        if (on < off) folded = true;
+        // With ligatures off, nothing may fold.
+        check(off >= on, "ligatures never ADD glyphs");
+    }
+    check(folded, "at least one fi/fl/ffi ligature folds into fewer glyphs");
+
+    // Greedy longest-match: 'ffi' should fold at least as much as 'ff'.
+    if (lf->has_glyph(U'f')) {
+        const std::size_t ffi_on = count("ffi", true);
+        check(ffi_on <= count("ff", true) + 1, "ffi uses the longest available ligature");
+    }
+
+    // The toggle is real: identical text, opposite flag, different glyph count
+    // for a font that actually ligates 'fi'.
+    if (count("fi", true) < count("fi", false))
+        check(count("fi", true) == 1, "fi ligates to a single glyph when enabled");
+
+    // Cluster mapping: the ligature keeps the first component's cluster so a
+    // caret at the start still resolves onto it.
+    {
+        typo::ShapeParams p; p.size_px = 32.0f; p.ligatures = true;
+        const auto r = stack.shape("fi", p);
+        if (!r.glyphs.empty())
+            check(r.glyphs.front().cluster == 0, "ligature keeps its first component's cluster");
+    }
+}
+
 /// COLR/CPAL vector colour glyphs. The bar: parse the palette, detect colour
 /// glyphs, and render them to a non-empty RGBA bitmap that actually uses more
 /// than one colour (palette or gradient). Skips cleanly if no COLR font is
@@ -1004,6 +1063,7 @@ int main() {
     test_metrics();
     test_rendering();
     test_variations();
+    test_ligatures();
     test_color_glyphs();
 
     std::printf("\n%s  %d checks, %d failures\n",

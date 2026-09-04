@@ -79,6 +79,7 @@ class Face {
         face->file_    = std::move(*parsed);
         face->glyphs_  = GlyphSource{face->file_};
         face->kerning_ = KernTable{face->file_};
+        face->ligatures_ = LigatureTable{face->file_};
         face->id_      = next_id();
         face->base_id_ = face->id_;
 
@@ -221,6 +222,16 @@ class Face {
 
     [[nodiscard]] bool has_kerning() const noexcept { return !kerning_.empty(); }
 
+    /// Whether this face carries GSUB ligatures we can apply.
+    [[nodiscard]] bool has_ligatures() const noexcept { return !ligatures_.empty(); }
+
+    /// Longest ligature substitution starting at gids[i]; 0 if none. On a hit
+    /// `consumed` is how many glyphs the returned ligature glyph replaces.
+    [[nodiscard]] std::uint16_t ligature_at(const std::vector<std::uint16_t>& gids,
+                                            std::size_t i, std::size_t& consumed) const {
+        return ligatures_.match(gids, i, consumed);
+    }
+
     // ── outlines ────────────────────────────────────────────────────────
 
     [[nodiscard]] Outline outline(std::uint16_t gid) const {
@@ -352,6 +363,7 @@ class Face {
     ot::FontFile              file_;
     GlyphSource               glyphs_;
     KernTable                 kerning_;
+    LigatureTable             ligatures_;
     std::uint32_t             id_ = 0;
     std::uint32_t             base_id_ = 0;   // stable id ignoring variation
 
@@ -536,6 +548,8 @@ class FontStack : public Shaper {
             have_prev = true;
         }
 
+        if (params.ligatures) apply_ligatures(out, params);
+
         return out;
     }
 
@@ -639,6 +653,57 @@ class FontStack : public Shaper {
         return atlas_.insert(key, r.bitmap, r.offset, advance, scale, 0.0f, false);
     }
 
+    // Greedy longest-match ligature substitution over the shaped run. Merges
+    // a component sequence (same face, contiguous) into one ligature glyph,
+    // keeping the first component's cluster so cursor hit-testing still maps
+    // the ligature back to its start. Advance becomes the ligature glyph's own
+    // advance at the run's variation. Runs per face so mixed-font text is safe.
+    void apply_ligatures(ShapeResult& out, const ShapeParams& params) const {
+        bool any = false;
+        for (const auto& g : out.glyphs)
+            if (g.face_index < faces_.size() && faces_[g.face_index]->has_ligatures()) {
+                any = true; break;
+            }
+        if (!any) return;
+
+        std::vector<ShapedGlyph> merged;
+        merged.reserve(out.glyphs.size());
+        std::vector<std::uint16_t> gids;
+        gids.reserve(out.glyphs.size());
+        for (const auto& g : out.glyphs) gids.push_back(g.glyph_id);
+
+        for (std::size_t i = 0; i < out.glyphs.size();) {
+            const ShapedGlyph& g = out.glyphs[i];
+            const std::size_t fi = g.face_index;
+            std::size_t consumed = 0;
+            std::uint16_t lig = 0;
+            if (fi < faces_.size() && faces_[fi]->has_ligatures()) {
+                // Only fold a run whose every component shares this face.
+                lig = faces_[fi]->ligature_at(gids, i, consumed);
+                if (lig != 0) {
+                    for (std::size_t k = 1; k < consumed; ++k)
+                        if (i + k >= out.glyphs.size() || out.glyphs[i + k].face_index != fi) {
+                            lig = 0; break;
+                        }
+                }
+            }
+            if (lig != 0 && consumed >= 2) {
+                ShapedGlyph m = g;                 // keep first component's cluster/offset
+                m.glyph_id = lig;
+                m.advance  = faces_[fi]->advance(lig, params.size_px) + params.letter_spacing;
+                merged.push_back(m);
+                i += consumed;
+            } else {
+                merged.push_back(g);
+                ++i;
+            }
+        }
+
+        out.glyphs = std::move(merged);
+        out.width = 0.0f;
+        for (const auto& g : out.glyphs) out.width += g.advance;
+    }
+
     // Pin a variable face to a run's axis position before we shape or
     // rasterise with it: the wght axis plus any extra overrides (opsz, wdth,
     // custom). A no-op for static faces. Face guards its own variation state
@@ -689,7 +754,7 @@ namespace detail {
     p.size_px        = st.size;
     p.letter_spacing = st.letter_spacing;
     p.kerning        = true;
-    p.ligatures      = true;
+    p.ligatures      = st.ligatures;
     p.weight         = st.effective_weight();
     for (std::uint8_t i = 0; i < st.variations.count && p.axis_count < ShapeParams::max_axes; ++i) {
         const auto& a = st.variations.axes[i];

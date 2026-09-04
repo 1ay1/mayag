@@ -220,6 +220,11 @@ struct TextStyle {
     /// an axis here overrides it.
     FontVariations variations{};
 
+    /// GSUB `liga` ligatures (fi, ffi, ...). On by default — the correct
+    /// typographic default; turn off for code/monospace where each character
+    /// must stay distinct.
+    bool ligatures = true;
+
     friend constexpr bool operator==(const TextStyle&, const TextStyle&) = default;
     [[nodiscard]] constexpr float line_advance() const noexcept { return size * line_height; }
 
