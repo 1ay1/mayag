@@ -542,7 +542,7 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
         // A bitmap entry IS coverage; an SDF entry must be thresholded. The
         // flag travels per instance because hybrid mode mixes both.
         cov = ((v.flags & FLAG_GLYPH_SDF) != 0u)
-            ? smoothstep(0.41, 0.59, raw)
+            ? smoothstep(0.5 - max(fwidth(raw), 1e-5), 0.5 + max(fwidth(raw), 1e-5), raw)
             : raw;
     } else {
         cov = mg_coverage(mg_rounded_box(v.local, v.half_size, v.radii), px);
