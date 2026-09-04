@@ -244,6 +244,65 @@ void test_source_lifecycle() {
           "the producer stopped and joined when the model disconnected");
 }
 
+// ── Sub::every reconciliation ────────────────────────────────────
+//
+// Interval subscriptions are declarative too: the live set is recomputed from
+// the model each frame. The runtime must START firing an interval that appears
+// and STOP one whose condition goes false. This was silently broken once (the
+// reconcile call was missing, so `interval_timers_` stayed empty and
+// `Sub::every` never fired at all) — this pins it so it cannot regress.
+
+struct EveryApp {
+    struct Model { int ticks = 0; bool running = true; };
+    struct Tick {};
+    struct Stop {};
+    using Msg = std::variant<Tick, Stop>;
+
+    static Model init() { return {}; }
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        if (std::holds_alternative<Tick>(msg)) m.ticks += 1;
+        else m.running = false;
+        return {m, Cmd<Msg>::none()};
+    }
+    static Node view(const Model&) { return dsl::box().build(); }
+    static Sub<Msg> subscribe(const Model& m) {
+        if (!m.running) return Sub<Msg>::none();          // interval disappears
+        return Sub<Msg>::every(10ms, Tick{});
+    }
+};
+
+void test_every_reconciliation() {
+    section("Sub::every reconciliation");
+
+    AppConfig cfg;
+    cfg.log_renderer = false;
+
+    int while_running = 0, after_stop = 0;
+    run_headless<EveryApp>(cfg, [&](auto& rt) {
+        for (int i = 0; i < 80 && rt.model().ticks < 3; ++i) {
+            std::this_thread::sleep_for(4ms);
+            rt.tick();
+        }
+        while_running = rt.model().ticks;
+
+        // Drop the interval; it must stop firing.
+        rt.send(EveryApp::Stop{});
+        rt.tick();
+        const int base = rt.model().ticks;
+        for (int i = 0; i < 40; ++i) {
+            std::this_thread::sleep_for(4ms);
+            rt.tick();
+        }
+        after_stop = rt.model().ticks - base;
+    });
+
+    check(while_running >= 3,
+          std::string{"an active Sub::every fires ("} +
+          std::to_string(while_running) + " ticks)");
+    check(after_stop == 0,
+          "it stops the frame its condition goes false");
+}
+
 // ── end to end: a blocked window wakes and renders ──────────────────────
 
 void test_blocked_window_wakes() {
@@ -295,6 +354,7 @@ int main() {
     test_waker_cross_thread();
     test_stream_lifecycle();
     test_source_lifecycle();
+    test_every_reconciliation();
     test_blocked_window_wakes();
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
