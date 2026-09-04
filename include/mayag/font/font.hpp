@@ -680,7 +680,12 @@ class FontStack : public Shaper {
 
         if (use_sdf) {
             const float raster_scale = face.scale_for(config_.sdf_raster_size);
-            auto r = rasterize_sdf(o, raster_scale, config_.sdf_spread, 2);
+            // Faux-bold in the SDF path: thicken the field's source coverage by
+            // ~3% of the SDF raster size, matching the coverage path so bold
+            // looks the same on both sides of the SDF threshold.
+            const float embolden_px = synth_bold
+                ? num::max(config_.sdf_raster_size * 0.03f, 1.0f) : 0.0f;
+            auto r = rasterize_sdf(o, raster_scale, config_.sdf_spread, 2, embolden_px);
             return atlas_.insert(key, r.bitmap, r.offset, advance,
                                  raster_scale, config_.sdf_spread, true);
         }

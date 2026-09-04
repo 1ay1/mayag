@@ -515,13 +515,25 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
 /// the SDF needs, because the distance transform's accuracy is bounded by the
 /// coverage bitmap it is seeded from.
 [[nodiscard]] inline RasterResult rasterize_sdf(const Outline& outline, float scale,
-                                                float spread = 4.0f, int supersample = 2) {
+                                                float spread = 4.0f, int supersample = 2,
+                                                float embolden_px = 0.0f) {
     const int   ss     = num::clamp(supersample, 1, 4);
     const int   pad    = static_cast<int>(std::ceil(spread)) + 1;
     const float hi_res = scale * static_cast<float>(ss);
 
     RasterResult hi = rasterize(outline, hi_res, pad * ss);
     if (hi.bitmap.empty()) return {};
+
+    // Faux-bold at SDF sizes: thicken the high-res coverage before the field
+    // is built, so every stem grows uniformly and the field stays exact. The
+    // strength scales with the supersample so the effect matches the coverage
+    // path once downsampled.
+    if (embolden_px > 0.0f) {
+        const float s = embolden_px * static_cast<float>(ss);
+        const int   grow = static_cast<int>(std::ceil(s));
+        hi.bitmap = embolden(hi.bitmap, s);
+        hi.offset -= Vec2{static_cast<float>(grow), static_cast<float>(grow)};
+    }
 
     Bitmap hi_sdf = make_sdf(hi.bitmap, spread * static_cast<float>(ss));
 

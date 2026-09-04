@@ -930,6 +930,20 @@ void test_synthetic_bold() {
     // A weight the face CAN'T reach embolds; a normal weight does not.
     const typo::CachedGlyph* reg2 = stack.glyph(0, g, 32.0f, 400.0f, {}, false);
     check(reg2 != nullptr, "regular weight still caches its own slim glyph");
+
+    // SDF path (large text) must embolden too, so bold looks the same on both
+    // sides of the SDF threshold.
+    typo::FontConfig sdf_cfg; sdf_cfg.mode = typo::RenderMode::sdf;
+    typo::FontStack sdf{sdf_cfg};
+    sdf.add(sf);
+    const typo::CachedGlyph* sreg = sdf.glyph(0, g, 64.0f, 400.0f, {}, false);
+    if (sreg == nullptr) { check(false, "sdf regular rasterises"); return; }
+    const Vec2 sreg_size = sreg->size;
+    const bool sreg_is_sdf = sreg->is_sdf;
+    const typo::CachedGlyph* sbold = sdf.glyph(0, g, 64.0f, 700.0f, {}, false);
+    if (sbold == nullptr) { check(false, "sdf bold rasterises"); return; }
+    check(sreg_is_sdf && sbold->is_sdf, "both are distance-field glyphs");
+    check(sbold->size.x > sreg_size.x, "synthetic bold thickens the SDF field too");
 }
 
 /// Justified text: every line but the last is stretched to the box edge by
