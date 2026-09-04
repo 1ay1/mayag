@@ -946,6 +946,58 @@ void test_synthetic_bold() {
     check(sbold->size.x > sreg_size.x, "synthetic bold thickens the SDF field too");
 }
 
+/// Ellipsis truncation — the DEFAULT overflow. A label too long for its box is
+/// cut to the glyphs that fit plus “…”, reaching the box edge but not past it,
+/// instead of clipping mid-glyph or overflowing.
+void test_ellipsis() {
+    section("ellipsis truncation");
+
+    auto face = test_face();
+    if (!face) { check(true, "no font — skipping"); return; }
+    auto stack = std::make_shared<typo::FontStack>();
+    stack->add(face);
+    typo::StackMeasurer measurer{*stack};
+    typo::StackGlyphRenderer glyphs{*stack};
+
+    check(stack->ellipsis_glyph() != 0, "primary face resolves an ellipsis glyph");
+
+    const std::string longtext = "This is a very long label that will not fit in the box";
+    const float box_w = 120.0f;
+
+    const auto paint_glyphs = [&](TextOverflow ov) {
+        auto ui = text_owned(longtext) | font(18) | width(box_w);
+        Node root = ui.build();
+        root.style().text.overflow = ov;
+        layout::layout_tree(root, {box_w, 40.0f}, measurer);
+        DrawList dl;
+        render::PaintOptions po; po.measurer = &measurer; po.glyphs = &glyphs;
+        render::paint(root, dl, po);
+        std::size_t n = 0; float maxx = 0.0f;
+        for (const auto& inst : dl.instances()) { ++n; maxx = num::max(maxx, inst.rect.x + inst.rect.z); }
+        return std::pair<std::size_t, float>{n, maxx};
+    };
+
+    const auto [clip_n, clip_r]   = paint_glyphs(TextOverflow::clip);
+    const auto [ell_n,  ell_r]    = paint_glyphs(TextOverflow::ellipsis);
+
+    check(clip_n > 0 && ell_n > 0, "both modes paint glyphs");
+    check(ell_n < clip_n, "ellipsis truncates to fewer glyphs than clip");
+    check(ell_r <= box_w + 2.0f, "ellipsis keeps the line within the box");
+    check(clip_r > box_w, "clip overflows the box (the thing ellipsis fixes)");
+
+    // Text that already fits is left untouched by ellipsis.
+    {
+        auto ui = text_owned("ok") | font(18) | width(box_w);
+        Node root = ui.build();
+        root.style().text.overflow = TextOverflow::ellipsis;
+        layout::layout_tree(root, {box_w, 40.0f}, measurer);
+        DrawList dl;
+        render::PaintOptions po; po.measurer = &measurer; po.glyphs = &glyphs;
+        render::paint(root, dl, po);
+        check(dl.instances().size() == 2, "short text keeps all its glyphs, no ellipsis added");
+    }
+}
+
 /// Justified text: every line but the last is stretched to the box edge by
 /// spreading slack across inter-word spaces. The bar: a wrapped justified
 /// paragraph paints glyphs reaching closer to the right edge than the same
@@ -1281,6 +1333,7 @@ int main() {
     test_italic();
     test_synthetic_italic();
     test_synthetic_bold();
+    test_ellipsis();
     test_justify();
     test_ligatures();
     test_color_glyphs();

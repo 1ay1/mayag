@@ -492,6 +492,15 @@ class FontStack : public Shaper {
         return {0, 0};
     }
 
+    /// Glyph id for the ellipsis (…) in the primary face, or '.' as a fallback
+    /// when the font has no U+2026. Used by ellipsis text truncation.
+    [[nodiscard]] std::uint16_t ellipsis_glyph() const noexcept {
+        if (faces_.empty()) return 0;
+        const Face& f = *faces_.front();
+        if (const std::uint16_t g = f.glyph_for(0x2026); g != 0) return g;
+        return f.glyph_for('.');
+    }
+
     [[nodiscard]] FaceMetrics metrics(float size_px) const {
         return faces_.empty() ? FaceMetrics{} : faces_.front()->metrics(size_px);
     }
@@ -1053,7 +1062,34 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
 
             const float line_start_x = pen_x;
 
-            for (std::size_t i = line.begin; i < line.end && i < shaped.glyphs.size(); ++i) {
+            // Ellipsis truncation: for a non-wrapping line that overflows the
+            // box, drop the trailing glyphs that don't fit and append “…”. This
+            // is the DEFAULT overflow, so a too-long label reads "Some long na…"
+            // instead of clipping mid-glyph. Only the last visual line ellipses.
+            std::size_t draw_end = line.end;
+            bool show_ellipsis = false;
+            float ellipsis_x = 0.0f;
+            const CachedGlyph* ell_glyph = nullptr;
+            if (st.overflow == TextOverflow::ellipsis && !wrapping &&
+                line.width > box.width() + 0.5f && box.width() > 0.0f) {
+                const std::uint16_t ell_gid = stack_->ellipsis_glyph();
+                ell_glyph = stack_->glyph(0, ell_gid, st.size, st.effective_weight(),
+                                          {sp.axes.data(), sp.axis_count}, sp.italic);
+                const float ell_w = ell_glyph ? ell_glyph->advance : st.size * 0.5f;
+                const float budget = box.width() - ell_w;
+                float run = 0.0f;
+                draw_end = line.begin;
+                for (std::size_t i = line.begin; i < line.end && i < shaped.glyphs.size(); ++i) {
+                    const float nx = run + shaped.glyphs[i].advance;
+                    if (nx > budget) break;
+                    run = nx;
+                    draw_end = i + 1;
+                }
+                ellipsis_x = pen_x + run;
+                show_ellipsis = true;
+            }
+
+            for (std::size_t i = line.begin; i < draw_end && i < shaped.glyphs.size(); ++i) {
                 const auto& g = shaped.glyphs[i];
                 if (g.glyph_id == 0 && g.advance == 0.0f) continue;   // newline marker
 
@@ -1069,6 +1105,11 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                     (s[g.cluster] == ' ' || s[g.cluster] == '\t')) {
                     pen_x += word_gap;
                 }
+            }
+
+            // Draw the ellipsis glyph after the truncated run.
+            if (show_ellipsis && ell_glyph != nullptr && ell_glyph->size.x > 0.0f) {
+                emit(dl, *ell_glyph, Vec2{ellipsis_x, baseline_y}, st);
             }
 
             const float line_end_x = (st.align == TextAlign::justify && word_gap > 0.0f)
