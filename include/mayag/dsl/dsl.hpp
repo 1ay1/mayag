@@ -446,6 +446,17 @@ template <Modifier M>
     return node(std::move(n));
 }
 
+/// Column / row of a RUNTIME-sized list of children — the dynamic-list twins of
+/// `v(...)` / `h(...)`, which take a fixed set of compile-time children. This is
+/// what a view does with `model.items`: build a std::vector<Node> in a loop,
+/// then `v_list(rows)`. Further modifiers pipe on as usual.
+[[nodiscard]] inline auto v_list(std::vector<Node> children, float gap_px = 0.0f) {
+    return list(Axis::vertical, std::move(children), gap_px);
+}
+[[nodiscard]] inline auto h_list(std::vector<Node> children, float gap_px = 0.0f) {
+    return list(Axis::horizontal, std::move(children), gap_px);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Modifiers — layout
 // ═══════════════════════════════════════════════════════════════════════════

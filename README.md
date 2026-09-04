@@ -453,8 +453,15 @@ no string building, so the same call names the row in the view loop and the
 subscribe loop:
 
 ```cpp
-// view:      row(item) | id_of("row", i)
-// subscribe: Sub<Msg>::on_click_id(node_id("row", i), Toggle{i})
+// view: build the rows in a loop, then v_list() lays them out like v() does
+std::vector<Node> rows;
+for (int i = 0; i < (int)m.items.size(); ++i)
+    rows.push_back((row(m.items[i]) | id_of("row", i)).build());
+return v_list(std::move(rows), 8.0f);
+
+// subscribe: same id, one Sub per row
+for (int i = 0; i < (int)m.items.size(); ++i)
+    subs.push_back(Sub<Msg>::on_click_id(node_id("row", i), Toggle{i}));
 ```
 
 **`on_frame(fn)`** — per-frame animation ticks without unpacking a FrameEvent,

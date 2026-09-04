@@ -318,6 +318,21 @@ void test_layout() {
         check(rows >= 2, "paragraph wraps its fragments onto multiple lines");
         check(n.children().size() == 4, "paragraph keeps every styled fragment");
     }
+
+    // v_list: a runtime-sized column of children (the dynamic-list case). It
+    // must place a std::vector<Node> the same way v(...) places fixed children.
+    {
+        std::vector<Node> rows;
+        for (int i = 0; i < 3; ++i)
+            rows.push_back((box() | size(100, 20)).build());
+        auto ui = v_list(std::move(rows), 10.0f) | width(120);
+        Node n = ui.build();
+        layout::layout_tree(n, {120, 200}, tm);
+        check(n.children().size() == 3, "v_list holds every runtime child");
+        near(n.children()[0].frame().top(), 0.0f,  0.01f, "v_list first child at top");
+        near(n.children()[1].frame().top(), 30.0f, 0.01f, "v_list stacks by height + gap");
+        near(n.children()[2].frame().top(), 60.0f, 0.01f, "v_list third child stacked");
+    }
 }
 
 void test_draw_list() {
