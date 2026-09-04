@@ -201,6 +201,7 @@ layout(location = 9) in vec2  v_half;
 
 layout(set = 0, binding = 0) uniform sampler2D u_atlas;
 layout(set = 0, binding = 1) uniform sampler2D u_color_atlas;
+layout(set = 0, binding = 2) uniform sampler2D u_capture;
 
 layout(location = 0) out vec4 o_color;
 
@@ -261,10 +262,33 @@ void main() {
         o_color = vec4(t.rgb * a, a);
         return;
     } else if (kind == KIND_BACKDROP) {
-        // Frosted glass reads and blurs the framebuffer, which the single-pass
-        // GPU pipeline cannot do inline; it renders on the software path today.
-        // Discard cleanly here rather than drawing a box.
-        discard;
+        // Frosted glass. Sample the mid-frame snapshot of everything drawn so
+        // far (u_capture, same size as the framebuffer) with a small Gaussian,
+        // apply saturation/brightness, and emit within the rounded coverage.
+        // v_params.x is the blur radius in px; v_params.y/.z are sat/bright.
+        float d = mg_rounded_box(v_local, v_half, v_radii);
+        float bd_cov = mg_coverage(d, px);
+        if (bd_cov <= 0.001) discard;
+        vec2 texel = 1.0 / vec2(textureSize(u_capture, 0));
+        float r = max(v_params.x, 0.0);
+        // 13-tap separable-ish Gaussian on a grid scaled by the radius: cheap,
+        // and for a UI blur (r up to ~30) visually smooth.
+        vec3 sum = vec3(0.0); float wsum = 0.0;
+        for (int oy = -2; oy <= 2; ++oy) {
+            for (int ox = -2; ox <= 2; ++ox) {
+                float fx = float(ox) * 0.5, fy = float(oy) * 0.5;
+                float w = exp(-(fx*fx + fy*fy) * 2.0);
+                vec2 uv = (gl_FragCoord.xy + vec2(float(ox), float(oy)) * r * 0.5) * texel;
+                sum += texture(u_capture, uv).rgb * w;
+                wsum += w;
+            }
+        }
+        vec3 c = sum / max(wsum, 1e-4);
+        float sat = v_params.y, bright = v_params.z;
+        float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        c = mix(vec3(luma), c, sat) * bright;
+        o_color = vec4(max(c, vec3(0.0)) * bd_cov, bd_cov);
+        return;
     } else {
         cov = mg_coverage(mg_rounded_box(v_local, v_half, v_radii), px);
     }

@@ -168,7 +168,7 @@ enum { VK_COMMAND_BUFFER_LEVEL_PRIMARY = 0 };
 enum { VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT = 2 };
 enum { VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT = 1 };
 enum { VK_SUBPASS_CONTENTS_INLINE = 0 };
-enum { VK_ATTACHMENT_LOAD_OP_CLEAR = 1, VK_ATTACHMENT_LOAD_OP_DONT_CARE = 2,
+enum { VK_ATTACHMENT_LOAD_OP_LOAD = 0, VK_ATTACHMENT_LOAD_OP_CLEAR = 1, VK_ATTACHMENT_LOAD_OP_DONT_CARE = 2,
        VK_ATTACHMENT_STORE_OP_STORE = 0, VK_ATTACHMENT_STORE_OP_DONT_CARE = 1 };
 enum { VK_PIPELINE_BIND_POINT_GRAPHICS = 0 };
 enum { VK_VERTEX_INPUT_RATE_VERTEX = 0, VK_VERTEX_INPUT_RATE_INSTANCE = 1 };
@@ -402,6 +402,12 @@ struct VkBufferImageCopy {
     VkImageSubresourceLayers imageSubresource; VkOffset2D imageOffset; std::int32_t z;
     VkExtent3D imageExtent;
 };
+struct VkOffset3D { std::int32_t x, y, z; };
+struct VkImageCopy {
+    VkImageSubresourceLayers srcSubresource; VkOffset3D srcOffset;
+    VkImageSubresourceLayers dstSubresource; VkOffset3D dstOffset;
+    VkExtent3D extent;
+};
 struct VkImageMemoryBarrier {
     int sType; const void* pNext; Flags srcAccessMask, dstAccessMask; int oldLayout, newLayout;
     std::uint32_t srcQueueFamilyIndex, dstQueueFamilyIndex; VkImage image;
@@ -524,6 +530,7 @@ struct Api {
     void (*CmdDraw)(VkCommandBuffer, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) = nullptr;
     void (*CmdCopyBufferToImage)(VkCommandBuffer, VkBuffer, VkImage, int, std::uint32_t, const VkBufferImageCopy*) = nullptr;
     void (*CmdCopyImageToBuffer)(VkCommandBuffer, VkImage, int, VkBuffer, std::uint32_t, const VkBufferImageCopy*) = nullptr;
+    void (*CmdCopyImage)(VkCommandBuffer, VkImage, int, VkImage, int, std::uint32_t, const VkImageCopy*) = nullptr;
     void (*CmdPipelineBarrier)(VkCommandBuffer, Flags, Flags, Flags, std::uint32_t, const void*, std::uint32_t, const void*, std::uint32_t, const VkImageMemoryBarrier*) = nullptr;
 
     // surface / swapchain (KHR, resolved from the instance)

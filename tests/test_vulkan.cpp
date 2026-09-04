@@ -171,6 +171,39 @@ int main() {
         }
     }
 
+    // ── backdrop blur on the GPU ────────────────────────────────────
+    //
+    // A frosted panel over a hard red|blue seam blends it. The GPU path
+    // snapshots the background mid-frame and the shader blurs the snapshot,
+    // so the pixel at the seam under the panel carries both colours — the
+    // same result the software rasteriser gives.
+    section("backdrop blur");
+    {
+        const int W = 120, H = 120;
+        auto ui = z(h(box() | size(60, 120) | bg(rgb<0xFF3020>),
+                      box() | size(60, 120) | bg(rgb<0x2040FF>)),
+                    box() | size(120, 120) | backdrop_blur(10.0f, 1.0f))
+                  | width(120) | height(120);
+        Node n = ui.build();
+        layout::layout_tree(n, {static_cast<float>(W), static_cast<float>(H)},
+                            layout::default_measurer());
+        DrawList dl; render::paint(n, dl, {});
+        std::vector<std::uint8_t> px;
+        const bool ok = dev.render_offscreen(dl, W, H, colors::black, px);
+        auto at = [&](int x, int y) {
+            const std::size_t i = (static_cast<std::size_t>(y) * W + x) * 4;
+            return std::array<int, 3>{px[i], px[i + 1], px[i + 2]};
+        };
+        const auto mid = at(60, 60);
+        check(ok, "the GPU backdrop frame rendered");
+        check(mid[0] > 40 && mid[2] > 40,
+              "GPU frosted glass blends the seam (mid pixel carries red AND blue)");
+        // The background outside the panel still rendered — the two-segment
+        // split did not clobber it.
+        const auto edge = at(10, 10);
+        check(edge[0] > 150, "the background survives the backdrop split");
+    }
+
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;

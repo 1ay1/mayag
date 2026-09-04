@@ -139,9 +139,19 @@ class DrawList {
               BlendMode blend = BlendMode::normal) {
         // Merge into the tail batch when render state matches; otherwise open
         // a new one. This is the entire batching algorithm.
-        if (!batches_.empty()) {
+        //
+        // Backdrops are the exception: a frosted-glass panel must be drawn in
+        // its own batch, because a GPU backend renders it in a SEPARATE pass
+        // after snapshotting the framebuffer behind it. So a backdrop never
+        // merges with a neighbour, and nothing merges onto a backdrop batch.
+        const bool is_backdrop =
+            static_cast<ShapeKind>(inst.kind) == ShapeKind::backdrop;
+        if (!is_backdrop && !batches_.empty()) {
             Batch& tail = batches_.back();
-            if (tail.texture == texture && tail.blend == blend && tail.clip == current_clip_) {
+            const bool tail_is_backdrop = tail.count > 0 &&
+                static_cast<ShapeKind>(instances_[tail.first].kind) == ShapeKind::backdrop;
+            if (!tail_is_backdrop && tail.texture == texture &&
+                tail.blend == blend && tail.clip == current_clip_) {
                 instances_.push_back(inst);
                 ++tail.count;
                 return;
