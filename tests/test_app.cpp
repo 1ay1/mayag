@@ -452,9 +452,8 @@ void test_subscriptions() {
 
         // Text input is separate from key events, so a shortcut and the
         // character it would type never both fire.
-        rt.window().type("hi");
-        rt.tick();
-        check(rt.model().text == "hi", "text events append");
+        rt.type("hi");
+        check(rt.model().text == "hi", "text events append (via rt.type)");
     });
 }
 

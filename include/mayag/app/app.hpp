@@ -697,6 +697,21 @@ class Runtime {
         tick();
     }
 
+    /// Type text into the focused field, then process — the input twin of
+    /// click(), so a test reads `rt.type("hi")` instead of the two-step
+    /// `rt.window().type(...); rt.tick();`.
+    void type(std::string_view s) {
+        window_.type(s);
+        tick();
+    }
+
+    /// Press a key (with optional modifiers), then process. For enter, escape,
+    /// backspace, arrows, and shortcuts.
+    void press_key(Key k, Mods mods = {}) {
+        window_.press_key(k, mods);
+        tick();
+    }
+
   private:
     // ── the pure step ───────────────────────────────────────────────────
 
