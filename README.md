@@ -244,6 +244,28 @@ Measured on a desktop with 816 faces: `default_stack()` assembles a **32-face
 chain** and resolves Latin, CJK, Cyrillic, Arabic, Devanagari, Hebrew, Thai,
 Korean and emoji with **zero tofu**.
 
+### Colour emoji, decoded from scratch
+
+Loading a colour font is only half of it — the glyphs still have to *render in
+colour*. mayag does, with no FreeType and no libpng. An emoji font stores each
+glyph as a PNG (Google's `CBDT`/`CBLC`, Apple's `sbix`), so the engine:
+
+1. **inflates the PNG itself** — `image/png_decode.hpp` is a from-scratch
+   DEFLATE decoder (stored, fixed- and dynamic-Huffman blocks) plus the five
+   PNG scanline filters, verified byte-exact against a reference decoder;
+2. **parses `CBLC`/`CBDT` and `sbix`** to locate a glyph's strike and read its
+   PNG bytes and placement metrics;
+3. **packs the RGBA into a colour plane** of the same atlas as coverage glyphs,
+   so a 😀 is cached, packed and evicted through the one glyph path; and
+4. **blends it verbatim** — a colour glyph is a distinct draw kind that samples
+   the RGBA atlas and takes its pixels as-is, tinted only by the run's opacity,
+   never by the text colour. `CPU 温度 🔥` renders every character, and the fire
+   is orange.
+
+The software rasteriser draws colour emoji today; the GPU path discards colour
+glyphs cleanly (the colour-atlas upload is the one remaining piece) rather than
+drawing garbage.
+
 **Kerning is real.** Measured on Arial at 32 px:
 
 | Pair | Kerned | Unkerned | Delta |

@@ -158,6 +158,15 @@ class CoverageSampler {
     virtual ~CoverageSampler() = default;
     /// Coverage of texture `slot` at normalised (u,v).
     [[nodiscard]] virtual float sample(std::uint32_t slot, float u, float v) const = 0;
+
+    /// RGBA of a COLOUR-glyph atlas at normalised (u,v), straight (not
+    /// premultiplied). Only `color_glyph` instances call this; the default
+    /// returns opaque white so a sampler that has no colour atlas degrades to
+    /// a blank quad rather than misbehaving.
+    [[nodiscard]] virtual Vec4 sample_rgba(std::uint32_t /*slot*/, float /*u*/,
+                                           float /*v*/) const {
+        return Vec4{1.0f, 1.0f, 1.0f, 0.0f};
+    }
 };
 
 class Software {
@@ -304,6 +313,30 @@ class Software {
         const int ix1 = has_interior ? static_cast<int>(interior.right())  : 0;
         const int iy1 = has_interior ? static_cast<int>(interior.bottom()) : 0;
 
+        // ── colour glyph (emoji) ────────────────────────────────────────
+        //
+        // Sample the RGBA colour-glyph atlas per pixel and blend it verbatim:
+        // the atlas supplies the colour, the instance supplies only opacity
+        // (in color.w). No SDF, no tint — a 😀 keeps its own colours.
+        if (kind == ShapeKind::color_glyph && sampler != nullptr) {
+            const float op = inst.color.w;
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    const Vec2 p{static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f};
+                    const float u = (p.x - shape.left()) / shape.width();
+                    const float v = (p.y - shape.top())  / shape.height();
+                    const float su = inst.uv.x + u * (inst.uv.z - inst.uv.x);
+                    const float sv = inst.uv.y + v * (inst.uv.w - inst.uv.y);
+                    const Vec4 texel = sampler->sample_rgba(inst.texture_slot, su, sv);
+                    const float a = texel.w * op;
+                    if (a <= 0.001f) continue;
+                    // Straight -> premultiplied, honouring opacity.
+                    fb.blend(x, y, Vec4{texel.x * a, texel.y * a, texel.z * a, a}, 1.0f);
+                }
+            }
+            return;
+        }
+
         for (int y = y0; y < y1; ++y) {
             const bool interior_row = has_interior && y >= iy0 && y < iy1;
 
@@ -412,6 +445,12 @@ class Software {
 
             case ShapeKind::texture:
                 return sdf::coverage_smooth(sdf::rounded_box(local, half, inst.radii));
+
+            case ShapeKind::color_glyph:
+                // Colour glyphs are blended per-pixel from the RGBA atlas in
+                // draw_instance before this coverage path runs, so control
+                // never reaches here; the case exists for switch exhaustivity.
+                return 0.0f;
         }
         return 0.0f;
     }

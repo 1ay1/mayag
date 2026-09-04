@@ -14,6 +14,7 @@
 // Those three interfaces already existed; the font engine just implements them.
 
 #include "atlas.hpp"
+#include "color_bitmap.hpp"
 #include "opentype.hpp"
 #include "outline.hpp"
 #include "raster.hpp"
@@ -417,6 +418,36 @@ class FontStack : public Shaper {
         const Outline o = face.outline(gid);
         const float advance = face.advance(gid, size_px);
 
+        // Colour glyph (emoji): the face has no outline, but a CBDT/sbix
+        // strike. Decode it, scale the strike to the requested size, and pack
+        // it into the atlas's RGBA plane. Marked is_color so the renderer
+        // emits an untinted colour-glyph quad.
+        if (face.is_color()) {
+            ColorBitmap cb = color_bitmap_for(face.file(), gid);
+            if (cb.valid()) {
+                // The strike is authored at cb.ppem px/em; scale it so the em
+                // matches the requested size_px.
+                const float scale = cb.ppem > 0 ? size_px / static_cast<float>(cb.ppem) : 1.0f;
+                const int dw = std::max(1, static_cast<int>(static_cast<float>(cb.width) * scale + 0.5f));
+                const int dh = std::max(1, static_cast<int>(static_cast<float>(cb.height) * scale + 0.5f));
+                std::vector<std::uint8_t> scaled;
+                const std::uint8_t* pixels = cb.rgba.data();
+                if (dw != cb.width || dh != cb.height) {
+                    scaled = scale_rgba(cb.rgba, cb.width, cb.height, dw, dh);
+                    pixels = scaled.data();
+                }
+                // Emoji sit on the baseline. CBDT bearingY is the height of
+                // the bitmap ABOVE the baseline (positive up); mayag's dst is
+                // pen.y + bearing.y with y growing DOWN, so the top of the
+                // bitmap is at -bearingY from the pen. bearingX is a normal
+                // left offset.
+                const Vec2 bearing{cb.bearing_x * scale, -cb.bearing_y * scale};
+                return atlas_.insert_color(key, pixels, dw, dh, bearing, advance);
+            }
+            // No usable strike — cache a blank so we stop retrying.
+            return atlas_.insert(key, Bitmap{}, Vec2{}, advance, 1.0f, 0.0f, false);
+        }
+
         if (o.empty()) {
             // Blank (space) — cache the metrics so we stop re-checking.
             return atlas_.insert(key, Bitmap{}, Vec2{}, advance, 1.0f, 0.0f, use_sdf);
@@ -723,7 +754,13 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                        g.size.x, g.size.y};
         }
 
-        dl.glyph(dst, g.uv, st.color, g.is_sdf);
+        if (g.is_color) {
+            // Colour glyph: sample RGBA verbatim, tinted only by the run's
+            // opacity (from the text colour's alpha), never by its hue.
+            dl.color_glyph(dst, g.uv, st.color.a);
+        } else {
+            dl.glyph(dst, g.uv, st.color, g.is_sdf);
+        }
     }
 
     FontStack*    stack_;
@@ -747,6 +784,12 @@ class StackSampler final : public backend::CoverageSampler {
     /// pixel to 0 or 1.
     [[nodiscard]] float sample(std::uint32_t, float u, float v) const override {
         return stack_->atlas().sample(u, v);
+    }
+
+    /// Colour-glyph atlas texel, for `color_glyph` instances (emoji). Straight
+    /// RGBA; the renderer premultiplies and blends it verbatim.
+    [[nodiscard]] Vec4 sample_rgba(std::uint32_t, float u, float v) const override {
+        return stack_->atlas().sample_color(u, v);
     }
 
   private:

@@ -20,6 +20,7 @@
 #include "../core/geometry.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <unordered_map>
 #include <vector>
 
@@ -103,6 +104,10 @@ struct CachedGlyph {
 
     bool  is_sdf = false;
     bool  valid  = false;
+    /// True when this entry is a colour glyph (emoji): its pixels live in the
+    /// FontStack's separate RGBA colour atlas, not this coverage atlas, and
+    /// `uv` indexes that atlas instead.
+    bool  is_color = false;
 
     /// Last frame this glyph was drawn — drives LRU eviction.
     std::uint64_t last_used = 0;
@@ -326,6 +331,70 @@ class Atlas {
         return &it->second;
     }
 
+    /// Insert a COLOUR glyph (emoji). Its RGBA pixels are packed into a second
+    /// plane that shares this atlas's packer and dimensions, so colour and
+    /// coverage glyphs are cached, packed and evicted through one path. The
+    /// returned entry is marked `is_color`; its `uv` indexes the colour plane.
+    const CachedGlyph* insert_color(const GlyphKey& key,
+                                    const std::uint8_t* rgba, int bw, int bh,
+                                    Vec2 bearing, float advance) {
+        CachedGlyph g;
+        g.bearing   = bearing;
+        g.advance   = advance;
+        g.is_color  = true;
+        g.last_used = frame_;
+        g.valid     = true;
+        if (bw <= 0 || bh <= 0 || rgba == nullptr) {
+            g.size = Vec2{};
+            auto [it, _] = entries_.insert_or_assign(key, g);
+            return &it->second;
+        }
+
+        constexpr int gutter = 1;
+        const int w = bw + gutter * 2;
+        const int h = bh + gutter * 2;
+        int x = 0, y = 0;
+        if (!packer_.pack(w, h, x, y)) {
+            if (!evict_and_repack(w, h, x, y)) return nullptr;
+        }
+
+        ensure_color_plane();
+        for (int row = 0; row < bh; ++row) {
+            const std::uint8_t* src = rgba + static_cast<std::size_t>(row) * bw * 4;
+            std::uint8_t* dst = color_.data() +
+                (static_cast<std::size_t>(y + gutter + row) * width_ + (x + gutter)) * 4;
+            std::memcpy(dst, src, static_cast<std::size_t>(bw) * 4);
+        }
+
+        g.atlas_rect = Rect{static_cast<float>(x + gutter), static_cast<float>(y + gutter),
+                            static_cast<float>(bw), static_cast<float>(bh)};
+        g.size = Vec2{static_cast<float>(bw), static_cast<float>(bh)};
+        g.uv = Rect{g.atlas_rect.left()  / static_cast<float>(width_),
+                    g.atlas_rect.top()   / static_cast<float>(height_),
+                    g.atlas_rect.width() / static_cast<float>(width_),
+                    g.atlas_rect.height()/ static_cast<float>(height_)};
+        const Rect touched{static_cast<float>(x), static_cast<float>(y),
+                           static_cast<float>(w), static_cast<float>(h)};
+        color_dirty_ = color_dirty_.empty() ? touched : color_dirty_.unite(touched);
+        auto [it, _] = entries_.insert_or_assign(key, g);
+        return &it->second;
+    }
+
+    /// Sample the RGBA colour plane at normalised (u,v), straight (not
+    /// premultiplied), nearest-neighbour. Emoji strikes are authored at a
+    /// fixed ppem and drawn near 1:1, so nearest keeps them crisp and avoids
+    /// bleeding the transparent gutter into the edge.
+    [[nodiscard]] Vec4 sample_color(float u, float v) const noexcept {
+        if (color_.empty()) return Vec4{1.0f, 1.0f, 1.0f, 0.0f};
+        const int x = num::clamp(static_cast<int>(u * static_cast<float>(width_)),
+                                 0, width_ - 1);
+        const int y = num::clamp(static_cast<int>(v * static_cast<float>(height_)),
+                                 0, height_ - 1);
+        const std::size_t i = (static_cast<std::size_t>(y) * width_ + x) * 4;
+        return Vec4{color_[i] / 255.0f, color_[i + 1] / 255.0f,
+                    color_[i + 2] / 255.0f, color_[i + 3] / 255.0f};
+    }
+
     /// Sample the atlas in normalised coordinates — the software backend's
     /// glyph path calls this.
     [[nodiscard]] float sample(float u, float v) const noexcept {
@@ -435,9 +504,19 @@ class Atlas {
         return packer_.pack(w, h, x, y);
     }
 
+    void ensure_color_plane() {
+        if (color_.empty()) {
+            color_.assign(static_cast<std::size_t>(width_) * height_ * 4, 0);
+        }
+    }
+
     int                       width_  = 0;
     int                       height_ = 0;
     std::vector<std::uint8_t> pixels_;
+    /// RGBA colour plane for emoji glyphs, allocated lazily on first colour
+    /// glyph. Same dimensions and packer as the coverage plane.
+    std::vector<std::uint8_t> color_;
+    Rect                      color_dirty_{};
     SkylinePacker             packer_;
     std::unordered_map<GlyphKey, CachedGlyph> entries_;
     Rect                      dirty_{};

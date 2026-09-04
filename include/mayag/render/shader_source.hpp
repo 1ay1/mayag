@@ -213,6 +213,7 @@ const uint KIND_GLYPH       = 4u;
 const uint KIND_TEXTURE     = 5u;
 const uint KIND_SHADOW      = 6u;
 const uint KIND_ARC         = 7u;
+const uint KIND_COLOR_GLYPH = 8u;
 
 const uint FLAG_GRADIENT   = 1u;
 const uint FLAG_RADIAL     = 2u;
@@ -248,6 +249,12 @@ void main() {
         if ((flags & FLAG_INSET) != 0u) cov = 1.0 - cov;
     } else if (kind == KIND_GLYPH) {
         cov = texture(u_atlas, v_uv).r;
+    } else if (kind == KIND_COLOR_GLYPH) {
+        // Colour glyph (emoji). The GPU path samples the same coverage atlas
+        // slot, which for a colour glyph is empty, so it discards cleanly
+        // rather than drawing a box — colour emoji currently renders on the
+        // software path; the GPU colour-atlas upload is a follow-up.
+        discard;
     } else {
         cov = mg_coverage(mg_rounded_box(v_local, v_half, v_radii), px);
     }

@@ -35,6 +35,7 @@ enum class ShapeKind : std::uint32_t {
     texture       = 5,   ///< samples an image
     shadow        = 6,   ///< blurred box, analytic
     arc           = 7,   ///< partial ring; param0/param1 are start/sweep radians
+    color_glyph   = 8,   ///< samples an RGBA colour-glyph atlas (emoji), untinted
 };
 
 /// One GPU instance. Layout is deliberately 16-byte-aligned vec4 groups so the
@@ -271,6 +272,10 @@ class DrawList {
     /// batch key never changes.
     static constexpr std::uint32_t atlas_slot = 0xFFFF'FFFFu;
 
+    /// The colour-glyph atlas rides in a distinct slot so the sampler knows to
+    /// return RGBA rather than coverage.
+    static constexpr std::uint32_t color_atlas_slot = 0xFFFF'FFFEu;
+
     /// `sdf` selects how the sampler decodes the atlas texel: a bitmap entry
     /// IS coverage and must be used as-is, while a distance-field entry has
     /// to be thresholded back into coverage.
@@ -301,6 +306,22 @@ class DrawList {
         i.uv    = {src_uv.left(), src_uv.top(), src_uv.right(), src_uv.bottom()};
         i.color = premultiplied(tint);
         push(i, texture);
+    }
+
+    /// A colour glyph (emoji). Unlike `glyph`, which samples a coverage atlas
+    /// and is tinted by the text colour, this samples an RGBA colour-glyph
+    /// atlas and takes its pixels VERBATIM — a 😀 is yellow no matter the
+    /// text colour. `opacity` still multiplies through, so it fades with the
+    /// run's opacity like everything else.
+    void color_glyph(const Rect& dst, const Rect& atlas_uv, float opacity = 1.0f) {
+        Instance i{};
+        i.kind  = static_cast<std::uint32_t>(ShapeKind::color_glyph);
+        i.rect  = {dst.origin.x, dst.origin.y, dst.size.x, dst.size.y};
+        i.uv    = {atlas_uv.left(), atlas_uv.top(), atlas_uv.right(), atlas_uv.bottom()};
+        // color.w carries opacity; rgb is unused (the atlas supplies colour).
+        i.color = {1.0f, 1.0f, 1.0f, num::saturate(opacity)};
+        i.texture_slot = color_atlas_slot;
+        push(i, 0);
     }
 
   private:

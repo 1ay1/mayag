@@ -171,12 +171,57 @@ void test_default_stack_completeness() {
     check(stack->resolve('A').second != 0, "Latin always resolves");
 }
 
+// ── colour emoji actually renders ────────────────────────────────
+//
+// The end-to-end payoff: a colour font's glyph is decoded from its CBDT/sbix
+// PNG strike, packed into the RGBA atlas, and blended with its own colours —
+// not tinted, not blank. Skips when no colour font is installed.
+
+void test_color_emoji_renders() {
+    section("colour emoji rendering");
+
+    auto stack = system::default_stack();
+    const auto [face_idx, gid] = stack->resolve(0x1F600);   // grinning face
+    if (gid == 0) { std::printf("  (no emoji font — skipped)\n"); return; }
+
+    const typo::Face* face = stack->face_at(face_idx);
+    check(face != nullptr && face->is_color(), "U+1F600 resolves to a colour face");
+    if (face == nullptr) return;
+
+    // The atlas entry must be a colour glyph with real pixels.
+    const typo::CachedGlyph* g = stack->glyph(face_idx, gid, 48.0f);
+    check(g != nullptr && g->valid && g->is_color, "the emoji is cached as a colour glyph");
+    if (g == nullptr || !g->is_color) return;
+
+    // Its atlas texel must be actual colour, not greyscale.
+    const Vec4 c = stack->atlas().sample_color(
+        g->uv.left() + g->uv.width() * 0.5f, g->uv.top() + g->uv.height() * 0.5f);
+    const bool coloured = std::abs(c.x - c.y) > 0.1f || std::abs(c.y - c.z) > 0.1f;
+    check(coloured && c.w > 0.5f, "the atlas holds real colour pixels, not coverage");
+
+    // Render a string with an emoji and confirm coloured pixels reach the frame.
+    auto ui = dsl::v(dsl::text_owned("A \xF0\x9F\x98\x80 B") | dsl::font(48)
+                                          | dsl::fg(colors::white))
+              | dsl::pad(16) | dsl::bg(colors::black);
+    RenderOptions o; o.fonts = stack;
+    const auto px = render_to_pixels(ui, {360, 100}, o);
+    int coloured_px = 0;
+    for (std::size_t i = 0; i + 3 < px.size(); i += 4) {
+        if (std::abs(int(px[i]) - int(px[i + 1])) > 25 ||
+            std::abs(int(px[i + 1]) - int(px[i + 2])) > 25) ++coloured_px;
+    }
+    check(coloured_px > 200,
+          std::string{"the rendered frame has colour-emoji pixels ("} +
+          std::to_string(coloured_px) + ")");
+}
+
 }  // namespace
 
 int main() {
     std::printf("mayag font discovery\n====================\n");
     test_last_resort();
     test_color_fonts_load();
+    test_color_emoji_renders();
     test_coverage_routing();
     test_default_stack_completeness();
     std::printf("\n%s  %d checks, %d failures\n",
