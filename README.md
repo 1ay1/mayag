@@ -151,7 +151,7 @@ struct Instance {
 };
 ```
 
-No path rasteriser. No tessellator. No stencil passes. No blur passes — a shadow is the same distance field, softened by an analytic Gaussian approximation. Consecutive instances sharing clip rect and texture merge automatically:
+No path rasteriser. No tessellator. No stencil passes. No blur passes — a shadow is the same distance field, softened by an analytic Gaussian approximation. The one primitive that *does* read pixels is **backdrop blur** (`backdrop_blur(radius)` — frosted glass): it blurs whatever the framebuffer already holds behind a panel, with optional saturation and brightness, clipped to the panel's rounded rect. It renders inline on the software path — no offscreen pass — because instances draw in order, so the background under the panel is already composited when the backdrop is reached. Consecutive instances sharing clip rect and texture merge automatically:
 
 ```
 mayag_gallery.png  1720x1800

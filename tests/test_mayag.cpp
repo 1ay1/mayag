@@ -470,6 +470,26 @@ void test_pixels() {
         check(luminance(img.at(26, 50)) < 0.95f, "shadow darkens just outside the box");
         check(luminance(img.at(2, 2)) > 0.95f, "shadow has fallen off by the far corner");
     }
+
+    // Backdrop blur (frosted glass) must soften a hard edge behind it. A red
+    // bar meets a blue bar at x=60; a frosted panel over the seam turns the
+    // hard step into a red→purple→blue gradient, so the pixel AT the seam
+    // carries both red and blue.
+    {
+        auto ui = z(h(box() | size(60, 120) | bg(rgb<0xFF3020>),
+                      box() | size(60, 120) | bg(rgb<0x2040FF>)),
+                    box() | size(120, 120) | backdrop_blur(10.0f, 1.0f))
+                  | width(120) | height(120);
+        RenderOptions o; o.background = colors::black;
+        const Image img = render(ui, {120, 120}, o);
+        const Color<Srgb> mid = img.at(60, 60);
+        check(mid.c0 > 0.15f && mid.c2 > 0.15f,
+              "backdrop blur blends the seam (mid pixel is purple, not a hard edge)");
+        // Far from the seam, inside the panel, the colour is still mostly its
+        // side's hue — the blur is local, not a full-panel average.
+        const Color<Srgb> left = img.at(10, 60);
+        check(left.c0 > left.c2, "the blur is local: the left edge stays red-dominant");
+    }
 }
 
 void test_determinism() {

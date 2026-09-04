@@ -64,7 +64,18 @@ inline void paint_node(const Node& node, DrawList& dl, const PaintOptions& opts,
         }
     }
 
-    // ── fill ────────────────────────────────────────────────────────────
+    // ── backdrop (frosted glass) ────────────────────────────────────────
+    //
+    // Emitted after the outer shadows and BEFORE the fill: it blurs whatever
+    // is already on the framebuffer behind this node, then the (usually
+    // translucent) fill composites over the blurred result — the vibrancy
+    // look. Blur is a pixel radius, so it scales with DPI like shadow blur.
+    if (st.backdrop.active()) {
+        dl.backdrop(frame, st.backdrop.blur * opts.dpi_scale,
+                    st.backdrop.saturation, st.backdrop.brightness, radii);
+    }
+
+    // ── fill ───────────────────────────────────────────────────
     if (st.fill.visible()) {
         if (st.fill.kind == FillKind::solid) {
             dl.fill_rect(frame, apply_opacity(st.fill.color, alpha), radii);

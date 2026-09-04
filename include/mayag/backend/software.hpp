@@ -337,6 +337,20 @@ class Software {
             return;
         }
 
+        // ── backdrop (frosted glass) ──────────────────────────────────
+        //
+        // Read the pixels ALREADY on the framebuffer under this rect, blur
+        // them (separable box blur, a couple of passes approximating a
+        // Gaussian), tweak saturation/brightness, and write the result back
+        // inside the rounded-rect coverage. Because instances render in emit
+        // order and the painter emits this before the panel's fill, the input
+        // is the fully-composited background — the vibrancy look, no offscreen
+        // pass.
+        if (kind == ShapeKind::backdrop) {
+            blur_backdrop(inst, fb, x0, y0, x1, y1, center, half);
+            return;
+        }
+
         for (int y = y0; y < y1; ++y) {
             const bool interior_row = has_interior && y >= iy0 && y < iy1;
 
@@ -451,6 +465,11 @@ class Software {
                 // draw_instance before this coverage path runs, so control
                 // never reaches here; the case exists for switch exhaustivity.
                 return 0.0f;
+
+            case ShapeKind::backdrop:
+                // Backdrops read + blur the framebuffer in draw_instance before
+                // this path; never reached here.
+                return 0.0f;
         }
         return 0.0f;
     }
@@ -556,6 +575,92 @@ class Software {
         return (inst.flags & instance_flags::gradient_srgb)
              ? lerp(inst.color, inst.color2, t)
              : lerp_oklch(inst.color, inst.color2, t);
+    }
+
+    /// Frosted glass: separable box blur of the framebuffer region under a
+    /// backdrop instance, with saturation/brightness, written back inside the
+    /// rounded-rect coverage. Operates on the premultiplied-linear buffer.
+    static void blur_backdrop(const Instance& inst, Framebuffer& fb,
+                              int x0, int y0, int x1, int y1,
+                              Vec2 center, Vec2 half) {
+        if (x1 <= x0 || y1 <= y0) return;
+        const int rw = x1 - x0, rh = y1 - y0;
+        const int radius = static_cast<int>(num::clamp(inst.params.x, 0.0f, 64.0f));
+        const float saturation = inst.params.y;
+        const float brightness = inst.params.z;
+
+        // Copy the region out (straight, un-premultiplied, so blur/sat/bright
+        // are correct on colour rather than on premultiplied values).
+        std::vector<Vec4> buf(static_cast<std::size_t>(rw) * rh);
+        for (int y = 0; y < rh; ++y) {
+            for (int x = 0; x < rw; ++x) {
+                const Vec4& p = fb.at(x0 + x, y0 + y);
+                const float a = p.w;
+                const float inv = a > 1e-4f ? 1.0f / a : 0.0f;
+                buf[static_cast<std::size_t>(y) * rw + x] =
+                    Vec4{p.x * inv, p.y * inv, p.z * inv, a};
+            }
+        }
+
+        // Separable box blur, run twice — two box passes approximate a Gaussian
+        // closely and cheaply. Clamped at the region edge (the panel is small
+        // relative to the frame, so edge bias is invisible under the fill).
+        if (radius > 0) {
+            std::vector<Vec4> tmp(buf.size());
+            const float norm = 1.0f / static_cast<float>(2 * radius + 1);
+            for (int pass = 0; pass < 2; ++pass) {
+                // Horizontal.
+                for (int y = 0; y < rh; ++y) {
+                    for (int x = 0; x < rw; ++x) {
+                        Vec4 s{};
+                        for (int k = -radius; k <= radius; ++k) {
+                            const int sx = num::clamp(x + k, 0, rw - 1);
+                            s = s + buf[static_cast<std::size_t>(y) * rw + sx];
+                        }
+                        tmp[static_cast<std::size_t>(y) * rw + x] = s * norm;
+                    }
+                }
+                // Vertical.
+                for (int y = 0; y < rh; ++y) {
+                    for (int x = 0; x < rw; ++x) {
+                        Vec4 s{};
+                        for (int k = -radius; k <= radius; ++k) {
+                            const int sy = num::clamp(y + k, 0, rh - 1);
+                            s = s + tmp[static_cast<std::size_t>(sy) * rw + x];
+                        }
+                        buf[static_cast<std::size_t>(y) * rw + x] = s * norm;
+                    }
+                }
+            }
+        }
+
+        // Write back inside the rounded-rect coverage, applying sat/brightness.
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                const Vec2 local{static_cast<float>(x) + 0.5f - center.x,
+                                 static_cast<float>(y) + 0.5f - center.y};
+                const float d = sdf::rounded_box(local, half, inst.radii);
+                const float cov = sdf::coverage(d);
+                if (cov <= 0.0f) continue;
+                Vec4 c = buf[static_cast<std::size_t>(y - y0) * rw + (x - x0)];
+                // Saturation: mix toward Rec.709 luma. Brightness: scale.
+                if (saturation != 1.0f) {
+                    const float luma = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+                    c.x = luma + (c.x - luma) * saturation;
+                    c.y = luma + (c.y - luma) * saturation;
+                    c.z = luma + (c.z - luma) * saturation;
+                }
+                c.x *= brightness; c.y *= brightness; c.z *= brightness;
+                c.x = num::max(c.x, 0.0f); c.y = num::max(c.y, 0.0f); c.z = num::max(c.z, 0.0f);
+                // Re-premultiply and replace the pixel by coverage.
+                Vec4& dst = fb.at(x, y);
+                const Vec4 blurred{c.x * c.w, c.y * c.w, c.z * c.w, c.w};
+                dst = Vec4{dst.x * (1 - cov) + blurred.x * cov,
+                           dst.y * (1 - cov) + blurred.y * cov,
+                           dst.z * (1 - cov) + blurred.z * cov,
+                           dst.w * (1 - cov) + blurred.w * cov};
+            }
+        }
     }
 
     [[nodiscard]] static Vec4 apply_blend(Vec4 src, Vec4 dst, BlendMode mode) {

@@ -215,6 +215,7 @@ const uint KIND_TEXTURE     = 5u;
 const uint KIND_SHADOW      = 6u;
 const uint KIND_ARC         = 7u;
 const uint KIND_COLOR_GLYPH = 8u;
+const uint KIND_BACKDROP    = 9u;
 
 const uint FLAG_GRADIENT   = 1u;
 const uint FLAG_RADIAL     = 2u;
@@ -259,6 +260,11 @@ void main() {
         if (a <= 0.001) discard;
         o_color = vec4(t.rgb * a, a);
         return;
+    } else if (kind == KIND_BACKDROP) {
+        // Frosted glass reads and blurs the framebuffer, which the single-pass
+        // GPU pipeline cannot do inline; it renders on the software path today.
+        // Discard cleanly here rather than drawing a box.
+        discard;
     } else {
         cov = mg_coverage(mg_rounded_box(v_local, v_half, v_radii), px);
     }

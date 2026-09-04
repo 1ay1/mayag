@@ -36,6 +36,7 @@ enum class ShapeKind : std::uint32_t {
     shadow        = 6,   ///< blurred box, analytic
     arc           = 7,   ///< partial ring; param0/param1 are start/sweep radians
     color_glyph   = 8,   ///< samples an RGBA colour-glyph atlas (emoji), untinted
+    backdrop      = 9,   ///< blurs the pixels already behind it (frosted glass)
 };
 
 /// One GPU instance. Layout is deliberately 16-byte-aligned vec4 groups so the
@@ -60,6 +61,7 @@ struct alignas(16) Instance {
     //   shadow      : (blur, spread, _, _)
     //   line        : (thickness, _, _, _)
     //   arc         : (thickness, start_rad, sweep_rad, _)
+    //   backdrop    : (blur_radius, saturation, brightness, _)
     Vec4 params{};
     // vec4 7: (kind, flags, blend, texture_slot)
     std::uint32_t kind = 0;
@@ -259,6 +261,22 @@ class DrawList {
         i.color  = premultiplied(sh.color);
         i.params = {num::max(sh.blur, 0.01f), sh.spread, 0.0f, 0.0f};
         if (sh.inset) i.flags |= instance_flags::inset;
+        push(i);
+    }
+
+    /// Frosted glass. Blurs the pixels ALREADY drawn behind `r` by `blur`
+    /// pixels, optionally shifting saturation and brightness, clipped to the
+    /// rounded rect. Unlike every other primitive this reads the framebuffer,
+    /// so it must be emitted BEFORE the fill that sits on top of it — the
+    /// painter does that. `radii` rounds the glass to match the panel.
+    void backdrop(const Rect& r, float blur, float saturation, float brightness,
+                  Corners radii = {}) {
+        Instance i{};
+        i.kind   = static_cast<std::uint32_t>(ShapeKind::backdrop);
+        i.rect   = {r.origin.x, r.origin.y, r.size.x, r.size.y};
+        i.radii  = radii.clamp_to(r.size).as_vec4();
+        i.color  = {0.0f, 0.0f, 0.0f, 1.0f};
+        i.params = {num::max(blur, 0.0f), saturation, brightness, 0.0f};
         push(i);
     }
 
