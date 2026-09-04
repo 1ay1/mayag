@@ -557,6 +557,14 @@ mayag does neither. Three pieces:
   }
   ```
 
+  A firehose feed — a socket or sensor faster than the UI renders — would grow
+  the inbox without bound if every message were queued. `Sub::source_latest`
+  is the backpressure answer: it keeps only the newest message between frames,
+  so the app sees one value per frame regardless of rate. In a test, a
+  producer emitting 20,000 values delivers **1** — the most recent — rather
+  than a 20,000-deep backlog. Use it for a state feed (a price, a metric, a
+  position); use plain `source` when every message matters (a chat, a log).
+
 - **A cross-thread waker** (a self-pipe the window's `poll()` also watches) is
   what makes that message *render now*. Posting to the runtime's inbox writes
   one byte to the pipe, which interrupts the blocked UI thread the instant the

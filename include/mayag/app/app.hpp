@@ -519,6 +519,13 @@ class Runtime {
             if (quit_) return;
         }
 
+        // One message from each coalescing source (`Sub::source_latest`) — the
+        // latest value it produced this frame. Kept separate from the inbox so
+        // a firehose feed contributes exactly one message per frame instead of
+        // a backlog.
+        drain_coalesced_sources();
+        if (quit_) return;
+
         render();
     }
 
@@ -958,6 +965,13 @@ class Runtime {
         std::string                        id;
         std::shared_ptr<std::atomic<bool>> alive;
         std::thread                        thread;
+        /// For a coalescing source, the single-slot latest message. The
+        /// producer writes it (replacing any unread value) and the UI thread
+        /// takes it at most once per frame, so a firehose feed delivers one
+        /// message per frame regardless of its rate. Null for a normal source,
+        /// which posts straight to the inbox.
+        std::shared_ptr<std::mutex>        slot_mutex;
+        std::shared_ptr<std::optional<Msg>> slot;
     };
 
     /// Diff the model's sources against the running ones. New ids start a
@@ -992,12 +1006,47 @@ class Runtime {
             auto alive = std::make_shared<std::atomic<bool>>(true);
             auto* inbox = &inbox_;
             auto  work  = w->work;   // shared_ptr keeps the callable alive
-            std::thread th([work, inbox, alive] {
-                (*work)([inbox](Msg m) { inbox->post(std::move(m)); },
-                        [alive] { return alive->load(std::memory_order_acquire); });
-            });
-            sources_.push_back(RunningSource{std::string{w->id}, std::move(alive),
-                                            std::move(th)});
+
+            RunningSource rs;
+            rs.id = std::string{w->id};
+            rs.alive = alive;
+
+            if (w->coalesce) {
+                // Coalescing: the sink replaces a single slot instead of
+                // appending to the inbox, and still wakes the UI thread so the
+                // latest value renders promptly. The slot is drained once per
+                // frame in tick().
+                auto slot_mutex = std::make_shared<std::mutex>();
+                auto slot = std::make_shared<std::optional<Msg>>();
+                auto* waker = &waker_;
+                rs.slot_mutex = slot_mutex;
+                rs.slot = slot;
+                rs.thread = std::thread([work, alive, slot_mutex, slot, waker] {
+                    (*work)([slot_mutex, slot, waker](Msg m) {
+                                { std::lock_guard lk{*slot_mutex}; *slot = std::move(m); }
+                                waker->wake();
+                            },
+                            [alive] { return alive->load(std::memory_order_acquire); });
+                });
+            } else {
+                rs.thread = std::thread([work, inbox, alive] {
+                    (*work)([inbox](Msg m) { inbox->post(std::move(m)); },
+                            [alive] { return alive->load(std::memory_order_acquire); });
+                });
+            }
+            sources_.push_back(std::move(rs));
+        }
+    }
+
+    /// Take one message from each coalescing source's slot. Called each tick
+    /// so a firehose feed contributes exactly one message per frame — the
+    /// latest — and never grows a backlog.
+    void drain_coalesced_sources() {
+        for (auto& s : sources_) {
+            if (s.slot == nullptr) continue;
+            std::optional<Msg> m;
+            { std::lock_guard lk{*s.slot_mutex}; m.swap(*s.slot); }
+            if (m) { step(std::move(*m)); if (quit_) return; }
         }
     }
 

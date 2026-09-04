@@ -303,6 +303,73 @@ void test_every_reconciliation() {
           "it stops the frame its condition goes false");
 }
 
+// ── Sub::source_latest: coalescing backpressure ──────────────────────
+//
+// A firehose feed — a socket or sensor faster than the UI renders — must not
+// grow the inbox without bound. source_latest keeps only the newest message
+// between frames, so the app sees one value per frame no matter the rate, and
+// the last value it sees is the most recent one produced.
+
+struct FirehoseApp {
+    struct Model { int received = 0; int last = 0; };
+    struct Start {};
+    struct Value { int n; };
+    using Msg = std::variant<Start, Value>;
+
+    static inline std::atomic<int> emitted{0};
+
+    static Model init() { return {}; }
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        if (std::holds_alternative<Value>(msg)) {
+            m.received += 1;
+            m.last = std::get<Value>(msg).n;
+        }
+        return {m, Cmd<Msg>::none()};
+    }
+    static Node view(const Model&) { return dsl::box().build(); }
+    static Sub<Msg> subscribe(const Model&) {
+        // Emit as fast as possible for a short burst.
+        return Sub<Msg>::source_latest("firehose",
+            [](std::function<void(Msg)> sink, std::function<bool()> alive) {
+                for (int i = 1; i <= 5000 && alive(); ++i) {
+                    emitted.fetch_add(1, std::memory_order_relaxed);
+                    sink(Value{i});
+                }
+            });
+    }
+};
+
+void test_source_latest_coalesces() {
+    section("Sub::source_latest coalescing");
+
+    AppConfig cfg;
+    cfg.log_renderer = false;
+
+    int received = 0, last = 0, emitted = 0;
+    run_headless<FirehoseApp>(cfg, [&](auto& rt) {
+        // Let the producer run and pump a handful of frames.
+        for (int i = 0; i < 30; ++i) {
+            std::this_thread::sleep_for(3ms);
+            rt.tick();
+        }
+        received = rt.model().received;
+        last     = rt.model().last;
+        emitted  = FirehoseApp::emitted.load();
+    });
+
+    check(emitted > 100,
+          std::string{"the producer emitted a firehose ("} +
+          std::to_string(emitted) + ")");
+    // The whole point: the app processed FAR fewer messages than were emitted
+    // — at most about one per frame — rather than a message per emission.
+    check(received > 0 && received < emitted / 4,
+          std::string{"coalescing collapses the firehose ("} +
+          std::to_string(received) + " processed of " + std::to_string(emitted) + ")");
+    // And what it did see is a recent value, not a stale early one.
+    check(last > received,
+          "the value delivered is the latest, not a backlog head");
+}
+
 // ── end to end: a blocked window wakes and renders ──────────────────────
 
 void test_blocked_window_wakes() {
@@ -354,6 +421,7 @@ int main() {
     test_waker_cross_thread();
     test_stream_lifecycle();
     test_source_lifecycle();
+    test_source_latest_coalesces();
     test_every_reconciliation();
     test_blocked_window_wakes();
     std::printf("\n%s  %d checks, %d failures\n",

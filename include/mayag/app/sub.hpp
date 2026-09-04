@@ -93,6 +93,13 @@ class Sub {
         std::string_view id;   ///< identity for diffing; stable across frames
         std::shared_ptr<
             std::function<void(std::function<void(Msg)>, std::function<bool()>)>> work;
+        /// Backpressure policy. When true, the runtime keeps only the LATEST
+        /// message this source emitted between two frames — a firehose feed
+        /// (a price tick, a sensor reading, a cursor position) cannot back up
+        /// the inbox, because only its most recent value matters. When false
+        /// (the default), every message is delivered in order, like a normal
+        /// stream.
+        bool coalesce = false;
     };
 
     // ── widget-level (hit-tested by the runtime) ────────────────────────
@@ -230,7 +237,19 @@ class Sub {
     template <typename F>
     [[nodiscard]] static Sub source(std::string_view id, F&& f) {
         using Work = std::function<void(std::function<void(Msg)>, std::function<bool()>)>;
-        return Sub{Alt{Source{id, std::make_shared<Work>(std::forward<F>(f))}}};
+        return Sub{Alt{Source{id, std::make_shared<Work>(std::forward<F>(f)), false}}};
+    }
+
+    /// Like `source`, but COALESCING: only the most recent message emitted
+    /// between two frames is delivered. Use it for a state feed where the
+    /// latest value supersedes the rest — a metric, a price, a position — so a
+    /// producer faster than the UI renders cannot grow the inbox without
+    /// bound. For an event stream where every message matters (a chat, a log),
+    /// use `source`.
+    template <typename F>
+    [[nodiscard]] static Sub source_latest(std::string_view id, F&& f) {
+        using Work = std::function<void(std::function<void(Msg)>, std::function<bool()>)>;
+        return Sub{Alt{Source{id, std::make_shared<Work>(std::forward<F>(f)), true}}};
     }
 
     // -- widget subscriptions, by compile-time name --
