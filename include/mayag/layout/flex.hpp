@@ -182,6 +182,17 @@ struct Distribution { float lead = 0.0f, between = 0.0f; };
     return 0.0f;
 }
 
+/// The distance from a laid-out child's top to its text baseline, used by
+/// Align::baseline. For a text node it's the font ascent at its style; for a
+/// non-text box there is no baseline, so we use its full height (its bottom
+/// sits on the row baseline, the CSS "last-line / bottom" convention). This is
+/// what lets a big heading and small caption in one row share a baseline.
+[[nodiscard]] inline float ascent_of(const Node& n, const TextMeasurer& tm,
+                                     float laid_out_height) noexcept {
+    if (n.kind() == NodeKind::text) return tm.ascent(n.style().text);
+    return laid_out_height;
+}
+
 }  // namespace detail
 
 /// Assign final rects to `node` and its whole subtree. `frame` is the absolute
@@ -275,6 +286,17 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
 
         float cursor = main_of(content.origin, ax) + dist.lead;
 
+        // Baseline alignment (horizontal rows): find the row's baseline as the
+        // deepest ascent among the children, so every child's text baseline
+        // lands on the same line regardless of its font size.
+        float row_baseline = 0.0f;
+        const bool do_baseline = (L.align == Align::baseline && ax == Axis::horizontal);
+        if (do_baseline) {
+            for (const auto& it : items)
+                row_baseline = num::max(row_baseline,
+                                        detail::ascent_of(kids[it.index], tm, cross_of(it.base, ax)));
+        }
+
         for (std::size_t k = 0; k < items.size(); ++k) {
             auto& it = items[k];
             Node& kid = kids[it.index];
@@ -298,9 +320,14 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
                 : clamp_axis(kid_cross, kl.min_width,  kl.max_width,  avail_cross);
 
             const float cross_free = avail_cross - kid_cross - kid_margin_cross;
+            // In baseline mode the child's own ascent decides its offset (so
+            // its baseline meets the row's); otherwise the usual align rule.
+            const float cross_align = do_baseline
+                ? (row_baseline - detail::ascent_of(kid, tm, kid_cross))
+                : align_offset(L.align, cross_free);
             const float cross_pos  = cross_of(content.origin, ax)
                                    + cross_of(it.margin_lead(ax), ax)
-                                   + align_offset(L.align, cross_free);
+                                   + cross_align;
 
             const Vec2 origin = compose(ax, cursor, cross_pos) + kl.offset;
             const Vec2 sz     = compose(ax, it.main, kid_cross);

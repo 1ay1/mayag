@@ -269,6 +269,23 @@ void test_layout() {
         near(n.style().corners.clamp_to(n.frame().size).tl, 15.0f, 0.01f,
              "pill radius clamps to half the short side");
     }
+
+    // Baseline alignment: a big and a small text on one row share a text
+    // baseline. With the monospace metric ascent = size*0.8, so a 32px and a
+    // 14px text put the small one DOWN by (32-14)*0.8 = 14.4px, and their
+    // baselines (top + ascent) coincide.
+    {
+        auto ui = h(text<"9"> | font(32), text<"kg"> | font(14)) | baseline;
+        Node n = ui.build();
+        layout::layout_tree(n, {200, 60}, tm);
+        const Node& big   = n.children()[0];
+        const Node& small = n.children()[1];
+        const float big_base   = big.frame().top()   + tm.ascent(big.style().text);
+        const float small_base = small.frame().top() + tm.ascent(small.style().text);
+        near(small_base, big_base, 0.5f, "baseline row aligns text baselines");
+        check(small.frame().top() > big.frame().top() + 1.0f,
+              "smaller text is pushed down so its baseline meets the larger");
+    }
 }
 
 void test_draw_list() {

@@ -491,6 +491,11 @@ struct AlignMod {
 };
 [[nodiscard]] constexpr AlignMod align(Align a) { return {a}; }
 
+/// Align a row's children on their shared TEXT BASELINE — the correct way to
+/// mix font sizes on one line (a big number beside its small unit, a heading
+/// beside a caption). `h(price | font(32), unit | font(14)) | baseline`.
+inline constexpr AlignMod baseline{Align::baseline};
+
 /// Centre children on both axes — by far the most-typed layout in any UI.
 struct Center {
     MAYAG_MODIFIER(Center, caps::container, caps::none, caps::none, "center");
