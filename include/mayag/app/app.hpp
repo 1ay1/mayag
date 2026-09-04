@@ -96,6 +96,41 @@ template <typename Variant, typename... Fs>
     return std::visit(overloaded{std::forward<Fs>(fs)...}, std::forward<Variant>(v));
 }
 
+// ── action: one id, wired in both view and subscribe ────────────────────
+//
+// A clickable target lives in two places — the view names a node, subscribe
+// maps that node's clicks to a Msg — and if the two ids drift the button just
+// silently stops working. `Action` binds the id to the message ONCE so both
+// sides come from the same value; a typo is then an undefined-name COMPILE
+// error, not a dead button.
+//
+//   // define the actions once, next to the Msg:
+//   static constexpr auto Inc = action(node_id("inc"), Increment{});
+//
+//   // view: drop its id onto the node
+//   button(t) | Inc.on
+//
+//   // subscribe: wire its clicks
+//   return Sub<Msg>::batch(Inc.click(), Dec.click(), ...);
+//
+// (Use dsl::node_id("...") or node_id_v<"..."> for the id.)
+template <typename Msg>
+struct Action {
+    std::uint64_t id;
+    Msg           msg;
+
+    /// The view-side modifier: `button(t) | act.on` tags the node with this id.
+    dsl::Id on{id};
+
+    /// The subscribe-side wiring: clicks on the node fire `msg`.
+    [[nodiscard]] Sub<Msg> click() const { return Sub<Msg>::on_click_id(id, msg); }
+};
+
+template <typename Msg>
+[[nodiscard]] constexpr Action<Msg> action(std::uint64_t id, Msg msg) {
+    return Action<Msg>{id, std::move(msg), dsl::Id{id}};
+}
+
 // ── the context passed to view() ────────────────────────────────────────
 
 /// Everything `view()` may know about the outside world. Deliberately small

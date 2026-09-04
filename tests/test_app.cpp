@@ -1011,11 +1011,60 @@ void test_match() {
     check(side == 7, "match works with void-returning handlers too");
 }
 
+/// `action(id, msg)` binds a node id to a message once, so the view modifier
+/// (`.on`) and the subscription (`.click()`) can never drift. This is the
+/// end-to-end guarantee: a node tagged with an action's id, clicked, fires
+/// exactly that action's message.
+struct ActionApp {
+    struct Model { int a = 0; int b = 0; };
+    struct HitA {}; struct HitB {}; struct Quit {};
+    using Msg = std::variant<HitA, HitB, Quit>;
+
+    // The two ids live in ONE place each, next to their message.
+    static constexpr std::uint64_t id_a = dsl::node_id("btn-a");
+    static constexpr std::uint64_t id_b = dsl::node_id("btn-b");
+
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](HitA) -> R { m.a++; return {m, Cmd<Msg>::none()}; },
+            [&](HitB) -> R { m.b++; return {m, Cmd<Msg>::none()}; },
+            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
+    }
+
+    static Node view(const Model&, const Ctx& t) {
+        return v(box() | size(80, 40) | bg(t.theme.accent) | action(id_a, Msg{HitA{}}).on,
+                 box() | size(80, 40) | bg(t.theme.danger) | action(id_b, Msg{HitB{}}).on)
+             | gap(10) | pad(10);
+    }
+
+    static Sub<Msg> subscribe(const Model&) {
+        return Sub<Msg>::batch(action(id_a, Msg{HitA{}}).click(),
+                               action(id_b, Msg{HitB{}}).click());
+    }
+};
+
+void test_action() {
+    section("action wiring");
+    static_assert(Program<ActionApp>);
+
+    run_headless<ActionApp>(AppConfig{.title = "act", .size = {200, 120}}, [](auto& rt) {
+        check(rt.node_rect("btn-a").has_value(), "action-tagged node is addressable");
+        rt.click("btn-a");
+        check(rt.model().a == 1 && rt.model().b == 0, "clicking btn-a fires HitA only");
+        rt.click("btn-b");
+        check(rt.model().a == 1 && rt.model().b == 1, "clicking btn-b fires HitB only");
+    });
+}
+
 int main() {
     std::printf("mayag app runtime\n=================");
 
     test_update_purity();
     test_match();
+    test_action();
     test_functor_laws();
     test_interaction();
     test_click_counts();
