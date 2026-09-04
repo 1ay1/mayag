@@ -274,6 +274,15 @@ class Atlas {
     [[nodiscard]] const Rect& dirty_region() const noexcept { return dirty_; }
     void clear_dirty() noexcept { dirty_ = Rect{}; }
 
+    /// The RGBA colour plane (emoji). Empty until the first colour glyph is
+    /// inserted; a GPU backend uploads it as a second texture.
+    [[nodiscard]] const std::vector<std::uint8_t>& color_pixels() const noexcept {
+        return color_;
+    }
+    [[nodiscard]] bool has_color() const noexcept { return !color_.empty(); }
+    [[nodiscard]] const Rect& color_dirty_region() const noexcept { return color_dirty_; }
+    void clear_color_dirty() noexcept { color_dirty_ = Rect{}; }
+
     void set_frame(std::uint64_t frame) noexcept { frame_ = frame; }
 
     /// Look up a glyph. Returns nullptr when it is not resident.

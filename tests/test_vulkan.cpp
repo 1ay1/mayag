@@ -139,6 +139,38 @@ int main() {
         check(ra && rb && a == b, "two GPU renders of the same scene are bit-identical");
     }
 
+    // ── colour emoji on the GPU ──────────────────────────────────────────
+    section("colour emoji");
+    {
+        auto stack = typo::system::default_stack();
+        const auto [fi, gid] = stack->resolve(0x1F600);
+        if (gid == 0 || stack->face_at(fi) == nullptr ||
+            !stack->face_at(fi)->is_color()) {
+            std::printf("  (no colour emoji font — skipped)\n");
+        } else {
+            const int W = 200, H = 90;
+            auto ui = v(text_owned("Hi \xF0\x9F\x98\x80") | font(44) | fg(colors::white))
+                      | pad(16) | bg(colors::black);
+            Node n = ui.build();
+            typo::StackMeasurer meas{*stack};
+            layout::layout_tree(n, {static_cast<float>(W), static_cast<float>(H)}, meas);
+            DrawList dl; typo::StackGlyphRenderer gr{*stack};
+            render::PaintOptions po; po.measurer = &meas; po.glyphs = &gr;
+            render::paint(n, dl, po);
+            dev.sync_atlas(stack->atlas());   // upload coverage + colour planes
+            std::vector<std::uint8_t> px;
+            const bool ok = dev.render_offscreen(dl, W, H, colors::black, px);
+            int coloured = 0;
+            for (std::size_t i = 0; i + 3 < px.size(); i += 4) {
+                if (std::abs(int(px[i]) - int(px[i + 1])) > 25 ||
+                    std::abs(int(px[i + 1]) - int(px[i + 2])) > 25) ++coloured;
+            }
+            check(ok && coloured > 150,
+                  std::string{"GPU renders colour emoji from the RGBA atlas ("} +
+                  std::to_string(coloured) + " px)");
+        }
+    }
+
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;

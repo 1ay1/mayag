@@ -112,40 +112,57 @@ class VulkanDevice {
         const int w = atlas.width(), h = atlas.height();
         if (w <= 0 || h <= 0) return;
 
-        // (Re)create the atlas image if the size changed, and force a full
-        // re-upload into the new image on the next line.
+        // (Re)create the coverage image if the size changed, forcing a full
+        // re-upload.
         bool full = false;
         if (w != atlas_w_ || h != atlas_h_) {
             recreate_atlas_image(w, h);
             full = true;
         }
+        if (full || !atlas.dirty_region().empty()) {
+            const std::size_t bytes = static_cast<std::size_t>(w) * h;
+            ensure_staging(bytes);
+            std::memcpy(staging_ptr_, atlas.pixels().data(), bytes);
+            upload_plane(atlas_image_, w, h, /*channels=*/1);
+            atlas.clear_dirty();
+        }
 
-        // Nothing rasterised since the last sync, and the image is the right
-        // size: skip the upload entirely (the common steady-state frame).
-        if (!full && atlas.dirty_region().empty()) return;
+        // The colour plane (emoji) is uploaded the same way, into its own RGBA
+        // image, and only exists once a colour glyph has been cached.
+        if (atlas.has_color()) {
+            bool color_full = false;
+            if (w != color_w_ || h != color_h_) {
+                recreate_color_image(w, h);
+                color_full = true;
+            }
+            if (color_full || !atlas.color_dirty_region().empty()) {
+                const std::size_t bytes = static_cast<std::size_t>(w) * h * 4;
+                ensure_staging(bytes);
+                std::memcpy(staging_ptr_, atlas.color_pixels().data(), bytes);
+                upload_plane(color_image_, w, h, /*channels=*/4);
+                atlas.clear_color_dirty();
+            }
+        }
+    }
 
-        // Upload the whole atlas coverage plane; a UI atlas is small (1-4 MB)
-        // and a single copy is simpler and faster than many sub-rect copies.
-        const std::size_t bytes = static_cast<std::size_t>(w) * h;
-        ensure_staging(bytes);
-        std::memcpy(staging_ptr_, atlas.pixels().data(), bytes);
-
+    /// Copy the current staging buffer into `image`, wrapping the transfer in
+    /// the layout transitions a sampled image needs.
+    void upload_plane(vk::VkImage image, int w, int h, int /*channels*/) {
         one_shot([&](vk::VkCommandBuffer cb) {
-            barrier_image(cb, atlas_image_, vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            barrier_image(cb, image, vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                           vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           vk::VK_ACCESS_SHADER_READ_BIT, vk::VK_ACCESS_TRANSFER_WRITE_BIT,
                           vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, vk::VK_PIPELINE_STAGE_TRANSFER_BIT);
             vk::VkBufferImageCopy region{};
             region.imageSubresource = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             region.imageExtent = {static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), 1};
-            api_->CmdCopyBufferToImage(cb, staging_buf_.buf, atlas_image_,
+            api_->CmdCopyBufferToImage(cb, staging_buf_.buf, image,
                                        vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-            barrier_image(cb, atlas_image_, vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            barrier_image(cb, image, vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                           vk::VK_ACCESS_TRANSFER_WRITE_BIT, vk::VK_ACCESS_SHADER_READ_BIT,
                           vk::VK_PIPELINE_STAGE_TRANSFER_BIT, vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         });
-        atlas.clear_dirty();
     }
 
     // ── the frame ────────────────────────────────────────────────────────
@@ -251,6 +268,9 @@ class VulkanDevice {
         if (atlas_view_) api_->DestroyImageView(device_, atlas_view_, nullptr);
         if (atlas_image_) api_->DestroyImage(device_, atlas_image_, nullptr);
         if (atlas_mem_) api_->FreeMemory(device_, atlas_mem_, nullptr);
+        if (color_view_) api_->DestroyImageView(device_, color_view_, nullptr);
+        if (color_image_) api_->DestroyImage(device_, color_image_, nullptr);
+        if (color_mem_) api_->FreeMemory(device_, color_mem_, nullptr);
         if (sampler_) api_->DestroySampler(device_, sampler_, nullptr);
         if (pipeline_) api_->DestroyPipeline(device_, pipeline_, nullptr);
         if (layout_) api_->DestroyPipelineLayout(device_, layout_, nullptr);
@@ -580,8 +600,9 @@ class VulkanDevice {
         if (api_->CreateSampler(device_, &sci, nullptr, &sampler_) != vk::VK_SUCCESS) return false;
 
         // A 1x1 placeholder so the descriptor is always valid, even before the
-        // first glyph is uploaded.
+        // first glyph is uploaded. Both planes: coverage and colour.
         recreate_atlas_image(1, 1);
+        recreate_color_image(1, 1);
         return true;
     }
 
@@ -590,10 +611,31 @@ class VulkanDevice {
         if (atlas_image_) api_->DestroyImage(device_, atlas_image_, nullptr);
         if (atlas_mem_) api_->FreeMemory(device_, atlas_mem_, nullptr);
 
+        make_sampled_image(w, h, vk::VK_FORMAT_R8_UNORM, atlas_image_, atlas_mem_, atlas_view_);
+        atlas_w_ = w; atlas_h_ = h;
+        atlas_dirty_binding_ = true;
+    }
+
+    /// The RGBA colour-glyph atlas (emoji). Same size as the coverage atlas so
+    /// one UV space indexes both; created lazily on the first colour glyph.
+    void recreate_color_image(int w, int h) {
+        if (color_view_) api_->DestroyImageView(device_, color_view_, nullptr);
+        if (color_image_) api_->DestroyImage(device_, color_image_, nullptr);
+        if (color_mem_) api_->FreeMemory(device_, color_mem_, nullptr);
+
+        make_sampled_image(w, h, vk::VK_FORMAT_R8G8B8A8_UNORM, color_image_, color_mem_, color_view_);
+        color_w_ = w; color_h_ = h;
+        atlas_dirty_binding_ = true;
+    }
+
+    /// Create a sampled image + backing memory + view, and transition it to
+    /// SHADER_READ_ONLY so the first frame can sample it before any upload.
+    void make_sampled_image(int w, int h, int format, vk::VkImage& image,
+                            vk::VkDeviceMemory& mem, vk::VkImageView& view) {
         vk::VkImageCreateInfo ici{};
         ici.sType = vk::VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ici.imageType = vk::VK_IMAGE_TYPE_2D;
-        ici.format = vk::VK_FORMAT_R8_UNORM;
+        ici.format = format;
         ici.extent = {static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), 1};
         ici.mipLevels = 1; ici.arrayLayers = 1;
         ici.samples = vk::VK_SAMPLE_COUNT_1_BIT;
@@ -601,34 +643,30 @@ class VulkanDevice {
         ici.usage = vk::VK_IMAGE_USAGE_SAMPLED_BIT | vk::VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         ici.sharingMode = vk::VK_SHARING_MODE_EXCLUSIVE;
         ici.initialLayout = vk::VK_IMAGE_LAYOUT_UNDEFINED;
-        api_->CreateImage(device_, &ici, nullptr, &atlas_image_);
+        api_->CreateImage(device_, &ici, nullptr, &image);
 
         vk::VkMemoryRequirements req{};
-        api_->GetImageMemoryRequirements(device_, atlas_image_, &req);
+        api_->GetImageMemoryRequirements(device_, image, &req);
         vk::VkMemoryAllocateInfo mai{};
         mai.sType = vk::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         mai.allocationSize = req.size;
         mai.memoryTypeIndex = find_memory(req.memoryTypeBits, vk::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        api_->AllocateMemory(device_, &mai, nullptr, &atlas_mem_);
-        api_->BindImageMemory(device_, atlas_image_, atlas_mem_, 0);
+        api_->AllocateMemory(device_, &mai, nullptr, &mem);
+        api_->BindImageMemory(device_, image, mem, 0);
 
         vk::VkImageViewCreateInfo vci{};
         vci.sType = vk::VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        vci.image = atlas_image_; vci.viewType = vk::VK_IMAGE_VIEW_TYPE_2D;
-        vci.format = vk::VK_FORMAT_R8_UNORM;
+        vci.image = image; vci.viewType = vk::VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = format;
         vci.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        api_->CreateImageView(device_, &vci, nullptr, &atlas_view_);
-        atlas_w_ = w; atlas_h_ = h;
+        api_->CreateImageView(device_, &vci, nullptr, &view);
 
-        // New layout is UNDEFINED -> move to SHADER_READ_ONLY so the first
-        // frame can sample it even before any glyph upload.
         one_shot([&](vk::VkCommandBuffer cb) {
-            barrier_image(cb, atlas_image_, vk::VK_IMAGE_LAYOUT_UNDEFINED,
+            barrier_image(cb, image, vk::VK_IMAGE_LAYOUT_UNDEFINED,
                           vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                           0, vk::VK_ACCESS_SHADER_READ_BIT,
                           vk::VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         });
-        atlas_dirty_binding_ = true;
     }
 
     // ── pipeline ─────────────────────────────────────────────────────────
@@ -644,18 +682,21 @@ class VulkanDevice {
     }
 
     [[nodiscard]] bool create_pipeline(int color_format, bool for_present) {
-        // descriptor set layout: one combined image sampler (the atlas)
-        vk::VkDescriptorSetLayoutBinding binding{};
-        binding.binding = 0;
-        binding.descriptorType = vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        binding.descriptorCount = 1;
-        binding.stageFlags = vk::VK_SHADER_STAGE_FRAGMENT_BIT;
+        // descriptor set layout: two combined image samplers — binding 0 is
+        // the coverage atlas (R8), binding 1 the colour atlas (RGBA, emoji).
+        vk::VkDescriptorSetLayoutBinding bindings[2]{};
+        for (int i = 0; i < 2; ++i) {
+            bindings[i].binding = static_cast<std::uint32_t>(i);
+            bindings[i].descriptorType = vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags = vk::VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
         vk::VkDescriptorSetLayoutCreateInfo dslci{};
         dslci.sType = vk::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dslci.bindingCount = 1; dslci.pBindings = &binding;
+        dslci.bindingCount = 2; dslci.pBindings = bindings;
         if (api_->CreateDescriptorSetLayout(device_, &dslci, nullptr, &set_layout_) != vk::VK_SUCCESS) return false;
 
-        vk::VkDescriptorPoolSize pool_size{vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+        vk::VkDescriptorPoolSize pool_size{vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
         vk::VkDescriptorPoolCreateInfo dpci{};
         dpci.sType = vk::VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &pool_size;
@@ -787,15 +828,22 @@ class VulkanDevice {
     }
 
     void update_atlas_descriptor() {
-        vk::VkDescriptorImageInfo info{};
-        info.sampler = sampler_; info.imageView = atlas_view_;
-        info.imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        vk::VkWriteDescriptorSet w{};
-        w.sType = vk::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet = desc_set_; w.dstBinding = 0; w.descriptorCount = 1;
-        w.descriptorType = vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w.pImageInfo = &info;
-        api_->UpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+        vk::VkDescriptorImageInfo info[2]{};
+        info[0].sampler = sampler_; info[0].imageView = atlas_view_;
+        info[0].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        info[1].sampler = sampler_; info[1].imageView = color_view_;
+        info[1].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        vk::VkWriteDescriptorSet w[2]{};
+        for (int i = 0; i < 2; ++i) {
+            w[i].sType = vk::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w[i].dstSet = desc_set_;
+            w[i].dstBinding = static_cast<std::uint32_t>(i);
+            w[i].descriptorCount = 1;
+            w[i].descriptorType = vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[i].pImageInfo = &info[i];
+        }
+        api_->UpdateDescriptorSets(device_, 2, w, 0, nullptr);
         atlas_dirty_binding_ = false;
     }
 
@@ -1087,6 +1135,10 @@ class VulkanDevice {
     vk::VkImage atlas_image_ = nullptr; vk::VkDeviceMemory atlas_mem_ = nullptr;
     vk::VkImageView atlas_view_ = nullptr;
     int atlas_w_ = 0, atlas_h_ = 0;
+    // Colour-glyph (emoji) atlas: RGBA, bound at descriptor slot 1.
+    vk::VkImage color_image_ = nullptr; vk::VkDeviceMemory color_mem_ = nullptr;
+    vk::VkImageView color_view_ = nullptr;
+    int color_w_ = 0, color_h_ = 0;
     bool atlas_dirty_binding_ = false;
 
     // instance + staging

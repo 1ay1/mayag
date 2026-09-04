@@ -262,9 +262,10 @@ glyph as a PNG (Google's `CBDT`/`CBLC`, Apple's `sbix`), so the engine:
    never by the text colour. `CPU 温度 🔥` renders every character, and the fire
    is orange.
 
-The software rasteriser draws colour emoji today; the GPU path discards colour
-glyphs cleanly (the colour-atlas upload is the one remaining piece) rather than
-drawing garbage.
+Both renderers draw colour emoji: the software rasteriser blends the RGBA plane
+per pixel, and the Vulkan backend uploads it as a second atlas texture the
+shader samples — verified against the software output on the GPU
+equivalence test.
 
 **Kerning is real.** Measured on Arial at 32 px:
 

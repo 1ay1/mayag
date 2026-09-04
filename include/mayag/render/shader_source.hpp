@@ -200,6 +200,7 @@ layout(location = 8) flat in uvec4 v_meta;
 layout(location = 9) in vec2  v_half;
 
 layout(set = 0, binding = 0) uniform sampler2D u_atlas;
+layout(set = 0, binding = 1) uniform sampler2D u_color_atlas;
 
 layout(location = 0) out vec4 o_color;
 
@@ -250,11 +251,14 @@ void main() {
     } else if (kind == KIND_GLYPH) {
         cov = texture(u_atlas, v_uv).r;
     } else if (kind == KIND_COLOR_GLYPH) {
-        // Colour glyph (emoji). The GPU path samples the same coverage atlas
-        // slot, which for a colour glyph is empty, so it discards cleanly
-        // rather than drawing a box — colour emoji currently renders on the
-        // software path; the GPU colour-atlas upload is a follow-up.
-        discard;
+        // Colour glyph (emoji): sample the RGBA colour atlas and emit it
+        // verbatim, tinted only by opacity (v_color.a), never by hue. The
+        // atlas holds straight RGBA; premultiply for the framebuffer.
+        vec4 t = texture(u_color_atlas, v_uv);
+        float a = t.a * v_color.a;
+        if (a <= 0.001) discard;
+        o_color = vec4(t.rgb * a, a);
+        return;
     } else {
         cov = mg_coverage(mg_rounded_box(v_local, v_half, v_radii), px);
     }
