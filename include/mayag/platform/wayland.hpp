@@ -52,6 +52,7 @@
 #include "../core/geometry.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
+#include "waker.hpp"
 #include "wayland_protocol.hpp"
 
 // The Vulkan backend is the default renderer on Linux; it self-loads at
@@ -481,21 +482,34 @@ class WaylandWindow {
         }
         L.display_flush(display_);
 
-        if (timeout_ms != 0) {
-            pollfd pfd{L.display_get_fd(display_), POLLIN, 0};
-            const int r = ::poll(&pfd, 1, timeout_ms);
-            if (r > 0 && (pfd.revents & POLLIN) != 0) {
-                L.display_read_events(display_);
-            } else {
-                L.display_cancel_read(display_);
-            }
+        // Poll the display fd AND the waker fd together. The waker is how a
+        // background thread (a socket, a subprocess, a Cmd::stream) interrupts
+        // an idle UI thread: without it, an app blocked in poll() with no
+        // window activity would sleep through streamed messages until the user
+        // moved the mouse. A byte on the waker pipe wakes us the instant the
+        // producer posts.
+        pollfd pfds[2];
+        pfds[0] = pollfd{L.display_get_fd(display_), POLLIN, 0};
+        int nfds = 1;
+        const int waker_fd = (waker_ != nullptr) ? waker_->fd() : -1;
+        if (waker_fd >= 0) {
+            pfds[1] = pollfd{waker_fd, POLLIN, 0};
+            nfds = 2;
+        }
+
+        const int r = ::poll(pfds, static_cast<nfds_t>(nfds), timeout_ms);
+        if (r > 0 && (pfds[0].revents & POLLIN) != 0) {
+            L.display_read_events(display_);
         } else {
-            pollfd pfd{L.display_get_fd(display_), POLLIN, 0};
-            if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN) != 0) {
-                L.display_read_events(display_);
-            } else {
-                L.display_cancel_read(display_);
-            }
+            // Timed out, or woken by the waker rather than the compositor.
+            // Either way there are no display events to read, so cancel the
+            // announced read to keep libwayland's state consistent.
+            L.display_cancel_read(display_);
+        }
+        // Clear the waker so the next post() writes a fresh byte. Cheap and
+        // harmless when nothing woke us.
+        if (nfds == 2 && (pfds[1].revents & POLLIN) != 0 && waker_ != nullptr) {
+            waker_->drain();
         }
 
         L.display_dispatch_pending(display_);
@@ -693,6 +707,11 @@ class WaylandWindow {
     // ── runtime hooks ───────────────────────────────────────────────────
 
     void set_coverage_sampler(const backend::CoverageSampler* s) { sampler_ = s; }
+
+    /// Give the window the runtime's waker so poll() can be interrupted by a
+    /// background thread. Set once at boot; a null waker just means the app
+    /// has no off-thread producers and poll() watches only the display fd.
+    void set_waker(Waker* w) noexcept { waker_ = w; }
 
 #ifdef MAYAG_WITH_VULKAN
     /// Upload dirty glyph rects to the GPU atlas image before a frame that
@@ -1625,6 +1644,7 @@ class WaylandWindow {
     std::int32_t  repeat_delay_     = 600;
 
     const backend::CoverageSampler* sampler_ = nullptr;
+    Waker* waker_ = nullptr;
 
 #ifdef MAYAG_WITH_VULKAN
     // GPU renderer. `gpu_active_` gates every GPU code path; when false the
@@ -1695,6 +1715,8 @@ class WaylandWindow {
     void set_coverage_sampler(const backend::CoverageSampler* s) {
         p_->set_coverage_sampler(s);
     }
+
+    void set_waker(Waker* w) noexcept { p_->set_waker(w); }
 
     template <typename AtlasT>
     void set_atlas_source(AtlasT* atlas) noexcept { p_->set_atlas_source(atlas); }

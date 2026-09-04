@@ -22,6 +22,7 @@
 #include "../image/png.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
+#include "waker.hpp"
 
 #include <chrono>
 #include <deque>
@@ -196,6 +197,11 @@ class Headless {
     }
 
     void set_coverage_sampler(const backend::CoverageSampler* s) { sampler_ = s; }
+
+    /// Headless never blocks on a real fd — it runs scripted, deterministic
+    /// frames — so there is nothing for a waker to interrupt. Accepted and
+    /// ignored so the runtime can wire it unconditionally.
+    void set_waker(Waker*) noexcept {}
 
     /// The headless window rasterises on the CPU, which reads the atlas
     /// through the coverage sampler — there is no texture to upload. Present

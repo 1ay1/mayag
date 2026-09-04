@@ -52,6 +52,23 @@ class Cmd {
     /// reads, or anything slow without blocking the frame.
     struct Task { std::function<Msg()> work; };
 
+    /// A thread-safe message sink handed to a `Stream`. Calling it delivers a
+    /// Msg to `update()` on the UI thread AND wakes a blocked UI thread, so a
+    /// streamed message renders immediately rather than waiting for the next
+    /// window event. Copyable and callable from any thread.
+    using Sink = std::function<void(Msg)>;
+
+    /// A long-lived producer: `work(sink)` runs on its own thread and may call
+    /// `sink` many times over its lifetime — a socket read loop, a subprocess
+    /// tail, a metrics poller, a ticker. This is the primitive a LIVE app is
+    /// built on: `Task` returns exactly one message and ends, but a stream
+    /// emits an open-ended sequence. The runtime owns the thread and signals
+    /// shutdown by making `keep_running()` return false; a well-behaved stream
+    /// checks it and returns, so the app exits cleanly.
+    struct Stream {
+        std::function<void(Sink, std::function<bool()> keep_running)> work;
+    };
+
     /// Fire-and-forget side effect with no message back.
     struct Perform { std::function<void()> action; };
 
@@ -73,7 +90,7 @@ class Cmd {
     /// Write a PNG of the current frame — screenshots and visual tests.
     struct Screenshot { std::string path; };
 
-    using Alt = std::variant<None, Quit, Batch, After, Task, Perform,
+    using Alt = std::variant<None, Quit, Batch, After, Task, Stream, Perform,
                              SetTitle, SetCursor, SetClipboard, ReadClipboard,
                              SetWindowSize, Fullscreen, Redraw, Focus, Screenshot>;
 
@@ -93,6 +110,23 @@ class Cmd {
     template <typename F>
     [[nodiscard]] static Cmd task(F&& f) {
         return Cmd{Alt{Task{std::function<Msg()>(std::forward<F>(f))}}};
+    }
+
+    /// Start a streaming producer. `f` has signature
+    /// `void(Sink sink, std::function<bool()> keep_running)` and runs on a
+    /// worker thread: call `sink(msg)` for each event, and return when
+    /// `keep_running()` becomes false. Example — a one-second ticker:
+    ///
+    ///   Cmd::stream([](auto sink, auto alive) {
+    ///       while (alive()) {
+    ///           std::this_thread::sleep_for(1s);
+    ///           if (alive()) sink(Tick{});
+    ///       }
+    ///   });
+    template <typename F>
+    [[nodiscard]] static Cmd stream(F&& f) {
+        return Cmd{Alt{Stream{
+            std::function<void(Sink, std::function<bool()>)>(std::forward<F>(f))}}};
     }
 
     template <typename F>

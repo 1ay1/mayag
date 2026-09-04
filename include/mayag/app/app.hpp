@@ -43,10 +43,13 @@
 #include "interaction.hpp"
 #include "latency.hpp"
 #include "platform.hpp"
+#include "../platform/waker.hpp"
 #include "sub.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <chrono>
@@ -268,13 +271,25 @@ struct StackBindings {
     explicit StackBindings(typo::FontStack& s) : measurer{s}, glyphs{s}, sampler{s} {}
 };
 
-/// Thread-safe inbox for messages produced off the UI thread (`Cmd::task`).
+/// Thread-safe inbox for messages produced off the UI thread — `Cmd::task`,
+/// `Cmd::stream`, or a `send()` from a producer the app owns.
+///
+/// Posting also WAKES the UI thread. Without that, a message from a background
+/// thread would sit in the queue until the next window event, because an idle
+/// app is blocked in poll() watching only the display fd. The waker's pipe is
+/// in that poll set, so post() interrupts the sleep and the frame renders at
+/// once. This is the single change that makes a streaming app feel live.
 template <typename Msg>
 class Inbox {
   public:
+    void set_waker(platform::Waker* w) noexcept { waker_ = w; }
+
     void post(Msg m) {
-        std::lock_guard lock{mutex_};
-        queue_.push_back(std::move(m));
+        {
+            std::lock_guard lock{mutex_};
+            queue_.push_back(std::move(m));
+        }
+        if (waker_ != nullptr) waker_->wake();
     }
     [[nodiscard]] std::vector<Msg> drain() {
         std::lock_guard lock{mutex_};
@@ -288,8 +303,9 @@ class Inbox {
         return queue_.empty();
     }
   private:
-    std::mutex        mutex_;
-    std::deque<Msg>   queue_;
+    std::mutex          mutex_;
+    std::deque<Msg>     queue_;
+    platform::Waker*    waker_ = nullptr;
 };
 
 /// A timer created by `Cmd::after` or `Sub::every`.
@@ -313,6 +329,23 @@ class Runtime {
     using Msg   = typename P::Msg;
 
     explicit Runtime(AppConfig cfg) : cfg_{std::move(cfg)} {}
+
+    /// Shut down cleanly: signal every `Cmd::stream` producer to stop and join
+    /// its thread. Streams are the one thing the runtime owns that outlives a
+    /// frame, so leaving them detached would mean a producer thread touching a
+    /// freed inbox after the app returned. `streams_alive_` flips to false,
+    /// well-behaved streams see `keep_running()` become false and return, and
+    /// this waits for them.
+    ~Runtime() {
+        streams_alive_->store(false, std::memory_order_release);
+        waker_.wake();   // nudge any stream sleeping on its own condition
+        for (auto& t : stream_threads_) {
+            if (t.joinable()) t.join();
+        }
+    }
+
+    Runtime(const Runtime&) = delete;
+    Runtime& operator=(const Runtime&) = delete;
 
     /// Open the window and evaluate `init()`. Separated from `run()` so a
     /// headless driver can boot the runtime and then step it by hand — the
@@ -344,6 +377,13 @@ class Runtime {
         // CPU sampler, so it needs the atlas itself to upload.
         window_.set_atlas_source(&cfg_.fonts->atlas());
         window_.set_coverage_sampler(sampler_);
+
+        // Wire the cross-thread waker: the Inbox writes to it on post() and the
+        // window watches it in poll(), so a background producer wakes an idle
+        // UI thread instead of leaving its message unrendered. This is what
+        // makes streaming apps live rather than frozen-until-you-move-the-mouse.
+        inbox_.set_waker(&waker_);
+        window_.set_waker(&waker_);
 
         // Adopt the platform's multi-click interval. Only used when a backend
         // reports no click count itself, but a wrong fallback is still a bug.
@@ -813,6 +853,21 @@ class Runtime {
                     inbox->post(work());
                 }).detach();
             }
+            else if constexpr (std::is_same_v<T, typename C::Stream>) {
+                // A long-lived producer. It runs on its own thread and pushes
+                // messages through a sink backed by the inbox+waker, so each
+                // one wakes the UI thread and renders at once. The thread
+                // outlives this call by design; the runtime signals it to stop
+                // via `streams_alive_` at shutdown and joins it in the
+                // destructor, so no detached thread survives the app.
+                auto* inbox = &inbox_;
+                auto  alive = streams_alive_;   // shared_ptr<atomic<bool>>
+                typename C::Sink sink = [inbox](Msg m) { inbox->post(std::move(m)); };
+                stream_threads_.emplace_back(
+                    [work = a.work, sink = std::move(sink), alive] {
+                        work(sink, [alive] { return alive->load(std::memory_order_acquire); });
+                    });
+            }
             else if constexpr (std::is_same_v<T, typename C::Perform>) { a.action(); }
             else if constexpr (std::is_same_v<T, typename C::SetTitle>) {
                 window_.set_title(a.title);
@@ -1116,6 +1171,14 @@ class Runtime {
     std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
     detail::Inbox<Msg>              inbox_;
+    platform::Waker                 waker_;
+    // Streaming producers (`Cmd::stream`). `streams_alive_` is shared with the
+    // worker threads as their shutdown signal; the runtime joins them in its
+    // destructor. A shared_ptr rather than a bare member so a thread that
+    // checks it during teardown never races the Runtime's own destruction.
+    std::shared_ptr<std::atomic<bool>> streams_alive_ =
+        std::make_shared<std::atomic<bool>>(true);
+    std::vector<std::thread>        stream_threads_;
     std::vector<detail::Timer<Msg>> timers_;
     std::vector<detail::Timer<Msg>> interval_timers_;
 

@@ -280,6 +280,16 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_discovery_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_discovery_tests COMMAND mayag_discovery_tests)
 
+    # Live / streaming: the cross-thread waker and Cmd::stream. The waker and
+    # the stream lifecycle are pure logic and run everywhere; the end-to-end
+    # "a blocked window wakes" check needs a compositor and skips without one.
+    if(MAYAG_WITH_WAYLAND)
+        add_executable(mayag_live_tests tests/test_live.cpp)
+        target_link_libraries(mayag_live_tests PRIVATE mayag)
+        target_compile_options(mayag_live_tests PRIVATE ${MAYAG_WARNINGS})
+        add_test(NAME mayag_live_tests COMMAND mayag_live_tests)
+    endif()
+
     # The GPU backend, checked against the software rasteriser pixel by pixel.
     # A timing benchmark cannot distinguish a fast backend from one that draws
     # nothing; this can, so the performance claim stays falsifiable. Skips

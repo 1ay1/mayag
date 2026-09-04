@@ -511,6 +511,50 @@ An animation earns a *budget* of frames rather than an open-ended
 subscription — the reactive demo's cursor trail wakes for 45 frames and then
 lets the app fall asleep again on its own.
 
+### Live, and still idle
+
+An idle app blocking at 0% CPU is only half the story. A *live* app —
+a dashboard, a monitor, a chat, a log tail — receives data from somewhere
+that is **not** the window: a socket, a subprocess, a metrics poller. The
+producer runs on its own thread, and the classic bug is that it posts an
+update while the UI thread is asleep in `poll()` watching only the display
+fd — so the frame sits unrendered until the user happens to move the mouse,
+and the app looks frozen. The usual escape is a polling timer, which trades
+the freeze for a permanently-awake core.
+
+mayag does neither. Two pieces:
+
+- **`Cmd::stream`** is a long-lived producer. Where `Cmd::task` runs once and
+  returns a single message, a stream gets a thread-safe `sink` and emits an
+  open-ended sequence over its lifetime. The runtime owns the thread and joins
+  it on shutdown; a well-behaved stream returns when `keep_running()` goes
+  false.
+
+  ```cpp
+  // A metrics poller. Each sample flows into update() as a message.
+  Cmd<Msg>::stream([](auto sink, auto alive) {
+      CpuSampler s;
+      while (alive()) {
+          std::this_thread::sleep_for(100ms);
+          if (alive()) sink(Sample{s.read()});
+      }
+  });
+  ```
+
+- **A cross-thread waker** (a self-pipe the window's `poll()` also watches) is
+  what makes that message *render now*. Posting to the runtime's inbox writes
+  one byte to the pipe, which interrupts the blocked UI thread the instant the
+  producer fires — no polling timer, no missed update. Wakes coalesce, so a
+  burst of a thousand streamed messages between two frames costs one syscall.
+
+The result is an app that is genuinely live and still cheap. `mayag_live` is a
+real-time CPU monitor streaming ten samples a second; measured while running,
+it sits at **0.0% CPU** between samples, because the UI thread is asleep in the
+kernel until the next reading arrives. The whole path — waker, inbox, stream
+lifecycle — is verified race-free under ThreadSanitizer, and a test asserts a
+blocked window is woken by a background thread in ~80 ms rather than sleeping
+through it.
+
 ## Accessibility
 
 A UI that exists only as pixels is unusable with a screen reader and
