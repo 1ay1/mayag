@@ -898,6 +898,40 @@ void test_synthetic_italic() {
     check(up_valid && it->valid, "both upright and italic cache independently");
 }
 
+/// Synthetic bold: a font that can't reach the requested weight (a static
+/// face, or a variable font past its wght-axis max) is emboldened by dilating
+/// the coverage, so `bold` works everywhere. The bold glyph is thicker and
+/// caches in its own bucket.
+void test_synthetic_bold() {
+    section("synthetic bold");
+
+    std::shared_ptr<typo::Face> sf;
+    for (const auto& e : typo::system::Database::instance().entries()) {
+        auto f = typo::Face::from_file(e.path, e.face_index);
+        if (f && !f->is_variable() && f->has_glyph(U'o') && f->has_outlines()) { sf = f; break; }
+    }
+    if (!sf) { check(true, "no static outline font — skipping"); return; }
+    check(!sf->can_reach_weight(700.0f), "static face can't reach bold on its own");
+
+    // Force the coverage path (SDF faux-bold is a separate, deferred concern).
+    typo::FontConfig cfg; cfg.mode = typo::RenderMode::bitmap;
+    typo::FontStack stack{cfg};
+    stack.add(sf);
+    const std::uint16_t g = sf->glyph_for('o');
+    const typo::CachedGlyph* reg = stack.glyph(0, g, 32.0f, 400.0f, {}, false);
+    if (reg == nullptr) { check(false, "regular glyph rasterises"); return; }
+    const Vec2 reg_size = reg->size;
+    const typo::CachedGlyph* bold = stack.glyph(0, g, 32.0f, 700.0f, {}, false);
+    if (bold == nullptr) { check(false, "bold glyph rasterises"); return; }
+
+    check(bold->size.x > reg_size.x, "synthetic bold thickens the glyph (wider)");
+    check(bold->size.y >= reg_size.y, "synthetic bold does not shrink the glyph");
+
+    // A weight the face CAN'T reach embolds; a normal weight does not.
+    const typo::CachedGlyph* reg2 = stack.glyph(0, g, 32.0f, 400.0f, {}, false);
+    check(reg2 != nullptr, "regular weight still caches its own slim glyph");
+}
+
 /// Justified text: every line but the last is stretched to the box edge by
 /// spreading slack across inter-word spaces. The bar: a wrapped justified
 /// paragraph paints glyphs reaching closer to the right edge than the same
@@ -1232,6 +1266,7 @@ int main() {
     test_caret();
     test_italic();
     test_synthetic_italic();
+    test_synthetic_bold();
     test_justify();
     test_ligatures();
     test_color_glyphs();

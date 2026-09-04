@@ -281,6 +281,16 @@ class Face {
         return false;
     }
 
+    /// True when the face can actually reach USER weight `w` on its own wght
+    /// axis. A static font (no wght axis) never can; a variable font can only
+    /// up to its axis max. When false, heavier text must be synthesised by
+    /// emboldening the coverage.
+    [[nodiscard]] bool can_reach_weight(float w) const noexcept {
+        for (const auto& a : axes_)
+            if (a.tag == var::tag_wght) return w <= a.max + 1.0f;
+        return false;
+    }
+
     /// Current value of one axis in USER units, or NaN if the tag is unknown.
     [[nodiscard]] float variation(std::uint32_t tag) const noexcept {
         for (std::size_t i = 0; i < axes_.size(); ++i)
@@ -595,8 +605,15 @@ class FontStack : public Shaper {
         // so we must not shear those on top.
         const bool synth_italic = italic && !face.has_slant_axis();
 
+        // Synthesise bold by emboldening the coverage when the font can't reach
+        // the requested weight itself — a static face (no wght axis) asked for
+        // >= semibold, or a variable face past its wght-axis max. Variable
+        // faces that CAN reach the weight already did it for real via the axis.
+        const bool synth_bold = weight >= 600.0f && !face.can_reach_weight(weight);
+
         key.flags = use_sdf ? glyph_flags::sdf : glyph_flags::none;
         if (synth_italic) key.flags |= glyph_flags::synthetic_italic;
+        if (synth_bold)   key.flags |= glyph_flags::synthetic_bold;
 
         if (const CachedGlyph* hit = atlas_.find(key)) return hit;
 
@@ -673,6 +690,14 @@ class FontStack : public Shaper {
         const float quantised = static_cast<float>(key.size_bucket) * 0.25f;
         const float scale = face.scale_for(quantised);
         auto r = rasterize(o, scale, 1);
+        if (synth_bold) {
+            // Emboldening grows the bitmap by `pad` on every side; keep the
+            // glyph visually centred by shifting the offset back by the same.
+            const float strength = num::max(quantised * 0.03f, 0.6f);   // ~stem +6%
+            const int pad = static_cast<int>(num::ceil(strength));
+            r.bitmap = embolden(r.bitmap, strength);
+            r.offset -= Vec2{static_cast<float>(pad), static_cast<float>(pad)};
+        }
         return atlas_.insert(key, r.bitmap, r.offset, advance, scale, 0.0f, false);
     }
 

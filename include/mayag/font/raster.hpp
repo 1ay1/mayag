@@ -420,11 +420,50 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
 /// with `spread` pixels mapping to the full 0..255 range. That matches what
 /// the SDF shader in `render/sdf.hpp` expects, so a glyph is shaded by the
 /// same `coverage_smooth()` as every other mayag shape.
-///
-/// Sub-pixel accuracy comes from seeding the transform with the coverage
-/// value itself: a pixel that is 30% covered sits 0.2 px outside the edge,
-/// not a whole pixel. Without that correction SDF text has visible stair-
-/// stepping at large sizes, which is the whole thing SDFs are supposed to fix.
+[[nodiscard]] inline Bitmap make_sdf(const Bitmap& coverage, float spread);
+
+/// Faux-bold: thicken a coverage bitmap by `strength` pixels, for fonts that
+/// can't reach the requested weight themselves (a static regular, or a
+/// variable font past its wght-axis max). Grows the bitmap by a 1px border and
+/// takes, at each pixel, the max coverage in a small horizontal+vertical
+/// neighbourhood weighted by the fractional strength — a cheap morphological
+/// dilation that fattens every stem the way FreeType's embolden does, without
+/// touching outlines or the GPU path.
+[[nodiscard]] inline Bitmap embolden(const Bitmap& src, float strength) {
+    if (src.empty() || strength <= 0.0f) return src;
+    const int pad = static_cast<int>(num::ceil(strength));
+    Bitmap out{src.width + pad * 2, src.height + pad * 2};
+    const int w = out.width, h = out.height;
+
+    const int radius = static_cast<int>(num::ceil(strength));
+    const float frac = strength - num::floor(strength);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            // Sample the source (offset by pad) over a square neighbourhood,
+            // taking the max so strokes grow rather than blur.
+            float best = 0.0f;
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int sx = x - pad + dx;
+                    const int sy = y - pad + dy;
+                    float v = static_cast<float>(src.at(sx, sy)) / 255.0f;
+                    // Feather the outermost ring by the fractional strength so
+                    // sub-pixel bold values interpolate smoothly.
+                    if ((num::abs(dx) == radius || num::abs(dy) == radius) && frac > 0.0f)
+                        v *= frac;
+                    best = num::max(best, v);
+                }
+            }
+            out.set(x, y, static_cast<std::uint8_t>(num::clamp(best, 0.0f, 1.0f) * 255.0f + 0.5f));
+        }
+    }
+    return out;
+}
+
+/// Signed-distance field from a coverage bitmap. Sub-pixel accuracy comes from
+/// seeding the transform with the coverage value itself: a pixel that is 30%
+/// covered sits 0.2 px outside the edge, not a whole pixel. Without that
+/// correction SDF text has visible stair-stepping at large sizes.
 [[nodiscard]] inline Bitmap make_sdf(const Bitmap& coverage, float spread = 4.0f) {
     if (coverage.empty()) return {};
 
