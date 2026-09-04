@@ -181,6 +181,7 @@ animate, <kbd>tab</kbd> to move focus, <kbd>esc</kbd> to quit.
 
 | Example | What it shows |
 |---------|---------------|
+| `hello` | ~110 lines: the smallest live animated app — match(), action(), on_frame(), a spring |
 | `counter` | the smallest complete Program — Model/Msg/init/update/view/subscribe |
 | `gallery` | every visual feature, 6 live themes, drag + hover + animation |
 | `dashboard` | a realistic app layout with a clickable sidebar |
