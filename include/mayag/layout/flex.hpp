@@ -240,6 +240,37 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
     }
 
     if (!items.empty()) {
+        // Partition into lines. Without wrap that's one line holding every item;
+        // with wrap, greedily break when the next item would overflow the main
+        // axis. Each line then runs the full grow/shrink/justify/align machinery
+        // independently and stacks along the cross axis.
+        struct Slice { std::size_t lo, hi; };
+        std::vector<Slice> lines;
+        if (L.wrap && avail_main > 0.0f) {
+            std::size_t start = 0;
+            float line_main = 0.0f;
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                const float w = items[i].main + main_of(items[i].margin.total(), ax);
+                const float with_gap = (i > start ? L.gap : 0.0f) + w;
+                if (i > start && line_main + with_gap > avail_main + 0.01f) {
+                    lines.push_back({start, i});
+                    start = i;
+                    line_main = w;
+                } else {
+                    line_main += with_gap;
+                }
+            }
+            lines.push_back({start, items.size()});
+        } else {
+            lines.push_back({0, items.size()});
+        }
+
+        float cross_cursor = 0.0f;   // accumulated cross offset across lines
+        const std::vector<Item> all_items = items;
+        for (const Slice& slice : lines) {
+        items.assign(all_items.begin() + static_cast<std::ptrdiff_t>(slice.lo),
+                     all_items.begin() + static_cast<std::ptrdiff_t>(slice.hi));
+        float line_cross = 0.0f;   // tallest child in this line (cross axis)
         const float gaps = L.gap * static_cast<float>(items.size() - 1);
         float used = gaps;
         float grow_sum = 0.0f, shrink_sum = 0.0f;
@@ -327,15 +358,19 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
                 : align_offset(L.align, cross_free);
             const float cross_pos  = cross_of(content.origin, ax)
                                    + cross_of(it.margin_lead(ax), ax)
-                                   + cross_align;
+                                   + cross_align + cross_cursor;
 
             const Vec2 origin = compose(ax, cursor, cross_pos) + kl.offset;
             const Vec2 sz     = compose(ax, it.main, kid_cross);
 
             arrange(kid, Rect{origin, sz}, tm);
 
+            line_cross = num::max(line_cross, kid_cross + kid_margin_cross);
             cursor += it.main + main_of(it.margin_trail(ax), ax);
             if (k + 1 < items.size()) cursor += L.gap + dist.between;
+        }
+        // Stack the next wrapped line below this one (plus the cross gap).
+        cross_cursor += line_cross + (line_cross > 0.0f ? L.gap : 0.0f);
         }
     }
 

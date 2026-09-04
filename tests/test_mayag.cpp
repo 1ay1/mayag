@@ -286,6 +286,38 @@ void test_layout() {
         check(small.frame().top() > big.frame().top() + 1.0f,
               "smaller text is pushed down so its baseline meets the larger");
     }
+
+    // Flex wrap: five 100px boxes in a 250px row break onto three lines
+    // (2 + 2 + 1), each line stacked below the last by height + gap.
+    {
+        auto ui = h(box() | size(100, 20), box() | size(100, 20), box() | size(100, 20),
+                    box() | size(100, 20), box() | size(100, 20))
+                | width(250) | wrap | gap(10);
+        Node n = ui.build();
+        layout::layout_tree(n, {250, 200}, tm);
+        const auto& k = n.children();
+        near(k[0].frame().top(), 0.0f,  0.01f, "wrap line 1 at y=0");
+        near(k[1].frame().top(), 0.0f,  0.01f, "wrap keeps two per line");
+        near(k[2].frame().top(), 30.0f, 0.01f, "wrap line 2 stacks below (h+gap)");
+        near(k[4].frame().top(), 60.0f, 0.01f, "wrap line 3 stacks below line 2");
+        near(k[0].frame().left(), 0.0f,   0.01f, "wrap line restarts at the left");
+        near(k[2].frame().left(), 0.0f,   0.01f, "second line also starts at left");
+    }
+
+    // Rich inline text: paragraph() flows styled fragments across wrapping
+    // baseline-aligned lines, each fragment keeping its own style.
+    {
+        auto p = paragraph(text<"aaa ">, text<"bbb "> | bold,
+                           text<"ccc "> | font(24), text<"ddd eee fff">)
+               | width(120);
+        Node n = p.build();
+        layout::layout_tree(n, {120, 120}, tm);
+        int rows = 0; float prev = -1.0f;
+        for (const auto& c : n.children())
+            if (c.frame().top() != prev) { ++rows; prev = c.frame().top(); }
+        check(rows >= 2, "paragraph wraps its fragments onto multiple lines");
+        check(n.children().size() == 4, "paragraph keeps every styled fragment");
+    }
 }
 
 void test_draw_list() {

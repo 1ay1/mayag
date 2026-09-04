@@ -1227,4 +1227,21 @@ struct When {
 template <Modifier M>
 [[nodiscard]] constexpr auto when(bool cond, M m) { return When<M>{cond, m}; }
 
+// ---- rich inline text ----
+
+/// Rich inline text — flow styled fragments across wrapping lines that share a
+/// baseline. Each child keeps its own style, so prose can mix weight, size,
+/// colour, and italics on one line and wrap like a real paragraph:
+///
+///     paragraph(text<"The ">, text<"quick "> | bold,
+///               text<"brown "> | fg(accent), text<"fox.">) | width(320)
+///
+/// It is exactly `h(kids...) | wrap | baseline` — the two primitives rich text
+/// needs — named so the intent and the correct defaults are one call. Add any
+/// further modifiers (width, gap, padding) with the usual `|`.
+template <typename... Kids>
+[[nodiscard]] constexpr auto paragraph(Kids... kids) {
+    return h(kids...) | wrap | baseline;
+}
+
 }  // namespace mayag::dsl
