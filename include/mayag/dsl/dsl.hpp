@@ -1093,6 +1093,21 @@ struct WrapText {
 };
 inline constexpr WrapText wrap_text{};
 
+/// Clamp wrapped prose to at most `n` lines, ellipsising the last visible one
+/// (CSS line-clamp) — the "3 lines then …" card-description pattern. Implies
+/// wrapping, so `text<"…"> | clamp_lines(3)` just works.
+struct ClampLines {
+    MAYAG_MODIFIER(ClampLines, caps::text, caps::none, caps::none, "clamp_lines");
+    std::uint16_t n;
+    constexpr void apply(Style& s) const {
+        s.text.overflow  = TextOverflow::wrap;
+        s.text.max_lines = n;
+    }
+};
+[[nodiscard]] constexpr ClampLines clamp_lines(int n) {
+    return {static_cast<std::uint16_t>(n < 0 ? 0 : n)};
+}
+
 /// Hard clip with no ellipsis.
 struct ClipText {
     MAYAG_MODIFIER(ClipText, caps::text, caps::none, caps::none, "clip_text");

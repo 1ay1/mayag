@@ -996,6 +996,38 @@ void test_ellipsis() {
         render::paint(root, dl, po);
         check(dl.instances().size() == 2, "short text keeps all its glyphs, no ellipsis added");
     }
+
+    // Multi-line ellipsis (line-clamp): a long paragraph clamped to 2 lines
+    // measures 2 lines tall and draws far fewer glyphs than the full block,
+    // with the last line ellipsised.
+    {
+        const std::string prose =
+            "This is a fairly long paragraph of body text that wraps across "
+            "several lines in a narrow column and then keeps going for a while";
+        const float w = 140.0f, lh = 16.0f * 1.4f;   // size * default line_height
+
+        TextStyle full; full.size = 16.0f; full.overflow = TextOverflow::wrap;
+        const float full_h = measurer.measure(prose, full, w).y;
+
+        TextStyle clamp2 = full; clamp2.max_lines = 2;
+        const float clamp_h = measurer.measure(prose, clamp2, w).y;
+
+        check(full_h > lh * 2.5f, "unclamped prose is several lines tall");
+        check(clamp_h <= lh * 2.0f + 1.0f, "clamp(2) measures at most two lines tall");
+
+        // Render count: clamped draws strictly fewer glyphs.
+        const auto count = [&](std::uint16_t maxl) {
+            auto ui = text_owned(prose) | font(16) | wrap_text | width(w);
+            Node root = ui.build();
+            root.style().text.max_lines = maxl;
+            layout::layout_tree(root, {w, 300.0f}, measurer);
+            DrawList dl;
+            render::PaintOptions po; po.measurer = &measurer; po.glyphs = &glyphs;
+            render::paint(root, dl, po);
+            return dl.instances().size();
+        };
+        check(count(2) < count(0), "clamp(2) draws fewer glyphs than the full block");
+    }
 }
 
 /// Justified text: every line but the last is stretched to the box edge by

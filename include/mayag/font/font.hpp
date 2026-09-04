@@ -890,9 +890,12 @@ class StackMeasurer final : public layout::TextMeasurer {
 
         // Greedy wrap at break opportunities.
         const auto lines = wrap_lines(s, shaped, max_width);
+        std::size_t n = num::max<std::size_t>(lines.size(), 1);
+        if (st.max_lines > 0) n = num::min<std::size_t>(n, st.max_lines);
         float widest = 0.0f;
-        for (const auto& l : lines) widest = num::max(widest, l.width);
-        return {widest, static_cast<float>(num::max<std::size_t>(lines.size(), 1)) * line_h};
+        for (std::size_t i = 0; i < lines.size() && i < n; ++i)
+            widest = num::max(widest, lines[i].width);
+        return {widest, static_cast<float>(n) * line_h};
     }
 
     /// One wrapped line: a glyph range and its measured width.
@@ -1036,9 +1039,16 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             ? StackMeasurer::wrap_lines(s, shaped, box.width())
             : std::vector<StackMeasurer::Line>{{0, shaped.glyphs.size(), shaped.width}};
 
+        // Line clamp: draw at most max_lines, and if that hides later lines the
+        // last drawn line gets an ellipsis (CSS line-clamp).
+        const std::size_t line_count =
+            (st.max_lines > 0 && lines.size() > st.max_lines)
+                ? st.max_lines : lines.size();
+        const bool clamped = line_count < lines.size();
+
         float baseline_y = box.top() + fm.ascent;
 
-        for (std::size_t li = 0; li < lines.size(); ++li) {
+        for (std::size_t li = 0; li < line_count; ++li) {
             const auto& line = lines[li];
             // Horizontal alignment happens per LINE, which is the only way
             // centred multi-line text looks right.
@@ -1070,8 +1080,12 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             bool show_ellipsis = false;
             float ellipsis_x = 0.0f;
             const CachedGlyph* ell_glyph = nullptr;
-            if (st.overflow == TextOverflow::ellipsis && !wrapping &&
-                line.width > box.width() + 0.5f && box.width() > 0.0f) {
+            // Ellipsis when: a non-wrapping line overflows, OR this is the last
+            // line of a clamped block that hides further lines.
+            const bool last_clamped_line = clamped && (li + 1 == line_count);
+            const bool overflow_line = st.overflow == TextOverflow::ellipsis &&
+                                       !wrapping && line.width > box.width() + 0.5f;
+            if ((overflow_line || last_clamped_line) && box.width() > 0.0f) {
                 const std::uint16_t ell_gid = stack_->ellipsis_glyph();
                 ell_glyph = stack_->glyph(0, ell_gid, st.size, st.effective_weight(),
                                           {sp.axes.data(), sp.axis_count}, sp.italic);

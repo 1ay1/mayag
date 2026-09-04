@@ -225,6 +225,10 @@ struct TextStyle {
     /// must stay distinct.
     bool ligatures = true;
 
+    /// Clamp wrapped text to at most this many lines, ellipsising the last one
+    /// (CSS line-clamp). 0 = unlimited. Only meaningful with overflow == wrap.
+    std::uint16_t max_lines = 0;
+
     friend constexpr bool operator==(const TextStyle&, const TextStyle&) = default;
     [[nodiscard]] constexpr float line_advance() const noexcept { return size * line_height; }
 
