@@ -782,6 +782,50 @@ void test_rendering() {
 
 }  // namespace
 
+/// Measure-accurate caret placement + hit-testing for text fields. The bar:
+/// caret_from_x is the exact inverse of the caret's x for every boundary
+/// (round-trips), so a click lands where the caret would be drawn — pixel
+/// correct under a proportional font, not a monospace guess.
+void test_caret() {
+    section("caret hit-testing");
+
+    auto face = test_face();
+    if (!face) { check(true, "no font — skipping"); return; }
+    typo::FontStack stack;
+    stack.add(face);
+    typo::StackMeasurer meas{stack};
+    TextStyle st; st.size = 20.0f;
+    const auto measure = [&](std::string_view s) { return meas.advance(s, st); };
+
+    // A string mixing wide and narrow glyphs so a monospace model would fail.
+    const std::string text = "Wave illiW";
+    const auto x_at = [&](std::size_t b) {
+        return b == 0 ? 0.0f : measure(std::string_view{text.data(), b});
+    };
+
+    // Round-trip: every caret boundary -> its x -> back to the same caret.
+    int exact = 0, total = 0;
+    for (std::size_t c = 0; c <= text.size(); ++c) {
+        ++total;
+        if (dsl::caret_from_x(text, x_at(c), measure) == c) ++exact;
+    }
+    check(exact == total, "caret_from_x round-trips every boundary exactly");
+
+    // Proportional truth: 'W' is wider than 'i', so the caret after "W" must
+    // sit further right than a fixed-width model would place it.
+    check(x_at(1) > 0.0f, "caret advances past the first glyph");
+    check(measure("W") > measure("i"), "measurer reflects proportional widths");
+
+    // A click past the end clamps to the last boundary; before the start to 0.
+    check(dsl::caret_from_x(text, 1e6f, measure) == text.size(), "click past end -> end caret");
+    check(dsl::caret_from_x(text, -5.0f, measure) == 0, "click before start -> caret 0");
+
+    // Without a measurer the helper still works (monospace fallback), never
+    // returning an out-of-range or mid-codepoint index.
+    const std::size_t fb = dsl::caret_from_x(text, 3.0f, {});
+    check(fb <= text.size(), "fallback hit-test stays in range");
+}
+
 /// GSUB ligatures. The bar: on a font with a `liga` feature, fi/ffi/fl fold
 /// into single glyphs (fewer glyphs, greedy longest-match), the toggle turns
 /// it off, and clusters still map the ligature back to its first character.
@@ -1063,6 +1107,7 @@ int main() {
     test_metrics();
     test_rendering();
     test_variations();
+    test_caret();
     test_ligatures();
     test_color_glyphs();
 
