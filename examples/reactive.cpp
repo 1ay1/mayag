@@ -261,7 +261,7 @@ struct Reactive {
             // trail is still catching up — and NOT otherwise, so an
             // untouched window sits at 0% CPU instead of looking hung.
             when(m.running || m.settle_frames > 0,
-                 Sub<Msg>::every_frame([](FrameEvent f) { return Msg{Tick{f.delta}}; })));
+                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
     }
 
     /// Copy the runtime's measurements into the model so `view()` can render

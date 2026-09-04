@@ -60,7 +60,7 @@ struct Dashboard {
             Sub<Msg>::on_click<"live">(ToggleLive{}),
             Sub<Msg>::on_key(Key::escape, Quit{}),
             Sub<Msg>::on_close(Quit{}),
-            when(m.live, Sub<Msg>::every_frame([](FrameEvent f) { return Msg{Tick{f.delta}}; })),
+            when(m.live, Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })),
         };
         for (int i = 0; i < static_cast<int>(nav.size()); ++i) {
             subs.push_back(Sub<Msg>::on_click_id(

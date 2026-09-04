@@ -344,7 +344,7 @@ struct Todo {
             // The indicator only requests frames while it is actually moving,
             // so a settled UI goes back to 0% CPU with no explicit stop.
             when(m.indicator.animating(),
-                 Sub<Msg>::every_frame([](FrameEvent f) { return Msg{Tick{f.delta}}; })),
+                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })),
         };
 
         // Menu entries, live only while the menu is open.

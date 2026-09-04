@@ -262,7 +262,7 @@ struct Gallery {
             // The animation subscription only EXISTS while animating, so a
             // paused gallery drops to 0% CPU with no explicit stop call.
             when(m.animating,
-                 Sub<Msg>::every_frame([](FrameEvent f) { return Msg{Tick{f.delta}}; })),
+                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })),
         };
         for (int i = 0; i < static_cast<int>(palette.size()); ++i) {
             subs.push_back(Sub<Msg>::on_click_id(
