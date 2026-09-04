@@ -826,6 +826,56 @@ void test_caret() {
     check(fb <= text.size(), "fallback hit-test stays in range");
 }
 
+/// Justified text: every line but the last is stretched to the box edge by
+/// spreading slack across inter-word spaces. The bar: a wrapped justified
+/// paragraph paints glyphs reaching closer to the right edge than the same
+/// text left-aligned, and never past it.
+void test_justify() {
+    section("justified text");
+
+    auto face = test_face();
+    if (!face) { check(true, "no font — skipping"); return; }
+    auto stack = std::make_shared<typo::FontStack>();
+    stack->add(face);
+    typo::StackMeasurer measurer{*stack};
+    typo::StackGlyphRenderer glyphs{*stack};
+
+    const std::string prose =
+        "The quick brown fox jumps over the lazy dog again and again today";
+    const float box_w = 220.0f;
+
+    // Rightmost painted glyph x for a given alignment.
+    const auto rightmost = [&](TextAlign align) {
+        auto ui = text_owned(prose) | font(16) | wrap_text | text_align(align) | width(box_w);
+        Node root = ui.build();
+        layout::layout_tree(root, {box_w, 200.0f}, measurer);
+        DrawList dl;
+        render::PaintOptions po; po.measurer = &measurer; po.glyphs = &glyphs;
+        render::paint(root, dl, po);
+        float maxx = 0.0f;
+        for (const auto& inst : dl.instances())
+            maxx = num::max(maxx, inst.rect.x + inst.rect.z);   // rect = (x,y,w,h)
+        return maxx;
+    };
+
+    const float left_r    = rightmost(TextAlign::left);
+    const float justify_r = rightmost(TextAlign::justify);
+
+    check(left_r > 0.0f && justify_r > 0.0f, "both alignments paint glyphs");
+    // Justified lines fill more of the width than ragged-right ones.
+    check(justify_r >= left_r - 0.5f, "justify never pulls text left of ragged");
+    check(justify_r > box_w * 0.9f, "justified lines reach near the box edge");
+    check(justify_r <= box_w + 2.0f, "justified text stays within the box");
+
+    // The DSL `justify_text` modifier also opts into wrapping on its own.
+    {
+        using namespace mayag::dsl;
+        Style s; justify_text.apply(s);
+        check(s.text.align == TextAlign::justify, "justify_text sets justify align");
+        check(s.text.overflow == TextOverflow::wrap, "justify_text implies wrapping");
+    }
+}
+
 /// GSUB ligatures. The bar: on a font with a `liga` feature, fi/ffi/fl fold
 /// into single glyphs (fewer glyphs, greedy longest-match), the toggle turns
 /// it off, and clusters still map the ligature back to its first character.
@@ -1108,6 +1158,7 @@ int main() {
     test_rendering();
     test_variations();
     test_caret();
+    test_justify();
     test_ligatures();
     test_color_glyphs();
 

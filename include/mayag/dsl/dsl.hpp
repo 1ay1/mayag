@@ -1056,6 +1056,27 @@ struct TextAlignMod {
 };
 [[nodiscard]] constexpr TextAlignMod text_align(TextAlign a) { return {a}; }
 
+/// Text-alignment shorthands. `text_left / text_center / text_right` set the
+/// alignment; `justify_text` fills each line to the box edge — and since a
+/// justified line only has slack to spread when text wraps, it also opts INTO
+/// wrapping, so `text<"…"> | justify_text` just works instead of silently
+/// looking left-aligned.
+inline constexpr TextAlignMod text_left{TextAlign::left};
+inline constexpr TextAlignMod text_center{TextAlign::center};
+inline constexpr TextAlignMod text_right{TextAlign::right};
+
+struct JustifyText {
+    MAYAG_MODIFIER(JustifyText, caps::text, caps::none, caps::none, "justify_text");
+    constexpr void apply(Style& s) const {
+        s.text.align = TextAlign::justify;
+        s.text.overflow = TextOverflow::wrap;   // justify implies multi-line
+    }
+};
+/// Justify prose: fill every line but the last to the box edge. Named
+/// `justify_text` because `justify` is the flexbox main-axis distribution.
+/// Opts into wrapping too, so `text<"…"> | justify_text` just works.
+inline constexpr JustifyText justify_text{};
+
 struct Ellipsis {
     MAYAG_MODIFIER(Ellipsis, caps::text, caps::none, caps::none, "ellipsis");
     constexpr void apply(Style& s) const { s.text.overflow = TextOverflow::ellipsis; }

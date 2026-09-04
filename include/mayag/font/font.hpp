@@ -955,12 +955,27 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
 
         float baseline_y = box.top() + fm.ascent;
 
-        for (const auto& line : lines) {
+        for (std::size_t li = 0; li < lines.size(); ++li) {
+            const auto& line = lines[li];
             // Horizontal alignment happens per LINE, which is the only way
             // centred multi-line text looks right.
             float pen_x = box.left();
             if (st.align == TextAlign::center)     pen_x += (box.width() - line.width) * 0.5f;
             else if (st.align == TextAlign::right) pen_x += box.width() - line.width;
+
+            // Justify: spread the slack across inter-word gaps so the line
+            // fills the box — every line but the LAST (a justified last line
+            // looks broken), and only when there is a real target width.
+            float word_gap = 0.0f;
+            if (st.align == TextAlign::justify && wrapping && li + 1 < lines.size()) {
+                std::size_t spaces = 0;
+                for (std::size_t i = line.begin; i < line.end && i < shaped.glyphs.size(); ++i) {
+                    const std::uint32_t c = shaped.glyphs[i].cluster;
+                    if (c < s.size() && (s[c] == ' ' || s[c] == '\t')) ++spaces;
+                }
+                const float slack = box.width() - line.width;
+                if (spaces > 0 && slack > 0.0f) word_gap = slack / static_cast<float>(spaces);
+            }
 
             const float line_start_x = pen_x;
 
@@ -975,16 +990,23 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                     emit(dl, *cached, Vec2{pen_x, baseline_y} + g.offset, st);
                 }
                 pen_x += g.advance;
+                if (word_gap > 0.0f && g.cluster < s.size() &&
+                    (s[g.cluster] == ' ' || s[g.cluster] == '\t')) {
+                    pen_x += word_gap;
+                }
             }
+
+            const float line_end_x = (st.align == TextAlign::justify && word_gap > 0.0f)
+                                     ? box.left() + box.width() : line_start_x + line.width;
 
             if (st.underline) {
                 const float y = baseline_y - fm.underline_position;
-                dl.line({line_start_x, y}, {line_start_x + line.width, y},
+                dl.line({line_start_x, y}, {line_end_x, y},
                         fm.underline_thickness, st.color);
             }
             if (st.strikethrough) {
                 const float y = baseline_y - fm.x_height * 0.5f;
-                dl.line({line_start_x, y}, {line_start_x + line.width, y},
+                dl.line({line_start_x, y}, {line_end_x, y},
                         fm.underline_thickness, st.color);
             }
 
