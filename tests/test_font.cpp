@@ -61,7 +61,7 @@ void section(const char* n) { std::printf("\n%s\n", n); }
         if (std::filesystem::exists(p)) return p;
     }
     for (const auto& e : typo::system::Database::instance().entries()) {
-        if (e.has_latin && !e.color) return e.path;
+        if (e.has_latin() && !e.color) return e.path;
     }
     return {};
 }
@@ -82,7 +82,7 @@ void section(const char* n) { std::printf("\n%s\n", n); }
     }
     // Last resort: whatever the database found first with Latin coverage.
     for (const auto& e : typo::system::Database::instance().entries()) {
-        if (e.has_latin && !e.color) {
+        if (e.has_latin() && !e.color) {
             if (auto f = typo::Face::from_file(e.path, e.face_index)) return f;
         }
     }
@@ -198,7 +198,7 @@ void test_all_system_fonts() {
         if (face->has_kerning()) ++kerned;
 
         // Render a representative glyph from whichever script it covers.
-        const std::uint32_t probe = e.has_latin ? 'B' : e.has_cjk ? 0x4E2D : 0;
+        const std::uint32_t probe = e.has_latin() ? 'B' : e.has_cjk() ? 0x4E2D : 0;
         if (probe != 0) {
             const auto gid = face->glyph_for(probe);
             if (gid != 0 && !face->outline(gid).empty()) ++with_outlines;
@@ -646,7 +646,7 @@ void test_rendering() {
         auto ui = v(text<"Hello"> | font(32) | fg(colors::white)) | pad(10);
         RenderOptions o;
         o.background = colors::black;
-        o.fonts = stack.get();
+        o.fonts = stack;
 
         const auto px = render_to_pixels(ui, {200, 60}, o);
         int lit = 0;
@@ -658,7 +658,7 @@ void test_rendering() {
     {
         const auto measure_ink = [&](float size) {
             auto ui = v(text<"W"> | font(size) | fg(colors::white)) | pad(4);
-            RenderOptions o; o.background = colors::black; o.fonts = stack.get();
+            RenderOptions o; o.background = colors::black; o.fonts = stack;
             const auto px = render_to_pixels(ui, {200, 120}, o);
             int lit = 0;
             for (std::size_t i = 0; i < px.size(); i += 4) if (px[i] > 128) ++lit;
@@ -671,7 +671,7 @@ void test_rendering() {
     // Colour is honoured.
     {
         auto ui = v(text<"XXXX"> | font(40) | fg(colors::red)) | pad(6);
-        RenderOptions o; o.background = colors::black; o.fonts = stack.get();
+        RenderOptions o; o.background = colors::black; o.fonts = stack;
         const auto px = render_to_pixels(ui, {200, 70}, o);
 
         int reddish = 0;
@@ -706,7 +706,7 @@ void test_rendering() {
             auto ui = v(text<"Recent deploys"> | font(13) | fg(colors::white)) | pad(4);
             RenderOptions o;
             o.background = colors::black;
-            o.fonts = s.get();
+            o.fonts = s;
 
             const auto px = render_to_pixels(ui, {160, 26}, o);
             int lit = 0, partial = 0;
@@ -731,7 +731,7 @@ void test_rendering() {
             auto ui = v(text<"H"> | font(40) | fg(colors::white)) | pad(6);
             RenderOptions o;
             o.background = colors::black;
-            o.fonts = s.get();
+            o.fonts = s;
 
             const int W = 50, H = 60;
             const auto px = render_to_pixels(ui, {static_cast<float>(W), static_cast<float>(H)}, o);

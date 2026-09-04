@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
         .title = "mayag — dashboard",
         .size  = opts.size,
         .theme = Dashboard::palette[0],
-        .fonts = fonts.get(),
+        .fonts = fonts,
         .debug_bounds = opts.debug_bounds,
     };
 

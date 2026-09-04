@@ -167,6 +167,16 @@ inline constexpr std::uint32_t gdef = tag("GDEF");
 inline constexpr std::uint32_t kern = tag("kern");
 inline constexpr std::uint32_t colr = tag("COLR");
 inline constexpr std::uint32_t cpal = tag("CPAL");
+// Colour and bitmap glyph tables. A font may carry ONLY these — an emoji
+// font typically has no `glyf`/`CFF ` at all — and it is still a real,
+// loadable face whose cmap defines genuine coverage. Treating them as
+// outline-equivalent for the purpose of "is this a font" is what lets
+// NotoColorEmoji, Apple Color Emoji and icon fonts into the database.
+inline constexpr std::uint32_t cbdt = tag("CBDT");   // Google colour bitmap data
+inline constexpr std::uint32_t cblc = tag("CBLC");   // … its location table
+inline constexpr std::uint32_t sbix = tag("sbix");   // Apple colour bitmap (PNG)
+inline constexpr std::uint32_t ebdt = tag("EBDT");   // monochrome embedded bitmap
+inline constexpr std::uint32_t eblc = tag("EBLC");
 inline constexpr std::uint32_t fvar = tag("fvar");
 inline constexpr std::uint32_t vhea = tag("vhea");
 inline constexpr std::uint32_t vmtx = tag("vmtx");
@@ -667,6 +677,22 @@ class FontFile {
     [[nodiscard]] bool is_cff() const noexcept { return is_cff_; }
     [[nodiscard]] bool is_truetype() const noexcept { return !is_cff_; }
 
+    /// True when the face carries vector outlines (glyf / CFF). Emoji and
+    /// icon fonts often do NOT — they store colour or bitmap strikes only —
+    /// and for those `outline(gid)` returns empty. Callers that need to know
+    /// whether a glyph will actually be drawn (rather than merely measured)
+    /// consult this.
+    [[nodiscard]] bool has_outlines() const noexcept {
+        return has_table(tags::glyf) || has_table(tags::cff) ||
+               has_table(tags::cff2);
+    }
+
+    /// True when the face carries colour or bitmap glyphs.
+    [[nodiscard]] bool has_color() const noexcept {
+        return has_table(tags::colr) || has_table(tags::cbdt) ||
+               has_table(tags::sbix) || has_table(tags::ebdt);
+    }
+
     [[nodiscard]] bool is_bold() const noexcept {
         return os2_.present ? os2_.bold() : head_.bold_flag();
     }
@@ -901,8 +927,15 @@ inline std::optional<FontFile> FontFile::parse(std::span<const std::uint8_t> dat
         }
     }
 
-    // A face must have outlines of one kind or the other.
-    if (!f.has_table(tags::glyf) && !f.has_table(tags::cff) && !f.has_table(tags::cff2)) {
+    // A face must be able to place SOME glyph: real outlines (glyf / CFF),
+    // or colour/bitmap strikes (emoji and icon fonts have no outlines at
+    // all). A cmap without either is a subsetting artefact, not a usable
+    // face, and is rejected.
+    const bool has_outlines = f.has_table(tags::glyf) || f.has_table(tags::cff) ||
+                              f.has_table(tags::cff2);
+    const bool has_bitmaps  = f.has_table(tags::cbdt) || f.has_table(tags::sbix) ||
+                              f.has_table(tags::ebdt) || f.has_table(tags::colr);
+    if (!has_outlines && !has_bitmaps) {
         return fail(Error::unsupported_format);
     }
 

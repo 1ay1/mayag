@@ -286,7 +286,7 @@ int main(int argc, char** argv) {
         .title = "mayag — reactive",
         .size  = opts.size,
         .theme = themes::midnight,
-        .fonts = fonts.get(),
+        .fonts = fonts,
         .debug_bounds = opts.debug_bounds,
     };
 

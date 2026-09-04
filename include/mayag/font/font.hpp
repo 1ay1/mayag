@@ -74,7 +74,12 @@ class Face {
         face->kerning_ = KernTable{face->file_};
         face->id_      = next_id();
 
-        if (!face->glyphs_.valid()) {
+        // A face is usable if it can place glyphs at all. Vector faces need a
+        // working glyph source; colour/bitmap faces (emoji, icons) have none
+        // and render blank-but-spaced here — but they still carry a real cmap,
+        // so they belong in the fallback chain for coverage detection rather
+        // than being dropped, which is exactly what turned emoji into tofu.
+        if (!face->glyphs_.valid() && !face->file_.has_color()) {
             if (err != nullptr) *err = ot::Error::unsupported_format;
             return nullptr;
         }
@@ -104,6 +109,13 @@ class Face {
     [[nodiscard]] std::uint16_t weight() const noexcept { return file_.weight(); }
     [[nodiscard]] bool is_italic() const noexcept { return file_.is_italic(); }
     [[nodiscard]] bool is_bold() const noexcept { return file_.is_bold(); }
+
+    /// True when the face has vector outlines that this engine can rasterise.
+    /// A colour/bitmap-only face (emoji) is false here: it is measurable and
+    /// keeps text from collapsing, but its glyphs draw blank.
+    [[nodiscard]] bool has_outlines() const noexcept { return file_.has_outlines(); }
+    /// True when the face carries colour or bitmap glyphs.
+    [[nodiscard]] bool is_color() const noexcept { return file_.has_color(); }
     [[nodiscard]] std::uint16_t num_glyphs() const noexcept { return file_.num_glyphs(); }
     [[nodiscard]] std::uint16_t units_per_em() const noexcept { return file_.units_per_em(); }
     [[nodiscard]] const ot::FontFile& file() const noexcept { return file_; }

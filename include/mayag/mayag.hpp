@@ -79,15 +79,15 @@
 
 // ── text ───────────────────────────────────────────────────────────
 //
-// Two engines, one interface. `strokefont::Font` is the built-in stroke font —
-// no files, no dependencies, always available. `typo::FontStack` is the real
-// engine: TrueType/OpenType parsing, kerning, fallback chains, SDF atlas.
-// Both satisfy the same TextMeasurer/GlyphRenderer seam, so a program picks
-// one in RenderOptions and nothing else changes.
-#include <mayag/text/font.hpp>
+// One engine. `typo::FontStack` parses TrueType/OpenType, kerns, chains a
+// complete per-script fallback, and rasterises through the SDF atlas. When a
+// caller supplies no fonts, the helpers below discover the system's — and,
+// on a machine with none, a synthesized last-resort face keeps text legible.
+// There is no second text path to keep in sync.
 #include <mayag/font/font.hpp>
 #include <mayag/font/system.hpp>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -99,12 +99,10 @@ struct RenderOptions {
     float       dpi_scale  = 1.0f;
     bool        debug_bounds = false;
 
-    /// The built-in stroke font — zero dependencies, always works.
-    const strokefont::Font* font = nullptr;
-
-    /// The real font engine. When set, this WINS over `font`: it has actual
-    /// typefaces, kerning, and script fallback.
-    typo::FontStack* fonts = nullptr;
+    /// The font engine. When null, the helpers build one with
+    /// `typo::system::default_stack()` — so text renders correctly with no
+    /// configuration at all.
+    std::shared_ptr<typo::FontStack> fonts = nullptr;
 };
 
 namespace detail {
@@ -122,14 +120,18 @@ template <typename Ui>
         else return ui.build();
     }();
 
-    // The real engine takes precedence when both are supplied.
-    std::optional<detail::StackBindings> bound;
-    if (opts.fonts != nullptr) bound.emplace(*opts.fonts);
+    // Discover the system fonts when the caller supplied none, so a bare
+    // `render_to_pixels(ui, size)` call renders real text. The result is
+    // cached across calls: enumerating fonts once per process, not per frame.
+    std::shared_ptr<typo::FontStack> stack = opts.fonts;
+    if (stack == nullptr) {
+        static const std::shared_ptr<typo::FontStack> shared = typo::system::default_stack();
+        stack = shared;
+    }
+    detail::StackBindings bound{*stack};
 
     const layout::TextMeasurer& measurer =
-        bound            ? static_cast<const layout::TextMeasurer&>(bound->measurer)
-      : opts.font        ? opts.font->measurer()
-                         : layout::default_measurer();
+        static_cast<const layout::TextMeasurer&>(bound.measurer);
 
     layout::layout_tree(root, viewport, measurer);
 
@@ -138,9 +140,7 @@ template <typename Ui>
     po.dpi_scale    = opts.dpi_scale;
     po.measurer     = &measurer;
     po.debug_bounds = opts.debug_bounds;
-    po.glyphs       = bound ? static_cast<const render::GlyphRenderer*>(&bound->glyphs)
-                    : opts.font ? &opts.font->glyph_renderer()
-                                : nullptr;
+    po.glyphs       = static_cast<const render::GlyphRenderer*>(&bound.glyphs);
     render::paint(root, dl, po);
 
     const int w = static_cast<int>(viewport.x * opts.dpi_scale);
@@ -148,9 +148,7 @@ template <typename Ui>
     backend::Framebuffer fb{w, h};
 
     const backend::CoverageSampler* sampler =
-        bound     ? static_cast<const backend::CoverageSampler*>(&bound->sampler)
-      : opts.font ? &opts.font->sampler()
-                  : nullptr;
+        static_cast<const backend::CoverageSampler*>(&bound.sampler);
 
     // Tiled + parallel. Bit-identical to the reference path (asserted by
     // tests), so there is no reason to take the slow one.

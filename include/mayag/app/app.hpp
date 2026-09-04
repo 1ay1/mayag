@@ -36,8 +36,8 @@
 #include "../scene/overlay.hpp"
 #include "../core/motion.hpp"
 #include "../style/theme.hpp"
-#include "../text/font.hpp"
 #include "../font/font.hpp"
+#include "../font/system.hpp"
 #include "cmd.hpp"
 #include "event.hpp"
 #include "interaction.hpp"
@@ -215,12 +215,13 @@ struct AppConfig {
     bool        vsync     = true;
     Theme       theme     = themes::midnight;
 
-    /// Built-in stroke font — zero dependencies, used when `fonts` is null.
-    const strokefont::Font* font = nullptr;
-
-    /// The real font engine: system typefaces, kerning, script fallback.
-    /// Takes precedence over `font` when set.
-    typo::FontStack* fonts = nullptr;
+    /// The font engine: system typefaces, kerning, and complete per-script
+    /// fallback. When null, the runtime builds one with
+    /// `typo::system::default_stack()` at boot — which discovers the platform
+    /// fonts and, failing that, uses a synthesized last-resort face. So text
+    /// always renders correctly with no configuration, and there is no second
+    /// engine to fall back to.
+    std::shared_ptr<typo::FontStack> fonts = nullptr;
 
     /// Overlay every node's rect. Bound to a key in your own subscribe() if
     /// you want to toggle it at runtime.
@@ -328,22 +329,20 @@ class Runtime {
         if (!opened) return false;
         window_ = std::move(*opened);
 
-        // Bind the font engine once, at boot. The real engine wins when both
-        // are supplied; the stroke font is the always-available fallback.
-        if (cfg_.fonts != nullptr) {
-            bindings_.emplace(*cfg_.fonts);
-            measurer_ = &bindings_->measurer;
-            glyphs_   = &bindings_->glyphs;
-            sampler_  = &bindings_->sampler;
-            // The GPU path samples a texture rather than calling back into
-            // the CPU sampler, so it needs the atlas itself to upload.
-            window_.set_atlas_source(&cfg_.fonts->atlas());
-        } else {
-            stroke_font_ = cfg_.font ? cfg_.font : &strokefont::Font::builtin_font();
-            measurer_ = &stroke_font_->measurer();
-            glyphs_   = &stroke_font_->glyph_renderer();
-            sampler_  = &stroke_font_->sampler();
+        // Bind the font engine once, at boot. There is exactly one text path
+        // now: a FontStack. When the caller gave none, discover the system
+        // fonts (with a synthesized last-resort face as the floor), so text
+        // renders correctly on a fresh machine with no configuration.
+        if (cfg_.fonts == nullptr) {
+            cfg_.fonts = typo::system::default_stack();
         }
+        bindings_.emplace(*cfg_.fonts);
+        measurer_ = &bindings_->measurer;
+        glyphs_   = &bindings_->glyphs;
+        sampler_  = &bindings_->sampler;
+        // The GPU path samples a texture rather than calling back into the
+        // CPU sampler, so it needs the atlas itself to upload.
+        window_.set_atlas_source(&cfg_.fonts->atlas());
         window_.set_coverage_sampler(sampler_);
 
         // Adopt the platform's multi-click interval. Only used when a backend
@@ -1098,10 +1097,9 @@ class Runtime {
     DrawList     draws_{};
     Interaction  input_{};
 
-    // Font binding, resolved once at boot. `bindings_` owns the adapters when
-    // the real engine is in use; `stroke_font_` is the built-in path.
+    // Font binding, resolved once at boot. `bindings_` owns the seam adapters
+    // that layout and the painter read through; `cfg_.fonts` owns the stack.
     std::optional<detail::StackBindings> bindings_;
-    const strokefont::Font*                   stroke_font_ = nullptr;
     const layout::TextMeasurer*          measurer_ = nullptr;
     const render::GlyphRenderer*         glyphs_   = nullptr;
     const backend::CoverageSampler*      sampler_  = nullptr;

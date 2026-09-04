@@ -47,7 +47,7 @@ struct Options {
         }
         else if (a == "--headless") { o.mode = Options::Mode::headless; }
         else if (a == "--window")   { o.mode = Options::Mode::window; }
-        else if (a == "--stroke-font") { o.use_system_fonts = false; }
+        else if (a == "--last-resort") { o.use_system_fonts = false; }
         else if (a == "--debug")    { o.debug_bounds = true; }
         else if (a == "--dpi" && i + 1 < argc) { o.dpi = std::strtof(argv[++i], nullptr); }
         else if (a == "--size" && i + 2 < argc) {
@@ -62,7 +62,7 @@ struct Options {
                 "  --headless        run scripted, assert, and exit (CI)\n"
                 "  --size W H        viewport size in logical pixels\n"
                 "  --dpi SCALE       device pixel ratio (default 2.0)\n"
-                "  --stroke-font     use the built-in font, not system fonts\n"
+                "  --last-resort     force the synthesized last-resort face\n"
                 "  --debug           overlay every node's layout rect\n",
                 argv[0]);
             std::exit(0);
@@ -73,25 +73,25 @@ struct Options {
 
 /// The font stack an example should use.
 ///
-/// Returns null when `--stroke-font` was passed or no system font was found;
-/// callers pass that straight through to AppConfig, which falls back to the
-/// built-in vector font. That is why an example still renders on a machine
-/// with no fonts installed at all.
+/// Always returns a non-empty stack: the discovered system fonts, or — with
+/// `--last-resort`, or on a machine with no fonts at all — a stack holding the
+/// synthesized last-resort face. There is no null path and no second engine.
 [[nodiscard]] inline std::shared_ptr<typo::FontStack> make_fonts(const Options& o) {
-    if (!o.use_system_fonts) return nullptr;
-
-    auto stack = typo::system::default_stack(typo::FontConfig{
+    if (!o.use_system_fonts) {
+        auto stack = std::make_shared<typo::FontStack>();
+        stack->add(typo::lastresort::face());
+        return stack;
+    }
+    return typo::system::default_stack(typo::FontConfig{
         .mode = typo::RenderMode::hybrid,
         .sdf_threshold = 26.0f,
         .atlas_size = 1024,
     });
-    if (stack->empty()) return nullptr;
-    return stack;
 }
 
 inline void print_fonts(const typo::FontStack* fonts) {
-    if (fonts == nullptr) {
-        std::printf("fonts: built-in stroke font\n");
+    if (fonts == nullptr || fonts->face_count() == 0) {
+        std::printf("fonts: (none)\n");
         return;
     }
     std::printf("fonts:\n");
@@ -125,10 +125,8 @@ inline void report(const Ui& ui, Vec2 viewport, const RenderOptions& opts,
         po.glyphs   = &glyphs;
         render::paint(root, dl, po);
     } else {
-        const auto& f = strokefont::Font::builtin_font();
-        layout::layout_tree(root, viewport, f.measurer());
-        po.measurer = &f.measurer();
-        po.glyphs   = &f.glyph_renderer();
+        layout::layout_tree(root, viewport, layout::default_measurer());
+        po.measurer = &layout::default_measurer();
         render::paint(root, dl, po);
     }
 
@@ -178,7 +176,6 @@ template <Program P, typename Driver>
             ro.background   = cfg.theme.background;
             ro.dpi_scale    = o.dpi;
             ro.fonts        = cfg.fonts;
-            ro.font         = cfg.font;
             ro.debug_bounds = cfg.debug_bounds;
 
             if (!render_to_png(root, o.size, o.out_path, ro)) {

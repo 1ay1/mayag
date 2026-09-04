@@ -45,6 +45,16 @@ void near(float got, float want, float eps, const std::string& what) {
 
 void section(const char* name) { std::printf("\n%s\n", name); }
 
+// A deterministic, dependency-free FontStack for tests that need to put ink on
+// the canvas without relying on whatever fonts the CI box happens to have.
+// It holds the synthesized last-resort face — the same one `default_stack()`
+// falls back to — so these tests exercise the real engine, not a stub.
+[[nodiscard]] std::shared_ptr<typo::FontStack> last_resort_stack() {
+    auto s = std::make_shared<typo::FontStack>();
+    s->add(typo::lastresort::face());
+    return s;
+}
+
 // ── pixel helpers ───────────────────────────────────────────────────────
 
 struct Image {
@@ -439,10 +449,10 @@ void test_pixels() {
 
     // Text must put ink on the canvas.
     {
-        auto ui = v(text<"Hello mayag"> | font(24) | fg(colors::white)) | pad(10);
+        auto ui = v(text<"HELLO MAYAG"> | font(24) | fg(colors::white)) | pad(10);
         RenderOptions o;
         o.background = colors::black;
-        o.font = &strokefont::Font::builtin_font();
+        o.fonts = last_resort_stack();
         const Image img = render(ui, {240, 60}, o);
         int lit = 0;
         for (int y = 0; y < img.h; ++y)
@@ -470,7 +480,7 @@ void test_determinism() {
                    text<"Body">  | font(12) | fg(colors::slate));
 
     RenderOptions o;
-    o.font = &strokefont::Font::builtin_font();
+    o.fonts = last_resort_stack();
     const auto a = render_to_pixels(ui, {200, 100}, o);
     const auto b = render_to_pixels(ui, {200, 100}, o);
     check(a == b, "rendering is deterministic across runs");
@@ -512,12 +522,15 @@ void test_batching() {
             | gap(12) | pad(16);
 
     Node n = ui.build();
-    const auto& font = strokefont::Font::builtin_font();
-    layout::layout_tree(n, {400, 300}, font.measurer());
+    auto stack = last_resort_stack();
+    typo::StackMeasurer measurer{*stack};
+    typo::StackGlyphRenderer glyphs{*stack};
+    layout::layout_tree(n, {400, 300}, measurer);
 
     DrawList dl;
     render::PaintOptions po;
-    po.glyphs = &font.glyph_renderer();
+    po.measurer = &measurer;
+    po.glyphs = &glyphs;
     render::paint(n, dl, po);
 
     check(dl.size() > 20, "the scene produced real instances");

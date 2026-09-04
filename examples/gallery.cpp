@@ -283,7 +283,7 @@ int main(int argc, char** argv) {
         .title = "mayag — gallery",
         .size  = opts.size,
         .theme = Gallery::palette[0],
-        .fonts = fonts.get(),
+        .fonts = fonts,
         .debug_bounds = opts.debug_bounds,
     };
 
