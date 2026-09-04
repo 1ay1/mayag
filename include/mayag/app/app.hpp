@@ -672,6 +672,13 @@ class Runtime {
         return Vec2{-1.0f, -1.0f};   // off-screen: a click there hits nothing
     }
 
+    /// Centre of a node by raw id — for dynamic rows addressed with
+    /// `node_id(base, index)`, whose id has no single string name.
+    [[nodiscard]] Vec2 center_of(std::uint64_t id) const {
+        if (auto r = node_rect(id)) return r->center();
+        return Vec2{-1.0f, -1.0f};
+    }
+
     /// Inject a message directly — how a test exercises `update()` through
     /// the real runtime rather than in isolation.
     void send(Msg m) { step(std::move(m)); }
@@ -681,6 +688,12 @@ class Runtime {
     /// events tends to get the ordering subtly wrong.
     void click(std::string_view name) {
         window_.click(center_of(name));
+        tick();
+    }
+
+    /// Click a node by raw id (a `node_id(base, index)` list row).
+    void click(std::uint64_t id) {
+        window_.click(center_of(id));
         tick();
     }
 

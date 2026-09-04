@@ -164,7 +164,7 @@ struct Todo {
                 return {std::move(m), Cmd<Msg>::none()};
             }
             else if constexpr (std::is_same_v<T, OpenMenu>) {
-                m.menu_for = node_id("row-" + std::to_string(e.index));
+                m.menu_for = node_id("row", static_cast<std::size_t>(e.index));
                 m.menu_index = e.index;
                 return {std::move(m), Cmd<Msg>::none()};
             }
@@ -191,7 +191,7 @@ struct Todo {
         // ---- one row ----
         auto row = [&](int slot, int index) {
             const Item& it = m.items[static_cast<std::size_t>(index)];
-            const auto nid = node_id("row-" + std::to_string(index));
+            const auto nid = node_id("row", static_cast<std::size_t>(index));
             const bool cursor = (slot == m.selected);
             const bool hot    = c.hovered(nid);
 
@@ -218,7 +218,7 @@ struct Todo {
                     | role(a11y::Role::checkbox)
                     | checked(it.done)
                     | label(it.text)
-                    | id_of("row-" + std::to_string(index))).build();
+                    | id_of_raw(nid)).build();
         };
 
         // VIRTUALISED: only the rows on screen are built. The list would
@@ -359,7 +359,7 @@ struct Todo {
         // A click toggles; a DOUBLE click deletes. The count model makes that
         // two lines instead of a state machine.
         for (int i = 0; i < static_cast<int>(m.items.size()); ++i) {
-            const auto nid = node_id("row-" + std::to_string(i));
+            const auto nid = node_id("row", static_cast<std::size_t>(i));
             subs.push_back(Sub<Msg>::on_click_id(nid, Toggle{i}));
             // Double click opens the row's context menu.
             subs.push_back(Sub<Msg>::on_click_id_gesture(
@@ -439,7 +439,7 @@ int main(int argc, char** argv) {
 
         // A click toggles.
         const bool was = rt.model().items[0].done;
-        rt.click("row-0");
+        rt.click(node_id("row", 0));
         ok(rt.model().items[0].done != was, "clicking a row toggles it");
 
         // Scrolling.
@@ -507,7 +507,7 @@ int main(int argc, char** argv) {
             rt.click("filter-all");
             ok(rt.model().menu_for == 0, "no menu initially");
 
-            const Vec2 row = rt.center_of("row-0");
+            const Vec2 row = rt.center_of(node_id("row", 0));
             rt.window().double_click(row);
             rt.tick();
             ok(rt.model().menu_for != 0, "double-clicking a row opens its menu");

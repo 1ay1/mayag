@@ -1199,6 +1199,17 @@ struct StateMod {
     return hash;
 }
 
+/// Indexed id for a dynamic list row: `node_id("row", i)`. Folds the index into
+/// the base hash without building a string, so the SAME call in the view loop
+/// and the subscribe loop yields the same id — no `"row-" + std::to_string(i)`
+/// spelled twice and no chance of the two drifting.
+[[nodiscard]] constexpr std::uint64_t node_id(std::string_view base, std::size_t index) noexcept {
+    std::uint64_t hash = node_id(base);
+    hash ^= 0x9E3779B97F4A7C15ull + index;   // mix the index in (golden-ratio salt)
+    hash *= 1099511628211ull;
+    return hash;
+}
+
 /// Compile-time form: `node_id_v<"save-btn">`.
 template <fixed_string Name>
 inline constexpr std::uint64_t node_id_v = node_id(Name.view());
@@ -1216,6 +1227,11 @@ struct Id {
 template <fixed_string Name>
 inline constexpr Id id{node_id(Name.view())};
 [[nodiscard]] constexpr Id id_of(std::string_view s) { return {node_id(s)}; }
+/// Indexed row id in the view, matching `node_id(base, index)` in subscribe:
+/// `row_box | id_of("row", i)`.
+[[nodiscard]] constexpr Id id_of(std::string_view base, std::size_t index) {
+    return {node_id(base, index)};
+}
 /// When the caller already hashed the name (a widget that took a node id as a
 /// parameter), skip re-hashing.
 [[nodiscard]] constexpr Id id_of_raw(std::uint64_t v) { return {v}; }
