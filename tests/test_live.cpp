@@ -158,6 +158,92 @@ void test_stream_lifecycle() {
     check(true, "the runtime shut the stream down and joined cleanly");
 }
 
+// ── Sub::source: a declarative stream tied to the model ─────────────────
+//
+// Where Cmd::stream is fired imperatively and runs to completion, Sub::source
+// runs exactly as long as subscribe() returns it. Toggling the model's
+// `connected` flag must start the producer, and clearing it must stop and join
+// the thread — with no connect()/disconnect() plumbing in update().
+
+struct SourceApp {
+    struct Model { bool connected = false; int received = 0; };
+    struct Connect {};
+    struct Disconnect {};
+    struct Value { int n; };
+    using Msg = std::variant<Connect, Disconnect, Value>;
+
+    // A process-wide counter so the test can observe the producer thread
+    // actually starting and stopping, independent of message delivery.
+    static inline std::atomic<int> live_producers{0};
+
+    static Model init() { return {}; }
+
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        if (std::holds_alternative<Connect>(msg))    m.connected = true;
+        else if (std::holds_alternative<Disconnect>(msg)) m.connected = false;
+        else m.received += 1;
+        return {m, Cmd<Msg>::none()};
+    }
+
+    static Node view(const Model&) { return dsl::box().build(); }
+
+    static Sub<Msg> subscribe(const Model& m) {
+        // The source exists ONLY while connected. This is the whole point:
+        // the producer's lifetime is a pure function of the model.
+        if (!m.connected) return Sub<Msg>::none();
+        return Sub<Msg>::source("feed", [](std::function<void(Msg)> sink,
+                                           std::function<bool()> alive) {
+            live_producers.fetch_add(1, std::memory_order_release);
+            int n = 0;
+            while (alive()) {
+                std::this_thread::sleep_for(3ms);
+                if (alive()) sink(Value{++n});
+            }
+            live_producers.fetch_sub(1, std::memory_order_release);
+        });
+    }
+};
+
+void test_source_lifecycle() {
+    section("Sub::source lifecycle");
+
+    AppConfig cfg;
+    cfg.log_renderer = false;
+
+    int received_after_connect = 0;
+    int producers_while_connected = 0;
+    int producers_after_disconnect = -1;
+
+    run_headless<SourceApp>(cfg, [&](auto& rt) {
+        // Not connected yet: no producer should be running.
+        rt.tick();
+        check(SourceApp::live_producers.load() == 0,
+              "no source runs before the model asks for it");
+
+        // Connect: the source appears in subscribe(), so the runtime starts it.
+        rt.send(SourceApp::Connect{});
+        for (int i = 0; i < 200 && rt.model().received < 3; ++i) {
+            std::this_thread::sleep_for(2ms);
+            rt.tick();
+        }
+        received_after_connect = rt.model().received;
+        producers_while_connected = SourceApp::live_producers.load();
+
+        // Disconnect: the source vanishes from subscribe(); the runtime must
+        // stop and join the producer thread.
+        rt.send(SourceApp::Disconnect{});
+        rt.tick();   // sync_sources sees the source gone and joins it
+        producers_after_disconnect = SourceApp::live_producers.load();
+    });
+
+    check(received_after_connect >= 3,
+          std::string{"a connected source streams messages ("} +
+          std::to_string(received_after_connect) + ")");
+    check(producers_while_connected == 1, "exactly one producer runs while connected");
+    check(producers_after_disconnect == 0,
+          "the producer stopped and joined when the model disconnected");
+}
+
 // ── end to end: a blocked window wakes and renders ──────────────────────
 
 void test_blocked_window_wakes() {
@@ -208,6 +294,7 @@ int main() {
     test_waker_basics();
     test_waker_cross_thread();
     test_stream_lifecycle();
+    test_source_lifecycle();
     test_blocked_window_wakes();
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);

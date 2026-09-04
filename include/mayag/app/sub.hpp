@@ -28,6 +28,7 @@
 
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -75,6 +76,25 @@ class Sub {
     /// only runs a display link while such a subscription exists.
     struct EveryFrame { std::function<Msg(FrameEvent)> handler; };
 
+    /// A long-lived external source, tied to the model.
+    ///
+    /// This is the *subscription* form of `Cmd::stream`. Where a Cmd fires a
+    /// producer once (imperatively, from `update`), a Source is DECLARATIVE:
+    /// it runs exactly as long as `subscribe()` keeps returning it. The
+    /// runtime keys sources by `id` and diffs them each frame — a new id
+    /// starts the producer, an id that disappears stops it — so "connect the
+    /// socket while logged in, close it on logout" is just
+    /// `when(m.logged_in, Sub::source("ws", ...))`. No connect()/disconnect()
+    /// bookkeeping in `update`, and no leaked thread when the model changes.
+    ///
+    /// `work(sink, keep_running)` runs on its own thread: call `sink(msg)` for
+    /// each event, return when `keep_running()` is false.
+    struct Source {
+        std::string_view id;   ///< identity for diffing; stable across frames
+        std::shared_ptr<
+            std::function<void(std::function<void(Msg)>, std::function<bool()>)>> work;
+    };
+
     // ── widget-level (hit-tested by the runtime) ────────────────────────
 
     enum class Gesture : std::uint8_t {
@@ -116,7 +136,7 @@ class Sub {
 
     using Alt = std::variant<None, Batch, OnEvent, OnKey, OnAnyKey, OnText,
                              OnCompose, OnComposeEnd,
-                             Every, EveryFrame, OnNode, OnNodeMotion,
+                             Every, EveryFrame, Source, OnNode, OnNodeMotion,
                              OnResize, OnClose, OnFocusChange>;
 
     // ── construction ────────────────────────────────────────────────────
@@ -197,6 +217,20 @@ class Sub {
     template <typename F>
     [[nodiscard]] static Sub every_frame(F&& f) {
         return Sub{Alt{EveryFrame{std::forward<F>(f)}}};
+    }
+
+    /// A declarative external source — the subscription form of `Cmd::stream`.
+    /// `id` must be stable across frames (a string literal is ideal); the
+    /// producer runs while this subscription is present and is stopped and
+    /// joined when it disappears. Example:
+    ///
+    ///   Sub<Msg>::source("clock", [](auto sink, auto alive) {
+    ///       while (alive()) { std::this_thread::sleep_for(1s); sink(Tick{}); }
+    ///   });
+    template <typename F>
+    [[nodiscard]] static Sub source(std::string_view id, F&& f) {
+        using Work = std::function<void(std::function<void(Msg)>, std::function<bool()>)>;
+        return Sub{Alt{Source{id, std::make_shared<Work>(std::forward<F>(f))}}};
     }
 
     // -- widget subscriptions, by compile-time name --

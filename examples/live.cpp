@@ -78,43 +78,18 @@ struct Live {
 
     // The one interesting message: a sample arrived from the background thread.
     struct Sample { float load; };
-    struct StartStream {};
     struct Quit {};
-    using Msg = std::variant<Sample, StartStream, Quit>;
+    using Msg = std::variant<Sample, Quit>;
 
     static std::pair<Model, Cmd<Msg>> init() {
-        // Fire StartStream immediately so the producer launches on the first
-        // update. (init() returns a Cmd, and a zero-delay After is the clean
-        // way to hand control to update() once.)
-        return {Model{}, Cmd<Msg>::batch(
-            Cmd<Msg>::set_title("mayag — live"),
-            Cmd<Msg>::after(0ms, StartStream{}))};
+        return {Model{.streaming = true}, Cmd<Msg>::set_title("mayag — live")};
     }
 
     static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         return std::visit([&](auto&& e) -> std::pair<Model, Cmd<Msg>> {
             using T = std::decay_t<decltype(e)>;
 
-            if constexpr (std::is_same_v<T, StartStream>) {
-                m.streaming = true;
-                // THE live-app primitive: a producer that samples the system
-                // ~10x/second and pushes each reading into the UI. It runs
-                // until keep_running() flips false (app shutdown), then
-                // returns, and the runtime joins it. No polling timer on the
-                // UI side, no shared mutable state — just messages.
-                auto cmd = Cmd<Msg>::stream([](Cmd<Msg>::Sink sink,
-                                               std::function<bool()> alive) {
-                    CpuSampler sampler;
-                    sampler.sample();   // prime the delta
-                    while (alive()) {
-                        std::this_thread::sleep_for(100ms);
-                        if (!alive()) break;
-                        sink(Sample{static_cast<float>(sampler.sample())});
-                    }
-                });
-                return {m, cmd};
-            }
-            else if constexpr (std::is_same_v<T, Sample>) {
+            if constexpr (std::is_same_v<T, Sample>) {
                 m.current = num::clamp(e.load, 0.0f, 1.0f);
                 m.history[m.head] = m.current;
                 m.head = (m.head + 1) % kHistory;
@@ -188,11 +163,28 @@ struct Live {
              | width(pct(100)) | height(pct(100)) | bg(t.background);
     }
 
-    static Sub<Msg> subscribe(const Model&) {
+    static Sub<Msg> subscribe(const Model& m) {
         // No frame subscription: the app is NOT animating. It renders only when
         // a sample arrives, and blocks at 0% CPU in between — which is exactly
         // the property that makes a streaming app cheap.
+        //
+        // The producer is a DECLARATIVE Sub::source: it runs precisely while
+        // this subscription is returned, so "stream while m.streaming" needs no
+        // start/stop plumbing in update() and leaks no thread when the flag
+        // flips. The runtime starts it on first appearance and joins it when it
+        // vanishes (here, at shutdown).
+        auto feed = Sub<Msg>::source("cpu", [](std::function<void(Msg)> sink,
+                                               std::function<bool()> alive) {
+            CpuSampler sampler;
+            sampler.sample();   // prime the delta
+            while (alive()) {
+                std::this_thread::sleep_for(100ms);
+                if (alive()) sink(Sample{static_cast<float>(sampler.sample())});
+            }
+        });
+
         return Sub<Msg>::batch(
+            m.streaming ? std::move(feed) : Sub<Msg>::none(),
             Sub<Msg>::on_key(Key::escape, Quit{}),
             Sub<Msg>::on_close(Quit{}));
     }
@@ -231,7 +223,7 @@ int main(int argc, char** argv) {
         }
 
         ok(rt.model().streaming, "the stream started");
-        ok(rt.model().samples >= 3, "background samples arrived via Cmd::stream ("
+        ok(rt.model().samples >= 3, "background samples arrived via Sub::source ("
                                     + std::to_string(rt.model().samples) + ")");
         ok(rt.model().count > 0, "the history filled from streamed data");
         // Runtime destructor joins the producer; if it hung, this line never

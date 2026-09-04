@@ -337,6 +337,7 @@ class Runtime {
     /// well-behaved streams see `keep_running()` become false and return, and
     /// this waits for them.
     ~Runtime() {
+        stop_all_sources();
         streams_alive_->store(false, std::memory_order_release);
         waker_.wake();   // nudge any stream sleeping on its own condition
         for (auto& t : stream_threads_) {
@@ -436,6 +437,13 @@ class Runtime {
     /// test can drive it step by step and assert between frames.
     void tick() {
         const auto subs = current_subs();
+
+        // Reconcile declarative streams (`Sub::source`): start producers that
+        // just appeared, stop and join ones the model dropped. Done every tick
+        // because the subscription set is a pure function of the model, so a
+        // source vanishes the frame its condition goes false — no manual
+        // connect/disconnect in `update`.
+        sync_sources(subs);
 
         // How to wait is DERIVED from the subscriptions, not from a flag.
         // No frame subscription and no timer means block — and a blocked app
@@ -920,6 +928,82 @@ class Runtime {
         }
     }
 
+    // ── declarative streams (Sub::source) ───────────────────────────────
+
+    /// A producer thread started by a `Sub::source`, keyed by its id.
+    struct RunningSource {
+        std::string                        id;
+        std::shared_ptr<std::atomic<bool>> alive;
+        std::thread                        thread;
+    };
+
+    /// Diff the model's sources against the running ones. New ids start a
+    /// producer; ids that vanished are signalled to stop and joined. This is
+    /// the same declarative contract as interval timers, but for threads: the
+    /// live set is a pure function of the model, so there is no stop() to
+    /// forget and no thread leaked when a condition goes false.
+    void sync_sources(const Sub<Msg>& subs) {
+        using S = Sub<Msg>;
+
+        // Gather (id, work) pairs the model wants this frame.
+        std::vector<const typename S::Source*> wanted;
+        collect_sources(subs, wanted);
+
+        // Stop any running source whose id is no longer wanted.
+        for (auto it = sources_.begin(); it != sources_.end();) {
+            const bool still = std::any_of(wanted.begin(), wanted.end(),
+                [&](const typename S::Source* w) { return w->id == it->id; });
+            if (still) { ++it; continue; }
+            it->alive->store(false, std::memory_order_release);
+            waker_.wake();                      // in case it sleeps on nothing
+            if (it->thread.joinable()) it->thread.join();
+            it = sources_.erase(it);
+        }
+
+        // Start any wanted source not already running.
+        for (const typename S::Source* w : wanted) {
+            const bool running = std::any_of(sources_.begin(), sources_.end(),
+                [&](const RunningSource& r) { return r.id == w->id; });
+            if (running || w->work == nullptr) continue;
+
+            auto alive = std::make_shared<std::atomic<bool>>(true);
+            auto* inbox = &inbox_;
+            auto  work  = w->work;   // shared_ptr keeps the callable alive
+            std::thread th([work, inbox, alive] {
+                (*work)([inbox](Msg m) { inbox->post(std::move(m)); },
+                        [alive] { return alive->load(std::memory_order_acquire); });
+            });
+            sources_.push_back(RunningSource{std::string{w->id}, std::move(alive),
+                                            std::move(th)});
+        }
+    }
+
+    void collect_sources(const Sub<Msg>& sub,
+                         std::vector<const typename Sub<Msg>::Source*>& out) {
+        using S = Sub<Msg>;
+        std::visit([&](const auto& a) {
+            using T = std::decay_t<decltype(a)>;
+            if constexpr (std::is_same_v<T, typename S::Batch>) {
+                for (const auto& s : a.subs) collect_sources(s, out);
+            } else if constexpr (std::is_same_v<T, typename S::Source>) {
+                out.push_back(&a);
+            }
+        }, sub.alternative());
+    }
+
+    /// Stop and join every running source. Called from the destructor so no
+    /// producer thread outlives the runtime and touches a freed inbox.
+    void stop_all_sources() {
+        for (auto& s : sources_) {
+            s.alive->store(false, std::memory_order_release);
+        }
+        waker_.wake();
+        for (auto& s : sources_) {
+            if (s.thread.joinable()) s.thread.join();
+        }
+        sources_.clear();
+    }
+
     void sync_interval_timers(const Sub<Msg>& subs) {
         // Interval subscriptions are declarative: the set of live timers is
         // recomputed from the model each frame, so a timer whose condition
@@ -1179,6 +1263,7 @@ class Runtime {
     std::shared_ptr<std::atomic<bool>> streams_alive_ =
         std::make_shared<std::atomic<bool>>(true);
     std::vector<std::thread>        stream_threads_;
+    std::vector<RunningSource>       sources_;
     std::vector<detail::Timer<Msg>> timers_;
     std::vector<detail::Timer<Msg>> interval_timers_;
 

@@ -522,13 +522,13 @@ fd — so the frame sits unrendered until the user happens to move the mouse,
 and the app looks frozen. The usual escape is a polling timer, which trades
 the freeze for a permanently-awake core.
 
-mayag does neither. Two pieces:
+mayag does neither. Three pieces:
 
-- **`Cmd::stream`** is a long-lived producer. Where `Cmd::task` runs once and
-  returns a single message, a stream gets a thread-safe `sink` and emits an
-  open-ended sequence over its lifetime. The runtime owns the thread and joins
-  it on shutdown; a well-behaved stream returns when `keep_running()` goes
-  false.
+- **`Cmd::stream`** is a long-lived producer, fired imperatively from `update`.
+  Where `Cmd::task` runs once and returns a single message, a stream gets a
+  thread-safe `sink` and emits an open-ended sequence over its lifetime. The
+  runtime owns the thread and joins it on shutdown; a well-behaved stream
+  returns when `keep_running()` goes false.
 
   ```cpp
   // A metrics poller. Each sample flows into update() as a message.
@@ -541,6 +541,22 @@ mayag does neither. Two pieces:
   });
   ```
 
+- **`Sub::source`** is the *declarative* form — the one you usually want. It is
+  a stream keyed by an id and returned from `subscribe()`, so it runs exactly
+  as long as the model says it should. "Connect the socket while logged in,
+  close it on logout" is one line, with no `connect()`/`disconnect()`
+  bookkeeping in `update` and no thread leaked when the flag flips — the
+  runtime diffs the ids each frame, starts a producer that appeared, and stops
+  and joins one that vanished.
+
+  ```cpp
+  Sub<Msg> subscribe(const Model& m) {
+      return Sub<Msg>::batch(
+          m.streaming ? Sub<Msg>::source("cpu", cpu_feed) : Sub<Msg>::none(),
+          Sub<Msg>::on_close(Quit{}));
+  }
+  ```
+
 - **A cross-thread waker** (a self-pipe the window's `poll()` also watches) is
   what makes that message *render now*. Posting to the runtime's inbox writes
   one byte to the pipe, which interrupts the blocked UI thread the instant the
@@ -548,12 +564,13 @@ mayag does neither. Two pieces:
   burst of a thousand streamed messages between two frames costs one syscall.
 
 The result is an app that is genuinely live and still cheap. `mayag_live` is a
-real-time CPU monitor streaming ten samples a second; measured while running,
-it sits at **0.0% CPU** between samples, because the UI thread is asleep in the
-kernel until the next reading arrives. The whole path — waker, inbox, stream
-lifecycle — is verified race-free under ThreadSanitizer, and a test asserts a
-blocked window is woken by a background thread in ~80 ms rather than sleeping
-through it.
+real-time CPU monitor whose sampler is a `Sub::source` emitting ten readings a
+second; measured while running, it sits at **0.0% CPU** between samples,
+because the UI thread is asleep in the kernel until the next reading arrives.
+The whole path — waker, inbox, `Cmd::stream` and `Sub::source` lifecycle — is
+verified race-free under ThreadSanitizer, and a test asserts a blocked window
+is woken by a background thread in ~80 ms rather than sleeping through it, and
+that a source stops and joins its thread the frame the model drops it.
 
 ## Accessibility
 
