@@ -79,6 +79,8 @@ concept Window = requires(W w, const W cw, const DrawList& dl, Wait wait,
     // forced headless
 #elif defined(__APPLE__) && defined(MAYAG_WITH_COCOA)
     #include "../platform/macos_window.hpp"
+#elif (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
+    #include "../platform/wayland.hpp"
 #endif
 
 namespace mayag::platform {
@@ -87,6 +89,8 @@ namespace mayag::platform {
     using Native = Headless;
 #elif defined(__APPLE__) && defined(MAYAG_WITH_COCOA)
     using Native = MacWindow;
+#elif (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
+    using Native = WaylandWindow;
 #else
     using Native = Headless;
 #endif
@@ -100,6 +104,8 @@ static_assert(Window<Native>,
     return "headless";
 #elif defined(__APPLE__) && defined(MAYAG_WITH_COCOA)
     return "cocoa";
+#elif (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
+    return "wayland";
 #else
     return "headless";
 #endif
