@@ -393,6 +393,13 @@ fresh grab `halt()`s a coasting list, and a tap-sized flick is ignored rather
 than turned into drift. Because the velocity lives in the model, a scroll in
 flight is saved, restored, and replayed like any other state.
 
+Turn on `overscroll` and the edges **rubber-band**: dragging past an edge pulls
+the content with diminishing resistance (each pixel of gesture moves it less,
+asymptoting at a soft ceiling), and it springs back on release under a
+critically-damped spring — a hard fling into the edge overshoots and bounces
+exactly back, the iOS/macOS feel. It is off by default, because a desktop list
+usually wants the hard stop; it is one flag for a touch surface.
+
 ## Overlays, virtualisation, animation
 
 Three more things every real app needs, each solved once rather than by every

@@ -68,12 +68,31 @@ struct ScrollState {
     /// everything else.
     Vec2 velocity{};
 
+    /// Rubber-band overscroll. When on, dragging or flinging past an edge
+    /// pulls the content beyond its bounds with diminishing resistance, and it
+    /// springs back on release — the iOS/macOS bounce. Off by default because
+    /// a desktop list usually wants a hard stop; a touch surface wants this.
+    bool overscroll = false;
+
+    /// How far, in px, the content can be pulled past an edge at full pull.
+    /// The resistance curve asymptotes here, so it is a soft ceiling, not a
+    /// hard one.
+    float overscroll_limit = 120.0f;
+
     friend constexpr bool operator==(const ScrollState&, const ScrollState&) = default;
 
-    /// Is momentum still in flight? A view subscribes to frames only while
-    /// this is true, so a settled list costs nothing.
+    /// Is momentum still in flight, OR is the content held past an edge and
+    /// owed a spring-back? Either needs frames.
     [[nodiscard]] constexpr bool coasting() const noexcept {
-        return velocity.x != 0.0f || velocity.y != 0.0f;
+        return velocity.x != 0.0f || velocity.y != 0.0f ||
+               overscroll_amount().x != 0.0f || overscroll_amount().y != 0.0f;
+    }
+
+    /// How far the offset is currently past an edge (signed: negative past the
+    /// top/left, positive past the bottom/right). Zero when in bounds.
+    [[nodiscard]] constexpr Vec2 overscroll_amount() const noexcept {
+        return {offset.x < 0.0f ? offset.x : (offset.x > max_offset.x ? offset.x - max_offset.x : 0.0f),
+                offset.y < 0.0f ? offset.y : (offset.y > max_offset.y ? offset.y - max_offset.y : 0.0f)};
     }
 
     // ── queries ─────────────────────────────────────────────────────────
@@ -109,9 +128,14 @@ struct ScrollState {
     ///
     /// The sign convention matches every platform: a downward wheel gesture
     /// reveals content BELOW, so it increases `offset.y`.
+    ///
+    /// With `overscroll` on, movement PAST an edge is rubber-banded: the
+    /// further out you already are, the less each pixel of gesture moves the
+    /// content (resistance = 1 - overshoot/limit, the same feel as iOS), so it
+    /// asymptotes at `overscroll_limit` instead of stopping dead.
     constexpr void scroll_by(Vec2 delta) noexcept {
-        offset.x = num::clamp(offset.x - delta.x * speed, 0.0f, max_offset.x);
-        offset.y = num::clamp(offset.y - delta.y * speed, 0.0f, max_offset.y);
+        offset.x = apply_scroll(offset.x, -delta.x * speed, max_offset.x);
+        offset.y = apply_scroll(offset.y, -delta.y * speed, max_offset.y);
     }
 
     constexpr void scroll_to(Vec2 position) noexcept {
@@ -158,15 +182,23 @@ struct ScrollState {
         velocity.x *= decay;
         velocity.y *= decay;
 
-        // Hitting an edge kills momentum on that axis — a scroll view that is
-        // already at the top should not keep "pushing".
-        if (offset.x <= 0.0f || offset.x >= max_offset.x) velocity.x = 0.0f;
-        if (offset.y <= 0.0f || offset.y >= max_offset.y) velocity.y = 0.0f;
-        offset.x = num::clamp(offset.x, 0.0f, max_offset.x);
-        offset.y = num::clamp(offset.y, 0.0f, max_offset.y);
+        if (overscroll) {
+            // Past an edge: a critically-damped spring pulls back to it, and
+            // momentum bleeds off fast so a fling overshoots a little and
+            // returns — the bounce. When in bounds this is a no-op.
+            spring_axis(offset.x, velocity.x, max_offset.x, dt);
+            spring_axis(offset.y, velocity.y, max_offset.y, dt);
+        } else {
+            // Hard stop: hitting an edge kills momentum on that axis.
+            if (offset.x <= 0.0f || offset.x >= max_offset.x) velocity.x = 0.0f;
+            if (offset.y <= 0.0f || offset.y >= max_offset.y) velocity.y = 0.0f;
+            offset.x = num::clamp(offset.x, 0.0f, max_offset.x);
+            offset.y = num::clamp(offset.y, 0.0f, max_offset.y);
+        }
 
         // Settle: below ~8 px/s the motion is imperceptible; snap to rest so
-        // the frame subscription can end and the app fall back to 0% CPU.
+        // the frame subscription can end and the app fall back to 0% CPU. In
+        // overscroll mode also require the offset to have returned to bounds.
         if (num::abs(velocity.x) < 8.0f) velocity.x = 0.0f;
         if (num::abs(velocity.y) < 8.0f) velocity.y = 0.0f;
         return coasting();
@@ -252,6 +284,53 @@ struct ScrollState {
         if (span <= 0.0f) return;
         const float t = num::saturate((pointer_y - track_top - len * 0.5f) / span);
         offset.y = t * max_offset.y;
+    }
+
+  private:
+    /// Apply a scroll delta on one axis with rubber-band resistance outside
+    /// [0, max]. In bounds it is a plain clamp; past an edge each pixel of
+    /// gesture moves the content by (1 - overshoot/limit), so it asymptotes at
+    /// `overscroll_limit` and never runs away.
+    [[nodiscard]] constexpr float apply_scroll(float pos, float delta, float max) const noexcept {
+        if (!overscroll) return num::clamp(pos + delta, 0.0f, max);
+
+        float next = pos + delta;
+        const float over = next < 0.0f ? -next : (next > max ? next - max : 0.0f);
+        if (over <= 0.0f) return num::clamp(next, 0.0f, max);
+
+        // Recompute the moved portion with resistance applied to the part that
+        // crossed the edge. Resistance grows with how far out we already are.
+        const float edge = next < 0.0f ? 0.0f : max;
+        const float prev_over = pos < 0.0f ? -pos : (pos > max ? pos - max : 0.0f);
+        const float raw_step = (next - edge) - (pos - edge);   // signed gesture past edge
+        const float resist = 1.0f - num::saturate(prev_over / overscroll_limit);
+        float result = pos + raw_step * resist * (prev_over > 0.0f ? 1.0f : 0.5f);
+        // Clamp the overshoot to the soft ceiling.
+        if (result < -overscroll_limit) result = -overscroll_limit;
+        if (result > max + overscroll_limit) result = max + overscroll_limit;
+        return result;
+    }
+
+    /// Critically-damped spring back toward the nearest edge for one axis, if
+    /// the offset is past it. Mutates offset and velocity in place.
+    static constexpr void spring_axis(float& pos, float& vel, float max, float dt) noexcept {
+        const float target = pos < 0.0f ? 0.0f : (pos > max ? max : pos);
+        if (target == pos) return;   // in bounds
+
+        // Stiff spring + heavy damping: the content snaps back promptly without
+        // oscillating. Tuned so a modest overshoot returns in ~0.3 s.
+        constexpr float stiffness = 200.0f;
+        constexpr float damping   = 28.0f;
+        const float displacement = pos - target;
+        const float accel = -stiffness * displacement - damping * vel;
+        vel += accel * dt;
+        pos += vel * dt;
+
+        // Land exactly on the edge once close, so the spring terminates.
+        if (num::abs(pos - target) < 0.5f && num::abs(vel) < 20.0f) {
+            pos = target;
+            vel = 0.0f;
+        }
     }
 };
 

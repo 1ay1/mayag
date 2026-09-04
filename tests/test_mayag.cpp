@@ -1029,6 +1029,56 @@ void test_kinetic_scroll() {
         s.fling({0, -10});
         check(!s.coasting(), "a tap-sized flick is ignored, not turned into drift");
     }
+
+    // ── overscroll rubber-banding (opt-in) ──────────────────────────────
+
+    // Pulling past an edge is resisted: 100 px of gesture moves less than 100.
+    {
+        ScrollState s; s.max_offset = {0, 2400}; s.overscroll = true;
+        s.scroll_by({0, 100});   // gesture at the top pulls past it (negative)
+        check(s.offset.y < 0.0f && s.offset.y > -100.0f,
+              "overscroll resists: content moves less than the gesture past an edge");
+    }
+
+    // The overshoot is bounded by the soft ceiling however hard you pull.
+    {
+        ScrollState s; s.max_offset = {0, 2400}; s.overscroll = true;
+        for (int i = 0; i < 50; ++i) s.scroll_by({0, 200});
+        check(s.offset.y >= -s.overscroll_limit - 1.0f,
+              "overshoot asymptotes at overscroll_limit, never runs away");
+    }
+
+    // Released past the edge, it springs back exactly to the edge and settles.
+    {
+        ScrollState s; s.max_offset = {0, 2400}; s.overscroll = true;
+        s.offset = {0, -80};
+        int frames = 0;
+        while (s.step(1.0f / 60.0f) && frames < 600) ++frames;
+        check(frames > 3, "the spring-back takes several frames");
+        check(s.offset.y == 0.0f && !s.coasting(),
+              "and lands exactly on the edge, then rests");
+    }
+
+    // A hard fling into the edge overshoots, then bounces back to rest.
+    {
+        ScrollState s; s.max_offset = {0, 2400}; s.overscroll = true;
+        s.offset = {0, 20};
+        s.fling({0, 2500});      // strong flick toward the top
+        float peak = 0.0f; int frames = 0;
+        while (s.step(1.0f / 60.0f) && frames < 600) {
+            if (s.offset.y < peak) peak = s.offset.y;
+            ++frames;
+        }
+        check(peak < 0.0f, "the fling overshoots past the edge (the bounce)");
+        check(s.offset.y == 0.0f, "and settles back exactly at the edge");
+    }
+
+    // With overscroll OFF (the default), the edge is a hard stop — no bounce.
+    {
+        ScrollState s; s.max_offset = {0, 2400};   // overscroll defaults false
+        s.scroll_by({0, 100});
+        check(s.offset.y == 0.0f, "without overscroll the top edge is a hard stop");
+    }
 }
 
 int main() {
