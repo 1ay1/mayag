@@ -420,6 +420,57 @@ critically-damped spring — a hard fling into the edge overshoots and bounces
 exactly back, the iOS/macOS feel. It is off by default, because a desktop list
 usually wants the hard stop; it is one flag for a touch surface.
 
+## Writing a live app
+
+An app is five static functions on a struct — `init`, `update`, `view`,
+`subscribe`, plus a `Model` and a `Msg` variant. Three helpers keep the wiring
+short *and* impossible to desync:
+
+**`match(msg, …)`** — one typed lambda per message, checked for exhaustiveness by
+the compiler. Add a `Msg` alternative and forget to handle it, and the build
+fails:
+
+```cpp
+using R = std::pair<Model, Cmd<Msg>>;
+return match(msg,
+    [&](Inc)     -> R { m.count++;         return {m, Cmd<Msg>::none()}; },
+    [&](Tick t)  -> R { m.pulse.step(t.dt); return {m, Cmd<Msg>::none()}; },
+    [&](Quit)    -> R { return {m, Cmd<Msg>::quit()}; });
+```
+
+**`action(id, msg)`** — a clickable's id and its message declared once, so the
+view tag and the subscription can't drift. A typo becomes a compile error, not
+a dead button:
+
+```cpp
+static inline const auto inc = action(node_id("inc"), Msg{Inc{}});
+// view:      button(t) | inc.on
+// subscribe: inc.click()
+```
+
+For a dynamic list, `node_id(base, index)` folds the row index into the id with
+no string building, so the same call names the row in the view loop and the
+subscribe loop:
+
+```cpp
+// view:      row(item) | id_of("row", i)
+// subscribe: Sub<Msg>::on_click_id(node_id("row", i), Toggle{i})
+```
+
+**`on_frame(fn)`** — per-frame animation ticks without unpacking a FrameEvent,
+gated so a settled app is 0% CPU:
+
+```cpp
+when(m.pulse.animating(),
+     Sub<Msg>::on_frame([](float dt) { return Tick{dt}; }))
+```
+
+Get a signature slightly wrong and the error names the exact method to fix
+("needs `static std::pair<Model, Cmd<Msg>> update(Model, Msg)`") rather than
+"constraints not satisfied". The whole thing is testable without a window:
+`run_headless` drives clicks and asserts on the model. See
+[`examples/hello.cpp`](examples/hello.cpp) for the smallest complete app.
+
 ## Overlays, virtualisation, animation
 
 Three more things every real app needs, each solved once rather than by every
