@@ -252,15 +252,48 @@ concept ViewModelOnly = requires(const typename P::Model& m) {
 }  // namespace detail
 
 /// The contract. Everything else in this header is machinery for honouring it.
+///
+/// It is deliberately spelled as four named pieces so a near-miss points at the
+/// exact requirement that failed — see `static_assert_program` below, which
+/// every entry point runs to turn a concept miss into a plain-English error.
 template <typename P>
-concept Program =
-    requires { typename P::Model; typename P::Msg; } &&
-    (detail::HasEffectfulInit<P> || detail::HasPlainInit<P>) &&
-    (detail::ViewWithCtx<P> || detail::ViewModelOnly<P>) &&
+concept HasModelAndMsg = requires { typename P::Model; typename P::Msg; };
+
+template <typename P>
+concept HasInit = detail::HasEffectfulInit<P> || detail::HasPlainInit<P>;
+
+template <typename P>
+concept HasView = detail::ViewWithCtx<P> || detail::ViewModelOnly<P>;
+
+template <typename P>
+concept HasUpdate = HasModelAndMsg<P> &&
     requires(typename P::Model m, typename P::Msg msg) {
         { P::update(std::move(m), std::move(msg)) }
             -> std::same_as<std::pair<typename P::Model, Cmd<typename P::Msg>>>;
     };
+
+template <typename P>
+concept Program =
+    HasModelAndMsg<P> && HasInit<P> && HasView<P> && HasUpdate<P>;
+
+/// A precise, one-line reason a type isn't a Program — call it in a
+/// `static_assert` and the compiler tells the user which method is wrong
+/// instead of "constraints not satisfied". `run()` runs it for you.
+template <typename P>
+constexpr bool static_assert_program() {
+    static_assert(HasModelAndMsg<P>,
+        "mayag::Program: your app must define `Model` and `Msg` types.");
+    static_assert(HasInit<P>,
+        "mayag::Program: needs `static Model init()` or "
+        "`static std::pair<Model, Cmd<Msg>> init()`.");
+    static_assert(HasView<P>,
+        "mayag::Program: needs `static Node view(const Model&)` or "
+        "`static Node view(const Model&, const Ctx&)`.");
+    static_assert(HasUpdate<P>,
+        "mayag::Program: needs `static std::pair<Model, Cmd<Msg>> "
+        "update(Model, Msg)` — check it returns a {Model, Cmd<Msg>} pair.");
+    return true;
+}
 
 // ── configuration ───────────────────────────────────────────────────────
 
@@ -1418,6 +1451,17 @@ template <Program P>
 int run(AppConfig cfg = {}) {
     Runtime<P, platform::Native> rt{std::move(cfg)};
     return rt.run();
+}
+
+/// Fallback for a type that ISN'T quite a Program: instead of the compiler's
+/// generic "constraints not satisfied", static_assert_program names the exact
+/// method that is missing or has the wrong signature.
+template <typename P>
+    requires (!Program<P>)
+int run(AppConfig = {}) {
+    static_assert(static_assert_program<P>(),
+                  "mayag::run: the type passed to run<T>() is not a Program.");
+    return 1;
 }
 
 /// Run a Program headlessly, with a driver that scripts input and inspects
