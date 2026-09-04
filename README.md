@@ -944,21 +944,53 @@ MSVC falls back to C++23; everything works, but DSL errors degrade to a generic 
 
 ## Tests
 
+21 test binaries, plus 8 example apps that double as end-to-end tests and 8
+must-not-compile cases. All of it runs with **no display** — which is what
+makes the suite work in CI and over SSH alike:
+
 ```
-PASS  129 checks   # rendering: numeric kernels, layout guarantees, real
-                   #            pixels, tiled == scalar reference bit for bit
-PASS   61 checks   # app runtime: interaction, click counts, effects, subs
-PASS 4940 checks   # fonts: 1300 system faces + 400 fuzzed files
-100% tests passed, 15 of 15      # + 4 example apps, + 8 must-not-compile
+ctest                        # 20/21 green on a fresh box
 ```
 
-Three layers, matching the three ways this can be wrong: **numeric** (colour round-trips, SDF gradient magnitude, transfer curves), **layout** (flex arithmetic against hand-computed rects), and **pixel** (render a scene, sample actual pixels). The pixel layer is what catches "compiles, lays out, draws nothing" — and it caught three real bugs while this was being written:
+The layers match the three ways rendering can be wrong: **numeric** (colour
+round-trips, SDF gradient magnitude, transfer curves), **layout** (flex
+arithmetic against hand-computed rects), and **pixel** (render a scene, sample
+actual pixels). The pixel layer is what catches "compiles, lays out, draws
+nothing" — and it caught three real bugs while this was being written:
 
 - cross-axis default was `start` instead of CSS's `stretch`, collapsing grown children to zero width
 - `srgb_interpolation` was silently ignored — gradients never used the flag
 - the first fix used *Cartesian* Oklab, which desaturates worse than linear RGB; the answer is *polar* Oklch
 
-All three are now regression tests.
+All three are now regression tests. The GPU (`mayag_vulkan_tests`), Wayland
+(`mayag_wayland_tests`) and live-streaming (`mayag_live_tests`) suites carry a
+pure-logic half that runs everywhere and a live half that **skips itself** when
+no compositor is present, so a headless runner stays green while a machine with
+a GPU verifies the real thing.
+
+### Testing over SSH
+
+mayag is a windowing framework, but almost none of it needs a window to test.
+Three display-free modes cover the whole surface:
+
+```bash
+ctest                                    # the suite (window tests self-skip)
+./build/examples/mayag_live --headless   # drive the REAL app, assert, exit
+./build/examples/mayag_live --png f.png  # render a real frame to an image
+```
+
+`--headless` runs the actual `init`/`update`/`view` through the same runtime
+the window uses — including `Cmd::stream` spawning its background thread — so
+your live-app logic is exercised for real, only the pixels go nowhere. `--png`
+renders frame zero through the full font/SDF pipeline; view it inline if your
+terminal is kitty (`kitten icat f.png`, works through mosh + tmux) or `scp` it
+back. `tools/test-remote.sh` runs the entire flow — build, ctest, every
+example headless and to PNG — in one command; `--show` previews the frames
+inline, `--window` spins up a headless `weston` so the window backends run too.
+
+To see a *live* window remotely, either point it at a headless compositor
+(`weston --backend=headless`, what CI does) or forward the real window with
+`waypipe ssh host ./mayag_live`.
 
 ## Layout
 
