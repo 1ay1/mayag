@@ -25,11 +25,15 @@
 #include "../backend/software.hpp"
 
 #include <atomic>
+#include <algorithm>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mayag::typo {
@@ -74,6 +78,21 @@ class Face {
         face->glyphs_  = GlyphSource{face->file_};
         face->kerning_ = KernTable{face->file_};
         face->id_      = next_id();
+
+        // ── variable-font setup ──────────────────────────────────────────
+        // Parse the fvar axis table and start the face at every axis's
+        // default, so an untouched variable font renders exactly like its
+        // default instance. set_variation() later moves along the axes.
+        face->axes_ = var::parse_fvar(face->file_.table(ot::tags::fvar));
+        face->avar_ = face->file_.table(ot::tags::avar);
+        if (!face->axes_.empty()) {
+            // Empty user list => every axis normalises to its default (0.0).
+            face->coords_ = var::normalize_all(face->axes_, face->avar_, {});
+            face->user_.reserve(face->axes_.size());
+            for (const auto& ax : face->axes_) face->user_.push_back(ax.def);
+            face->hvar_ = var::parse_hvar(face->file_.table(ot::tags::hvar));
+            face->glyphs_.set_coords(&face->coords_);
+        }
 
         // A face is usable if it can place glyphs at all. Vector faces need a
         // working glyph source; colour/bitmap faces (emoji, icons) have none
@@ -176,9 +195,16 @@ class Face {
         return m;
     }
 
-    /// Advance width of a glyph in pixels.
+    /// Advance width of a glyph in pixels. For a variable font this includes
+    /// the HVAR advance-width delta at the current axis position, so heavy and
+    /// light instances space text correctly rather than reusing the default.
     [[nodiscard]] float advance(std::uint16_t gid, float size_px) const noexcept {
-        return static_cast<float>(file_.advance(gid)) * scale_for(size_px);
+        float units = static_cast<float>(file_.advance(gid));
+        if (hvar_.ok) {
+            std::lock_guard lock{mutex_};
+            units += var::hvar_advance_delta(hvar_, gid, coords_);
+        }
+        return units * scale_for(size_px);
     }
 
     /// Kerning between two glyphs in pixels.
@@ -202,8 +228,74 @@ class Face {
         return o;
     }
 
+    // VARIATION_API_ANCHOR
+
+    /// True when this face carries fvar axes we can drive.
+    [[nodiscard]] bool is_variable() const noexcept { return !axes_.empty(); }
+
+    /// The design axes (tag + min/def/max in user units); empty if static.
+    [[nodiscard]] const std::vector<var::Axis>& axes() const noexcept { return axes_; }
+
+    /// Current value of one axis in USER units, or NaN if the tag is unknown.
+    [[nodiscard]] float variation(std::uint32_t tag) const noexcept {
+        for (std::size_t i = 0; i < axes_.size(); ++i)
+            if (axes_[i].tag == tag)
+                return i < user_.size() ? user_[i] : axes_[i].def;
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+
+    /// Move several axes at once (USER units, e.g. {{tag_wght, 700}}). Axes
+    /// not listed keep their current value; unknown tags are ignored.
+    void set_variations(std::span<const std::pair<std::uint32_t, float>> vals) {
+        if (axes_.empty()) return;
+        apply_user_coords(vals);
+    }
+
+    /// Move one axis to `value` (USER units), leaving the others put.
+    void set_variation(std::uint32_t tag, float value) {
+        const std::pair<std::uint32_t, float> one{tag, value};
+        set_variations({&one, 1});
+    }
+
+    /// Snap back to the default instance (every axis at its fvar default).
+    void reset_variations() {
+        std::vector<std::pair<std::uint32_t, float>> defs;
+        defs.reserve(axes_.size());
+        for (const auto& a : axes_) defs.emplace_back(a.tag, a.def);
+        set_variations(defs);
+    }
+
+
   private:
     Face() = default;
+
+    // Re-derive the normalised coords from a set of user-unit axis values,
+    // then invalidate everything downstream that baked in the old instance.
+    void apply_user_coords(std::span<const std::pair<std::uint32_t, float>> vals) {
+        // Seed from the current per-axis user values (defaults on first call)
+        // so axes the caller doesn't mention keep exactly where they were.
+        std::vector<float> next_user(axes_.size());
+        std::vector<std::pair<std::uint32_t, float>> user;
+        user.reserve(axes_.size());
+        for (std::size_t i = 0; i < axes_.size(); ++i) {
+            const var::Axis& ax = axes_[i];
+            float u = (i < user_.size()) ? user_[i] : ax.def;
+            for (const auto& [tag, v] : vals)
+                if (tag == ax.tag) u = v;
+            u = std::clamp(u, ax.min, ax.max);
+            next_user[i] = u;
+            user.emplace_back(ax.tag, u);
+        }
+        var::Coords next = var::normalize_all(axes_, avar_, user);
+
+        std::lock_guard lock{mutex_};
+        if (next == coords_) return;   // no-op move: geometry unchanged
+        coords_ = std::move(next);
+        user_   = std::move(next_user);
+        glyphs_.set_coords(&coords_);
+        outline_cache_.clear();
+        id_ = next_id();               // force atlas re-rasterisation
+    }
 
     [[nodiscard]] static std::uint32_t next_id() {
         static std::atomic<std::uint32_t> counter{1};
@@ -215,6 +307,13 @@ class Face {
     GlyphSource               glyphs_;
     KernTable                 kerning_;
     std::uint32_t             id_ = 0;
+
+    // ── variable-font state ─────────────────────────────────────────────
+    std::vector<var::Axis>        axes_;      // fvar axes (empty ⇒ static font)
+    std::span<const std::uint8_t> avar_{};    // optional axis remap table
+    var::Coords                   coords_;    // current normalised position
+    std::vector<float>            user_;      // current value per axis, USER units
+    var::HvarTable                hvar_;      // advance-width variations (optional)
 
     mutable std::mutex                                 mutex_;
     mutable std::unordered_map<std::uint16_t, Outline> outline_cache_;

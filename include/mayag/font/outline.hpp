@@ -18,8 +18,10 @@
 // forever, produces an empty glyph rather than a stack overflow.
 
 #include "opentype.hpp"
+#include "variations.hpp"
 #include "../core/geometry.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -156,9 +158,21 @@ class GlyfSource {
         : glyf_{f.table(ot::tags::glyf)},
           loca_{f.table(ot::tags::loca)},
           long_loca_{f.head().index_to_loc_format != 0},
-          num_glyphs_{f.num_glyphs()} {}
+          num_glyphs_{f.num_glyphs()},
+          gvar_{f.table(ot::tags::gvar)} {
+        if (!gvar_.empty()) gvar_header_ = var::parse_gvar_header(gvar_);
+    }
 
     [[nodiscard]] bool valid() const noexcept { return !glyf_.empty() && !loca_.empty(); }
+
+    /// Point this source at a set of normalised axis coordinates. When set (and
+    /// the font has gvar), every subsequent `load` interpolates the outline to
+    /// those coordinates — the variable-font instance. A null/empty coords
+    /// leaves the default master untouched.
+    void set_coords(const var::Coords* coords) noexcept { coords_ = coords; }
+    [[nodiscard]] bool is_variable() const noexcept {
+        return gvar_header_.ok && gvar_header_.axis_count > 0;
+    }
 
     /// Byte range of glyph `gid` within `glyf`. An empty range is legal and
     /// means a blank glyph (space) — not an error.
@@ -191,15 +205,15 @@ class GlyfSource {
         r.skip(8);   // xMin, yMin, xMax, yMax — we recompute from the outline
 
         if (n_contours >= 0) {
-            load_simple(r, static_cast<std::uint16_t>(n_contours), out);
+            load_simple(r, static_cast<std::uint16_t>(n_contours), gid, out);
         } else {
-            load_composite(r, out, depth);
+            load_composite(r, gid, out, depth);
         }
         return out;
     }
 
   private:
-    void load_simple(ot::Reader& r, std::uint16_t n_contours, Outline& out) const {
+    void load_simple(ot::Reader& r, std::uint16_t n_contours, std::uint16_t gid, Outline& out) const {
         // ---- contour end indices ----
         std::vector<std::uint16_t> ends(n_contours);
         for (std::uint16_t i = 0; i < n_contours; ++i) ends[i] = r.u16();
@@ -253,6 +267,23 @@ class GlyfSource {
                 v += r.i16();
             }
             ys[i] = v;
+        }
+
+        // ---- variation: displace points per the requested axis coords ----
+        // gvar deltas apply to the base outline before it becomes contours,
+        // so any weight/width/optical-size is baked into the geometry that
+        // the rasteriser and metrics later see.
+        if (coords_ != nullptr && !coords_->empty() && gvar_header_.ok) {
+            std::vector<float> fx(n_points), fy(n_points);
+            for (std::size_t i = 0; i < n_points; ++i) {
+                fx[i] = static_cast<float>(xs[i]);
+                fy[i] = static_cast<float>(ys[i]);
+            }
+            var::apply_gvar(gvar_, gvar_header_, gid, *coords_, fx, fy, ends);
+            for (std::size_t i = 0; i < n_points; ++i) {
+                xs[i] = static_cast<std::int32_t>(std::lround(fx[i]));
+                ys[i] = static_cast<std::int32_t>(std::lround(fy[i]));
+            }
         }
 
         // ---- build contours ----
@@ -337,46 +368,76 @@ class GlyfSource {
         if (!contour.empty()) out.contours.push_back(std::move(contour));
     }
 
-    void load_composite(ot::Reader& r, Outline& out, int depth) const {
+    void load_composite(ot::Reader& r, std::uint16_t gid, Outline& out, int depth) const {
+        struct Comp {
+            std::uint16_t gid = 0;
+            float dx = 0.0f, dy = 0.0f;
+            float a = 1.0f, b = 0.0f, c = 0.0f, d = 1.0f;
+            bool  args_are_xy = true;
+        };
+        std::vector<Comp> comps;
+
         std::uint16_t flags = 0;
         do {
             flags = r.u16();
-            const std::uint16_t comp_gid = r.u16();
+            Comp cp;
+            cp.gid = r.u16();
+            cp.args_are_xy = (flags & detail::comp_args_are_xy) != 0;
 
-            float dx = 0.0f, dy = 0.0f;
             if (flags & detail::comp_arg_words) {
                 const std::int16_t a1 = r.i16(), a2 = r.i16();
-                if (flags & detail::comp_args_are_xy) { dx = a1; dy = a2; }
+                if (cp.args_are_xy) { cp.dx = a1; cp.dy = a2; }
                 // Point-matching (args are point indices) is vanishingly rare
                 // and requires the parent's points; treat as no offset.
             } else {
                 const std::int8_t a1 = r.i8(), a2 = r.i8();
-                if (flags & detail::comp_args_are_xy) { dx = a1; dy = a2; }
+                if (cp.args_are_xy) { cp.dx = a1; cp.dy = a2; }
             }
 
-            float a = 1.0f, b = 0.0f, c = 0.0f, d = 1.0f;
             if (flags & detail::comp_has_scale) {
-                a = d = r.f2dot14();
+                cp.a = cp.d = r.f2dot14();
             } else if (flags & detail::comp_xy_scale) {
-                a = r.f2dot14();
-                d = r.f2dot14();
+                cp.a = r.f2dot14();
+                cp.d = r.f2dot14();
             } else if (flags & detail::comp_two_by_two) {
-                a = r.f2dot14(); b = r.f2dot14();
-                c = r.f2dot14(); d = r.f2dot14();
+                cp.a = r.f2dot14(); cp.b = r.f2dot14();
+                cp.c = r.f2dot14(); cp.d = r.f2dot14();
             }
+            comps.push_back(cp);
+        } while ((flags & detail::comp_more) && !r.bad());
 
-            if (comp_gid < num_glyphs_ && !r.bad()) {
-                Outline sub = load(comp_gid, depth + 1);
-                sub.transform(Affine{a, b, c, d, dx, dy});
+        // ---- variation: displace each component's offset ----
+        // A composite glyph's gvar "points" are one per component (its offset)
+        // followed by four phantom points (metrics). We vary the offsets so
+        // built-up glyphs (accented letters) track the axis too.
+        if (coords_ != nullptr && !coords_->empty() && gvar_header_.ok && !comps.empty()) {
+            const std::size_t n = comps.size();
+            std::vector<float> fx(n + 4, 0.0f), fy(n + 4, 0.0f);
+            for (std::size_t i = 0; i < n; ++i) { fx[i] = comps[i].dx; fy[i] = comps[i].dy; }
+            std::vector<std::uint16_t> ends{static_cast<std::uint16_t>(n + 4 - 1)};
+            var::apply_gvar(gvar_, gvar_header_, gid, *coords_, fx, fy, ends);
+            for (std::size_t i = 0; i < n; ++i) {
+                if (comps[i].args_are_xy) { comps[i].dx = fx[i]; comps[i].dy = fy[i]; }
+            }
+        }
+
+        for (const auto& cp : comps) {
+            if (cp.gid < num_glyphs_) {
+                Outline sub = load(cp.gid, depth + 1);
+                sub.transform(Affine{cp.a, cp.b, cp.c, cp.d, cp.dx, cp.dy});
                 out.append(sub);
             }
-        } while ((flags & detail::comp_more) && !r.bad());
+        }
     }
 
     std::span<const std::uint8_t> glyf_{};
     std::span<const std::uint8_t> loca_{};
     bool          long_loca_  = false;
     std::uint16_t num_glyphs_ = 0;
+
+    std::span<const std::uint8_t> gvar_{};
+    var::GvarHeader               gvar_header_{};
+    const var::Coords*            coords_ = nullptr;
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1041,6 +1102,18 @@ class GlyphSource {
             case Kind::none: break;
         }
         return {};
+    }
+
+    /// Point this source at a set of normalized axis coordinates. Only the
+    /// glyf/gvar path varies today; CFF2 is a future extension. The pointer
+    /// must outlive every subsequent load() call.
+    void set_coords(const var::Coords* c) noexcept {
+        if (kind_ == Kind::glyf) glyf_.set_coords(c);
+    }
+
+    /// True when the face carries gvar variation data we can apply.
+    [[nodiscard]] bool is_variable() const noexcept {
+        return kind_ == Kind::glyf && glyf_.is_variable();
     }
 
   private:

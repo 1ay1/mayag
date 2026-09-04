@@ -178,6 +178,9 @@ inline constexpr std::uint32_t sbix = tag("sbix");   // Apple colour bitmap (PNG
 inline constexpr std::uint32_t ebdt = tag("EBDT");   // monochrome embedded bitmap
 inline constexpr std::uint32_t eblc = tag("EBLC");
 inline constexpr std::uint32_t fvar = tag("fvar");
+inline constexpr std::uint32_t gvar = tag("gvar");   // glyph outline variations
+inline constexpr std::uint32_t avar = tag("avar");   // axis-value remapping
+inline constexpr std::uint32_t hvar = tag("HVAR");   // advance-width variations
 inline constexpr std::uint32_t vhea = tag("vhea");
 inline constexpr std::uint32_t vmtx = tag("vmtx");
 }  // namespace tags

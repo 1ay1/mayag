@@ -781,6 +781,102 @@ void test_rendering() {
 
 }  // namespace
 
+/// Variable fonts: one file spanning a continuous design space (weight,
+/// optical size, ...). We must parse fvar, apply gvar deltas via IUP, and
+/// re-interpolate outlines as the axes move. The bar: heavier weight lays
+/// down strictly more ink, and the motion is smooth and reversible.
+void test_variations() {
+    section("variable fonts");
+
+    // Find any variable font: prefer Adwaita (the design target), else scan
+    // the system database for a face that exposes fvar axes.
+    std::shared_ptr<typo::Face> vf;
+    for (const char* p : {"/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf"}) {
+        if (std::filesystem::exists(p)) { vf = typo::Face::from_file(p); break; }
+    }
+    if (!vf || !vf->is_variable()) {
+        for (const auto& e : typo::system::Database::instance().entries()) {
+            auto f = typo::Face::from_file(e.path, e.face_index);
+            if (f && f->is_variable() && f->has_glyph(U'H')) { vf = f; break; }
+        }
+    }
+    if (!vf || !vf->is_variable()) {
+        check(true, "no variable font installed — skipping (not a failure)");
+        return;
+    }
+    check(vf->is_variable(), "variable font reports fvar axes");
+    check(!vf->axes().empty(), "axis list is non-empty");
+
+    // Locate the weight axis.
+    const typo::var::Axis* wght = nullptr;
+    for (const auto& a : vf->axes()) if (a.tag == typo::var::tag_wght) wght = &a;
+    if (wght == nullptr) {
+        check(true, "font has no wght axis — skipping weight sweep");
+        return;
+    }
+    check(wght->min < wght->max, "wght axis has a real range");
+
+    const auto ink = [&](char32_t cp) {
+        auto o = vf->outline(vf->glyph_for(static_cast<std::uint32_t>(cp)));
+        float a = 0.0f;
+        for (const auto& c : o.contours) a += num::abs(c.signed_area());
+        return a;
+    };
+
+    // Sweep the weight axis; a bar-heavy glyph must gain ink monotonically.
+    const float lo = wght->min, hi = wght->max, mid = (lo + hi) * 0.5f;
+    vf->set_variation(typo::var::tag_wght, lo);
+    const float ink_lo = ink(U'H');
+    near(vf->variation(typo::var::tag_wght), lo, 0.01f, "axis reads back exactly (min)");
+
+    vf->set_variation(typo::var::tag_wght, mid);
+    const float ink_mid = ink(U'H');
+
+    vf->set_variation(typo::var::tag_wght, hi);
+    const float ink_hi = ink(U'H');
+    near(vf->variation(typo::var::tag_wght), hi, 0.01f, "axis reads back exactly (max)");
+
+    check(ink_lo > 0.0f, "thin weight produces a real outline");
+    check(ink_hi > ink_lo * 1.5f, "heavy weight lays down much more ink than thin");
+    check(ink_mid > ink_lo && ink_mid < ink_hi, "mid weight interpolates between the two");
+
+    // Reversibility: returning to the default must restore the default glyph
+    // byte-for-byte (deterministic, replayable variation state).
+    vf->set_variation(typo::var::tag_wght, wght->def);
+    const float ink_def_a = ink(U'H');
+    vf->set_variation(typo::var::tag_wght, hi);
+    (void)ink(U'H');
+    vf->reset_variations();
+    const float ink_def_b = ink(U'H');
+    near(ink_def_b, ink_def_a, 0.5f, "reset_variations restores the default instance");
+    near(vf->variation(typo::var::tag_wght), wght->def, 0.01f, "reset returns wght to its default");
+
+    // Clamping: out-of-range requests pin to the axis bounds.
+    vf->set_variation(typo::var::tag_wght, hi + 10000.0f);
+    near(vf->variation(typo::var::tag_wght), hi, 0.01f, "over-max request clamps to max");
+    vf->set_variation(typo::var::tag_wght, lo - 10000.0f);
+    near(vf->variation(typo::var::tag_wght), lo, 0.01f, "under-min request clamps to min");
+
+    // HVAR: advance width should track the axis too (heavy != thin spacing),
+    // otherwise heavy text overlaps. Not every variable font ships HVAR, so a
+    // zero difference is only a failure when the outline itself changed a lot.
+    const auto adv = [&](char32_t cp) {
+        return vf->advance(vf->glyph_for(static_cast<std::uint32_t>(cp)), 100.0f);
+    };
+    vf->set_variation(typo::var::tag_wght, lo);
+    const float adv_lo = adv(U'H');
+    vf->set_variation(typo::var::tag_wght, hi);
+    const float adv_hi = adv(U'H');
+    check(adv_lo > 0.0f && adv_hi > 0.0f, "advance width is positive at both extremes");
+    // Adwaita (and most quality VFs) widen the advance with weight; assert the
+    // spacing moved at all when the shape moved a lot.
+    if (ink_hi > ink_lo * 3.0f)
+        check(num::abs(adv_hi - adv_lo) > 0.01f,
+              "advance width varies with weight (HVAR applied)");
+
+    vf->reset_variations();
+}
+
 int main() {
     std::printf("mayag font engine\n=================");
 
@@ -796,6 +892,7 @@ int main() {
     test_line_breaking();
     test_metrics();
     test_rendering();
+    test_variations();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
