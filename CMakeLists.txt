@@ -385,7 +385,16 @@ write_basic_package_version_file(
     COMPATIBILITY SameMajorVersion
     ARCH_INDEPENDENT)
 
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/mayagConfigVersion.cmake"
+# The package config file `find_package(mayag)` actually looks for. Without it
+# a consuming project cannot locate mayag at all, even once installed.
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mayagConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/mayagConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mayag)
+
+install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/mayagConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/mayagConfigVersion.cmake"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mayag)
 
 # ─────────────────────────────────────────────────────────────────────────

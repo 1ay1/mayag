@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+
+# mayag is a header-only INTERFACE library, but its INTERFACE link deps
+# (Threads on Linux, the platform frameworks elsewhere) must be resolvable in
+# the consuming project. Threads is the only find_package'able one; the OS
+# frameworks are absolute paths baked into the exported target.
+include(CMakeFindDependencyMacro)
+if(NOT WIN32)
+    find_dependency(Threads)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/mayagTargets.cmake")
+
+check_required_components(mayag)

@@ -52,6 +52,25 @@ int main() {
 
 `card` is a `constexpr` object. The entire style tree is folded at compile time; the only runtime work is layout, painting, and rasterising.
 
+### Use it in your project
+
+mayag is header-only. Point CMake at an installed copy and link the interface target:
+
+```cmake
+find_package(mayag REQUIRED)
+add_executable(myapp main.cpp)
+target_link_libraries(myapp PRIVATE mayag::mayag)
+```
+
+or vendor it directly with no install step:
+
+```cmake
+add_subdirectory(third_party/mayag)   # or FetchContent_Declare(mayag ...)
+target_link_libraries(myapp PRIVATE mayag::mayag)
+```
+
+The smallest complete live app is [`examples/hello.cpp`](examples/hello.cpp) (~110 lines): copy it, change the `Model` and the `update` cases, and you have a working animated app. `./myapp` opens a window; `./myapp --headless` runs its self-test with no display.
+
 ## The type-state DSL
 
 Every element carries a **capability set in its type**. Every modifier declares what it *needs*, what it *grants*, and what it *forbids*. The pipe operator is the proof checker, and C++26 user-generated `static_assert` messages (P2741) turn a failed proof into a sentence.
