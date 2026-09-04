@@ -383,6 +383,16 @@ in every mayag app behaves the same instead of each author re-deriving it.
 thumb geometry for free. Wheel events bubble to the nearest scrollable
 ancestor, because the cursor is nearly always over a leaf.
 
+**Kinetic scrolling** is built in and, like animation, it is pure state. A
+flick calls `m.list.fling(release_velocity)`; the runtime then calls
+`m.list.step(dt)` each frame while `m.list.coasting()`, and the offset
+decelerates under exponential friction — the long, smooth tail-off iOS uses —
+settling on its own so the frame subscription ends and the app falls back to
+0% CPU. Hitting an edge spends the momentum instead of fighting the clamp, a
+fresh grab `halt()`s a coasting list, and a tap-sized flick is ignored rather
+than turned into drift. Because the velocity lives in the model, a scroll in
+flight is saved, restored, and replayed like any other state.
+
 ## Overlays, virtualisation, animation
 
 Three more things every real app needs, each solved once rather than by every

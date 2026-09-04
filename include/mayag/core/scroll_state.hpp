@@ -62,7 +62,19 @@ struct ScrollState {
     /// layer rather than here.
     float speed = 1.0f;
 
+    /// Current momentum, in content px/second. Nonzero after a fling; decays
+    /// under friction in `step()`. This is authoritative state — it lives in
+    /// the model, so a scroll in flight is saved, restored, and replayed like
+    /// everything else.
+    Vec2 velocity{};
+
     friend constexpr bool operator==(const ScrollState&, const ScrollState&) = default;
+
+    /// Is momentum still in flight? A view subscribes to frames only while
+    /// this is true, so a settled list costs nothing.
+    [[nodiscard]] constexpr bool coasting() const noexcept {
+        return velocity.x != 0.0f || velocity.y != 0.0f;
+    }
 
     // ── queries ─────────────────────────────────────────────────────────
 
@@ -106,6 +118,62 @@ struct ScrollState {
         offset.x = num::clamp(position.x, 0.0f, max_offset.x);
         offset.y = num::clamp(position.y, 0.0f, max_offset.y);
     }
+
+    // ── kinetic scrolling ────────────────────────────────────────
+    //
+    // A flick should glide and coast to a stop, not halt the instant the
+    // finger lifts. The producer of the gesture calls `fling` with the release
+    // velocity (px/s); the runtime then calls `step(dt)` each frame while
+    // `coasting()`, and the offset decelerates under exponential friction —
+    // the model iOS and every good touch UI use. It is all pure: the momentum
+    // lives in the model, so the glide is deterministic and replayable.
+
+    /// Start (or add to) momentum from a release velocity, in content px/s.
+    /// The sign matches `scroll_by`: an upward flick (negative delta) reveals
+    /// content below, so it drives `offset` up.
+    constexpr void fling(Vec2 v) noexcept {
+        velocity.x += -v.x * speed;
+        velocity.y += -v.y * speed;
+        // A tiny flick is a tap; do not coast on noise.
+        if (num::abs(velocity.x) < 40.0f) velocity.x = 0.0f;
+        if (num::abs(velocity.y) < 40.0f) velocity.y = 0.0f;
+    }
+
+    /// Advance momentum by `dt` seconds. Returns true while still coasting, so
+    /// the caller keeps requesting frames until it settles. Friction is
+    /// exponential (a constant fraction of speed shed per second), which gives
+    /// the long, smooth tail-off that feels right; the glide stops when speed
+    /// drops below a pixel-per-second threshold or hits an edge.
+    constexpr bool step(float dt) noexcept {
+        if (!coasting() || dt <= 0.0f) return false;
+
+        // 0.0025 per second retained => ~6 units/s after 1s from 1000; a
+        // firm-but-not-endless deceleration. pow via exp/log kept out of the
+        // hot path: dt is small, so a first-order-exact form is fine.
+        constexpr float friction = 0.0025f;
+        const float decay = num::pow(friction, dt);
+
+        offset.x += velocity.x * dt;
+        offset.y += velocity.y * dt;
+        velocity.x *= decay;
+        velocity.y *= decay;
+
+        // Hitting an edge kills momentum on that axis — a scroll view that is
+        // already at the top should not keep "pushing".
+        if (offset.x <= 0.0f || offset.x >= max_offset.x) velocity.x = 0.0f;
+        if (offset.y <= 0.0f || offset.y >= max_offset.y) velocity.y = 0.0f;
+        offset.x = num::clamp(offset.x, 0.0f, max_offset.x);
+        offset.y = num::clamp(offset.y, 0.0f, max_offset.y);
+
+        // Settle: below ~8 px/s the motion is imperceptible; snap to rest so
+        // the frame subscription can end and the app fall back to 0% CPU.
+        if (num::abs(velocity.x) < 8.0f) velocity.x = 0.0f;
+        if (num::abs(velocity.y) < 8.0f) velocity.y = 0.0f;
+        return coasting();
+    }
+
+    /// Stop any glide immediately — a fresh touch on a coasting list grabs it.
+    constexpr void halt() noexcept { velocity = Vec2{}; }
 
     constexpr void scroll_to_top() noexcept { offset = Vec2{}; }
     constexpr void scroll_to_bottom() noexcept { offset = max_offset; }

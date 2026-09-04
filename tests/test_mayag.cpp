@@ -970,6 +970,67 @@ void test_gpu_layout() {
           "and shares the SDF kernel with the CPU path");
 }
 
+// Kinetic scrolling: a fling glides under friction and settles cleanly, an
+// edge kills momentum, and a fresh grab halts a coasting list.
+void test_kinetic_scroll() {
+    section("kinetic scroll");
+
+    // A fling coasts a good distance, then settles to rest.
+    {
+        ScrollState s; s.max_offset = {0, 2400};
+        s.fling({0, -1500});                 // upward flick reveals content below
+        check(s.coasting(), "a fling starts momentum");
+        check(s.velocity.y > 0, "upward flick drives the offset down the content");
+
+        int frames = 0;
+        while (s.step(1.0f / 60.0f) && frames < 1000) ++frames;
+        check(frames > 10, "the glide lasts many frames, not one");
+        check(!s.coasting(), "and settles to rest on its own");
+        check(s.offset.y > 150.0f && s.offset.y <= 2400.0f,
+              "it glided a meaningful, in-bounds distance");
+    }
+
+    // Friction is monotonic: speed only decreases.
+    {
+        ScrollState s; s.max_offset = {0, 100000};
+        s.fling({0, -3000});
+        float prev = num::abs(s.velocity.y);
+        for (int i = 0; i < 30; ++i) {
+            s.step(1.0f / 60.0f);
+            const float now = num::abs(s.velocity.y);
+            check(now <= prev + 0.01f, "momentum never speeds up under friction");
+            prev = now;
+        }
+    }
+
+    // Hitting the top edge kills momentum rather than fighting the clamp.
+    {
+        ScrollState s; s.max_offset = {0, 2400}; s.offset = {0, 30};
+        s.fling({0, 1500});                  // downward flick scrolls toward top
+        int frames = 0;
+        while (s.step(1.0f / 60.0f) && frames < 1000) ++frames;
+        check(s.offset.y == 0.0f, "the glide lands exactly at the top edge");
+        check(!s.coasting(), "and momentum is spent, not bouncing forever");
+    }
+
+    // A fresh grab halts a coasting list instantly.
+    {
+        ScrollState s; s.max_offset = {0, 2400};
+        s.fling({0, -2000});
+        s.step(1.0f / 60.0f);
+        check(s.coasting(), "still coasting mid-glide");
+        s.halt();
+        check(!s.coasting(), "halt() stops it immediately");
+    }
+
+    // A tap (tiny release velocity) does not coast on noise.
+    {
+        ScrollState s; s.max_offset = {0, 2400};
+        s.fling({0, -10});
+        check(!s.coasting(), "a tap-sized flick is ignored, not turned into drift");
+    }
+}
+
 int main() {
     std::printf("mayag test suite\n================");
 
@@ -984,6 +1045,7 @@ int main() {
     test_tiled_equivalence();
     test_layout_guarantees();
     test_gpu_layout();
+    test_kinetic_scroll();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
