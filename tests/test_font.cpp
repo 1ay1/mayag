@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <random>
+#include <set>
 #include <string>
 
 using namespace mayag;
@@ -781,6 +782,69 @@ void test_rendering() {
 
 }  // namespace
 
+/// COLR/CPAL vector colour glyphs. The bar: parse the palette, detect colour
+/// glyphs, and render them to a non-empty RGBA bitmap that actually uses more
+/// than one colour (palette or gradient). Skips cleanly if no COLR font is
+/// installed — so it never fails a bare CI box, but exercises the real path
+/// wherever an emoji/icon/notation font exists.
+void test_color_glyphs() {
+    section("colour glyphs (COLR)");
+
+    std::shared_ptr<typo::Face> cf;
+    for (const char* p : {
+            "/usr/share/fonts/noto/NotoZnamennyMusicalNotation-Regular.ttf",
+            "/tmp/colrv1test.ttf"}) {
+        if (std::filesystem::exists(p)) { cf = typo::Face::from_file(p); if (cf) break; }
+    }
+    if (!cf) {
+        for (const auto& e : typo::system::Database::instance().entries()) {
+            auto f = typo::Face::from_file(e.path, e.face_index);
+            if (!f) continue;
+            for (std::uint16_t g = 1; g < 400; ++g)
+                if (f->has_colr(g)) { cf = f; break; }
+            if (cf) break;
+        }
+    }
+    if (!cf) {
+        check(true, "no COLR font installed — skipping (not a failure)");
+        return;
+    }
+
+    // Find a colour glyph and render it.
+    int rendered = 0;
+    std::set<std::uint32_t> palette_colors;   // distinct colours across glyphs
+    bool gradient_in_one = false;             // >1 colour within a single glyph
+    for (std::uint16_t g = 1; g < 1200; ++g) {
+        if (!cf->has_colr(g)) continue;
+        const typo::ColorBitmap cb = cf->render_colr(g, 64.0f, typo::colr::Rgba{0, 0, 0, 255});
+        if (!cb.valid()) continue;
+        int opaque = 0;
+        std::uint32_t first = 0xFFFFFFFFu;
+        for (std::size_t i = 0; i + 3 < cb.rgba.size(); i += 4) {
+            if (cb.rgba[i + 3] > 8) {
+                ++opaque;
+                const std::uint32_t c = (static_cast<std::uint32_t>(cb.rgba[i]) << 16) |
+                                        (static_cast<std::uint32_t>(cb.rgba[i + 1]) << 8) |
+                                        cb.rgba[i + 2];
+                palette_colors.insert(c);
+                if (first == 0xFFFFFFFFu) first = c; else if (c != first) gradient_in_one = true;
+            }
+        }
+        if (opaque > 0) ++rendered;
+        // Enough evidence gathered? stop early.
+        if (rendered >= 4 && (palette_colors.size() > 1 || gradient_in_one)) break;
+    }
+    check(rendered > 0, "at least one COLR glyph renders to non-empty RGBA");
+    // The palette must actually be applied: a real COLR render is either
+    // multi-coloured (v0 palette spread or a v1 gradient) or, for a mono-
+    // palette font, a single NON-BLACK colour — black would mean we silently
+    // fell back to the text colour instead of reading CPAL.
+    const bool non_black = std::any_of(palette_colors.begin(), palette_colors.end(),
+                                       [](std::uint32_t c) { return c != 0; });
+    check(palette_colors.size() > 1 || gradient_in_one || non_black,
+          "COLR rendering applies real palette colours (not the black fallback)");
+}
+
 /// Variable fonts: one file spanning a continuous design space (weight,
 /// optical size, ...). We must parse fvar, apply gvar deltas via IUP, and
 /// re-interpolate outlines as the axes move. The bar: heavier weight lays
@@ -917,6 +981,7 @@ int main() {
     test_metrics();
     test_rendering();
     test_variations();
+    test_color_glyphs();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);

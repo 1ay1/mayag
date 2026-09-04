@@ -15,6 +15,7 @@
 
 #include "atlas.hpp"
 #include "color_bitmap.hpp"
+#include "colr.hpp"
 #include "opentype.hpp"
 #include "outline.hpp"
 #include "raster.hpp"
@@ -95,6 +96,10 @@ class Face {
             face->hvar_ = var::parse_hvar(face->file_.table(ot::tags::hvar));
             face->glyphs_.set_coords(&face->coords_);
         }
+
+        // ── vector colour glyphs (COLR/CPAL) ─────────────────────────────
+        face->colr_ = colr::parse_colr(face->file_.table(ot::tags::colr));
+        face->cpal_ = colr::parse_cpal(face->file_.table(ot::tags::cpal));
 
         // A face is usable if it can place glyphs at all. Vector faces need a
         // working glyph source; colour/bitmap faces (emoji, icons) have none
@@ -232,6 +237,25 @@ class Face {
 
     // VARIATION_API_ANCHOR
 
+    // == vector colour glyphs (COLR) ==
+    /// True when `gid` has a COLR (layered/vector) colour representation.
+    [[nodiscard]] bool has_colr(std::uint16_t gid) const noexcept {
+        return colr::has_color_glyph(colr_, gid);
+    }
+
+    /// Render a COLR colour glyph to a straight-RGBA bitmap at `size_px`. The
+    /// `text_color` fills palette index 0xFFFF ("use foreground"). Returns an
+    /// invalid ColorBitmap if `gid` has no usable COLR glyph.
+    [[nodiscard]] ColorBitmap render_colr(std::uint16_t gid, float size_px,
+                                          colr::Rgba text_color) const {
+        colr::RenderContext ctx;
+        ctx.palette = cpal_.ok() ? &cpal_ : nullptr;
+        ctx.text_color = text_color;
+        ctx.upem = units_per_em();
+        ctx.outline_of = [this](std::uint16_t g) { return glyphs_.load(g); };
+        return colr::render_glyph(colr_, gid, size_px, ctx);
+    }
+
     /// True when this face carries fvar axes we can drive.
     [[nodiscard]] bool is_variable() const noexcept { return !axes_.empty(); }
 
@@ -337,6 +361,9 @@ class Face {
     var::Coords                   coords_;    // current normalised position
     std::vector<float>            user_;      // current value per axis, USER units
     var::HvarTable                hvar_;      // advance-width variations (optional)
+
+    colr::ColrTable               colr_;      // vector colour glyphs (optional)
+    colr::Palette                 cpal_;      // colour palette for COLR
 
     mutable std::mutex                                 mutex_;
     mutable std::unordered_map<std::uint16_t, Outline> outline_cache_;
@@ -546,6 +573,22 @@ class FontStack : public Shaper {
         // strike. Decode it, scale the strike to the requested size, and pack
         // it into the atlas's RGBA plane. Marked is_color so the renderer
         // emits an untinted colour-glyph quad.
+        if (face.has_colr(gid)) {
+            // Vector colour glyph: render at native size (crisp at any scale),
+            // no strike rescale. Palette index 0xFFFF resolves to black here;
+            // the emit path tints colour glyphs by alpha only, so real palette
+            // colours pass through untouched.
+            const ColorBitmap cb = face.render_colr(gid, size_px, colr::Rgba{0, 0, 0, 255});
+            if (cb.valid()) {
+                // bearing_y is px ABOVE the baseline (positive up); the emit
+                // path expects y-down, so negate it like the CBDT path.
+                const Vec2 bearing{cb.bearing_x, -cb.bearing_y};
+                return atlas_.insert_color(key, cb.rgba.data(), cb.width, cb.height,
+                                           bearing, advance);
+            }
+            // Empty COLR render (e.g. all-empty layers) — fall through.
+        }
+
         if (face.is_color()) {
             ColorBitmap cb = color_bitmap_for(face.file(), gid);
             if (cb.valid()) {
