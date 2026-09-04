@@ -830,6 +830,28 @@ class VulkanDevice {
         std::uint32_t images = caps.minImageCount + 1;
         if (caps.maxImageCount > 0 && images > caps.maxImageCount) images = caps.maxImageCount;
 
+        // Present mode. FIFO (vsync) is always supported and is the correct
+        // default — no tearing, and an idle app that never presents costs
+        // nothing regardless. MAILBOX is preferred WHEN available because it
+        // presents the newest frame instead of queuing behind the vsync
+        // deadline: for a bursty live app (a sample lands, one frame goes out)
+        // that shaves up to a refresh interval of latency off each update,
+        // still without tearing. It needs one more image, which is why images
+        // is bumped when we pick it.
+        int present_mode = vk::VK_PRESENT_MODE_FIFO_KHR;
+        std::uint32_t pm_count = 0;
+        api_->GetPhysicalDeviceSurfacePresentModesKHR(phys_, surface_, &pm_count, nullptr);
+        std::vector<int> modes(pm_count);
+        api_->GetPhysicalDeviceSurfacePresentModesKHR(phys_, surface_, &pm_count, modes.data());
+        for (int mode : modes) {
+            if (mode == vk::VK_PRESENT_MODE_MAILBOX_KHR) {
+                present_mode = mode;
+                std::uint32_t want = caps.minImageCount + 2;   // triple-buffer
+                if (caps.maxImageCount == 0 || want <= caps.maxImageCount) images = want;
+                break;
+            }
+        }
+
         vk::VkSwapchainCreateInfoKHR ci{};
         ci.sType = vk::VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
         ci.surface = surface_; ci.minImageCount = images;
@@ -839,7 +861,7 @@ class VulkanDevice {
         ci.imageSharingMode = vk::VK_SHARING_MODE_EXCLUSIVE;
         ci.preTransform = vk::VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         ci.compositeAlpha = vk::VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        ci.presentMode = vk::VK_PRESENT_MODE_FIFO_KHR;   // vsync; always supported
+        ci.presentMode = present_mode;
         ci.clipped = 1;
         ci.oldSwapchain = swapchain_;
         vk::VkSwapchainKHR new_swap = nullptr;
