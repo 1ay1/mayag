@@ -982,10 +982,40 @@ void test_render_economy() {
 
 }  // namespace
 
+/// The `match` helper: dispatch a variant to one typed lambda per case. This
+/// is the ergonomic core of writing update() — it must route to the active
+/// alternative, pass the payload by reference, and return the handler's value.
+void test_match() {
+    section("match dispatch");
+
+    struct Inc {}; struct Add { int by; }; struct Stop {};
+    using M = std::variant<Inc, Add, Stop>;
+
+    const auto step = [](int n, const M& msg) {
+        return match(msg,
+            [&](Inc)            { return n + 1; },
+            [&](const Add& a)   { return n + a.by; },
+            [&](Stop)           { return 0; });
+    };
+
+    check(step(10, M{Inc{}})     == 11, "match routes to the Inc case");
+    check(step(10, M{Add{5}})    == 15, "match passes the payload to the Add case");
+    check(step(10, M{Stop{}})    == 0,  "match routes to the Stop case");
+
+    // match returns whatever the handlers return, including a void effect.
+    int side = 0;
+    match(M{Add{7}},
+          [&](Inc)          { side = -1; },
+          [&](const Add& a) { side = a.by; },
+          [&](Stop)         { side = -2; });
+    check(side == 7, "match works with void-returning handlers too");
+}
+
 int main() {
     std::printf("mayag app runtime\n=================");
 
     test_update_purity();
+    test_match();
     test_functor_laws();
     test_interaction();
     test_click_counts();

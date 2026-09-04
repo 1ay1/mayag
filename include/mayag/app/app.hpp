@@ -62,9 +62,39 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace mayag {
+
+// ── match: ergonomic message dispatch ───────────────────────────────
+//
+// `update` switches on which Msg alternative arrived. The std::visit +
+// if-constexpr chain is correct but noisy; `match` lets you write one typed
+// lambda per case, exhaustively checked by the compiler:
+//
+//   using R = std::pair<Model, Cmd<Msg>>;
+//   return match(msg,
+//       [&](Increment)     -> R { m.count += m.step; return {m, Cmd<Msg>::none()}; },
+//       [&](Decrement)     -> R { m.count -= m.step; return {m, Cmd<Msg>::none()}; },
+//       [&](const Tick& e) -> R { m.pulse += e.dt;   return {m, Cmd<Msg>::none()}; },
+//       [&](Quit)          -> R { return {m, Cmd<Msg>::quit()}; });
+//
+// Every case returns the same type (the update result). A missing Msg case is
+// a COMPILE error, so the set of handlers stays exhaustive as the app grows.
+
+template <typename... Fs>
+struct overloaded : Fs... { using Fs::operator()...; };
+template <typename... Fs>
+overloaded(Fs...) -> overloaded<Fs...>;
+
+/// Dispatch `v` (a std::variant) to whichever handler matches its active
+/// alternative. A missing case is a COMPILE error, so adding a Msg variant
+/// forces you to handle it — the exhaustiveness Elm gives you, in C++.
+template <typename Variant, typename... Fs>
+[[nodiscard]] constexpr decltype(auto) match(Variant&& v, Fs&&... fs) {
+    return std::visit(overloaded{std::forward<Fs>(fs)...}, std::forward<Variant>(v));
+}
 
 // ── the context passed to view() ────────────────────────────────────────
 

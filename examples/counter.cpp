@@ -55,10 +55,9 @@ struct Counter {
     // returned as data. That is what makes this testable with `==`.
 
     static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        return std::visit([&](auto&& e) -> std::pair<Model, Cmd<Msg>> {
-            using T = std::decay_t<decltype(e)>;
-
-            if constexpr (std::is_same_v<T, Increment>) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](Increment) -> R {
                 m.count += m.step;
                 // Crossing a multiple of 10 starts a celebration animation.
                 // The animation is state, so it is replayable and testable.
@@ -67,29 +66,28 @@ struct Counter {
                     m.pulse = 0.0;
                 }
                 return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Decrement>) {
+            },
+            [&](Decrement) -> R {
                 m.count -= m.step;
                 return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Reset>) {
+            },
+            [&](Reset) -> R {
                 m.count = 0;
                 m.celebrating = false;
                 return {m, Cmd<Msg>::write_clipboard("0")};
-            }
-            else if constexpr (std::is_same_v<T, BumpStep>) {
+            },
+            [&](BumpStep) -> R {
                 m.step = (m.step == 1) ? 5 : (m.step == 5 ? 10 : 1);
                 return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Tick>) {
+            },
+            [&](const Tick& e) -> R {
                 m.pulse += e.dt;
                 if (m.pulse > 0.8) { m.celebrating = false; m.pulse = 0.0; }
                 return {m, Cmd<Msg>::none()};
-            }
-            else {
+            },
+            [&](Quit) -> R {
                 return {m, Cmd<Msg>::quit()};
-            }
-        }, msg);
+            });
     }
 
     // ── view: pure function of (Model, Ctx) -> Node ─────────────────────
