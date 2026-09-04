@@ -826,6 +826,48 @@ void test_caret() {
     check(fb <= text.size(), "fallback hit-test stays in range");
 }
 
+/// Italic on a variable font drives its own slant: `st.italic` moves the slnt
+/// axis (degrees) or ital axis (0..1) so the glyph is a real oblique from the
+/// font's masters, not a synthetic shear. Skips unless a slnt/ital variable
+/// font is present (only checked opportunistically at /tmp).
+void test_italic() {
+    section("italic (variable slnt/ital)");
+
+    std::shared_ptr<typo::Face> vf;
+    for (const char* p : {"/tmp/slnttest.ttf"}) {
+        if (std::filesystem::exists(p)) { vf = typo::Face::from_file(p); if (vf) break; }
+    }
+    if (!vf || !vf->is_variable()) {
+        // Look for any installed variable font with a slnt or ital axis.
+        for (const auto& e : typo::system::Database::instance().entries()) {
+            auto f = typo::Face::from_file(e.path, e.face_index);
+            if (!f || !f->is_variable()) continue;
+            bool has = false;
+            for (const auto& a : f->axes())
+                if (a.tag == typo::var::tag_slnt || a.tag == typo::var::tag_ital) has = true;
+            if (has) { vf = f; break; }
+        }
+    }
+    if (!vf) { check(true, "no slnt/ital variable font — skipping (not a failure)"); return; }
+
+    typo::FontStack stack;
+    stack.add(vf);
+
+    const std::uint16_t g = vf->glyph_for('H');
+    // Upright.
+    { typo::ShapeParams p; p.size_px = 100.0f; stack.shape("H", p); }
+    const Rect up = vf->outline(g).control_bounds();
+    // Italic.
+    { typo::ShapeParams p; p.size_px = 100.0f; p.italic = true; stack.shape("H", p); }
+    const Rect it = vf->outline(g).control_bounds();
+
+    check(up.size.x > 0.0f && it.size.x > 0.0f, "glyph has outline in both states");
+    // A slant leaves height alone but shifts/widens the control box.
+    check(num::abs(it.size.y - up.size.y) < up.size.y * 0.05f, "italic keeps the cap height");
+    check(num::abs(it.origin.x - up.origin.x) > 1.0f || num::abs(it.size.x - up.size.x) > 1.0f,
+          "italic slants the glyph geometry");
+}
+
 /// Justified text: every line but the last is stretched to the box edge by
 /// spreading slack across inter-word spaces. The bar: a wrapped justified
 /// paragraph paints glyphs reaching closer to the right edge than the same
@@ -1158,6 +1200,7 @@ int main() {
     test_rendering();
     test_variations();
     test_caret();
+    test_italic();
     test_justify();
     test_ligatures();
     test_color_glyphs();

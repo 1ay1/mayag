@@ -665,6 +665,7 @@ struct ShapeParams {
     bool  kerning       = true;
     bool  ligatures     = true;
     float weight        = 400.0f;   ///< drives a variable font's wght axis
+    bool  italic        = false;    ///< drive slnt/ital axis (variable fonts)
 
     /// Extra variable-font axis overrides beyond weight (opsz, wdth, slnt,
     /// custom). Kept as a tiny inline array so ShapeParams stays a value type

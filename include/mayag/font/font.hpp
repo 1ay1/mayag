@@ -512,7 +512,7 @@ class FontStack : public Shaper {
             const bool missing = (gid == 0);
             const Face& face = *faces_[face_idx];
             pin_variations(faces_[face_idx].get(), params.weight,
-                           {params.axes.data(), params.axis_count});
+                           {params.axes.data(), params.axis_count}, params.italic);
 
             ShapedGlyph g;
             g.glyph_id   = gid;
@@ -560,10 +560,11 @@ class FontStack : public Shaper {
     /// overrides (opsz, wdth, ...) so the raster matches the shaped run.
     [[nodiscard]] const CachedGlyph* glyph(std::size_t face_index, std::uint16_t gid,
                                            float size_px, float weight = 400.0f,
-                                           std::span<const ShapeParams::Axis> axes = {}) {
+                                           std::span<const ShapeParams::Axis> axes = {},
+                                           bool italic = false) {
         if (face_index >= faces_.size()) return nullptr;
         const Face& face = *faces_[face_index];
-        pin_variations(faces_[face_index].get(), weight, axes);
+        pin_variations(faces_[face_index].get(), weight, axes, italic);
 
         const bool use_sdf = should_use_sdf(size_px);
 
@@ -706,19 +707,39 @@ class FontStack : public Shaper {
 
     // Pin a variable face to a run's axis position before we shape or
     // rasterise with it: the wght axis plus any extra overrides (opsz, wdth,
-    // custom). A no-op for static faces. Face guards its own variation state
-    // and set_variations early-outs when nothing moves, so this is cheap to
-    // call per run and safe on the shared face.
+    // custom) and, when `italic` is requested, the font's own slant — slnt
+    // (degrees, use its min = most slanted) or ital (0..1, use 1). A no-op for
+    // static faces. Face guards its own variation state and set_variations
+    // early-outs when nothing moves, so this is cheap per run and safe.
     static void pin_variations(Face* face, float weight,
-                               std::span<const ShapeParams::Axis> axes) {
+                               std::span<const ShapeParams::Axis> axes,
+                               bool italic = false) {
         if (face == nullptr || !face->is_variable()) return;
-        std::array<std::pair<std::uint32_t, float>, ShapeParams::max_axes + 1> vals;
+        std::array<std::pair<std::uint32_t, float>, ShapeParams::max_axes + 2> vals;
         std::size_t n = 0;
         vals[n++] = {var::tag_wght, weight};
+
+        // Real oblique from the font when italic is asked for and the face has
+        // a slant/italic axis (true masters beat any synthetic shear).
+        if (italic) {
+            for (const auto& ax : face->axes()) {
+                if (ax.tag == var::tag_slnt && n < vals.size()) {
+                    vals[n++] = {var::tag_slnt, ax.min};   // most-slanted extreme
+                    break;
+                }
+                if (ax.tag == var::tag_ital && n < vals.size()) {
+                    vals[n++] = {var::tag_ital, ax.max};   // fully italic
+                    break;
+                }
+            }
+        }
+
         for (const auto& a : axes) {
             if (n >= vals.size()) break;
-            if (a.tag == var::tag_wght) { vals[0].second = a.value; continue; }
-            vals[n++] = {a.tag, a.value};
+            bool merged = false;
+            for (std::size_t j = 0; j < n; ++j)
+                if (vals[j].first == a.tag) { vals[j].second = a.value; merged = true; break; }
+            if (!merged) vals[n++] = {a.tag, a.value};
         }
         face->set_variations({vals.data(), n});
     }
@@ -756,6 +777,7 @@ namespace detail {
     p.kerning        = true;
     p.ligatures      = st.ligatures;
     p.weight         = st.effective_weight();
+    p.italic         = st.italic;
     for (std::uint8_t i = 0; i < st.variations.count && p.axis_count < ShapeParams::max_axes; ++i) {
         const auto& a = st.variations.axes[i];
         p.axes[p.axis_count++] = ShapeParams::Axis{a.tag, a.value};
@@ -985,7 +1007,8 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
 
                 const CachedGlyph* cached = stack_->glyph(g.face_index, g.glyph_id, st.size,
                                                            st.effective_weight(),
-                                                           {sp.axes.data(), sp.axis_count});
+                                                           {sp.axes.data(), sp.axis_count},
+                                                           sp.italic);
                 if (cached != nullptr && cached->size.x > 0.0f) {
                     emit(dl, *cached, Vec2{pen_x, baseline_y} + g.offset, st);
                 }
