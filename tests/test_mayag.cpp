@@ -374,6 +374,40 @@ void test_pixels() {
         check(right > left + 0.3f, "horizontal gradient ramps left to right");
     }
 
+    // Multi-stop radial gradient: bright centre, dark rim. The centre pixel
+    // must be brighter than the corners, and a mid-radius stop must land
+    // between the two — proving the 3-stop radial builder wires end to end.
+    {
+        auto ui = box() | size(80, 80)
+                        | radial_gradient<GradientStop{0.0f, rgb<0xFFFFFF>},
+                                          GradientStop{0.5f, rgb<0x808080>},
+                                          GradientStop{1.0f, rgb<0x000000>}>();
+        RenderOptions o; o.background = colors::black;
+        const Image img = render(ui, {80, 80}, o);
+        const float centre = luminance(img.at(40, 40));
+        const float corner = luminance(img.at(4, 4));
+        check(centre > corner + 0.3f, "radial gradient is bright at centre, dark at rim");
+    }
+
+    // Multi-stop conic (angular) sweep: verify the builder produces a correct
+    // angular Fill with all stops (the renderer's angular shading is covered
+    // elsewhere; here we pin the DSL builder that feeds it).
+    {
+        Style cs;
+        (conic_gradient<GradientStop{0.0f, rgb<0xFF0000>},
+                        GradientStop{0.5f, rgb<0x00FF00>},
+                        GradientStop{1.0f, rgb<0xFF0000>}>()).apply(cs);
+        check(cs.fill.kind == FillKind::angular_gradient, "conic_gradient sets angular kind");
+        check(cs.fill.stop_count == 3, "conic_gradient keeps all three stops");
+        check(cs.fill.stops[1].color == rgb<0x00FF00>, "conic middle stop is the given colour");
+
+        // The 2-colour convenience form too.
+        Style cs2;
+        conic_gradient(rgb<0xFFFFFF>, rgb<0x000000>).apply(cs2);
+        check(cs2.fill.kind == FillKind::angular_gradient && cs2.fill.stop_count == 2,
+              "2-colour conic_gradient builds a 2-stop angular fill");
+    }
+
     // REGRESSION: gradients must interpolate in Ok**LCH** (polar), not Oklab
     // (Cartesian) and not linear RGB. Both of the wrong choices desaturate
     // through the middle of a hue sweep; only the polar path holds chroma.

@@ -720,6 +720,67 @@ template <GradientStop... Stops>
     return {f};
 }
 
+// ---- multi-stop gradients: same stop list, any geometry ----
+//
+// One family: list the colour stops once, choose the shape. All perceptual
+// (Oklch) by default; `| srgb_interpolation` opts out. Stops are checked at
+// compile time to be ordered, so a mis-ordered gradient never ships. Stops are
+// non-type template args, so use the compile-time colour form rgb<0xRRGGBB>:
+//
+//   box | radial_gradient<GradientStop{0.0f, rgb<0xFFDD88>},
+//                         GradientStop{1.0f, rgb<0x3C1478>}>()
+//   ring | conic_gradient<GradientStop{0.0f,  rgb<0xFF0000>},
+//                         GradientStop{0.5f,  rgb<0x00FF00>},
+//                         GradientStop{1.0f,  rgb<0xFF0000>}>()   // seamless
+
+namespace detail {
+template <GradientStop... Stops>
+[[nodiscard]] constexpr Fill make_gradient(FillKind kind, Vec2 a, Vec2 b, float r) {
+    static_assert(stops_ordered<Stops...>(),
+                  "mayag: gradient stop positions must be non-decreasing (0.0 -> 1.0).");
+    static_assert(sizeof...(Stops) <= max_gradient_stops,
+                  "mayag: too many gradient stops (max 8).");
+    constexpr std::array<GradientStop, sizeof...(Stops)> arr{Stops...};
+    Fill f{.kind = kind, .from = a, .to = b, .radius = r};
+    for (std::size_t i = 0; i < arr.size(); ++i) f.stops[i] = arr[i];
+    f.stop_count = static_cast<std::uint8_t>(arr.size());
+    return f;
+}
+}  // namespace detail
+
+/// Multi-stop linear gradient from `a` to `b` in normalised box coords.
+template <GradientStop... Stops>
+[[nodiscard]] constexpr LinearGradient linear_gradient(Vec2 a = {0.0f, 0.0f},
+                                                       Vec2 b = {0.0f, 1.0f}) {
+    return {detail::make_gradient<Stops...>(FillKind::linear_gradient, a, b, 0.5f)};
+}
+
+/// Multi-stop radial gradient centred at `center_`, reaching `r` (fraction of
+/// the box). stop(0) is the centre, stop(1) the rim.
+template <GradientStop... Stops>
+[[nodiscard]] constexpr LinearGradient radial_gradient(Vec2 center_ = {0.5f, 0.5f},
+                                                       float r = 0.5f) {
+    return {detail::make_gradient<Stops...>(FillKind::radial_gradient, center_, {1.0f, 1.0f}, r)};
+}
+
+/// Two-colour conic (angular) sweep around `center_` — spinners, hue wheels.
+/// The sweep runs the full turn; stop 0 is the start angle, stop 1 the end.
+[[nodiscard]] constexpr LinearGradient conic_gradient(Color<Srgb> from, Color<Srgb> to,
+                                                      Vec2 center_ = {0.5f, 0.5f}) {
+    Fill f{.kind = FillKind::angular_gradient, .from = center_};
+    f.stops[0] = {0.0f, from};
+    f.stops[1] = {1.0f, to};
+    f.stop_count = 2;
+    return {f};
+}
+
+/// Multi-stop conic (angular) sweep around `center_`. Repeat the first colour
+/// as the last stop for a seamless wheel.
+template <GradientStop... Stops>
+[[nodiscard]] constexpr LinearGradient conic_gradient(Vec2 center_ = {0.5f, 0.5f}) {
+    return {detail::make_gradient<Stops...>(FillKind::angular_gradient, center_, {1.0f, 1.0f}, 0.5f)};
+}
+
 /// Interpolate this gradient in sRGB instead of Oklch. Requires a gradient —
 /// on a solid fill it would be a lie.
 struct SrgbInterp {
