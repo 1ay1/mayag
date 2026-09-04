@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -78,6 +79,7 @@ class Face {
         face->glyphs_  = GlyphSource{face->file_};
         face->kerning_ = KernTable{face->file_};
         face->id_      = next_id();
+        face->base_id_ = face->id_;
 
         // ── variable-font setup ──────────────────────────────────────────
         // Parse the fvar axis table and start the face at every axis's
@@ -294,7 +296,27 @@ class Face {
         user_   = std::move(next_user);
         glyphs_.set_coords(&coords_);
         outline_cache_.clear();
-        id_ = next_id();               // force atlas re-rasterisation
+        // Derive the id from the position, not a running counter, so returning
+        // to a weight we've drawn before reuses its atlas entries instead of
+        // re-rasterising every glyph again.
+        id_ = variation_id(base_id_, coords_);
+    }
+
+    // Stable id for a base face at a given normalised position. FNV-1a over
+    // the coords, mixed with the base id; collisions across different faces
+    // are astronomically unlikely and only cost a redundant re-raster.
+    [[nodiscard]] static std::uint32_t variation_id(std::uint32_t base,
+                                                    const var::Coords& c) noexcept {
+        std::uint32_t h = 2166136261u ^ base;
+        for (float v : c) {
+            std::uint32_t bits = 0;
+            static_assert(sizeof(bits) == sizeof(v));
+            std::memcpy(&bits, &v, sizeof(bits));
+            h = (h ^ bits) * 16777619u;
+        }
+        // Keep it out of the low range next_id() hands out for base faces so a
+        // varied instance never aliases a different base face's id.
+        return h | 0x80000000u;
     }
 
     [[nodiscard]] static std::uint32_t next_id() {
@@ -307,6 +329,7 @@ class Face {
     GlyphSource               glyphs_;
     KernTable                 kerning_;
     std::uint32_t             id_ = 0;
+    std::uint32_t             base_id_ = 0;   // stable id ignoring variation
 
     // ── variable-font state ─────────────────────────────────────────────
     std::vector<var::Axis>        axes_;      // fvar axes (empty ⇒ static font)
@@ -449,6 +472,7 @@ class FontStack : public Shaper {
             auto [face_idx, gid] = resolve(cp);
             const bool missing = (gid == 0);
             const Face& face = *faces_[face_idx];
+            pin_weight(faces_[face_idx].get(), params.weight);
 
             ShapedGlyph g;
             g.glyph_id   = gid;
@@ -491,9 +515,10 @@ class FontStack : public Shaper {
 
     /// Fetch (rasterising on demand) the atlas entry for a glyph.
     [[nodiscard]] const CachedGlyph* glyph(std::size_t face_index, std::uint16_t gid,
-                                           float size_px) {
+                                           float size_px, float weight = 400.0f) {
         if (face_index >= faces_.size()) return nullptr;
         const Face& face = *faces_[face_index];
+        pin_weight(faces_[face_index].get(), weight);
 
         const bool use_sdf = should_use_sdf(size_px);
 
@@ -567,6 +592,15 @@ class FontStack : public Shaper {
         return atlas_.insert(key, r.bitmap, r.offset, advance, scale, 0.0f, false);
     }
 
+    // Set a variable face's weight axis before we shape or rasterise with it.
+    // A no-op for static faces or ones without a wght axis. Face guards its own
+    // variation state, and set_variation early-outs when nothing moves, so
+    // this is cheap to call per glyph and safe on the shared face.
+    static void pin_weight(Face* face, float weight) {
+        if (face != nullptr && face->is_variable())
+            face->set_variation(var::tag_wght, weight);
+    }
+
     [[nodiscard]] bool should_use_sdf(float size_px) const noexcept {
         switch (config_.mode) {
             case RenderMode::bitmap: return false;
@@ -593,7 +627,8 @@ class StackMeasurer final : public layout::TextMeasurer {
     explicit StackMeasurer(const FontStack& stack) : stack_{&stack} {}
 
     [[nodiscard]] float advance(std::string_view s, const TextStyle& st) const override {
-        ShapeParams p{st.size, st.letter_spacing, true, true};
+        ShapeParams p{st.size, st.letter_spacing, true, true,
+                      static_cast<float>(st.weight)};
         return stack_->shape(s, p).width;
     }
 
@@ -608,7 +643,8 @@ class StackMeasurer final : public layout::TextMeasurer {
 
         if (s.empty()) return {0.0f, line_h};
 
-        ShapeParams p{st.size, st.letter_spacing, true, true};
+        ShapeParams p{st.size, st.letter_spacing, true, true,
+                      static_cast<float>(st.weight)};
         const ShapeResult shaped = stack_->shape(s, p);
 
         const bool wrapping = st.overflow == TextOverflow::wrap &&
@@ -770,7 +806,8 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
         const FaceMetrics fm = stack_->metrics(st.size);
         const float line_h = st.line_height > 0.0f ? st.size * st.line_height : fm.line_height;
 
-        ShapeParams p{st.size, st.letter_spacing, true, true};
+        ShapeParams p{st.size, st.letter_spacing, true, true,
+                      static_cast<float>(st.weight)};
         const ShapeResult shaped = stack_->shape(s, p);
 
         const bool wrapping = st.overflow == TextOverflow::wrap && box.width() > 0.0f;
@@ -793,7 +830,8 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                 const auto& g = shaped.glyphs[i];
                 if (g.glyph_id == 0 && g.advance == 0.0f) continue;   // newline marker
 
-                const CachedGlyph* cached = stack_->glyph(g.face_index, g.glyph_id, st.size);
+                const CachedGlyph* cached = stack_->glyph(g.face_index, g.glyph_id, st.size,
+                                                           static_cast<float>(st.weight));
                 if (cached != nullptr && cached->size.x > 0.0f) {
                     emit(dl, *cached, Vec2{pen_x, baseline_y} + g.offset, st);
                 }

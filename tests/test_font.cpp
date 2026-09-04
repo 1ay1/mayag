@@ -874,6 +874,30 @@ void test_variations() {
         check(num::abs(adv_hi - adv_lo) > 0.01f,
               "advance width varies with weight (HVAR applied)");
 
+    // End-to-end: TextStyle::weight must drive the axis through the whole
+    // layout pipeline, so measuring the same string at thin vs black yields a
+    // wider line at black — no discrete face swap, one variable file.
+    {
+        typo::FontStack stack;
+        stack.add(vf);
+        typo::StackMeasurer meas{stack};
+        TextStyle thin;  thin.size  = 100.0f; thin.weight  = FontWeight::thin;
+        TextStyle black; black.size = 100.0f; black.weight = FontWeight::black;
+        const float w_thin  = meas.advance("Hamburgefons", thin);
+        const float w_black = meas.advance("Hamburgefons", black);
+        check(w_thin > 0.0f, "variable text measures at thin weight");
+        check(w_black > w_thin,
+              "heavier TextStyle::weight measures wider through StackMeasurer");
+
+        // Content-addressed id: the same weight twice yields the same face id,
+        // so glyph atlases hit across frames instead of re-rasterising.
+        vf->set_variation(typo::var::tag_wght, hi);
+        const std::uint32_t id_a = vf->id();
+        vf->set_variation(typo::var::tag_wght, lo);
+        vf->set_variation(typo::var::tag_wght, hi);
+        check(vf->id() == id_a, "returning to a weight restores its stable face id");
+    }
+
     vf->reset_variations();
 }
 

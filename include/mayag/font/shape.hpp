@@ -516,6 +516,7 @@ struct ShapeParams {
     float letter_spacing = 0.0f;
     bool  kerning       = true;
     bool  ligatures     = true;
+    float weight        = 400.0f;   ///< drives a variable font's wght axis
 };
 
 /// The seam. `SimpleShaper` below is the default; a HarfBuzz-backed
