@@ -15,8 +15,9 @@
 
 #include <mayag/mayag.hpp>
 
+#include "harness.hpp"
+
 #include <cstdio>
-#include <cstring>
 #include <variant>
 
 using namespace mayag;
@@ -179,13 +180,12 @@ static_assert(Program<Counter>, "Counter must satisfy the Program concept");
 // ────────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
-    const bool headless = argc > 1 && std::strcmp(argv[1], "--headless") == 0;
+    // Same harness as every other example: --png, --gpu, --headless, --size,
+    // --dpi and the shared font stack all apply here, instead of this file
+    // understanding only --headless and quietly missing harness-level fixes.
+    const auto opts = demo::parse_args(argc, argv, {420, 460});
 
-    AppConfig cfg{.title = "mayag — counter", .size = {420, 460}};
-
-    if (!headless) {
-        return run<Counter>(cfg);
-    }
+    AppConfig cfg{.title = "mayag — counter", .size = opts.size};
 
     // Headless: script the input, assert the behaviour, and prove the app
     // works end to end without a display. This is the SAME runtime the
@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
         if (!ok) ++failures;
     };
 
-    run_headless<Counter>(cfg, [&](auto& rt) {
+    const int rc = demo::run<Counter>(opts, cfg, [&](auto& rt) {
         std::printf("counter headless\n");
 
         // Ask the runtime for rects by NAME every time. Never hold a
@@ -264,6 +264,9 @@ int main(int argc, char** argv) {
         check(rt.finished(), "escape quits");
     });
 
+    // Only the headless mode runs the script, so only it has assertions to
+    // report; window/png/gpu modes just return the harness's result.
+    if (opts.mode != demo::Options::Mode::headless) return rc;
     std::printf("%s\n", failures == 0 ? "\nPASS" : "\nFAIL");
     return failures == 0 ? 0 : 1;
 }

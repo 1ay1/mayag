@@ -185,6 +185,12 @@ inline void report(const Ui& ui, Vec2 viewport, const RenderOptions& opts,
 /// the app and assert on it. In window and png modes it is never called.
 template <Program P, typename Driver>
 [[nodiscard]] int run(const Options& o, AppConfig cfg, Driver&& drive) {
+    // Every mode gets the SAME font stack. This used to be set only on the png
+    // path, so a fix to the font configuration silently did not reach the live
+    // window or the headless run — the three "same Program" modes were not
+    // actually rendering the same way.
+    if (!cfg.fonts) cfg.fonts = make_fonts(o);
+
     switch (o.mode) {
         case Options::Mode::window:
             return mayag::run<P>(std::move(cfg));
@@ -243,7 +249,7 @@ template <Program P, typename Driver>
             DrawList dl;
             render::PaintOptions po{};
             po.dpi_scale = o.dpi;
-            auto fonts = cfg.fonts ? cfg.fonts : make_fonts(o);
+            auto fonts = cfg.fonts;   // set once above, for every mode
             typo::StackMeasurer measurer{*fonts};
             typo::StackGlyphRenderer glyphs{*fonts};
             layout::layout_tree(root, o.size, measurer);

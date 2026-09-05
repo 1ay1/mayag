@@ -11,11 +11,12 @@
 //   subscribe what to listen for, as a function of state; on_frame() animates
 //
 // Build:  cmake --build build && ./build/examples/mayag_hello
-// (add --headless to run its self-check without a window)
+// (--headless self-checks without a window; --png/--gpu write a screenshot)
 
 #include <mayag/mayag.hpp>
 
-#include <cstring>
+#include "harness.hpp"
+
 #include <string>
 #include <utility>
 
@@ -88,15 +89,19 @@ struct Hello {
 };
 
 int main(int argc, char** argv) {
-    const bool headless = argc > 1 && std::strcmp(argv[1], "--headless") == 0;
+    // Same harness as every other example, so `--png`, `--gpu`, `--headless`,
+    // `--size`, `--dpi` and the shared font configuration all apply here too.
+    // hello used to hand-roll its own main and understood only `--headless`,
+    // which meant fixes to the harness (its font stack, its backend selection)
+    // silently did not reach the one example newcomers are told to copy.
+    const auto opts = demo::parse_args(argc, argv, {360, 320});
+
     AppConfig cfg;
     cfg.title = "mayag — hello";
-    cfg.size  = {360, 320};
-
-    if (!headless) return run<Hello>(cfg);
+    cfg.size  = opts.size;
 
     // The whole app is testable without a window: drive it, assert on state.
-    return run_headless<Hello>(cfg, [](auto& rt) {
+    return demo::run<Hello>(opts, std::move(cfg), [](auto& rt) {
         int fails = 0;
         const auto ok = [&](bool c, const char* what) {
             std::printf("  %s  %s\n", c ? "ok  " : "FAIL", what);
@@ -113,6 +118,5 @@ int main(int argc, char** argv) {
         ok(!rt.model().bump.animating(), "the spring settles on its own (0% CPU)");
         ok(rt.window().frames_presented() >= 1, "the app rendered");
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
-        return fails == 0 ? 0 : 1;
     });
 }
