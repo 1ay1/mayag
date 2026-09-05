@@ -335,6 +335,24 @@ if(MAYAG_BUILD_TESTS)
     # the public interface, so it fails if adding a backend ever requires
     # touching the core again. Deliberately NOT inside any MAYAG_WITH_* guard —
     # the property it checks is that no such guard is needed.
+    # Cmd::task / Cmd::stream / Sub::source under real contention.
+    add_executable(mayag_concurrency_tests tests/test_concurrency.cpp)
+    target_link_libraries(mayag_concurrency_tests PRIVATE mayag)
+    target_compile_options(mayag_concurrency_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_concurrency_tests COMMAND mayag_concurrency_tests)
+
+    # The same test under ThreadSanitizer. Not part of the default suite --
+    # TSan is ~10x slower and needs a compatible toolchain -- but it is the
+    # only thing that finds a race which does not happen to fire today.
+    # Build and run explicitly:  ninja mayag_concurrency_tsan && ./mayag_concurrency_tsan
+    if(NOT MSVC AND NOT APPLE)
+        add_executable(mayag_concurrency_tsan EXCLUDE_FROM_ALL
+                       tests/test_concurrency.cpp)
+        target_link_libraries(mayag_concurrency_tsan PRIVATE mayag)
+        target_compile_options(mayag_concurrency_tsan PRIVATE -fsanitize=thread -O1 -g)
+        target_link_options(mayag_concurrency_tsan PRIVATE -fsanitize=thread)
+    endif()
+
     # Virtualised cost must be flat in the row count, not just look right.
     add_executable(mayag_scaling_tests tests/test_scaling.cpp)
     target_link_libraries(mayag_scaling_tests PRIVATE mayag)
