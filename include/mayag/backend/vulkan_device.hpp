@@ -1007,27 +1007,30 @@ class VulkanDevice {
         std::uint32_t images = caps.minImageCount + 1;
         if (caps.maxImageCount > 0 && images > caps.maxImageCount) images = caps.maxImageCount;
 
-        // Present mode. FIFO (vsync) is always supported and is the correct
-        // default — no tearing, and an idle app that never presents costs
-        // nothing regardless. MAILBOX is preferred WHEN available because it
-        // presents the newest frame instead of queuing behind the vsync
-        // deadline: for a bursty live app (a sample lands, one frame goes out)
-        // that shaves up to a refresh interval of latency off each update,
-        // still without tearing. It needs one more image, which is why images
-        // is bumped when we pick it.
-        int present_mode = vk::VK_PRESENT_MODE_FIFO_KHR;
-        std::uint32_t pm_count = 0;
-        api_->GetPhysicalDeviceSurfacePresentModesKHR(phys_, surface_, &pm_count, nullptr);
-        std::vector<int> modes(pm_count);
-        api_->GetPhysicalDeviceSurfacePresentModesKHR(phys_, surface_, &pm_count, modes.data());
-        for (int mode : modes) {
-            if (mode == vk::VK_PRESENT_MODE_MAILBOX_KHR) {
-                present_mode = mode;
-                std::uint32_t want = caps.minImageCount + 2;   // triple-buffer
-                if (caps.maxImageCount == 0 || want <= caps.maxImageCount) images = want;
-                break;
-            }
-        }
+        // Present mode. FIFO (vsync) is always supported and is what mayag
+        // uses on the Wayland path.
+        //
+        // MAILBOX looks attractive -- it presents the newest frame instead of
+        // queuing behind the vsync deadline, shaving up to a refresh interval
+        // of latency off a bursty update -- but it is NON-BLOCKING by
+        // definition, and on this path nothing else blocks either: the
+        // wl_surface.frame callback that is supposed to pace Wait::poll never
+        // fires, because a frame callback is only delivered after a
+        // wl_surface.commit and vkQueuePresentKHR owns the commit. Measured
+        // consequence: poll() returned immediately 92% of the time and an
+        // animating window free-ran at ~11k fps, burning a core to render
+        // thousands of frames per second that no one will ever see.
+        //
+        // FIFO makes vkQueuePresentKHR block on the display's refresh, which
+        // is the clock this loop was missing. An idle app still costs nothing
+        // (it never presents at all, and Wait::block parks it on the fd), so
+        // the only thing given up is sub-refresh latency on a bursty update --
+        // a fair trade for not spinning a core.
+        //
+        // If MAILBOX is ever restored here, it MUST come with a real pacing
+        // source, or this regresses silently: everything still looks correct,
+        // it just costs 100% of a CPU.
+        const int present_mode = vk::VK_PRESENT_MODE_FIFO_KHR;
 
         vk::VkSwapchainCreateInfoKHR ci{};
         ci.sType = vk::VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
