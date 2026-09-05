@@ -172,6 +172,7 @@ struct Ctx {
     /// cannot see, and it drifts the moment a label or font changes.
     TrackedSet* tracked = nullptr;
 
+
     /// Follow a node's measured rect.
     void track(const Tracked& t, std::uint64_t node) const {
         t.follow(node);
@@ -753,9 +754,13 @@ class Runtime {
         // seek was lost and you had to click again. Measured: 4 of 12 clicks
         // lost while playing.
         //
-        // Cheap in the common case: subscribe() is a pure function and
-        // sync_sources() does nothing when the id set is unchanged.
-        sync_sources(current_subs());
+        // Skipped entirely when no message was applied, so an idle frame does
+        // not pay for a second subscribe(). The model cannot have changed if
+        // nothing ran update().
+        if (model_touched_) {
+            model_touched_ = false;
+            sync_sources(current_subs());
+        }
 
         render();
     }
@@ -851,6 +856,9 @@ class Runtime {
     /// Model' = update(Model, Msg); then interpret the returned effects.
     /// This function is the ONLY place the model changes.
     void step(Msg msg) {
+        // Any message means update() ran, so the subscription set may have
+        // changed and sources must be reconciled again this frame.
+        model_touched_ = true;
         if (!cfg_.catch_exceptions) {
             auto [next, cmd] = P::update(std::move(model_), std::move(msg));
             model_ = std::move(next);
@@ -1907,6 +1915,11 @@ class Runtime {
     };
     std::shared_ptr<CoalesceChain> coalesce_chain_ =
         std::make_shared<CoalesceChain>();
+
+    /// Set whenever update() runs, cleared once sources have been reconciled
+    /// against the resulting model. Lets an idle frame skip a second
+    /// subscribe() entirely.
+    bool model_touched_ = false;
 
     std::vector<RunningSource>       sources_;
     /// Sources that have been stopped but whose threads have not finished.

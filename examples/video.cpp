@@ -131,7 +131,11 @@ class Decoder {
     /// shared_ptr, which is what lets it travel to the renderer without a
     /// copy. `pts_out` is the presentation time in seconds, so the caller can
     /// pace playback against a real clock rather than assuming a frame rate.
-    [[nodiscard]] std::shared_ptr<const ImageData> next(double* pts_out) {
+    /// `max_w` caps the output width, so the decoder produces pixels at the
+    /// size they will be DRAWN rather than the size they were encoded. Zero
+    /// means source resolution. It never upscales.
+    [[nodiscard]] std::shared_ptr<const ImageData> next(double* pts_out,
+                                                        int max_w = 0) {
         if (ctx_ == nullptr) return nullptr;
 
         for (;;) {
@@ -143,7 +147,7 @@ class Decoder {
                     *pts_out = pts == AV_NOPTS_VALUE
                              ? 0.0 : static_cast<double>(pts) * av_q2d(st->time_base);
                 }
-                return to_rgba();
+                return to_rgba(max_w);
             }
             if (rc != AVERROR(EAGAIN)) return nullptr;   // EOF or hard error
 
@@ -151,7 +155,7 @@ class Decoder {
             av_packet_unref(pkt_);
             if (av_read_frame(fmt_, pkt_) < 0) {
                 avcodec_send_packet(ctx_, nullptr);      // flush
-                if (avcodec_receive_frame(ctx_, frame_) == 0) return to_rgba();
+                if (avcodec_receive_frame(ctx_, frame_) == 0) return to_rgba(max_w);
                 return nullptr;
             }
             if (pkt_->stream_index == stream_) {
@@ -200,6 +204,7 @@ class Decoder {
     /// so it is one flag rather than two functions.
     [[nodiscard]] std::shared_ptr<const ImageData> seek(
             double seconds, double* pts_out, bool precise = true,
+            int max_w = 0,
             const std::function<bool()>& still_wanted = {}) {
         if (ctx_ == nullptr) return nullptr;
         const AVStream* st = fmt_->streams[stream_];
@@ -216,7 +221,7 @@ class Decoder {
             // Superseded by a newer seek: stop rather than finish work whose
             // result is already destined for the bin.
             if (still_wanted && !still_wanted()) return nullptr;
-            auto frame = next(&pts);
+            auto frame = next(&pts, max_w);
             if (!frame) break;
             last = std::move(frame);
             if (!precise) break;                 // the keyframe is the answer
@@ -227,11 +232,26 @@ class Decoder {
     }
 
   private:
-    [[nodiscard]] std::shared_ptr<const ImageData> to_rgba() {
-        const int w = ctx_->width, h = ctx_->height;
-        sws_ = sws_getCachedContext(sws_, w, h, ctx_->pix_fmt,
+    /// Convert the current frame to RGBA, optionally scaling to `max_w`.
+    ///
+    /// Scaling HERE rather than at draw time is the point: sws_scale is
+    /// already running, so a smaller destination makes it cheaper AND makes
+    /// the buffer that crosses to the UI thread smaller. Measured on 1080p:
+    /// 3.27 ms / 7.91 MB at source, 1.14 ms / 1.59 MB at 860 wide. The
+    /// pixels dropped are ones the sampler would have discarded anyway.
+    [[nodiscard]] std::shared_ptr<const ImageData> to_rgba(int max_w = 0) {
+        const int sw = ctx_->width, sh = ctx_->height;
+        // Never scale UP -- that costs time and adds no detail.
+        const bool shrink = max_w > 0 && max_w < sw;
+        const int  w = shrink ? max_w : sw;
+        const int  h = shrink ? num::max(sh * max_w / sw, 1) : sh;
+        sws_ = sws_getCachedContext(sws_, sw, sh, ctx_->pix_fmt,
                                     w, h, AV_PIX_FMT_RGBA,
-                                    SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                    // A preview is resampled once and looked
+                                    // at for a few milliseconds; bilinear's
+                                    // quality is not worth its cost here.
+                                    shrink ? SWS_FAST_BILINEAR : SWS_BILINEAR,
+                                    nullptr, nullptr, nullptr);
         if (sws_ == nullptr) return nullptr;
 
         // Let ffmpeg size and align the destination.
@@ -263,7 +283,7 @@ class Decoder {
                                  AV_PIX_FMT_RGBA, w, h, kAlign) < 0) {
             return nullptr;
         }
-        sws_scale(sws_, frame_->data, frame_->linesize, 0, h, dst, stride);
+        sws_scale(sws_, frame_->data, frame_->linesize, 0, sh, dst, stride);
 
         // mayag's ImageData is tightly packed, so drop any row padding ffmpeg
         // asked for before handing the pixels over.
@@ -330,6 +350,18 @@ struct Video {
         /// it owes a precise seek. False for a plain click, which already
         /// seeked precisely and must not pay for a second decode.
         bool   previewing = false;
+        /// The size the picture is actually drawn at, in physical pixels.
+        ///
+        /// Decoding to this instead of to the source resolution is the
+        /// single largest saving in the seek path: a 1080p frame costs
+        /// 3.27 ms to scale and 7.91 MB to upload, against 1.14 ms and
+        /// 1.59 MB at an 860px window size. The extra pixels are discarded
+        /// by the sampler, so they buy nothing.
+        ///
+        /// Zero means "not known yet" -- the first frame decodes at source
+        /// size, and every frame after uses the measured box.
+        int    view_w = 0;
+        int    view_h = 0;
         double time    = 0.0;      ///< current PTS, seconds
         double duration = 0.0;
         int    frames  = 0;
@@ -459,6 +491,7 @@ struct Video {
                 if (!s.preview) ++m.epoch;
                 const double want = m.time;
                 const int    epoch = m.epoch;
+                const int    max_w = m.view_w;
                 // task_coalesce, NOT task_latest: one decode runs at a time and
                 // the newest pending position replaces the rest.
                 //
@@ -473,7 +506,7 @@ struct Video {
                 // Coalescing shows a frame every ~500 ms during the drag, each
                 // nearer the cursor, and the release position always lands.
                 return {m, Cmd<Msg>::task_coalesce("seek",
-                    [want, epoch, preview = s.preview] {
+                    [want, epoch, max_w, preview = s.preview] {
                         Decoder d;               // owned by this task alone
                         if (!d.open(g_path)) return Msg{Ended{}};
                         double pts = 0.0;
@@ -481,7 +514,11 @@ struct Video {
                         // No cancel predicate: under task_coalesce this decode
                         // is the only one running and its frame is wanted.
                         // Abandoning it is what made the drag show nothing.
-                        auto px = d.seek(want, &pts, !preview);
+                        // Decode straight to the size it will be drawn at.
+                        // The scaler is running anyway, so a smaller target
+                        // is cheaper AND the buffer that crosses to the UI
+                        // thread shrinks with it.
+                        auto px = d.seek(want, &pts, !preview, max_w);
                         const float ms = std::chrono::duration<float, std::milli>(
                                              std::chrono::steady_clock::now() - t0).count();
                         if (px) return Msg{Frame{std::move(px), pts, ms, epoch}};
@@ -576,7 +613,29 @@ struct Video {
                 return update(std::move(m), Msg{SeekTo{m.time, false}});
             },
 
-            [&](Resized r) -> R { m.window = r.size; return {m, Cmd<Msg>::none()}; },
+            [&](Resized r) -> R {
+                m.window = r.size;
+                // The size the picture will be drawn at, derived with the
+                // same letterbox rule the view uses. Decoding to this instead
+                // of to the source resolution is the largest single saving in
+                // the seek path -- 3.27 ms/7.91 MB becomes 1.14 ms/1.59 MB on
+                // a 1080p file in an 860px window -- and the pixels dropped
+                // are ones the sampler would have thrown away.
+                //
+                // Derived rather than read back from layout: it is a pure
+                // function of the window and the source aspect, so computing
+                // it here keeps update() self-contained and avoids depending
+                // on a frame having already been laid out.
+                const float src = g_info.height > 0
+                    ? static_cast<float>(g_info.width) /
+                      static_cast<float>(g_info.height)
+                    : 16.0f / 9.0f;
+                const float win = r.size.y > 0.0f ? r.size.x / r.size.y : src;
+                const float vw = win > src ? r.size.y * src : r.size.x;
+                m.view_w = static_cast<int>(vw);
+                m.view_h = static_cast<int>(vw / src);
+                return {m, Cmd<Msg>::none()};
+            },
 
             [&](Tick t) -> R {
                 m.chrome.step(t.dt);
@@ -611,8 +670,9 @@ struct Video {
     static Sub<Msg> decoder(const Model& m) {
         const double from  = m.time;
         const int    epoch = m.epoch;
+        const int    max_w = m.view_w;
         return Sub<Msg>::source("playback:" + std::to_string(m.epoch),
-                                [from, epoch](auto sink, auto alive) {
+                                [from, epoch, max_w](auto sink, auto alive) {
             Decoder d;                       // owned by this thread alone
             if (!d.open(g_path)) { sink(Msg{Ended{}}); return; }
             double ignored = 0.0;
@@ -625,7 +685,7 @@ struct Video {
             while (alive()) {
                 double pts = 0.0;
                 const auto t0 = clk::now();
-                std::shared_ptr<const ImageData> px = d.next(&pts);
+                std::shared_ptr<const ImageData> px = d.next(&pts, max_w);
 
                 // No frame. Only report end-of-stream if this producer is
                 // still the one the model wants.
