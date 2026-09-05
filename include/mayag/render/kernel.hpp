@@ -251,6 +251,17 @@ inline constexpr u32 FLAG_GLYPH_SDF = 128u;
     return vec4{lin.x * alpha, lin.y * alpha, lin.z * alpha, alpha};   // re-premultiply
 }
 
+/// sRGB -> linear, the exact piecewise transfer.
+///
+/// The kernel never ENCODES (the framebuffer does that), but it must DECODE:
+/// a user image arrives sRGB-encoded, and multiplying it into a linear
+/// premultiplied colour without decoding first is a gamma error that shows up
+/// as a tinted image being too bright.
+[[nodiscard]] inline f32 srgb_to_linear(f32 c) noexcept {
+    if (c <= 0.04045f) return c / 12.92f;
+    return mg::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
 // ── text ────────────────────────────────────────────────────────────────
 //
 // Stem darkening. Coverage-antialiased glyphs look too THIN when light text
@@ -326,6 +337,9 @@ struct Env {
     vec4 (*atlas_rgba)(const void* ctx, vec2 uv) = nullptr;
     /// Mid-frame capture of everything drawn so far (RGBA, linear premul).
     vec4 (*capture)(const void* ctx, vec2 uv) = nullptr;
+    /// A user image (RGBA, straight, sRGB-encoded): photos, icons, video
+    /// frames. Distinct from the colour atlas, which the font engine owns.
+    vec4 (*texture)(const void* ctx, vec2 uv) = nullptr;
     /// Size of the capture target in pixels, for texel-sized offsets.
     vec2 capture_size{1.0f, 1.0f};
     const void* ctx = nullptr;
@@ -457,8 +471,16 @@ struct Env {
     vec4 color = fill_color(f);
 
     if (f.kind == KIND_TEXTURE) {
-        const vec4 t = env.atlas_rgba(env.ctx, f.uv);
-        color = vec4{color.x * t.x, color.y * t.y, color.z * t.z, color.w * t.w};
+        // A user image, modulated by the node's colour so `image(id) | fg(c)`
+        // tints and `| opacity(a)` fades. The sample is straight (not
+        // premultiplied) sRGB-encoded RGBA; the shader's own colour is linear
+        // premultiplied, so decode before multiplying or a tinted image comes
+        // out with the wrong gamma.
+        const vec4 t = env.texture(env.ctx, f.uv);
+        const vec4 lin = vec4{srgb_to_linear(t.x), srgb_to_linear(t.y),
+                              srgb_to_linear(t.z), t.w};
+        color = vec4{color.x * lin.x, color.y * lin.y,
+                     color.z * lin.z, color.w * lin.w};
     }
 
     // LINEAR PREMULTIPLIED. No transfer function here, ever: the software path

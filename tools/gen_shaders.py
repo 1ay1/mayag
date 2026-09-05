@@ -305,6 +305,7 @@ layout(location = 9) in vec2  v_half;
 layout(set = 0, binding = 0) uniform sampler2D u_atlas;
 layout(set = 0, binding = 1) uniform sampler2D u_color_atlas;
 layout(set = 0, binding = 2) uniform sampler2D u_capture;
+layout(set = 0, binding = 3) uniform sampler2D u_texture;
 
 layout(location = 0) out vec4 o_color;
 
@@ -322,6 +323,7 @@ struct Shaded { vec4 color; bool discarded; };
 float env_atlas_r(vec2 uv)     { return texture(u_atlas, uv).r; }
 vec4  env_atlas_rgba(vec2 uv)  { return texture(u_color_atlas, uv); }
 vec4  env_capture(vec2 uv)     { return texture(u_capture, uv); }
+vec4  env_texture(vec2 uv)     { return texture(u_texture, uv); }
 vec2  env_capture_size()       { return vec2(textureSize(u_capture, 0)); }
 """
 
@@ -364,6 +366,7 @@ def emit_glsl():
     prog = re.sub(r"env\.atlas_r\(env\.ctx,\s*([^)]+)\)", r"env_atlas_r(\1)", prog)
     prog = re.sub(r"env\.atlas_rgba\(env\.ctx,\s*([^)]+)\)", r"env_atlas_rgba(\1)", prog)
     prog = re.sub(r"env\.capture\(env\.ctx,\s*([^)]+)\)", r"env_capture(\1)", prog)
+    prog = re.sub(r"env\.texture\(env\.ctx,\s*([^)]+)\)", r"env_texture(\1)", prog)
     prog = prog.replace("env.capture_size.x", "env_capture_size().x")
     prog = prog.replace("env.capture_size.y", "env_capture_size().y")
     prog = prog.replace("Shaded shade(Fragment f, )", "Shaded shade(Fragment f)")

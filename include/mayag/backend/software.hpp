@@ -168,6 +168,54 @@ class CoverageSampler {
                                            float /*v*/) const {
         return Vec4{1.0f, 1.0f, 1.0f, 0.0f};
     }
+
+    /// RGBA of a USER IMAGE at normalised (u,v), straight (not premultiplied),
+    /// sRGB-encoded. Only `texture` instances call this. The default returns
+    /// opaque white, which multiplies through as "no image" rather than
+    /// drawing a black rectangle when nothing is bound.
+    [[nodiscard]] virtual Vec4 sample_texture(float /*u*/, float /*v*/) const {
+        return Vec4{1.0f, 1.0f, 1.0f, 1.0f};
+    }
+};
+
+/// A user image the software path can sample for KIND_TEXTURE instances.
+///
+/// The GPU keeps this as a bound sampler; the CPU keeps it as a span. Both
+/// exist so `image()` renders identically on either backend rather than being
+/// a GPU-only feature -- a DSL element that works on one renderer and silently
+/// draws nothing on the other is worse than no element at all.
+struct TextureSource {
+    const std::uint8_t* rgba = nullptr;   ///< straight, sRGB-encoded RGBA8
+    int width = 0, height = 0;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return rgba != nullptr && width > 0 && height > 0;
+    }
+
+    /// Bilinear sample, matching what a GPU sampler does. Nearest-neighbour
+    /// here would make the two backends disagree along every image edge.
+    [[nodiscard]] Vec4 sample(float u, float v) const noexcept {
+        if (!valid()) return Vec4{1, 1, 1, 1};
+        const float fx = num::clamp(u * static_cast<float>(width)  - 0.5f, 0.0f,
+                                    static_cast<float>(width  - 1));
+        const float fy = num::clamp(v * static_cast<float>(height) - 0.5f, 0.0f,
+                                    static_cast<float>(height - 1));
+        const int x0 = static_cast<int>(fx), y0 = static_cast<int>(fy);
+        const int x1 = std::min(x0 + 1, width  - 1);
+        const int y1 = std::min(y0 + 1, height - 1);
+        const float tx = fx - static_cast<float>(x0), ty = fy - static_cast<float>(y0);
+        const auto tap = [&](int x, int y, int c) {
+            return static_cast<float>(
+                rgba[(static_cast<std::size_t>(y) * width + x) * 4 + c]) / 255.0f;
+        };
+        Vec4 out{};
+        float* o = &out.x;
+        for (int c = 0; c < 4; ++c) {
+            o[c] = num::lerp(num::lerp(tap(x0, y0, c), tap(x1, y0, c), tx),
+                             num::lerp(tap(x0, y1, c), tap(x1, y1, c), tx), ty);
+        }
+        return out;
+    }
 };
 
 class Software {
@@ -302,6 +350,36 @@ class Software {
                     if (a <= 0.001f) continue;
                     // Straight -> premultiplied, honouring opacity.
                     fb.blend(x, y, Vec4{texel.x * a, texel.y * a, texel.z * a, a}, 1.0f);
+                }
+            }
+            return;
+        }
+
+        // ── user image ───────────────────────────────────────────
+        //
+        // Same shading the GPU does for KIND_TEXTURE, kept in step with
+        // render/kernel.hpp: sample straight sRGB RGBA, DECODE to linear, then
+        // modulate by the instance colour (so `image(id) | fg(c)` tints and
+        // `| opacity(a)` fades) and premultiply. Skipping the decode is a
+        // gamma error that makes every tinted image too bright.
+        if (kind == ShapeKind::texture && sampler != nullptr) {
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    const Vec2 p{static_cast<float>(x) + 0.5f,
+                                 static_cast<float>(y) + 0.5f};
+                    const float cov = coverage_at(inst, kind, p, center, half,
+                                                  texture, sampler);
+                    if (cov <= 0.001f) continue;
+                    const float u = (p.x - shape.left()) / shape.width();
+                    const float v = (p.y - shape.top())  / shape.height();
+                    const Vec4 t = sampler->sample_texture(num::saturate(u),
+                                                           num::saturate(v));
+                    const Vec4 lin{kernel::srgb_to_linear(t.x),
+                                   kernel::srgb_to_linear(t.y),
+                                   kernel::srgb_to_linear(t.z), t.w};
+                    const Vec4 c{inst.color.x * lin.x, inst.color.y * lin.y,
+                                 inst.color.z * lin.z, inst.color.w * lin.w};
+                    fb.blend(x, y, c, cov);
                 }
             }
             return;

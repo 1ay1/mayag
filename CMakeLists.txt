@@ -335,6 +335,12 @@ if(MAYAG_BUILD_TESTS)
     # the public interface, so it fails if adding a backend ever requires
     # touching the core again. Deliberately NOT inside any MAYAG_WITH_* guard —
     # the property it checks is that no such guard is needed.
+    # image() must render on every backend, not just compile.
+    add_executable(mayag_texture_tests tests/test_texture.cpp)
+    target_link_libraries(mayag_texture_tests PRIVATE mayag)
+    target_compile_options(mayag_texture_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_texture_tests COMMAND mayag_texture_tests)
+
     add_executable(mayag_backend_tests tests/test_backend_api.cpp)
     target_link_libraries(mayag_backend_tests PRIVATE mayag)
     target_compile_options(mayag_backend_tests PRIVATE ${MAYAG_WARNINGS})

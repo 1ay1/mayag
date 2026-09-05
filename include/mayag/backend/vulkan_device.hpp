@@ -337,6 +337,47 @@ class VulkanDevice {
         return true;
     }
 
+    /// Upload an RGBA8 image and make it the texture that KIND_TEXTURE
+    /// instances sample. Returns a slot id (1-based; 0 means "no texture").
+    ///
+    /// This is deliberately a SINGLE bound texture rather than a slot array:
+    /// mayag draws a whole frame in a handful of instanced batches, and a
+    /// per-instance texture array would need either bindless descriptors or a
+    /// batch break per image. One binding covers the cases that exist today
+    /// (an image, a video frame) honestly, and the signature leaves room to
+    /// grow without changing callers.
+    std::uint32_t upload_texture(const std::uint8_t* rgba, int w, int h) {
+        if (!valid_ || rgba == nullptr || w <= 0 || h <= 0) return 0;
+
+        if (w != tex_w_ || h != tex_h_) {
+            if (tex_view_) api_->DestroyImageView(device_, tex_view_, nullptr);
+            if (tex_image_) api_->DestroyImage(device_, tex_image_, nullptr);
+            if (tex_mem_) api_->FreeMemory(device_, tex_mem_, nullptr);
+            tex_view_ = nullptr; tex_image_ = nullptr; tex_mem_ = nullptr;
+            make_sampled_image(w, h, vk::VK_FORMAT_R8G8B8A8_UNORM,
+                               tex_image_, tex_mem_, tex_view_);
+            tex_w_ = w; tex_h_ = h;
+        }
+        if (tex_image_ == nullptr) return 0;
+
+        const std::size_t bytes = static_cast<std::size_t>(w) * h * 4;
+        ensure_staging(bytes);
+        std::memcpy(staging_ptr_, rgba, bytes);
+        upload_plane(tex_image_, w, h, /*channels=*/4);
+
+        atlas_dirty_binding_ = true;   // rebind so the shader sees it
+        return 1;
+    }
+
+    void release_texture() {
+        if (tex_view_) api_->DestroyImageView(device_, tex_view_, nullptr);
+        if (tex_image_) api_->DestroyImage(device_, tex_image_, nullptr);
+        if (tex_mem_) api_->FreeMemory(device_, tex_mem_, nullptr);
+        tex_view_ = nullptr; tex_image_ = nullptr; tex_mem_ = nullptr;
+        tex_w_ = tex_h_ = 0;
+        atlas_dirty_binding_ = true;
+    }
+
     /// The swapchain's pixel format, so callers can report it.
     [[nodiscard]] int swapchain_format() const noexcept { return swap_format_; }
 
@@ -785,11 +826,12 @@ class VulkanDevice {
     }
 
     [[nodiscard]] bool create_pipeline(int color_format, bool for_present) {
-        // descriptor set layout: three combined image samplers — binding 0 is
+        // descriptor set layout: four combined image samplers — binding 0 is
         // the coverage atlas (R8), binding 1 the colour atlas (RGBA, emoji),
-        // binding 2 the backdrop capture (RGBA snapshot of the frame).
-        vk::VkDescriptorSetLayoutBinding bindings[3]{};
-        for (int i = 0; i < 3; ++i) {
+        // binding 2 the backdrop capture (RGBA snapshot of the frame), and
+        // binding 3 the current user texture (RGBA, an image()/video frame).
+        vk::VkDescriptorSetLayoutBinding bindings[4]{};
+        for (int i = 0; i < 4; ++i) {
             bindings[i].binding = static_cast<std::uint32_t>(i);
             bindings[i].descriptorType = vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             bindings[i].descriptorCount = 1;
@@ -797,10 +839,10 @@ class VulkanDevice {
         }
         vk::VkDescriptorSetLayoutCreateInfo dslci{};
         dslci.sType = vk::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dslci.bindingCount = 3; dslci.pBindings = bindings;
+        dslci.bindingCount = 4; dslci.pBindings = bindings;
         if (api_->CreateDescriptorSetLayout(device_, &dslci, nullptr, &set_layout_) != vk::VK_SUCCESS) return false;
 
-        vk::VkDescriptorPoolSize pool_size{vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3};
+        vk::VkDescriptorPoolSize pool_size{vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4};
         vk::VkDescriptorPoolCreateInfo dpci{};
         dpci.sType = vk::VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &pool_size;
@@ -943,16 +985,22 @@ class VulkanDevice {
     }
 
     void update_atlas_descriptor() {
-        vk::VkDescriptorImageInfo info[3]{};
+        vk::VkDescriptorImageInfo info[4]{};
         info[0].sampler = sampler_; info[0].imageView = atlas_view_;
         info[0].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         info[1].sampler = sampler_; info[1].imageView = color_view_;
         info[1].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         info[2].sampler = sampler_; info[2].imageView = capture_view_;
         info[2].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        // Binding 3 falls back to the colour atlas when no user texture is
+        // bound: a descriptor set must be COMPLETE before it is used, and an
+        // unwritten binding is undefined behaviour rather than a blank sample.
+        info[3].sampler = sampler_;
+        info[3].imageView = tex_view_ != nullptr ? tex_view_ : color_view_;
+        info[3].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        vk::VkWriteDescriptorSet w[3]{};
-        for (int i = 0; i < 3; ++i) {
+        vk::VkWriteDescriptorSet w[4]{};
+        for (int i = 0; i < 4; ++i) {
             w[i].sType = vk::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = desc_set_;
             w[i].dstBinding = static_cast<std::uint32_t>(i);
@@ -960,7 +1008,7 @@ class VulkanDevice {
             w[i].descriptorType = vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             w[i].pImageInfo = &info[i];
         }
-        api_->UpdateDescriptorSets(device_, 3, w, 0, nullptr);
+        api_->UpdateDescriptorSets(device_, 4, w, 0, nullptr);
         atlas_dirty_binding_ = false;
     }
 
@@ -1438,6 +1486,10 @@ class VulkanDevice {
     /// Index of the image handed to the last QueuePresentKHR, so read_swapchain
     /// copies the frame the compositor actually got.
     std::uint32_t last_presented_ = 0;
+    // The single user texture (image(), video frames). See upload_texture.
+    vk::VkImage tex_image_ = nullptr; vk::VkDeviceMemory tex_mem_ = nullptr;
+    vk::VkImageView tex_view_ = nullptr;
+    int tex_w_ = 0, tex_h_ = 0;
     std::vector<vk::VkImage> swap_images_;
     std::vector<vk::VkImageView> swap_views_;
     std::vector<vk::VkFramebuffer> framebuffers_;
