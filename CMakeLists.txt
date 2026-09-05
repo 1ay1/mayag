@@ -244,6 +244,10 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────
 if(MAYAG_BUILD_EXAMPLES)
     file(GLOB MAYAG_EXAMPLES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp")
+    # video.cpp needs ffmpeg and is built separately below, only if it is
+    # present. mayag itself takes no dependencies; an example is allowed to,
+    # as long as its absence costs nothing.
+    list(REMOVE_ITEM MAYAG_EXAMPLES "${CMAKE_CURRENT_SOURCE_DIR}/examples/video.cpp")
     foreach(example_src ${MAYAG_EXAMPLES})
         get_filename_component(example_name ${example_src} NAME_WE)
         add_executable(mayag_${example_name} ${example_src})
@@ -256,6 +260,31 @@ if(MAYAG_BUILD_EXAMPLES)
         set_target_properties(mayag_${example_name} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
     endforeach()
+
+    # ── the one example with a dependency ────────────────────────────
+    #
+    # video.cpp plays a real file through ffmpeg. It exists to show that
+    # decoding is ORDINARY APPLICATION WORK -- a Sub::source producing frames,
+    # Cmd::upload_image showing them -- and that mayag needs no special support
+    # for it. Nothing in the library links against libav; if it is missing,
+    # this example is skipped and everything else builds exactly as before.
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFMPEG QUIET IMPORTED_TARGET
+                          libavcodec libavformat libavutil libswscale)
+    endif()
+    if(TARGET PkgConfig::FFMPEG)
+        add_executable(mayag_video "${CMAKE_CURRENT_SOURCE_DIR}/examples/video.cpp")
+        target_link_libraries(mayag_video PRIVATE mayag PkgConfig::FFMPEG)
+        target_include_directories(mayag_video
+                                   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+        target_compile_options(mayag_video PRIVATE ${MAYAG_WARNINGS})
+        set_target_properties(mayag_video PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
+        message(STATUS "mayag: ffmpeg found, building the video example")
+    else()
+        message(STATUS "mayag: no ffmpeg, skipping the video example")
+    endif()
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────
