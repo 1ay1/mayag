@@ -350,6 +350,27 @@ class VulkanDevice {
         if (!valid_ || rgba == nullptr || w <= 0 || h <= 0) return 0;
 
         if (w != tex_w_ || h != tex_h_) {
+            // The size changed, so the old image must go -- but a frame that
+            // is still in flight may be SAMPLING it, and destroying a
+            // resource the GPU is reading is undefined behaviour. In practice
+            // it hangs or faults inside the driver, with no stack that points
+            // back here.
+            //
+            // one_shot() below waits on its own fence, which says nothing
+            // about the render submission; submit() waits on in_flight_.
+            // Only a device-level wait covers both.
+            //
+            // Reported as "it hung in fullscreen on pause": going fullscreen
+            // changes the decode size (860 -> 2560 wide), so the next frame
+            // uploaded takes exactly this path while a frame is in flight.
+            // Rare enough to look random, which is what a missing barrier
+            // always looks like.
+            //
+            // A full DeviceWaitIdle is heavy, but this runs only when the
+            // size actually changes -- a resize or a fullscreen toggle, not
+            // per frame.
+            if (api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
+
             if (tex_view_) api_->DestroyImageView(device_, tex_view_, nullptr);
             if (tex_image_) api_->DestroyImage(device_, tex_image_, nullptr);
             if (tex_mem_) api_->FreeMemory(device_, tex_mem_, nullptr);
@@ -370,6 +391,12 @@ class VulkanDevice {
     }
 
     void release_texture() {
+        // Same hazard as the resize path in upload_texture: a frame in flight
+        // may still be sampling this image, and freeing it under the GPU is
+        // undefined behaviour. Releasing happens on teardown and when an app
+        // drops its last image -- both rare, so the wait costs nothing that
+        // matters.
+        if (api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
         if (tex_view_) api_->DestroyImageView(device_, tex_view_, nullptr);
         if (tex_image_) api_->DestroyImage(device_, tex_image_, nullptr);
         if (tex_mem_) api_->FreeMemory(device_, tex_mem_, nullptr);

@@ -651,8 +651,12 @@ struct Video {
                     : 16.0f / 9.0f;
                 const float win = r.size.y > 0.0f ? r.size.x / r.size.y : src;
                 const float vw = win > src ? r.size.y * src : r.size.x;
-                m.view_w = static_cast<int>(vw);
-                m.view_h = static_cast<int>(vw / src);
+                // Clamped to the source width: asking for more pixels than
+                // the file has costs scaling time and invents no detail. A
+                // fullscreen window on a 2560px display would otherwise ask a
+                // 1920px file to upscale on every frame.
+                m.view_w = num::min(static_cast<int>(vw), g_info.width);
+                m.view_h = static_cast<int>(static_cast<float>(m.view_w) / src);
                 return {m, Cmd<Msg>::none()};
             },
 
@@ -1270,6 +1274,43 @@ int main(int argc, char** argv) {
                 ok(rt.window().fullscreen_calls() == synth_before + 1,
                    "two quick clicks with an UNREPORTED count synthesise a "
                    "double-click");
+
+                // Going fullscreen while PLAYING changes the decode size, so
+                // every uploaded frame takes the texture destroy/recreate
+                // path in the backend while a frame may still be in flight.
+                // On Vulkan that freed an image the GPU was sampling, which
+                // is undefined behaviour and hung the app -- reported as "it
+                // hung in fullscreen on pause".
+                //
+                // Headless renders in software so it cannot catch the Vulkan
+                // fault, but it does catch the app-level half: the decode
+                // size must follow the window, must never exceed the source,
+                // and pausing at the new size must still settle.
+                rt.send(Video::Msg{Video::Play{}});
+                pump([&] { return rt.model().time > 0.1; }, 15000);
+                rt.send(Video::Msg{Video::Resized{Vec2{2560.0f, 1440.0f}}});
+                rt.tick();
+                ok(rt.model().view_w <= g_info.width,
+                   "a fullscreen window never asks the decoder to upscale (" +
+                       std::to_string(rt.model().view_w) + " <= " +
+                       std::to_string(g_info.width) + ")");
+
+                const int fs_frames = rt.model().frames;
+                pump([&] { return rt.model().frames > fs_frames + 2; }, 15000);
+                ok(rt.model().frames > fs_frames,
+                   "frames keep arriving after the size change");
+
+                rt.send(Video::Msg{Video::Pause{}});
+                pump([&] { return !rt.model().playing; }, 5000);
+                const int paused_at = rt.model().frames;
+                for (int i = 0; i < 60; ++i) {
+                    rt.tick();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+                ok(rt.model().frames == paused_at,
+                   "and pausing at the new size stops cleanly");
+                rt.send(Video::Msg{Video::Resized{Vec2{860.0f, 620.0f}}});
+                rt.tick();
             }
 
             // The ends must be reachable, and clamped rather than overshooting.
