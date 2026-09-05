@@ -603,6 +603,11 @@ class Runtime {
     void tick() {
         const auto subs = current_subs();
 
+        // Start the next unit of coalesced work for any key whose worker has
+        // finished (`Cmd::task_coalesce`). On the UI thread, so the policy
+        // state needs no lock.
+        pump_coalesced_tasks();
+
         // Reconcile declarative streams (`Sub::source`): start producers that
         // just appeared, stop and join ones the model dropped. Done every tick
         // because the subscription set is a pure function of the model, so a
@@ -1118,8 +1123,27 @@ class Runtime {
                     }).detach();
                 }
             }
+            else if constexpr (std::is_same_v<T, typename C::TaskCoalesce>) {
+                // At most one worker per key; a newer request replaces the
+                // one WAITING rather than queueing behind it.
+                //
+                // The difference from TaskLatest is what happens to the work
+                // already RUNNING: task_latest supersedes it, this lets it
+                // finish. Under a continuous gesture that is the difference
+                // between never completing a single unit of work and
+                // completing them back to back as fast as the machine allows.
+                auto& slot = coalescing_[a.key];
+                slot.settled = a.settled;   // newest request wins
+                if (slot.running) {
+                    slot.pending = a.work;   // replaces any older pending one
+                    return;
+                }
+                slot.running = true;
+                start_coalesced_task(a.key, a.work);
+            }
             else if constexpr (std::is_same_v<T, typename C::Stream>) {
                 // A long-lived producer. It runs on its own thread and pushes
+                // messages until the app exits.
                 //
                 // Warn about the LEAK PATTERN, which is starting streams again
                 // and again as the model changes -- each one runs until the
@@ -1277,6 +1301,11 @@ class Runtime {
         /// which posts straight to the inbox.
         std::shared_ptr<std::mutex>        slot_mutex;
         std::shared_ptr<std::optional<Msg>> slot;
+        /// Set by the thread itself as its last act. Lets the UI thread tell
+        /// "finished, join() will return immediately" from "still winding
+        /// down" WITHOUT blocking to find out -- the difference between
+        /// reaping a retired source and stalling a frame on it.
+        std::shared_ptr<std::atomic<bool>> done;
     };
 
     /// Diff the model's sources against the running ones. New ids start a
@@ -1323,15 +1352,27 @@ class Runtime {
         }
 
         // Stop any running source whose id is no longer wanted.
+        //
+        // Signal it and set it aside; do NOT join here. A join on the UI
+        // thread is a join on the frame: the producer only notices at its
+        // next `alive()` poll, and a decoder in the middle of a frame can
+        // take hundreds of milliseconds to get there. Measured at 370 ms of
+        // frozen UI per stop with a 400 ms producer -- and an app that folds
+        // a seek position into its source id (the video example does exactly
+        // that, so a seek restarts the decoder) hits this on every drag move.
+        //
+        // Retired threads are reaped in reap_retired_sources() once they have
+        // actually finished, so nothing leaks and nothing blocks.
         for (auto it = sources_.begin(); it != sources_.end();) {
             const bool still = std::any_of(wanted.begin(), wanted.end(),
                 [&](const typename S::Source* w) { return w->id == it->id; });
             if (still) { ++it; continue; }
             it->alive->store(false, std::memory_order_release);
-            waker_.wake();                      // in case it sleeps on nothing
-            if (it->thread.joinable()) it->thread.join();
+            retiring_.push_back(std::move(*it));
             it = sources_.erase(it);
         }
+        waker_.wake();                      // in case they sleep on nothing
+        reap_retired_sources();
 
         // Start any wanted source not already running.
         for (const typename S::Source* w : wanted) {
@@ -1340,12 +1381,14 @@ class Runtime {
             if (running || w->work == nullptr) continue;
 
             auto alive = std::make_shared<std::atomic<bool>>(true);
+            auto done  = std::make_shared<std::atomic<bool>>(false);
             auto inbox = inbox_;
             auto  work  = w->work;   // shared_ptr keeps the callable alive
 
             RunningSource rs;
             rs.id = std::string{w->id};
             rs.alive = alive;
+            rs.done  = done;
 
             if (w->coalesce) {
                 // Coalescing: the sink replaces a single slot instead of
@@ -1357,17 +1400,22 @@ class Runtime {
                 auto* waker = &waker_;
                 rs.slot_mutex = slot_mutex;
                 rs.slot = slot;
-                rs.thread = std::thread([work, alive, slot_mutex, slot, waker] {
+                rs.thread = std::thread([work, alive, done, slot_mutex, slot, waker] {
                     (*work)([slot_mutex, slot, waker](Msg m) {
                                 { std::lock_guard lk{*slot_mutex}; *slot = std::move(m); }
                                 waker->wake();
                             },
                             [alive] { return alive->load(std::memory_order_acquire); });
+                    done->store(true, std::memory_order_release);
+                    waker->wake();          // let a waiting reaper notice
                 });
             } else {
-                rs.thread = std::thread([work, inbox, alive] {
+                auto* waker = &waker_;
+                rs.thread = std::thread([work, inbox, alive, done, waker] {
                     (*work)([inbox](Msg m) { inbox->post(std::move(m)); },
                             [alive] { return alive->load(std::memory_order_acquire); });
+                    done->store(true, std::memory_order_release);
+                    waker->wake();
                 });
             }
             sources_.push_back(std::move(rs));
@@ -1399,17 +1447,91 @@ class Runtime {
         }, sub.alternative());
     }
 
+    /// Run one unit of coalesced work for `key` on a worker thread.
+    ///
+    /// The continuation is the interesting part: when the worker finishes it
+    /// posts its result AND a nudge that runs on the UI thread, which starts
+    /// whatever request arrived meanwhile. Chaining there rather than on the
+    /// worker keeps the whole policy single-threaded -- `coalescing_` is only
+    /// ever touched from the UI thread, so the map needs no lock and the
+    /// "is one running" decision can never race a completion.
+    void start_coalesced_task(const std::string& key,
+                              std::function<Msg()> work) {
+        auto inbox = inbox_;
+        auto chain = coalesce_chain_;   // shared_ptr: outlives teardown
+        std::thread([work = std::move(work), inbox, chain, key] {
+            Msg result = work();
+            {
+                std::lock_guard lk{chain->mutex};
+                chain->finished.push_back(key);
+            }
+            inbox->post(std::move(result));
+        }).detach();
+    }
+
+    /// Start the next coalesced request for any key whose worker just
+    /// finished. Called once per tick on the UI thread.
+    void pump_coalesced_tasks() {
+        std::vector<std::string> done;
+        {
+            std::lock_guard lk{coalesce_chain_->mutex};
+            done.swap(coalesce_chain_->finished);
+        }
+        for (const auto& key : done) {
+            const auto it = coalescing_.find(key);
+            if (it == coalescing_.end()) continue;
+            if (it->second.pending) {
+                auto next = std::move(*it->second.pending);
+                it->second.pending.reset();
+                start_coalesced_task(key, std::move(next));
+            } else {
+                // Nothing running and nothing waiting: this key has settled,
+                // so the result just delivered is the final one.
+                it->second.running = false;
+                if (it->second.settled) {
+                    Msg m = std::move(*it->second.settled);
+                    it->second.settled.reset();
+                    step(std::move(m));
+                }
+            }
+        }
+    }
+
+    /// Join retired source threads that have already finished.
+    ///
+    /// Never blocks: a thread is only joined once it has set `done`, at which
+    /// point join() returns at once. A producer that is slow to notice it was
+    /// stopped simply stays on the list and is collected a frame or two later
+    /// -- late, but off the UI thread, which is the whole point.
+    void reap_retired_sources() {
+        for (auto it = retiring_.begin(); it != retiring_.end();) {
+            if (!it->done->load(std::memory_order_acquire)) { ++it; continue; }
+            if (it->thread.joinable()) it->thread.join();
+            it = retiring_.erase(it);
+        }
+    }
+
     /// Stop and join every running source. Called from the destructor so no
     /// producer thread outlives the runtime and touches a freed inbox.
     void stop_all_sources() {
         for (auto& s : sources_) {
             s.alive->store(false, std::memory_order_release);
         }
+        for (auto& s : retiring_) {
+            s.alive->store(false, std::memory_order_release);
+        }
         waker_.wake();
+        // Teardown is the one place a blocking join is correct: the runtime is
+        // going away and its inbox with it, so every producer must be finished
+        // before we return. Retirees included -- they hold the same inbox.
         for (auto& s : sources_) {
             if (s.thread.joinable()) s.thread.join();
         }
+        for (auto& s : retiring_) {
+            if (s.thread.joinable()) s.thread.join();
+        }
         sources_.clear();
+        retiring_.clear();
     }
 
     void sync_interval_timers(const Sub<Msg>& subs) {
@@ -1685,7 +1807,29 @@ class Runtime {
     std::shared_ptr<std::atomic<bool>> streams_alive_ =
         std::make_shared<std::atomic<bool>>(true);
     std::vector<std::thread>        stream_threads_;
+    /// Per-key state for Cmd::task_coalesce. UI-thread only.
+    struct CoalesceSlot {
+        bool running = false;
+        std::optional<std::function<Msg()>> pending;
+        /// Delivered when this key drains; see Cmd::task_coalesce.
+        std::optional<Msg> settled;
+    };
+    std::unordered_map<std::string, CoalesceSlot> coalescing_;
+
+    /// Keys whose coalesced worker has finished, published by the worker and
+    /// drained on the UI thread. A shared_ptr so a detached worker that
+    /// outlives the runtime writes to a live object rather than a freed one.
+    struct CoalesceChain {
+        std::mutex               mutex;
+        std::vector<std::string> finished;
+    };
+    std::shared_ptr<CoalesceChain> coalesce_chain_ =
+        std::make_shared<CoalesceChain>();
+
     std::vector<RunningSource>       sources_;
+    /// Sources that have been stopped but whose threads have not finished.
+    /// Reaped without blocking; see reap_retired_sources().
+    std::vector<RunningSource>       retiring_;
     std::vector<detail::Timer<Msg>> timers_;
     std::vector<detail::Timer<Msg>> interval_timers_;
 

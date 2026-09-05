@@ -229,10 +229,23 @@ void test_source_lifecycle() {
         received_after_connect = rt.model().received;
         producers_while_connected = SourceApp::live_producers.load();
 
-        // Disconnect: the source vanishes from subscribe(); the runtime must
-        // stop and join the producer thread.
+        // Disconnect: the source vanishes from subscribe(), so the runtime
+        // stops it.
+        //
+        // The stop is SIGNALLED synchronously but not joined inline: the
+        // runtime sets the producer's alive flag and retires the thread,
+        // reaping it on a later tick once it has actually returned. Joining
+        // inside this tick would mean the UI thread waits for whatever the
+        // producer is in the middle of -- measured at 370 ms of frozen frame
+        // with a slow decoder, which is why it no longer does.
+        //
+        // So the contract under test is "stops promptly and leaks nothing",
+        // not "is joined before tick() returns". Pump until it winds down.
         rt.send(SourceApp::Disconnect{});
-        rt.tick();   // sync_sources sees the source gone and joins it
+        for (int i = 0; i < 500 && SourceApp::live_producers.load() != 0; ++i) {
+            rt.tick();
+            std::this_thread::sleep_for(2ms);
+        }
         producers_after_disconnect = SourceApp::live_producers.load();
     });
 
@@ -241,7 +254,7 @@ void test_source_lifecycle() {
           std::to_string(received_after_connect) + ")");
     check(producers_while_connected == 1, "exactly one producer runs while connected");
     check(producers_after_disconnect == 0,
-          "the producer stopped and joined when the model disconnected");
+          "the producer stops when the model disconnects");
 }
 
 // ── Sub::every reconciliation ────────────────────────────────────
