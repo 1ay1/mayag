@@ -1401,7 +1401,10 @@ class Runtime {
                 rs.slot_mutex = slot_mutex;
                 rs.slot = slot;
                 rs.thread = std::thread([work, alive, done, slot_mutex, slot, waker] {
-                    (*work)([slot_mutex, slot, waker](Msg m) {
+                    (*work)([alive, slot_mutex, slot, waker](Msg m) {
+                                // A STOPPED source must not deliver. See the
+                                // note on the plain sink below.
+                                if (!alive->load(std::memory_order_acquire)) return;
                                 { std::lock_guard lk{*slot_mutex}; *slot = std::move(m); }
                                 waker->wake();
                             },
@@ -1412,7 +1415,25 @@ class Runtime {
             } else {
                 auto* waker = &waker_;
                 rs.thread = std::thread([work, inbox, alive, done, waker] {
-                    (*work)([inbox](Msg m) { inbox->post(std::move(m)); },
+                    // The sink checks `alive` too, not just the loop the
+                    // producer writes.
+                    //
+                    // A producer is asked to stop between its alive() polls,
+                    // so it can be deep inside one unit of work with a
+                    // finished message in hand. Delivering it means a source
+                    // the model has already dropped still reaches update().
+                    // Seen exactly that way: seeking during playback restarts
+                    // the decoder at the new position, and the OLD decoder's
+                    // in-flight frames kept arriving -- the picture jumped to
+                    // the seek target and then carried on from where it was.
+                    //
+                    // The inline join used to mask this by making "stopped"
+                    // and "finished" the same instant. They no longer are, so
+                    // the sink has to enforce it.
+                    (*work)([inbox, alive](Msg m) {
+                                if (!alive->load(std::memory_order_acquire)) return;
+                                inbox->post(std::move(m));
+                            },
                             [alive] { return alive->load(std::memory_order_acquire); });
                     done->store(true, std::memory_order_release);
                     waker->wake();

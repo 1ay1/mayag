@@ -181,6 +181,57 @@ struct Coalesce {
 
 std::atomic<int> g_finished{0};
 
+// ── a COMPUTED source id must actually distinguish sources ──────────
+//
+// Folding state into the id is the documented way to say "this is a different
+// producer now" -- source("chat:" + room, ...). Every such id is a temporary
+// std::string that dies when subscribe() returns, so while Source::id was a
+// string_view the runtime diffed FREED memory: two epochs compared equal
+// (ASan: stack-use-after-return), the id looked unchanged, and the old
+// producer was left running.
+//
+// The visible symptom was a video that showed the seeked frame and then
+// carried on playing from the position before the seek.
+std::vector<int> g_epoch_starts;
+std::mutex       g_epoch_mutex;
+
+struct EpochSrc {
+    struct Model { int epoch = 0; };
+    struct Bump {};
+    struct Ping { int epoch; };
+    using Msg = std::variant<Bump, Ping>;
+
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](Bump) -> R { ++m.epoch; return {m, Cmd<Msg>::none()}; },
+            [&](Ping) -> R { return {m, Cmd<Msg>::none()}; });
+    }
+
+    static Node view(const Model&, const Ctx& c) {
+        return (box() | width(px(80)) | height(px(40))
+                      | bg(c.theme.surface)).build();
+    }
+
+    static Sub<Msg> subscribe(const Model& m) {
+        // The id is a TEMPORARY string, as every real use of this pattern is.
+        return Sub<Msg>::source("gen:" + std::to_string(m.epoch),
+                                [e = m.epoch](auto sink, auto alive) {
+            {
+                std::lock_guard lk{g_epoch_mutex};
+                g_epoch_starts.push_back(e);
+            }
+            while (alive()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                if (alive()) sink(Msg{Ping{e}});
+            }
+        });
+    }
+};
+
 // ── replacing a slow source must not block the UI thread ────────────────
 //
 // The video example folds a seek position into its playback source id, so
@@ -549,6 +600,34 @@ int main() {
               "the first source with a given id runs");
         check(g_b.load() == 0 && b_msgs == 0,
               "the second is dropped (which is why the runtime warns)");
+    }
+
+    // ── a COMPUTED source id must actually distinguish sources ──────
+    section("a source id built from model state restarts the producer");
+    {
+        AppConfig cfg;
+        cfg.size = {80, 40};
+
+        run_headless<EpochSrc>(cfg, [&](auto& rt) {
+            for (int i = 0; i < 3; ++i) {
+                rt.tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                rt.send(EpochSrc::Msg{EpochSrc::Bump{}});
+            }
+            rt.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            rt.tick();
+        });
+
+        std::lock_guard lk{g_epoch_mutex};
+        // Each bump is a new id, so each must have started its OWN producer.
+        check(g_epoch_starts.size() >= 3,
+              "each computed id started a distinct producer (" +
+                  std::to_string(g_epoch_starts.size()) + " started)");
+        bool ordered = true;
+        for (std::size_t i = 1; i < g_epoch_starts.size(); ++i)
+            if (g_epoch_starts[i] <= g_epoch_starts[i - 1]) ordered = false;
+        check(ordered, "and each ran with its own captured state, in order");
     }
 
     // ── coalescing under a continuous gesture ────────────────────

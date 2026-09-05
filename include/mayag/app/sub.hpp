@@ -90,7 +90,21 @@ class Sub {
     /// `work(sink, keep_running)` runs on its own thread: call `sink(msg)` for
     /// each event, return when `keep_running()` is false.
     struct Source {
-        std::string_view id;   ///< identity for diffing; stable across frames
+        /// Identity for diffing; stable across frames.
+        ///
+        /// OWNED, not a string_view. The documented way to give a source a
+        /// distinct identity is to fold state into it -- source("chat:" +
+        /// room_id, ...), source("playback:" + epoch, ...) -- and every one
+        /// of those builds a temporary std::string that dies when subscribe()
+        /// returns. A view left the runtime diffing FREED MEMORY: two
+        /// different epochs compared equal (ASan: stack-use-after-return), so
+        /// the runtime saw an unchanged id and never restarted the producer.
+        /// In the video example that meant seeking during playback showed the
+        /// target frame and then carried on from the old position.
+        ///
+        /// A string per source per frame is a rounding error next to a
+        /// producer thread; correctness of the diff is not.
+        std::string id;
         std::shared_ptr<
             std::function<void(std::function<void(Msg)>, std::function<bool()>)>> work;
         /// Backpressure policy. When true, the runtime keeps only the LATEST
@@ -265,9 +279,10 @@ class Sub {
     ///       while (alive()) { std::this_thread::sleep_for(1s); sink(Tick{}); }
     ///   });
     template <typename F>
-    [[nodiscard]] static Sub source(std::string_view id, F&& f) {
+    [[nodiscard]] static Sub source(std::string id, F&& f) {
         using Work = std::function<void(std::function<void(Msg)>, std::function<bool()>)>;
-        return Sub{Alt{Source{id, std::make_shared<Work>(std::forward<F>(f)), false}}};
+        return Sub{Alt{Source{std::move(id),
+                              std::make_shared<Work>(std::forward<F>(f)), false}}};
     }
 
     /// Like `source`, but COALESCING: only the most recent message emitted
@@ -277,9 +292,10 @@ class Sub {
     /// bound. For an event stream where every message matters (a chat, a log),
     /// use `source`.
     template <typename F>
-    [[nodiscard]] static Sub source_latest(std::string_view id, F&& f) {
+    [[nodiscard]] static Sub source_latest(std::string id, F&& f) {
         using Work = std::function<void(std::function<void(Msg)>, std::function<bool()>)>;
-        return Sub{Alt{Source{id, std::make_shared<Work>(std::forward<F>(f)), true}}};
+        return Sub{Alt{Source{std::move(id),
+                              std::make_shared<Work>(std::forward<F>(f)), true}}};
     }
 
     // -- widget subscriptions, by compile-time name --
