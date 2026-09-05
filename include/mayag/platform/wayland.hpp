@@ -442,6 +442,24 @@ class WaylandWindow {
     [[nodiscard]] Vec2  size() const noexcept { return logical_; }
     [[nodiscard]] float dpi_scale() const noexcept { return scale_; }
 
+    /// The size, IN PIXELS, of the buffer `read_pixels()` returns.
+    ///
+    /// Not simply `size() * dpi_scale()`: the compositor owns the surface
+    /// dimensions and can resize it between frames, so the logical size and
+    /// the swapchain extent drift apart. A caller that assumes the product is
+    /// correct will reinterpret the rows at the wrong stride and see a
+    /// perfectly convincing diagonal-stripe "rendering bug" that does not
+    /// exist. Ask the window instead of computing it.
+    [[nodiscard]] Vec2 pixel_size() const noexcept {
+#ifdef MAYAG_WITH_VULKAN
+        if (gpu_active_) {
+            const auto e = gpu_.swapchain_extent();
+            if (e.x > 0.0f && e.y > 0.0f) return e;
+        }
+#endif
+        return {logical_.x * scale_, logical_.y * scale_};
+    }
+
     // ── events ──────────────────────────────────────────────────────────
 
     /// Drain the compositor, translating to mayag events.
@@ -718,12 +736,24 @@ class WaylandWindow {
     /// Read the current frame back as RGBA8, for screenshots and golden tests.
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() {
 #ifdef MAYAG_WITH_VULKAN
-        // On the GPU path the swapchain owns the pixels, not `fb_`. Re-render
-        // the last presented frame offscreen (into an sRGB target that reads
-        // back byte-identical to the software path) so screenshots and golden
-        // tests see real GPU output rather than the empty shm buffer.
         if (gpu_active_ && last_had_frame_) {
             std::vector<std::uint8_t> out;
+
+            // FIRST CHOICE: copy the image that was actually presented.
+            //
+            // This used to go straight to the re-render path below, which is a
+            // different pipeline -- different image format, different render
+            // pass, no swapchain, no compositor. It therefore could not observe
+            // any bug living in presentation itself, which is precisely the
+            // case where a window shows something other than what the renderer
+            // produced. A screenshot facility that cannot see that class of bug
+            // is worse than none, because it actively reassures you.
+            if (gpu_.read_swapchain(out)) return out;
+
+            // FALLBACK: re-render the last draw list offscreen. Used when
+            // nothing has been presented yet, or the driver refused the
+            // readback. Still useful, but it shows what SHOULD have been
+            // presented rather than what was.
             const int w = static_cast<int>(logical_.x * scale_ + 0.5f);
             const int h = static_cast<int>(logical_.y * scale_ + 0.5f);
             if (readback_gpu_.valid() || readback_gpu_.init_offscreen()) {
@@ -1728,6 +1758,8 @@ class WaylandWindow {
 
     [[nodiscard]] Vec2  size()      const noexcept { return p_->size(); }
     [[nodiscard]] float dpi_scale() const noexcept { return p_->dpi_scale(); }
+    /// Pixel dimensions of what read_pixels() returns. See Impl::pixel_size.
+    [[nodiscard]] Vec2 pixel_size() const noexcept { return p_->pixel_size(); }
 
     [[nodiscard]] std::vector<Event> poll_events(Wait wait, double timeout) {
         return p_->poll_events(wait, timeout);

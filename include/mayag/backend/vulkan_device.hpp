@@ -226,6 +226,7 @@ class VulkanDevice {
         if (pr == vk::VK_ERROR_OUT_OF_DATE_KHR || pr == vk::VK_SUBOPTIMAL_KHR) {
             rebuild_swapchain_ = true;
         }
+        last_presented_ = image_index;
         ++frames_;
     }
 
@@ -272,6 +273,78 @@ class VulkanDevice {
 
     [[nodiscard]] std::uint64_t frames_presented() const noexcept { return frames_; }
     [[nodiscard]] const char* device_name() const noexcept { return device_name_; }
+
+    /// Read back the image that was ACTUALLY PRESENTED, as RGBA8.
+    ///
+    /// This is deliberately not the same thing as re-rendering the last draw
+    /// list offscreen, which is what the screenshot path used to do. That
+    /// re-render goes through a different image format, a different render
+    /// pass and no swapchain, so it is blind to every bug that lives in
+    /// presentation itself -- exactly the class of bug where the window shows
+    /// something different from what the renderer produced. Copying the real
+    /// swapchain image is the only way to observe what the user sees.
+    ///
+    /// Returns false when there is no swapchain (offscreen device) or nothing
+    /// has been presented yet.
+    [[nodiscard]] bool read_swapchain(std::vector<std::uint8_t>& out_rgba) {
+        if (!valid_ || offscreen_ || swapchain_ == nullptr) return false;
+        if (frames_ == 0) return false;
+
+        const int w = static_cast<int>(swap_extent_.width);
+        const int h = static_cast<int>(swap_extent_.height);
+        if (w <= 0 || h <= 0) return false;
+        if (last_presented_ >= swap_images_.size()) return false;
+
+        // The presented image is still in PRESENT_SRC layout; move it to
+        // TRANSFER_SRC, copy, and put it back so presentation can continue.
+        if (api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
+        ensure_readback(w, h);
+
+        vk::VkImage img = swap_images_[last_presented_];
+        one_shot([&](vk::VkCommandBuffer cb) {
+            barrier_image(cb, img, vk::VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                          vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          0, vk::VK_ACCESS_TRANSFER_READ_BIT,
+                          vk::VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          vk::VK_PIPELINE_STAGE_TRANSFER_BIT);
+            vk::VkBufferImageCopy region{};
+            region.imageSubresource = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageExtent = {static_cast<std::uint32_t>(w),
+                                  static_cast<std::uint32_t>(h), 1};
+            api_->CmdCopyImageToBuffer(cb, img, vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                       readback_buf_.buf, 1, &region);
+            barrier_image(cb, img, vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          vk::VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                          vk::VK_ACCESS_TRANSFER_READ_BIT, 0,
+                          vk::VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          vk::VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        });
+
+        out_rgba.resize(static_cast<std::size_t>(w) * h * 4);
+        std::memcpy(out_rgba.data(), readback_ptr_, out_rgba.size());
+
+        // The swapchain may be BGRA (it is on most Linux drivers), while every
+        // other surface in mayag -- PNG output, the software rasteriser, the
+        // offscreen target -- is RGBA. Normalise here so a caller comparing a
+        // live capture against an offscreen render is comparing pixels, not
+        // channel orders.
+        if (swap_format_ == vk::VK_FORMAT_B8G8R8A8_SRGB ||
+            swap_format_ == vk::VK_FORMAT_B8G8R8A8_UNORM) {
+            for (std::size_t i = 0; i + 3 < out_rgba.size(); i += 4) {
+                std::swap(out_rgba[i], out_rgba[i + 2]);
+            }
+        }
+        return true;
+    }
+
+    /// The swapchain's pixel format, so callers can report it.
+    [[nodiscard]] int swapchain_format() const noexcept { return swap_format_; }
+
+    /// The swapchain's extent in pixels, or {0,0} when there is no swapchain.
+    [[nodiscard]] Vec2 swapchain_extent() const noexcept {
+        return {static_cast<float>(swap_extent_.width),
+                static_cast<float>(swap_extent_.height)};
+    }
 
     /// Tear down all GPU resources. Idempotent, and public because the window
     /// must call it explicitly while the wl_surface/display it wraps are still
@@ -961,7 +1034,14 @@ class VulkanDevice {
         ci.surface = surface_; ci.minImageCount = images;
         ci.imageFormat = swap_format_; ci.imageColorSpace = color_space;
         ci.imageExtent = swap_extent_; ci.imageArrayLayers = 1;
-        ci.imageUsage = vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        // COLOR_ATTACHMENT to render into, TRANSFER_SRC so the presented
+        // image can be copied back. That readback is what makes it possible to
+        // see WHAT THE USER SEES: the previous screenshot path re-rendered the
+        // last draw list offscreen, which is a different pipeline (different
+        // image format, no swapchain, no compositor) and therefore could not
+        // observe a bug in presentation itself.
+        ci.imageUsage = vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                        vk::VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         ci.imageSharingMode = vk::VK_SHARING_MODE_EXCLUSIVE;
         ci.preTransform = vk::VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         ci.compositeAlpha = vk::VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -1068,7 +1148,20 @@ class VulkanDevice {
         readback_buf_ = make_buffer(static_cast<vk::DeviceSize>(w) * h * 4,
                                     vk::VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
         readback_ptr_ = readback_buf_.mapped;
+        readback_size_ = static_cast<vk::DeviceSize>(w) * h * 4;
         off_w_ = w; off_h_ = h;
+    }
+
+    /// Make sure the mapped readback buffer can hold a w*h RGBA8 image.
+    /// Shared by the offscreen path and by read_swapchain(), which needs it
+    /// without allocating an offscreen colour target.
+    void ensure_readback(int w, int h) {
+        const vk::DeviceSize need = static_cast<vk::DeviceSize>(w) * h * 4;
+        if (readback_buf_.buf != nullptr && readback_size_ >= need) return;
+        if (readback_buf_.buf) destroy_buffer(readback_buf_);
+        readback_buf_ = make_buffer(need, vk::VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+        readback_ptr_ = readback_buf_.mapped;
+        readback_size_ = need;
     }
 
     // ── the pass ─────────────────────────────────────────────────────────
@@ -1339,6 +1432,9 @@ class VulkanDevice {
     vk::VkSwapchainKHR swapchain_ = nullptr;
     int swap_format_ = vk::VK_FORMAT_B8G8R8A8_UNORM;
     vk::VkExtent2D swap_extent_{};
+    /// Index of the image handed to the last QueuePresentKHR, so read_swapchain
+    /// copies the frame the compositor actually got.
+    std::uint32_t last_presented_ = 0;
     std::vector<vk::VkImage> swap_images_;
     std::vector<vk::VkImageView> swap_views_;
     std::vector<vk::VkFramebuffer> framebuffers_;
@@ -1350,6 +1446,7 @@ class VulkanDevice {
     vk::VkImage off_image_ = nullptr; vk::VkDeviceMemory off_mem_ = nullptr;
     vk::VkImageView off_view_ = nullptr; vk::VkFramebuffer off_fb_ = nullptr;
     Buffer readback_buf_{}; void* readback_ptr_ = nullptr;
+    vk::DeviceSize readback_size_ = 0;
     int off_w_ = 0, off_h_ = 0;
 
     Vec2 viewport_{};
