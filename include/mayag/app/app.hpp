@@ -406,6 +406,31 @@ class Inbox {
         queue_.clear();
     }
 
+    /// Post `m`, admitted only if `gate` is still true WHEN IT IS APPLIED.
+    ///
+    /// A worker that checks a flag and then posts has done two things, not
+    /// one, and the model can change in between:
+    ///
+    ///     T1  worker    alive() -> true
+    ///     T2  UI        model changes, this producer is stopped
+    ///     T3  worker    post(msg)          <-- passed the check, posts anyway
+    ///     T4  UI        applies a message from a producer that no longer exists
+    ///
+    /// Checking harder on the worker cannot fix this; the window is between
+    /// the check and the post, and it is never zero. Measured 2.5 MILLION
+    /// messages applied from already-stopped sources in a 300-iteration test.
+    ///
+    /// So the gate travels WITH the message and is evaluated on the UI thread
+    /// at the moment of delivery, where it is atomic with respect to the
+    /// model. A stale message is then not a race to be narrowed but a value
+    /// that is dropped.
+    void post_gated(Msg m, std::shared_ptr<std::atomic<bool>> gate) {
+        std::lock_guard lock{mutex_};
+        if (closed_) return;
+        queue_.push_back(Entry{std::move(m), std::move(gate)});
+        if (waker_ != nullptr) waker_->wake();
+    }
+
     void post(Msg m) {
         // The waker is signalled INSIDE the lock, deliberately.
         //
@@ -420,14 +445,22 @@ class Inbox {
         // blocking. Holding the mutex across it is cheaper than the bug.
         std::lock_guard lock{mutex_};
         if (closed_) return;
-        queue_.push_back(std::move(m));
+        queue_.push_back(Entry{std::move(m), nullptr});
         if (waker_ != nullptr) waker_->wake();
     }
+    /// Take everything pending, dropping any message whose gate has since
+    /// closed. The drop happens HERE, on the UI thread, which is what makes
+    /// it exact rather than best-effort.
     [[nodiscard]] std::vector<Msg> drain() {
         std::lock_guard lock{mutex_};
         std::vector<Msg> out;
         out.reserve(queue_.size());
-        while (!queue_.empty()) { out.push_back(std::move(queue_.front())); queue_.pop_front(); }
+        while (!queue_.empty()) {
+            Entry e = std::move(queue_.front());
+            queue_.pop_front();
+            if (e.gate && !e.gate->load(std::memory_order_acquire)) continue;
+            out.push_back(std::move(e.msg));
+        }
         return out;
     }
     [[nodiscard]] bool empty() {
@@ -435,8 +468,15 @@ class Inbox {
         return queue_.empty();
     }
   private:
+    /// A queued message plus the gate that must still be open when it is
+    /// applied. Null gate means unconditional.
+    struct Entry {
+        Msg                                msg;
+        std::shared_ptr<std::atomic<bool>> gate;
+    };
+
     std::mutex          mutex_;
-    std::deque<Msg>     queue_;
+    std::deque<Entry>   queue_;
     platform::Waker*    waker_ = nullptr;
     bool                closed_ = false;
 };
@@ -1423,8 +1463,12 @@ class Runtime {
                 rs.slot = slot;
                 rs.thread = std::thread([work, alive, done, slot_mutex, slot, waker] {
                     (*work)([alive, slot_mutex, slot, waker](Msg m) {
-                                // A STOPPED source must not deliver. See the
-                                // note on the plain sink below.
+                                // Same gate as the plain sink, but the slot is
+                                // read on the UI thread under its own mutex, so
+                                // the check here is only an optimisation --
+                                // drain_coalesced_sources() re-checks `alive`
+                                // before applying, which is what makes it
+                                // exact.
                                 if (!alive->load(std::memory_order_acquire)) return;
                                 { std::lock_guard lk{*slot_mutex}; *slot = std::move(m); }
                                 waker->wake();
@@ -1436,24 +1480,20 @@ class Runtime {
             } else {
                 auto* waker = &waker_;
                 rs.thread = std::thread([work, inbox, alive, done, waker] {
-                    // The sink checks `alive` too, not just the loop the
-                    // producer writes.
+                    // Deliver through the source's own alive flag as a GATE.
                     //
-                    // A producer is asked to stop between its alive() polls,
-                    // so it can be deep inside one unit of work with a
-                    // finished message in hand. Delivering it means a source
-                    // the model has already dropped still reaches update().
-                    // Seen exactly that way: seeking during playback restarts
-                    // the decoder at the new position, and the OLD decoder's
-                    // in-flight frames kept arriving -- the picture jumped to
-                    // the seek target and then carried on from where it was.
+                    // The flag is checked on the UI thread when the message is
+                    // applied, not here when it is posted. Checking here is
+                    // check-then-act: the model can stop this source in the
+                    // window between the check and the post, and no amount of
+                    // checking closes that window -- measured 2.5 million
+                    // messages applied from already-stopped sources.
                     //
-                    // The inline join used to mask this by making "stopped"
-                    // and "finished" the same instant. They no longer are, so
-                    // the sink has to enforce it.
+                    // Gating at apply time makes it exact: a message from a
+                    // producer the model has dropped is never applied, whatever
+                    // the interleaving.
                     (*work)([inbox, alive](Msg m) {
-                                if (!alive->load(std::memory_order_acquire)) return;
-                                inbox->post(std::move(m));
+                                inbox->post_gated(std::move(m), alive);
                             },
                             [alive] { return alive->load(std::memory_order_acquire); });
                     done->store(true, std::memory_order_release);

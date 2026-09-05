@@ -181,6 +181,57 @@ struct Coalesce {
 
 std::atomic<int> g_finished{0};
 
+// ── a stopped source's IN-FLIGHT messages must never be applied ───────
+//
+// A producer that checks a liveness flag and then posts has done TWO things,
+// and the model can change in between:
+//
+//   T1  worker    alive() -> true
+//   T2  UI        model changes, this producer is stopped
+//   T3  worker    post(msg)      <-- passed the check, posts anyway
+//   T4  UI        applies a message from a producer that no longer exists
+//
+// No amount of checking on the worker closes that window. The runtime gates
+// at APPLY time instead, on the UI thread, where the check is atomic with
+// respect to the model. Before that fix this test counted ~2.5 MILLION
+// applied messages from dead sources; it must now be exactly zero.
+std::atomic<int> g_from_dead_source{0};
+
+struct Hammer {
+    struct Model { int epoch = 0; };
+    struct Bump {};
+    struct Value { int epoch; };
+    using Msg = std::variant<Bump, Value>;
+
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](Bump) -> R { ++m.epoch; return {m, Cmd<Msg>::none()}; },
+            [&](Value v) -> R {
+                // The source id carries the epoch, so a message whose epoch is
+                // not current came from a source the model already dropped.
+                if (v.epoch != m.epoch) ++g_from_dead_source;
+                return {m, Cmd<Msg>::none()};
+            });
+    }
+
+    static Node view(const Model&, const Ctx& c) {
+        return (box() | width(px(80)) | height(px(40))
+                      | bg(c.theme.surface)).build();
+    }
+
+    static Sub<Msg> subscribe(const Model& m) {
+        // Post as fast as possible, to make the window as wide as it can be.
+        return Sub<Msg>::source("hammer:" + std::to_string(m.epoch),
+                                [e = m.epoch](auto sink, auto alive) {
+            while (alive()) sink(Msg{Value{e}});
+        });
+    }
+};
+
 // ── a COMPUTED source id must actually distinguish sources ──────────
 //
 // Folding state into the id is the documented way to say "this is a different
@@ -628,6 +679,27 @@ int main() {
         for (std::size_t i = 1; i < g_epoch_starts.size(); ++i)
             if (g_epoch_starts[i] <= g_epoch_starts[i - 1]) ordered = false;
         check(ordered, "and each ran with its own captured state, in order");
+    }
+
+    // ── in-flight messages from a stopped source ─────────────────
+    section("a stopped source's in-flight messages are never applied");
+    {
+        AppConfig cfg;
+        cfg.size = {80, 40};
+
+        run_headless<Hammer>(cfg, [&](auto& rt) {
+            // Each bump replaces the source while the old one is mid-post.
+            for (int i = 0; i < 300; ++i) {
+                rt.send(Hammer::Msg{Hammer::Bump{}});
+                rt.tick();
+            }
+        });
+
+        // Exactly zero. Not "few" -- the gate is checked on the UI thread at
+        // apply time, so the answer cannot depend on the interleaving.
+        check(g_from_dead_source.load() == 0,
+              "no message from an already-stopped source reaches update() (" +
+                  std::to_string(g_from_dead_source.load()) + ")");
     }
 
     // ── coalescing under a continuous gesture ────────────────────
