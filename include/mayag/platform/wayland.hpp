@@ -714,6 +714,19 @@ class WaylandWindow {
         wl::request(toplevel_, wl::toplevel_set_title, title_.c_str());
     }
 
+    void set_fullscreen(bool on) {
+        if (toplevel_ == nullptr) return;
+        // Let the COMPOSITOR pick the output by passing a null one. Naming an
+        // output means guessing which monitor the window is on, and guessing
+        // wrong moves it to another screen -- the compositor already knows.
+        //
+        // No size is set here on purpose: the compositor answers with a
+        // configure carrying the fullscreen geometry, which arrives through
+        // the normal resize path. Setting a size locally would fight it.
+        if (on) wl::request(toplevel_, wl::toplevel_set_fullscreen, nullptr);
+        else    wl::request(toplevel_, wl::toplevel_unset_fullscreen);
+    }
+
     void set_cursor(CursorShape shape) {
         if (shape == cursor_) return;
         cursor_ = shape;
@@ -1801,6 +1814,7 @@ class WaylandWindow {
     }
 
     void set_title(std::string_view t)   { p_->set_title(t); }
+    void set_fullscreen(bool on)         { p_->set_fullscreen(on); }
     void set_cursor(CursorShape shape)   { p_->set_cursor(shape); }
     void set_clipboard(std::string_view text) { p_->set_clipboard(text); }
     [[nodiscard]] std::string get_clipboard() { return p_->get_clipboard(); }

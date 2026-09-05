@@ -362,6 +362,10 @@ struct Video {
         /// size, and every frame after uses the measured box.
         int    view_w = 0;
         int    view_h = 0;
+        /// True while the window is filling the screen. Tracked because the
+        /// Cmd is a one-way instruction -- the runtime is told what to do, not
+        /// asked what it did -- so the app owns the toggle's state.
+        bool   fullscreen = false;
         double time    = 0.0;      ///< current PTS, seconds
         double duration = 0.0;
         int    frames  = 0;
@@ -423,12 +427,14 @@ struct Video {
     struct ScrubEnd {};
     /// No seek is running or pending: the picture is where it was asked to be.
     struct SeekSettled {};
+    /// Double-click on the picture: fill the screen, or come back.
+    struct ToggleFullscreen {};
     struct Resized { Vec2 size; };
     struct Tick { float dt; };
     struct Quit {};
     using Msg = std::variant<Play, Pause, SeekTo, Frame, Ended, SeekAbandoned,
                              Pointer, Scrub, ScrubEnd, SeekSettled,
-                             Resized, Tick, Quit>;
+                             ToggleFullscreen, Resized, Tick, Quit>;
 
     static inline const auto play_btn  = action(node_id("play"), Msg{Play{}});
     static inline const auto pause_btn = action(node_id("pause"), Msg{Pause{}});
@@ -613,6 +619,19 @@ struct Video {
                 return update(std::move(m), Msg{SeekTo{m.time, false}});
             },
 
+            [&](ToggleFullscreen) -> R {
+                m.fullscreen = !m.fullscreen;
+                // Keep the chrome up for a moment on the way in and out: the
+                // window is about to resize under the pointer, and controls
+                // that vanish at the same time read as the app losing state.
+                m.idle = 0.0;
+                m.chrome.to(1.0f);
+                // The new size arrives as a Resized, which recomputes view_w,
+                // so the decode resolution follows the window without this
+                // handler knowing anything about it.
+                return {m, Cmd<Msg>::fullscreen(m.fullscreen)};
+            },
+
             [&](Resized r) -> R {
                 m.window = r.size;
                 // The size the picture will be drawn at, derived with the
@@ -790,9 +809,15 @@ struct Video {
 
         return (z(
             // 1. THE VIDEO, letterboxed into the window.
+            //
+            // Named so a double-click can hit it. The controls sit ON TOP in
+            // this z-stack, so a double-click on the scrub bar is claimed by
+            // the bar and never reaches here -- which is what you want:
+            // dragging the scrub bar quickly must not toggle fullscreen.
             image(kImage)
                 | width(px(vw)) | height(px(vh))
-                | absolute(vx, vy),
+                | absolute(vx, vy)
+                | dsl::id<"picture">,
 
             // 2. A scrim behind the controls so white text stays legible over
             //    a bright frame. It fades with them.
@@ -861,7 +886,14 @@ struct Video {
             play_btn.click(),
             pause_btn.click(),
             Sub<Msg>::on_key(Key::space, m.playing ? Msg{Pause{}} : Msg{Play{}}),
-            Sub<Msg>::on_key(Key::escape, Msg{Quit{}}),
+            // Escape leaves fullscreen before it quits. In fullscreen the
+            // window is the whole screen and there is no title bar to aim
+            // at, so a key that quits outright is a trap -- every player
+            // treats Escape as "back out one level".
+            Sub<Msg>::on_key(Key::escape,
+                             m.fullscreen ? Msg{ToggleFullscreen{}} : Msg{Quit{}}),
+            // The usual keyboard shortcut, alongside the double-click.
+            Sub<Msg>::on_key(Key::f, Msg{ToggleFullscreen{}}),
             Sub<Msg>::on_close(Msg{Quit{}}),
             // Keep the model's idea of the window current, so a scrub after a
             // resize maps to the track that is actually on screen.
@@ -904,6 +936,15 @@ struct Video {
             Sub<Msg>::on_click_id_gesture(node_id("track"),
                                           Sub<Msg>::Gesture::release,
                                           Msg{ScrubEnd{}}),
+
+            // Double-click the picture to fill the screen, the way every
+            // video player behaves. Bound to the IMAGE rather than the
+            // window: the controls are above it in the z-stack, so a fast
+            // double-click while scrubbing hits the bar and is not mistaken
+            // for a fullscreen toggle.
+            Sub<Msg>::on_click_id_gesture(node_id("picture"),
+                                          Sub<Msg>::Gesture::click,
+                                          Msg{ToggleFullscreen{}}, 2, false),
 
             // The playback decoder runs while playing AND not mid-drag.
             //
@@ -1168,6 +1209,37 @@ int main(int argc, char** argv) {
                        std::to_string(landed) + "/" +
                        std::to_string(kClicks) + ")");
                 rt.send(Video::Msg{Video::Pause{}});
+            }
+
+            // ── double-click the picture to go fullscreen ────────
+            //
+            // Asserted against the WINDOW, not the model's bool. Cmd::fullscreen
+            // existed as a documented API that the runtime never handled, so a
+            // test checking only m.fullscreen passed while the command was
+            // dropped on the floor -- the app looked correct and nothing
+            // happened on screen.
+            {
+                const auto pic = rt.node_rect("picture");
+                ok(pic.has_value(), "the picture is in the laid-out tree");
+
+                const int before = rt.window().fullscreen_calls();
+                const Vec2 c = pic->center();
+                rt.window().push(MouseMove{c, {}, {}});
+                rt.window().push(MouseDown{c, MouseButton::left, {}, 2});
+                rt.window().push(MouseUp{c, MouseButton::left, {}});
+                rt.tick();
+
+                ok(rt.window().fullscreen_calls() == before + 1,
+                   "a double-click reaches the window as a fullscreen request");
+                ok(rt.window().fullscreen(), "and it asks to go fullscreen");
+
+                // And it toggles back, rather than being a one-way trip.
+                rt.window().push(MouseMove{c, {}, {}});
+                rt.window().push(MouseDown{c, MouseButton::left, {}, 2});
+                rt.window().push(MouseUp{c, MouseButton::left, {}});
+                rt.tick();
+                ok(!rt.window().fullscreen(),
+                   "a second double-click leaves fullscreen");
             }
 
             // The ends must be reachable, and clamped rather than overshooting.

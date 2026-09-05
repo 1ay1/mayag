@@ -311,16 +311,27 @@ class Interaction {
     }
 
     static void hit_recurse(const Node& n, Vec2 p, std::uint64_t& found) {
+        if (found != 0) return;                  // already settled, higher up
         if (!n.frame().contains(p)) return;
         // Clipping parents cull their subtree — a scrolled-away child is not
         // clickable even though its frame still says it contains the point.
         if (n.style().clip && !n.frame().contains(p)) return;
 
-        // Children paint on top of parents, so search them first and let the
-        // last (topmost) match win.
-        for (const auto& kid : n.children()) hit_recurse(kid, p, found);
+        // Children paint on top of parents, and LATER siblings paint on top
+        // of earlier ones, so search back-to-front and take the first hit.
+        //
+        // Forward order with a `found == 0` guard looks equivalent and is the
+        // exact opposite: it lets the BOTTOM-most sibling win. Nothing caught
+        // it while only one node in each stack had an id -- the bug appears
+        // the moment a background gets one. Giving the video picture an id so
+        // it could take a double-click made it swallow every click meant for
+        // the controls painted over it.
+        for (auto it = n.children().rbegin(); it != n.children().rend(); ++it) {
+            hit_recurse(*it, p, found);
+            if (found != 0) return;
+        }
 
-        if (found == 0 && n.style().id != 0) found = n.style().id;
+        if (n.style().id != 0) found = n.style().id;
     }
 
     static void collect_focusable(const Node& n, std::vector<std::uint64_t>& out) {

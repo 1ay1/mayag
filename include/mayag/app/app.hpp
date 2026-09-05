@@ -1264,6 +1264,25 @@ class Runtime {
             else if constexpr (std::is_same_v<T, typename C::SetTitle>) {
                 window_.set_title(a.title);
             }
+            else if constexpr (std::is_same_v<T, typename C::Fullscreen>) {
+                // Probed as a CAPABILITY, like image upload: a window that
+                // cannot go fullscreen (headless, an embedded surface) still
+                // satisfies the concept and simply ignores this.
+                //
+                // This branch was missing entirely, so Cmd::fullscreen was a
+                // documented API that silently did nothing -- the worst kind
+                // of gap, because the app looks correct and the compiler is
+                // happy. The size change arrives later as a normal resize
+                // event, so nothing else has to know about it.
+                if constexpr (requires { window_.set_fullscreen(a.on); }) {
+                    window_.set_fullscreen(a.on);
+                }
+            }
+            else if constexpr (std::is_same_v<T, typename C::SetWindowSize>) {
+                if constexpr (requires { window_.set_size(a.size); }) {
+                    window_.set_size(a.size);
+                }
+            }
             else if constexpr (std::is_same_v<T, typename C::SetCursor>) {
                 window_.set_cursor(static_cast<CursorShape>(a.shape));
             }

@@ -97,6 +97,14 @@ class Headless {
     void set_title(std::string_view t) { title_ = std::string{t}; }
     void set_cursor(CursorShape c) { cursor_ = static_cast<int>(c); }
     void set_clipboard(std::string_view s) { clipboard_ = std::string{s}; }
+    /// Fullscreen is recorded rather than performed, so a headless test can
+    /// assert that an app ASKED for it. Without this the Cmd is unobservable
+    /// and a test can only check the app's own bool -- which passes even when
+    /// the runtime drops the command on the floor, as it did.
+    void set_fullscreen(bool on) { fullscreen_ = on; ++fullscreen_calls_; }
+    [[nodiscard]] bool fullscreen() const noexcept { return fullscreen_; }
+    [[nodiscard]] int fullscreen_calls() const noexcept { return fullscreen_calls_; }
+
     [[nodiscard]] std::string get_clipboard() { return clipboard_; }
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() { return fb_.to_rgba8(); }
@@ -246,6 +254,8 @@ class Headless {
 
     std::string title_ = "mayag";
     std::string clipboard_;
+    bool        fullscreen_ = false;
+    int         fullscreen_calls_ = 0;
     std::string record_dir_;
     int         cursor_ = 0;
     Vec2        last_pos_{};
