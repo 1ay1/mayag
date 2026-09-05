@@ -16,6 +16,7 @@
 // the first few kilobytes of each, not the whole 20 MB CJK file.
 
 #include "font.hpp"
+#include "mapped_file.hpp"
 #include "last_resort.hpp"
 
 #include <algorithm>
@@ -234,14 +235,21 @@ namespace detail {
 [[nodiscard]] inline std::vector<FontEntry> describe(const std::filesystem::path& path) {
     std::vector<FontEntry> out;
 
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) return out;
-    const auto size = static_cast<std::size_t>(f.tellg());
-    if (size < 12) return out;
-    f.seekg(0);
-
-    std::vector<std::uint8_t> data(size);
-    f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
+    // MAP the file rather than read it.
+    //
+    // Discovery wants a family name, a weight, and which scripts the cmap
+    // covers -- the table directory and a few tables, scattered through the
+    // file. Reading the whole thing to get them meant a cold start pulled in
+    // every installed font in full: measured at 801 MB across 972 files on an
+    // ordinary Linux box, including 20 MB CJK faces read entirely to learn
+    // their name.
+    //
+    // Mapping makes the parser's access pattern the I/O pattern. It already
+    // takes a std::span, so it is handed the mapping unchanged and only the
+    // pages it actually touches are faulted in.
+    const MappedFile file{path.string()};
+    const std::span<const std::uint8_t> data = file.data();
+    if (data.size() < 12) return out;
 
     const std::uint32_t faces = ot::FontFile::face_count(data);
     for (std::uint32_t i = 0; i < faces && i < 64; ++i) {
