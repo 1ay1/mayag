@@ -200,6 +200,47 @@ struct Search {
 };
 
 
+std::atomic<int> g_a{0}, g_b{0};
+
+struct Twin {
+    struct Model { int a = 0, b = 0; };
+    struct FromA {}; struct FromB {};
+    using Msg = std::variant<FromA, FromB>;
+
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](FromA) -> R { ++m.a; return {m, Cmd<Msg>::none()}; },
+            [&](FromB) -> R { ++m.b; return {m, Cmd<Msg>::none()}; });
+    }
+    static Node view(const Model&, const Ctx& c) {
+        return (box() | width(px(10)) | height(px(10)) | bg(c.theme.surface)).build();
+    }
+    static Sub<Msg> subscribe(const Model&) {
+        // Two DIFFERENT producers that happen to share an id. In a real app
+        // this is two components both naming their feed "feed", or the same
+        // component instantiated twice.
+        return Sub<Msg>::batch({
+            Sub<Msg>::source("feed", [](auto sink, auto alive) {
+                ++g_a;
+                while (alive()) {
+                    sink(Msg{FromA{}});
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+            }),
+            Sub<Msg>::source("feed", [](auto sink, auto alive) {
+                ++g_b;
+                while (alive()) {
+                    sink(Msg{FromB{}});
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+            }),
+        });
+    }
+};
+
+
 }  // namespace
 
 int main() {
@@ -387,6 +428,40 @@ int main() {
                   std::to_string(fired.size()) + ")");
         check(!fired.empty() && fired.front() == "hello",
               "and it carries the newest state, not a stale one");
+    }
+
+    // ── id collisions ────────────────────────────────────────────────
+    section("duplicate Sub::source ids are detected, not silently dropped");
+    {
+        // Sources are reconciled BY id, so two subscriptions sharing one means
+        // the second never starts: no crash, no warning, just a feed that
+        // never produces while the app looks fine. Two instances of a
+        // component, or two modules that both picked "feed", is all it takes.
+        //
+        // The runtime now reports it. This test pins the BEHAVIOUR that makes
+        // the report necessary -- first wins, second is dropped -- so if the
+        // reconciliation is ever changed to something better (running both
+        // under distinct internal keys), this fails and gets revisited rather
+        // than the warning quietly becoming a lie.
+        AppConfig cfg;
+        cfg.size = {10, 10};
+        int a_msgs = 0, b_msgs = 0;
+
+        run_headless<Twin>(cfg, [&](auto& rt) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(600);
+            while (std::chrono::steady_clock::now() < deadline) {
+                rt.tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            a_msgs = rt.model().a;
+            b_msgs = rt.model().b;
+        });
+
+        check(g_a.load() == 1 && a_msgs > 0,
+              "the first source with a given id runs");
+        check(g_b.load() == 0 && b_msgs == 0,
+              "the second is dropped (which is why the runtime warns)");
     }
 
     // ── the threading contract ───────────────────────────────────────

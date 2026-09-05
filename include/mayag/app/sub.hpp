@@ -241,9 +241,25 @@ class Sub {
     }
 
     /// A declarative external source — the subscription form of `Cmd::stream`.
-    /// `id` must be stable across frames (a string literal is ideal); the
-    /// producer runs while this subscription is present and is stopped and
-    /// joined when it disappears. Example:
+    ///
+    /// `id` identifies the producer, and must be BOTH stable across frames and
+    /// UNIQUE among the sources alive at the same time. Stability is what lets
+    /// the runtime tell "still the same feed" from "a new one", so an unstable
+    /// id (a counter, a formatted timestamp) restarts the thread every frame.
+    /// Uniqueness matters because the runtime reconciles BY id: if two
+    /// subscriptions share one, the second is not started at all, and the
+    /// symptom is a feed that silently never produces while the app otherwise
+    /// looks fine.
+    ///
+    /// The collision is easy to hit without noticing -- two instances of the
+    /// same component, or two modules that both picked "feed" -- so a
+    /// component that can appear more than once should fold its identity into
+    /// the id:
+    ///
+    ///   Sub<Msg>::source("chat:" + room_id, tail_room)
+    ///
+    /// The runtime reports a collision on stderr rather than guessing which
+    /// producer was meant.
     ///
     ///   Sub<Msg>::source("clock", [](auto sink, auto alive) {
     ///       while (alive()) { std::this_thread::sleep_for(1s); sink(Tick{}); }

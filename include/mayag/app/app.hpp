@@ -59,6 +59,7 @@
 #include <future>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -1276,6 +1277,37 @@ class Runtime {
         std::vector<const typename S::Source*> wanted;
         collect_sources(subs, wanted);
 
+        // Report duplicate ids.
+        //
+        // Reconciliation is BY id, so a collision means the second producer is
+        // never started -- it does not crash, it does not warn, the feed is
+        // simply dead while the app looks fine. That is the worst failure mode
+        // available: silent, and indistinguishable from a producer that has
+        // nothing to say. Two instances of one component, or two modules that
+        // both picked "feed", is all it takes.
+        //
+        // Reported once per offending id rather than every frame, since
+        // subscribe() runs continuously and a per-frame message would bury the
+        // first one.
+        for (std::size_t i = 0; i < wanted.size(); ++i) {
+            for (std::size_t j = i + 1; j < wanted.size(); ++j) {
+                if (wanted[i]->id != wanted[j]->id) continue;
+                const std::string id{wanted[i]->id};
+                if (!reported_dup_ids_.insert(id).second) continue;
+                std::fprintf(stderr,
+                    "mayag: two Sub::source subscriptions share the id \"%s\".\n"
+                    "       Sources are reconciled by id, so only the FIRST is"
+                    " started -- the\n"
+                    "       other never runs and its feed is silently dead."
+                    " Give each one a\n"
+                    "       distinct id; a component that can appear twice"
+                    " should fold its\n"
+                    "       identity in, e.g. source(\"chat:\" + room_id,"
+                    " ...).\n",
+                    id.c_str());
+            }
+        }
+
         // Stop any running source whose id is no longer wanted.
         for (auto it = sources_.begin(); it != sources_.end();) {
             const bool still = std::any_of(wanted.begin(), wanted.end(),
@@ -1619,6 +1651,9 @@ class Runtime {
     int                                  stream_start_frames_ = 0;
     std::uint64_t                        last_stream_frame_ = ~0ull;
     bool                                 stream_warned_ = false;
+    /// Source ids already reported as duplicated, so the warning fires once
+    /// per offending id rather than on every frame.
+    std::set<std::string>                reported_dup_ids_;
     std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
     /// shared_ptr, not a member value: detached task workers capture it and
