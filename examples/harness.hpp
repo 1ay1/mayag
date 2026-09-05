@@ -96,9 +96,30 @@ struct Options {
         stack->add(typo::lastresort::face());
         return stack;
     }
+    // Deliberately do NOT override sdf_threshold.
+    //
+    // This used to pass `.sdf_threshold = 26.0f`, which pushed ordinary UI text
+    // into the distance-field path on any HiDPI display (13pt at 2x is 26
+    // device px). The library default is 56 precisely to keep UI text on the
+    // bitmap path, and FontConfig documents why: an SDF entry is resampled by
+    // construction, so it is never as sharp as a bitmap rasterised at the exact
+    // size it is drawn at.
+    //
+    // Measured cost of the override, sweeping a vertical stem across 8
+    // sub-pixel positions at 2x (columns of ink per stem, lower is crisper):
+    //
+    //       device px    bitmap    SDF
+    //          22         3.00     3.36
+    //          26         3.00     3.71
+    //          32         4.00     4.23
+    //          44         5.00     5.38
+    //
+    // The bitmap figures are exact integers at every sub-pixel phase because
+    // `FontStack::emit` snaps bitmap glyphs to the pixel grid; SDF entries are
+    // scale-free and must not be snapped, so their stems land fractionally and
+    // spread 8-24% wider. That is the soft, haloed look in a screenshot.
     return typo::system::default_stack(typo::FontConfig{
         .mode = typo::RenderMode::hybrid,
-        .sdf_threshold = 26.0f,
         .atlas_size = 1024,
     });
 }
