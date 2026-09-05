@@ -335,6 +335,12 @@ if(MAYAG_BUILD_TESTS)
     # the public interface, so it fails if adding a backend ever requires
     # touching the core again. Deliberately NOT inside any MAYAG_WITH_* guard —
     # the property it checks is that no such guard is needed.
+    # Virtualised cost must be flat in the row count, not just look right.
+    add_executable(mayag_scaling_tests tests/test_scaling.cpp)
+    target_link_libraries(mayag_scaling_tests PRIVATE mayag)
+    target_compile_options(mayag_scaling_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_scaling_tests COMMAND mayag_scaling_tests)
+
     # image() must render on every backend, not just compile.
     add_executable(mayag_texture_tests tests/test_texture.cpp)
     target_link_libraries(mayag_texture_tests PRIVATE mayag)
