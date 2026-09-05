@@ -521,7 +521,23 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
     const int   pad    = static_cast<int>(std::ceil(spread)) + 1;
     const float hi_res = scale * static_cast<float>(ss);
 
-    RasterResult hi = rasterize(outline, hi_res, pad * ss);
+    // Flatten curves FINER than the default 0.1 px.
+    //
+    // `rasterize`'s tolerance is a deviation in the pixels it is rendering
+    // into, which is the right measure for a bitmap glyph: it is drawn at the
+    // size it was rasterised at, so 0.1 px of chord error is 0.1 px on screen
+    // and invisible. An SDF entry is different. It is rasterised ONCE and then
+    // magnified -- mayag's 48 px field routinely drives 190 px display text --
+    // and the flattening error magnifies with it. At 4x, 0.1 px of chord error
+    // becomes 0.4 px of visible faceting, which reads as a lumpy, wobbling
+    // outline on large text no matter how good the field sampling is. The
+    // error is baked into the stored field, so nothing downstream can undo it.
+    //
+    // 0.02 px keeps the outline smooth out to ~5x magnification for the cost
+    // of a few more line segments during a one-off rasterisation.
+    constexpr float sdf_tolerance = 0.02f;
+
+    RasterResult hi = rasterize(outline, hi_res, pad * ss, sdf_tolerance);
     if (hi.bitmap.empty()) return {};
 
     // Faux-bold at SDF sizes: thicken the high-res coverage before the field
