@@ -367,14 +367,19 @@ class SoftwareBackend final : public Device {
 
     void sync_atlas(const AtlasView& v) override { atlas_ = v; }
 
+    void upload_image(std::uint32_t id, const ImageData& img) override {
+        images_.upload(id, img);
+    }
+    void release_image(std::uint32_t id) override { images_.release(id); }
+
     [[nodiscard]] bool render_offscreen(const DrawList& list, int w, int h,
                                         Color<Srgb> clear,
                                         std::vector<std::uint8_t>& out) override {
         if (w <= 0 || h <= 0) return false;
         Framebuffer fb{w, h};
         AtlasViewSampler sampler{atlas_};
-        const CoverageSampler* s = atlas_.coverage != nullptr ? &sampler : nullptr;
-        Tiled::render(list, fb, s, &shared_pool(), clear);
+        images_.set_glyphs(atlas_.coverage != nullptr ? &sampler : nullptr);
+        Tiled::render(list, fb, &images_, &shared_pool(), clear);
         Tiled::encode_parallel(fb, out, &shared_pool());
         return true;
     }
@@ -389,6 +394,7 @@ class SoftwareBackend final : public Device {
   private:
     int           w_ = 0, h_ = 0;
     AtlasView     atlas_{};
+    ImageStore    images_;
     std::vector<std::uint8_t> last_frame_;
     std::uint64_t frames_ = 0;
 };

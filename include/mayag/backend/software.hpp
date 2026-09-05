@@ -25,6 +25,7 @@
 #include <cmath>
 #include <array>
 #include <cstdint>
+#include <unordered_map>
 #include <span>
 #include <vector>
 
@@ -216,6 +217,68 @@ struct TextureSource {
         }
         return out;
     }
+};
+
+/// Uploaded user images, and the CoverageSampler wrapper that lets the
+/// software rasteriser see them.
+///
+/// A software window already has a CoverageSampler for glyphs (the font
+/// stack). Images are a SECOND source, so rather than make every window
+/// juggle two samplers this decorates the font one: glyph calls pass straight
+/// through, `sample_texture` reads whichever image is bound. That keeps the
+/// rasteriser's interface at one sampler and means a window gains image
+/// support by owning this instead of by growing a code path.
+class ImageStore final : public CoverageSampler {
+  public:
+    void set_glyphs(const CoverageSampler* s) noexcept { glyphs_ = s; }
+
+    void upload(std::uint32_t id, const ImageData& img) {
+        auto& slot = images_[id];
+        slot.rgba = img.rgba;
+        slot.width = img.width;
+        slot.height = img.height;
+        bound_ = id;
+    }
+
+    void release(std::uint32_t id) {
+        images_.erase(id);
+        if (bound_ == id) bound_ = 0;
+    }
+
+    /// Which image `sample_texture` reads. mayag binds ONE image at a time
+    /// (see VulkanDevice::upload_texture for why), so the most recent upload
+    /// wins -- exactly the video case, where one id is refreshed per frame.
+    void bind(std::uint32_t id) noexcept { bound_ = id; }
+
+    [[nodiscard]] bool empty() const noexcept { return images_.empty(); }
+
+    // ── CoverageSampler ─────────────────────────────────────────────
+    [[nodiscard]] float sample(std::uint32_t slot, float u, float v) const override {
+        return glyphs_ != nullptr ? glyphs_->sample(slot, u, v) : 0.0f;
+    }
+    [[nodiscard]] Vec4 sample_rgba(std::uint32_t slot, float u, float v) const override {
+        return glyphs_ != nullptr ? glyphs_->sample_rgba(slot, u, v)
+                                  : Vec4{1.0f, 1.0f, 1.0f, 0.0f};
+    }
+    [[nodiscard]] Vec4 sample_texture(float u, float v) const override {
+        const auto it = images_.find(bound_);
+        if (it == images_.end()) return Vec4{1.0f, 1.0f, 1.0f, 1.0f};
+        return it->second.sample(u, v);
+    }
+
+  private:
+    struct Entry {
+        std::vector<std::uint8_t> rgba;
+        int width = 0, height = 0;
+
+        [[nodiscard]] Vec4 sample(float u, float v) const noexcept {
+            TextureSource src{rgba.data(), width, height};
+            return src.sample(u, v);
+        }
+    };
+    std::unordered_map<std::uint32_t, Entry> images_;
+    std::uint32_t bound_ = 0;
+    const CoverageSampler* glyphs_ = nullptr;
 };
 
 class Software {

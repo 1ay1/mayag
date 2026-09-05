@@ -769,7 +769,33 @@ class WaylandWindow {
 
     // ── runtime hooks ───────────────────────────────────────────────────
 
-    void set_coverage_sampler(const backend::CoverageSampler* s) { sampler_ = s; }
+    void set_coverage_sampler(const backend::CoverageSampler* s) {
+        images_.set_glyphs(s);
+        sampler_ = &images_;
+    }
+
+    /// Optional window capability: hand pixels to the renderer for image(id).
+    ///
+    /// Both paths are fed, because which one is live is decided at runtime:
+    /// the GPU gets a sampled image, the shm fallback gets the CPU store.
+    /// Uploading to both costs one copy of an image the app already built,
+    /// and means a GPU that fails to initialise does not silently lose every
+    /// picture in the app.
+    void upload_image(std::uint32_t id, const ImageData& img) {
+        images_.upload(id, img);
+#ifdef MAYAG_WITH_VULKAN
+        if (gpu_active_) {
+            (void)gpu_.upload_texture(img.rgba.data(), img.width, img.height);
+        }
+#endif
+    }
+
+    void release_image(std::uint32_t id) {
+        images_.release(id);
+#ifdef MAYAG_WITH_VULKAN
+        if (gpu_active_ && images_.empty()) gpu_.release_texture();
+#endif
+    }
 
     /// Give the window the runtime's waker so poll() can be interrupted by a
     /// background thread. Set once at boot; a null waker just means the app
@@ -1709,6 +1735,7 @@ class WaylandWindow {
     std::int32_t  repeat_delay_     = 600;
 
     const backend::CoverageSampler* sampler_ = nullptr;
+    backend::ImageStore images_;
     Waker* waker_ = nullptr;
 
 #ifdef MAYAG_WITH_VULKAN
@@ -1778,6 +1805,9 @@ class WaylandWindow {
     [[nodiscard]] std::string get_clipboard() { return p_->get_clipboard(); }
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() { return p_->read_pixels(); }
+
+    void upload_image(std::uint32_t id, const ImageData& img) { p_->upload_image(id, img); }
+    void release_image(std::uint32_t id) { p_->release_image(id); }
 
     void set_coverage_sampler(const backend::CoverageSampler* s) {
         p_->set_coverage_sampler(s);

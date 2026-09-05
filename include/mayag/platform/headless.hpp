@@ -196,7 +196,18 @@ class Headless {
         return Color<Linear>{p.x * inv, p.y * inv, p.z * inv, a}.to<Srgb>();
     }
 
-    void set_coverage_sampler(const backend::CoverageSampler* s) { sampler_ = s; }
+    void set_coverage_sampler(const backend::CoverageSampler* s) {
+        // The image store decorates the font sampler, so the rasteriser sees
+        // one sampler that can answer both glyph and image queries.
+        images_.set_glyphs(s);
+        sampler_ = &images_;
+    }
+
+    /// Optional window capability: hand pixels to the renderer for image(id).
+    void upload_image(std::uint32_t id, const ImageData& img) {
+        images_.upload(id, img);
+    }
+    void release_image(std::uint32_t id) { images_.release(id); }
 
     /// Headless never blocks on a real fd — it runs scripted, deterministic
     /// frames — so there is nothing for a waker to interrupt. Accepted and
@@ -231,6 +242,7 @@ class Headless {
     std::deque<Event>     queue_;
     backend::Framebuffer  fb_{1024, 640};
     const backend::CoverageSampler* sampler_ = nullptr;
+    backend::ImageStore images_;
 
     std::string title_ = "mayag";
     std::string clipboard_;

@@ -24,6 +24,32 @@
 
 namespace mayag {
 
+/// Pixels an app hands to the renderer: photos, icons, decoded video frames.
+///
+/// Deliberately OUTSIDE Cmd<Msg>. Nested inside, every Msg type would get its
+/// own incompatible ImageData, and lifting a child component's upload into a
+/// parent would need a cast between two identical layouts. Images do not
+/// depend on the message type, so they should not be parameterised by it.
+///
+/// Held by shared_ptr and moved by POINTER, never copied. A 1080p frame is
+/// 8 MB; a player producing 60 a second would otherwise burn half a gigabyte
+/// per second copying frames into messages that are themselves copied through
+/// the queue. Sharing also lets a decoder hand over a buffer it already owns.
+///
+/// `rgba` is straight (not premultiplied), sRGB-encoded RGBA8 -- what every
+/// decoder and image loader produces. The shading kernel decodes it.
+struct ImageData {
+    std::vector<std::uint8_t> rgba;
+    int width = 0;
+    int height = 0;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return width > 0 && height > 0 &&
+               rgba.size() == static_cast<std::size_t>(width) * height * 4;
+    }
+};
+
+
 /// What the shader should compute for this instance. Kept in the instance data
 /// rather than in pipeline state, so different shapes still batch together.
 enum class ShapeKind : std::uint32_t {

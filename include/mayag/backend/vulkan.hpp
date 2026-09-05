@@ -658,6 +658,11 @@ class VulkanBackend final : public Device {
 
     void sync_atlas(const AtlasView& v) override { dev_.sync_atlas_view(v); }
 
+    void upload_image(std::uint32_t, const ImageData& img) override {
+        (void)dev_.upload_texture(img.rgba.data(), img.width, img.height);
+    }
+    void release_image(std::uint32_t) override { dev_.release_texture(); }
+
     [[nodiscard]] bool render_offscreen(const DrawList& list, int w, int h,
                                         Color<Srgb> clear,
                                         std::vector<std::uint8_t>& out) override {

@@ -90,9 +90,25 @@ class Cmd {
     /// Write a PNG of the current frame — screenshots and visual tests.
     struct Screenshot { std::string path; };
 
+    /// Hand an image to the renderer so `image(id)` can draw it.
+    ///
+    /// Re-uploading the SAME id replaces its contents, which is the video
+    /// case: one id, a new frame every tick, no allocation churn and no
+    /// growing texture table.
+    struct UploadImage {
+        std::uint32_t id = 0;
+        std::shared_ptr<const ImageData> image;
+    };
+
+    /// Release an uploaded image. Optional -- images are freed with the
+    /// window -- but a long-running app that cycles through large images
+    /// should not hold them all.
+    struct ReleaseImage { std::uint32_t id = 0; };
+
     using Alt = std::variant<None, Quit, Batch, After, Task, Stream, Perform,
                              SetTitle, SetCursor, SetClipboard, ReadClipboard,
-                             SetWindowSize, Fullscreen, Redraw, Focus, Screenshot>;
+                             SetWindowSize, Fullscreen, Redraw, Focus, Screenshot,
+                             UploadImage, ReleaseImage>;
 
     // ── construction ────────────────────────────────────────────────────
 
@@ -158,6 +174,28 @@ class Cmd {
     }
     [[nodiscard]] static Cmd screenshot(std::string path) {
         return Cmd{Alt{Screenshot{std::move(path)}}};
+    }
+
+    /// Upload pixels for `image(id)` to draw. See UploadImage.
+    ///
+    ///     // in update(), when a decoded frame arrives:
+    ///     return {m, Cmd<Msg>::upload_image(1, frame.pixels)};
+    ///
+    ///     // in view():
+    ///     image(1) | width(pct(100)) | height(pct(100))
+    [[nodiscard]] static Cmd upload_image(std::uint32_t id,
+                                          std::shared_ptr<const ImageData> img) {
+        return Cmd{Alt{UploadImage{id, std::move(img)}}};
+    }
+
+    /// Convenience for a one-off image the app builds inline.
+    [[nodiscard]] static Cmd upload_image(std::uint32_t id, ImageData img) {
+        return Cmd{Alt{UploadImage{
+            id, std::make_shared<const ImageData>(std::move(img))}}};
+    }
+
+    [[nodiscard]] static Cmd release_image(std::uint32_t id) {
+        return Cmd{Alt{ReleaseImage{id}}};
     }
 
     /// Combine effects. Flattens, and drops `none` so batching in a loop
@@ -231,6 +269,15 @@ class Cmd {
             else if constexpr (std::is_same_v<T, Fullscreen>)   return Out::fullscreen(a.on);
             else if constexpr (std::is_same_v<T, Focus>)        return Out::focus(a.node_id);
             else if constexpr (std::is_same_v<T, Screenshot>)   return Out::screenshot(a.path);
+            else if constexpr (std::is_same_v<T, UploadImage>) {
+                // Carries no Msg, so it lifts unchanged -- but it MUST be
+                // listed. The catch-all below turns anything unhandled into
+                // none(), which would silently drop a child component's
+                // image upload the moment it was composed into a parent.
+                return Out::upload_image(a.id, a.image);
+            }
+            else if constexpr (std::is_same_v<T, ReleaseImage>)
+                return Out::release_image(a.id);
             else return Out::none();
         }, alt_);
     }

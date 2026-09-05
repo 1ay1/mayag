@@ -1038,6 +1038,30 @@ class Runtime {
                                        static_cast<int>(size_.x * dpi_),
                                        static_cast<int>(size_.y * dpi_));
             }
+            else if constexpr (std::is_same_v<T, typename C::UploadImage>) {
+                // Hand the pixels to whatever is rendering. The window owns
+                // the GPU image (or the CPU sampler), because it owns the
+                // device -- the runtime only routes.
+                //
+                // Probed with `requires` rather than added to the Window
+                // concept: image support is a CAPABILITY, and a window that
+                // has none should still satisfy the concept and compile. An
+                // app that uploads to such a window simply draws nothing,
+                // which is the same contract the backend registry uses for
+                // optional device features.
+                if (a.image && a.image->valid()) {
+                    if constexpr (requires { window_.upload_image(a.id, *a.image); }) {
+                        window_.upload_image(a.id, *a.image);
+                        dirty_ = true;   // new pixels mean the frame changed
+                    }
+                }
+            }
+            else if constexpr (std::is_same_v<T, typename C::ReleaseImage>) {
+                if constexpr (requires { window_.release_image(a.id); }) {
+                    window_.release_image(a.id);
+                    dirty_ = true;
+                }
+            }
         }, cmd.alternative());
     }
 

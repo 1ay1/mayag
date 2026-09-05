@@ -335,6 +335,12 @@ if(MAYAG_BUILD_TESTS)
     # the public interface, so it fails if adding a backend ever requires
     # touching the core again. Deliberately NOT inside any MAYAG_WITH_* guard —
     # the property it checks is that no such guard is needed.
+    # The frame pipeline, with numbers that survive.
+    add_executable(mayag_perf_tests tests/test_perf.cpp)
+    target_link_libraries(mayag_perf_tests PRIVATE mayag)
+    target_compile_options(mayag_perf_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_perf_tests COMMAND mayag_perf_tests)
+
     # Menus, modals and tooltips must land on screen.
     add_executable(mayag_overlay_tests tests/test_overlay.cpp)
     target_link_libraries(mayag_overlay_tests PRIVATE mayag)
@@ -398,7 +404,7 @@ if(MAYAG_BUILD_TESTS)
     # SAME Program the windowed build runs, so a green test here is evidence
     # about the shipped app rather than about a parallel harness.
     if(MAYAG_BUILD_EXAMPLES)
-        foreach(demo counter gallery dashboard typography todo reactive aurora)
+        foreach(demo counter gallery dashboard typography todo reactive aurora player)
             if(TARGET mayag_${demo})
                 add_test(NAME mayag_${demo}_headless
                          COMMAND mayag_${demo} --headless)

@@ -179,6 +179,35 @@ inline void report(const Ui& ui, Vec2 viewport, const RenderOptions& opts,
     }
 }
 
+/// Interpret the effects a Program's init() returns that a STILL frame can
+/// honour.
+///
+/// The png/gpu paths render one frame without a runtime, so they used to drop
+/// init()'s Cmd entirely -- `init().first` took the Model and threw the
+/// effects away. That is harmless for set_title, which a screenshot has no
+/// use for, and wrong for anything supplying CONTENT: an app whose first
+/// frame shows a decoded image rendered blank, which looks like a renderer
+/// bug rather than a missing upload.
+///
+/// Only image uploads are interpreted. Timers, tasks and streams need a
+/// running runtime by definition, and half-running them would be worse than
+/// not running them at all.
+template <typename Msg>
+inline void apply_still_effects(const Cmd<Msg>& cmd,
+                                const std::function<void(std::uint32_t,
+                                                         const ImageData&)>& upload) {
+    using C = Cmd<Msg>;
+    std::visit([&](const auto& a) {
+        using T = std::decay_t<decltype(a)>;
+        if constexpr (std::is_same_v<T, typename C::Batch>) {
+            for (const auto& c : a.cmds) apply_still_effects(c, upload);
+        }
+        else if constexpr (std::is_same_v<T, typename C::UploadImage>) {
+            if (a.image && a.image->valid()) upload(a.id, *a.image);
+        }
+    }, cmd.alternative());
+}
+
 /// Run a Program in whichever mode the flags asked for.
 ///
 /// `drive` is the headless script: it receives the runtime and should exercise
@@ -232,9 +261,25 @@ template <Program P, typename Driver>
             // differs. Note there is no mention of Vulkan, Metal or any other
             // API here: the registry hands back whatever is best on this
             // machine, and everything below talks to backend::Device.
-            typename P::Model model = [] {
-                if constexpr (detail::HasEffectfulInit<P>) return P::init().first;
-                else return P::init();
+            auto device = backend::create_offscreen_device();
+            if (!device) {
+                std::fprintf(stderr, "mayag: no usable rendering backend\n");
+                return 1;
+            }
+
+            typename P::Model model = [&] {
+                if constexpr (detail::HasEffectfulInit<P>) {
+                    auto [m, cmd] = P::init();
+                    // Honour init()'s image uploads, so an app whose first
+                    // frame IS an image does not screenshot blank.
+                    apply_still_effects(cmd, [&](std::uint32_t id,
+                                                 const ImageData& img) {
+                        device->upload_image(id, img);
+                    });
+                    return m;
+                } else {
+                    return P::init();
+                }
             }();
 
             Ctx ctx{o.size, o.dpi, 0.0, cfg.theme, nullptr};
@@ -257,11 +302,6 @@ template <Program P, typename Driver>
             po.glyphs   = &glyphs;
             render::paint(root, dl, po);
 
-            auto device = backend::create_offscreen_device();
-            if (!device) {
-                std::fprintf(stderr, "mayag: no usable rendering backend\n");
-                return 1;
-            }
             device->sync_atlas(backend::view_of(fonts->atlas()));
 
             std::vector<std::uint8_t> px;
