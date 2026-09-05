@@ -326,6 +326,10 @@ struct Video {
     struct Model {
         bool   playing = false;
         bool   seeking = false;
+        /// True once a DRAG has shown a keyframe preview, so the release knows
+        /// it owes a precise seek. False for a plain click, which already
+        /// seeked precisely and must not pay for a second decode.
+        bool   previewing = false;
         double time    = 0.0;      ///< current PTS, seconds
         double duration = 0.0;
         int    frames  = 0;
@@ -430,7 +434,16 @@ struct Video {
                 // New epoch -> new playback source id, so a seek while playing
                 // restarts the decoder at the new position instead of leaving
                 // the old thread running from where it was.
-                ++m.epoch;
+                //
+                // A PREVIEW does not bump it. Previews come from pointer
+                // moves, and each bump replaces the playback source: a 25-move
+                // drag spawned 25 decoder threads, every one opening a 1080p
+                // file and seeking before being retired a frame later. The
+                // picture during a drag comes from the seek task, not from
+                // playback, so restarting the decoder mid-drag buys nothing --
+                // the release fires a precise SeekTo and that one restarts it
+                // exactly once, at the position the user chose.
+                if (!s.preview) ++m.epoch;
                 const double want = m.time;
                 // task_coalesce, NOT task_latest: one decode runs at a time and
                 // the newest pending position replaces the rest.
@@ -523,13 +536,20 @@ struct Video {
                 // button is held this asks for a cheap keyframe preview: a
                 // 10x faster decode the user can aim with. ScrubEnd re-seeks
                 // precisely once they let go.
+                if (s.dragging) m.previewing = true;
                 return update(std::move(m),
                               Msg{SeekTo{frac * m.duration, s.dragging}});
             },
 
             [&](ScrubEnd) -> R {
-                // The button came up. Land exactly where they left it -- the
-                // previews during the drag were keyframe-accurate only.
+                // Re-seek precisely ONLY if the previews during a drag left the
+                // picture keyframe-accurate. A plain click never previewed --
+                // press seeks precisely and is already correct -- so firing a
+                // seek here anyway made every click decode the same frame
+                // TWICE, doubling the latency of the most common interaction
+                // (measured 92 ms to 172 ms, 228 ms to 412 ms).
+                if (!m.previewing) return {m, Cmd<Msg>::none()};
+                m.previewing = false;
                 return update(std::move(m), Msg{SeekTo{m.time, false}});
             },
 
@@ -801,7 +821,14 @@ struct Video {
                                           Sub<Msg>::Gesture::release,
                                           Msg{ScrubEnd{}}),
 
-            when(m.playing, decoder(m)),
+            // The playback decoder runs while playing AND not mid-drag.
+            //
+            // Suspending it during a scrub is what a real player does, and
+            // here it is also correctness: the picture during a drag comes
+            // from the seek task, and a decoder still running from the old
+            // position would race it, overwriting m.time with frames from
+            // wherever playback had reached.
+            when(m.playing && !m.previewing, decoder(m)),
 
             // Frames are requested only while something is moving: the chrome
             // spring settling, or playback counting down to auto-hide. A
@@ -992,6 +1019,28 @@ int main(int argc, char** argv) {
                    std::to_string(rt.model().time) + " vs " +
                    std::to_string(want) + ")");
             ok(rt.model().time != before, "and it actually moved");
+
+            // A click must cost ONE decode, not two.
+            //
+            // press seeks precisely and release fired a second precise seek
+            // to the same spot, so the most common interaction in the app
+            // decoded the same frame twice and took twice as long to respond
+            // (measured 92 -> 172 ms, 228 -> 412 ms on a 1080p file). The
+            // release only owes a seek if a DRAG left keyframe previews on
+            // screen, which a plain click never does.
+            {
+                const int decodes_before = rt.model().frames;
+                rt.click(node_id("track"));
+                pump([&] { return !rt.model().seeking; }, 15000);
+                // Let a redundant second decode land if one was queued.
+                for (int i = 0; i < 400; ++i) {
+                    rt.tick();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+                ok(rt.model().frames - decodes_before == 1,
+                   "a single click decodes exactly one frame (" +
+                       std::to_string(rt.model().frames - decodes_before) + ")");
+            }
 
             // The ends must be reachable, and clamped rather than overshooting.
             const float w = Video::track_width(rt.model().window);
