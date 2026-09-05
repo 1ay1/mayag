@@ -1240,6 +1240,36 @@ int main(int argc, char** argv) {
                 rt.tick();
                 ok(!rt.window().fullscreen(),
                    "a second double-click leaves fullscreen");
+
+                // And again with the count UNREPORTED, which is what Wayland
+                // actually sends -- it has no multi-click protocol, so the
+                // interaction layer must derive the count from timing.
+                //
+                // This is the case that was broken in the real app while the
+                // test above passed: wayland.hpp hardcoded click_count = 1,
+                // which reads as "definitely a single click" and suppressed
+                // synthesis entirely. Passing 2 explicitly, as the test above
+                // does, exercises the platform-reported path that only macOS
+                // takes. Both paths need a test or one of them rots.
+                const int synth_before = rt.window().fullscreen_calls();
+                // Break the chain from the clicks above first: the count is
+                // cumulative, so without a gap this run continues to 3 and 4
+                // rather than starting a fresh 1, 2.
+                rt.tick();
+                rt.window().push(MouseMove{Vec2{5.0f, 5.0f}, {}, {}});
+                rt.tick();
+
+                rt.window().set_tick_seconds(0.02);   // inside the 0.4 s window
+                for (int i = 0; i < 2; ++i) {
+                    rt.window().push(MouseMove{c, {}, {}});
+                    rt.window().push(MouseDown{c, MouseButton::left, {}, 0});
+                    rt.window().push(MouseUp{c, MouseButton::left, {}});
+                    rt.tick();
+                }
+                rt.window().set_tick_seconds(0.5);
+                ok(rt.window().fullscreen_calls() == synth_before + 1,
+                   "two quick clicks with an UNREPORTED count synthesise a "
+                   "double-click");
             }
 
             // The ends must be reachable, and clamped rather than overshooting.

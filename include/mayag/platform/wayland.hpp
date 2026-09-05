@@ -1377,7 +1377,17 @@ class WaylandWindow {
         }
 
         if (state == wl::pointer_button_pressed) {
-            w->pending_.push_back(MouseDown{w->pointer_pos_, b, w->mods_, 1});
+            // Click count 0 means UNKNOWN, not one.
+            //
+            // Wayland has no multi-click protocol -- wl_pointer.button says
+            // only "a button went down" -- so the interaction layer has to
+            // derive the count from timing and distance. It only does that
+            // when the platform reports nothing, and a hardcoded 1 is a
+            // platform reporting "definitely a single click": synthesis never
+            // ran and a double-click was impossible on this backend. macOS
+            // sends a real clickCount from NSEvent, which is why it worked
+            // there and only there.
+            w->pending_.push_back(MouseDown{w->pointer_pos_, b, w->mods_, 0});
         } else {
             w->pending_.push_back(MouseUp{w->pointer_pos_, b, w->mods_});
         }
