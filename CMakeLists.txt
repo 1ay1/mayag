@@ -3,6 +3,33 @@ project(mayag VERSION 0.1.0 LANGUAGES CXX
         DESCRIPTION "A GPU UI framework for C++26")
 
 # ─────────────────────────────────────────────────────────────────────────
+# Compiler cache (ccache / sccache)
+#
+# mayag is header-only in the parts that matter, so touching one header in
+# include/mayag/app/ recompiles every example and test that includes it —
+# and app.hpp is included by all of them. Most of those recompiles produce
+# byte-identical preprocessed input, because the edit was in a different
+# part of the header. ccache keys on CONTENT, so they become cache hits
+# instead of 30-second rebuilds.
+#
+# Impossible to get wrong: with neither tool installed the launcher is not
+# set and the build is exactly as before. Opt out with
+# -DMAYAG_COMPILER_CACHE=OFF; a user-set *_COMPILER_LAUNCHER always wins.
+# ─────────────────────────────────────────────────────────────────────────
+option(MAYAG_COMPILER_CACHE "Use ccache/sccache as the compiler launcher when available" ON)
+if(MAYAG_COMPILER_CACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    find_program(MAYAG_CCACHE NAMES ccache sccache)
+    if(MAYAG_CCACHE)
+        set(CMAKE_C_COMPILER_LAUNCHER   "${MAYAG_CCACHE}" CACHE STRING "" FORCE)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${MAYAG_CCACHE}" CACHE STRING "" FORCE)
+        message(STATUS "mayag: compiler cache enabled (${MAYAG_CCACHE})")
+    else()
+        message(STATUS "mayag: no ccache/sccache found — install ccache to make "
+                       "header edits rebuild in seconds (pacman/apt/brew install ccache)")
+    endif()
+endif()
+
+# ─────────────────────────────────────────────────────────────────────────
 # Standard
 #
 # mayag uses C++26 for user-generated static_assert messages (P2741), which
