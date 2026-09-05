@@ -470,6 +470,10 @@ struct Timer {
     double deadline = 0.0;
     double interval = 0.0;   ///< 0 = one-shot
     Msg    msg;
+    /// Debounce key from `Cmd::after_latest`; empty for a plain timer.
+    /// Scheduling a new timer with the same non-empty key cancels the old one,
+    /// which is what makes "do this once the user stops" actually work.
+    std::string key;
 };
 
 }  // namespace detail
@@ -1052,6 +1056,20 @@ class Runtime {
             else if constexpr (std::is_same_v<T, typename C::After>) {
                 const double secs = std::chrono::duration<double>(a.delay).count();
                 timers_.push_back(detail::Timer<Msg>{window_.now() + secs, 0.0, a.msg});
+            }
+            else if constexpr (std::is_same_v<T, typename C::AfterLatest>) {
+                // Replace any pending timer with this key, so only the most
+                // recent request survives. That is the whole of a debounce,
+                // and it belongs here rather than in every app that needs one:
+                // done by hand it means storing a token in the Model and
+                // checking it on arrival, which is the same error-prone shape
+                // as the stale-task problem task_latest solves.
+                std::erase_if(timers_, [&](const detail::Timer<Msg>& t) {
+                    return t.key == a.key;
+                });
+                const double secs = std::chrono::duration<double>(a.delay).count();
+                timers_.push_back(detail::Timer<Msg>{
+                    window_.now() + secs, 0.0, a.msg, a.key});
             }
             else if constexpr (std::is_same_v<T, typename C::Task>) {
                 // Detached worker; its result lands in the inbox and is

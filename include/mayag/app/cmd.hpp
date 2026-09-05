@@ -47,6 +47,29 @@ class Cmd {
         Msg msg;
     };
 
+    /// A delayed message that REPLACES any earlier pending one with the same
+    /// key. This is a debounce, and it is what `after` is usually reached for.
+    ///
+    /// `Cmd::after` schedules a timer with no identity, so every call adds
+    /// another. The canonical use -- "search 80 ms after the user stops
+    /// typing" -- therefore does not debounce at all: typing "hello" queues
+    /// five timers and fires five searches, four of them for stale queries.
+    /// Measured, not hypothesised.
+    ///
+    ///     // WRONG: one search per keystroke
+    ///     Cmd<Msg>::after(80ms, Msg{Search{m.query}})
+    ///
+    ///     // RIGHT: one search, 80 ms after the last keystroke
+    ///     Cmd<Msg>::after_latest("search", 80ms, Msg{Search{m.query}})
+    ///
+    /// Keys are independent, so a debounced search and a debounced autosave
+    /// do not interfere.
+    struct AfterLatest {
+        std::string               key;
+        std::chrono::milliseconds delay{};
+        Msg                       msg;
+    };
+
     /// Run `work` on a worker thread; its returned Msg comes back to
     /// `update()` on the UI thread. This is how you do network I/O, file
     /// reads, or anything slow without blocking the frame.
@@ -126,10 +149,11 @@ class Cmd {
     /// should not hold them all.
     struct ReleaseImage { std::uint32_t id = 0; };
 
-    using Alt = std::variant<None, Quit, Batch, After, Task, TaskLatest, Stream,
-                             Perform, SetTitle, SetCursor, SetClipboard,
-                             ReadClipboard, SetWindowSize, Fullscreen, Redraw,
-                             Focus, Screenshot, UploadImage, ReleaseImage>;
+    using Alt = std::variant<None, Quit, Batch, After, AfterLatest, Task,
+                             TaskLatest, Stream, Perform, SetTitle, SetCursor,
+                             SetClipboard, ReadClipboard, SetWindowSize,
+                             Fullscreen, Redraw, Focus, Screenshot,
+                             UploadImage, ReleaseImage>;
 
     // ── construction ────────────────────────────────────────────────────
 
@@ -142,6 +166,13 @@ class Cmd {
 
     [[nodiscard]] static Cmd after(std::chrono::milliseconds d, Msg m) {
         return Cmd{Alt{After{d, std::move(m)}}};
+    }
+
+    /// Debounce: a delayed message that cancels any earlier pending one with
+    /// the same key. See AfterLatest.
+    [[nodiscard]] static Cmd after_latest(std::string key,
+                                          std::chrono::milliseconds d, Msg m) {
+        return Cmd{Alt{AfterLatest{std::move(key), d, std::move(m)}}};
     }
 
     template <typename F>
@@ -310,6 +341,8 @@ class Cmd {
             }
             else if constexpr (std::is_same_v<T, After>)
                 return Out::after(a.delay, f(a.msg));
+            else if constexpr (std::is_same_v<T, AfterLatest>)
+                return Out::after_latest(a.key, a.delay, f(a.msg));
             else if constexpr (std::is_same_v<T, Task>)
                 return Out::task([work = a.work, f] { return f(work()); });
             else if constexpr (std::is_same_v<T, TaskLatest>)

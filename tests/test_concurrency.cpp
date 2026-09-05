@@ -173,6 +173,33 @@ struct Drag {
 };
 
 
+struct Search {
+    struct Model { std::string query; std::vector<std::string> fired; };
+    struct Typed { char c; };
+    struct Fire { std::string q; };
+    using Msg = std::variant<Typed, Fire>;
+
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](Typed t) -> R {
+                m.query += t.c;
+                // The classic debounce: "search 80ms after the user stops".
+                return {m, Cmd<Msg>::after_latest("search",
+                                           std::chrono::milliseconds(80),
+                                           Msg{Fire{m.query}})};
+            },
+            [&](Fire f) -> R { m.fired.push_back(f.q); return {m, Cmd<Msg>::none()}; });
+    }
+    static Node view(const Model&, const Ctx& c) {
+        return (box() | width(px(10)) | height(px(10)) | bg(c.theme.surface)).build();
+    }
+    static Sub<Msg> subscribe(const Model&) { return Sub<Msg>::none(); }
+};
+
+
 }  // namespace
 
 int main() {
@@ -328,6 +355,38 @@ int main() {
         check(delivered == 1, "but only ONE result reached update()");
         check(final_value == 5,
               "and it is the newest request, not the last to finish");
+    }
+
+    // ── debounce ─────────────────────────────────────────────────────
+    section("after_latest: a debounce that actually debounces");
+    {
+        // Cmd::after schedules a timer with no identity, so the canonical
+        // "search 80ms after the user stops typing" fires once PER KEYSTROKE:
+        // typing "hello" queued five timers and ran five searches, four for
+        // stale queries. In a real app that is five network requests a word.
+        //
+        // Headless runs a VIRTUAL clock advancing per tick, so the test types
+        // at 10ms/char of tick time -- sleeping in wall time would prove
+        // nothing.
+        AppConfig cfg;
+        cfg.size = {10, 10};
+        std::vector<std::string> fired;
+
+        run_headless<Search>(cfg, [&](auto& rt) {
+            rt.window().set_tick_seconds(0.010);
+            for (char c : {'h', 'e', 'l', 'l', 'o'}) {
+                rt.send(Search::Msg{Search::Typed{c}});
+                rt.tick();
+            }
+            for (int i = 0; i < 40; ++i) rt.tick();
+            fired = rt.model().fired;
+        });
+
+        check(fired.size() == 1,
+              "five fast keystrokes produce ONE delayed message (" +
+                  std::to_string(fired.size()) + ")");
+        check(!fired.empty() && fired.front() == "hello",
+              "and it carries the newest state, not a stale one");
     }
 
     // ── the threading contract ───────────────────────────────────────
