@@ -353,6 +353,22 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_text_edit_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_text_edit_tests COMMAND mayag_text_edit_tests)
 
+    # The PNG decoder parses untrusted input: fuzz it like the font parser.
+    add_executable(mayag_png_tests tests/test_png.cpp)
+    target_link_libraries(mayag_png_tests PRIVATE mayag)
+    target_compile_options(mayag_png_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_png_tests COMMAND mayag_png_tests)
+
+    # The same sweep under ASan+UBSan, where an out-of-bounds read in the
+    # inflater actually fails instead of quietly returning wrong pixels.
+    if(NOT MSVC)
+        add_executable(mayag_png_asan EXCLUDE_FROM_ALL tests/test_png.cpp)
+        target_link_libraries(mayag_png_asan PRIVATE mayag)
+        target_compile_options(mayag_png_asan PRIVATE
+                               -fsanitize=address,undefined -O1 -g)
+        target_link_options(mayag_png_asan PRIVATE -fsanitize=address,undefined)
+    endif()
+
     # Cmd::task / Cmd::stream / Sub::source under real contention.
     add_executable(mayag_concurrency_tests tests/test_concurrency.cpp)
     target_link_libraries(mayag_concurrency_tests PRIVATE mayag)
