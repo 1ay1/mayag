@@ -157,13 +157,38 @@ class Cmd {
                                   std::function<Msg()>(std::forward<F>(f))}}};
     }
 
-    /// Start a streaming producer. `f` has signature
-    /// `void(Sink sink, std::function<bool()> keep_running)` and runs on a
-    /// worker thread: call `sink(msg)` for each event, and return when
-    /// `keep_running()` becomes false. Example — a one-second ticker:
+    /// Start a producer that runs until the APP EXITS.
+    ///
+    /// Prefer `Sub::source`. This is the right tool only when a producer
+    /// genuinely has no off switch -- and that is rarer than it looks.
+    ///
+    /// The trap is `keep_running()`. It reads like "stop when I no longer
+    /// want this", and it is not: it stays true until the Runtime is
+    /// destroyed. There is no way to end a stream early, because a Cmd is
+    /// fire-and-forget -- once interpreted, nothing refers to it again, so
+    /// there is nothing for a later model state to switch off.
+    ///
+    /// That difference is invisible until it bites. Writing a video player's
+    /// decoder as a stream, `pause` set a flag the producer never saw, frames
+    /// kept arriving, and a subsequent seek was overwritten by a decode that
+    /// should have stopped. The fix was one word:
+    ///
+    ///     // WRONG -- runs until the app quits, whatever the model says
+    ///     return {m, Cmd<Msg>::stream(decode_frames)};
+    ///
+    ///     // RIGHT -- exists exactly while `m.playing` is true; the runtime
+    ///     // signals and JOINS the thread when it goes false
+    ///     when(m.playing, Sub<Msg>::source("decoder", decode_frames))
+    ///
+    /// `Sub::source` is declarative: the live set of producers is a pure
+    /// function of the model, the same way the view is. Nothing has to
+    /// remember to stop anything, which is the entire point of the
+    /// architecture. Use `Cmd::stream` only for a feed that should outlive
+    /// every model state -- a log tail, a crash reporter -- and say so at the
+    /// call site.
     ///
     ///   Cmd::stream([](auto sink, auto alive) {
-    ///       while (alive()) {
+    ///       while (alive()) {           // false only at shutdown
     ///           std::this_thread::sleep_for(1s);
     ///           if (alive()) sink(Tick{});
     ///       }

@@ -1087,6 +1087,40 @@ class Runtime {
             }
             else if constexpr (std::is_same_v<T, typename C::Stream>) {
                 // A long-lived producer. It runs on its own thread and pushes
+                //
+                // Warn about the LEAK PATTERN, which is starting streams again
+                // and again as the model changes -- each one runs until the
+                // app exits, so a new thread accumulates every time.
+                //
+                // The signal is repetition over TIME, not count: fanning out
+                // several producers once (a test, a multi-source feed) is
+                // legitimate and must not warn, while one stream started on
+                // every toggle is a leak. So this counts distinct frames on
+                // which a stream was started, not streams.
+                ++streams_started_;
+                if (frame_counter_ != last_stream_frame_) {
+                    last_stream_frame_ = frame_counter_;
+                    ++stream_start_frames_;
+                }
+                if (stream_start_frames_ == 4 && !stream_warned_) {
+                    stream_warned_ = true;
+                    std::fprintf(stderr,
+                        "mayag: Cmd::stream started on %d separate frames"
+                        " (%d producers total).\n"
+                        "       A stream runs until the app EXITS -- its"
+                        " keep_running() flag is\n"
+                        "       only cleared at shutdown, so nothing in the"
+                        " model can stop one.\n"
+                        "       Starting them repeatedly leaks a thread each"
+                        " time. For a producer\n"
+                        "       that should come and go with the model, use a"
+                        " subscription:\n"
+                        "         when(m.playing, Sub<Msg>::source(\"id\","
+                        " work))\n"
+                        "       which the runtime starts, stops and JOINS for"
+                        " you.\n",
+                        stream_start_frames_, streams_started_);
+                }
                 // messages through a sink backed by the inbox+waker, so each
                 // one wakes the UI thread and renders at once. The thread
                 // outlives this call by design; the runtime signals it to stop
@@ -1562,6 +1596,11 @@ class Runtime {
     LatencyStats                         latency_{};
     BusyLoopDetector                     busy_{};
     bool                                 busy_warned_ = false;
+    /// Cmd::stream producers started, for the leak diagnostic in interpret().
+    int                                  streams_started_ = 0;
+    int                                  stream_start_frames_ = 0;
+    std::uint64_t                        last_stream_frame_ = ~0ull;
+    bool                                 stream_warned_ = false;
     std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
     /// shared_ptr, not a member value: detached task workers capture it and
