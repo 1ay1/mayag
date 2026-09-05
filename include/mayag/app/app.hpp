@@ -696,6 +696,27 @@ class Runtime {
         drain_coalesced_sources();
         if (quit_) return;
 
+        // Reconcile sources AGAIN, now that this frame's messages have been
+        // applied.
+        //
+        // The set of live producers is a pure function of the model, and the
+        // model just changed. Reconciling only at the top of tick() left a
+        // source the model dropped THIS frame running until the next one --
+        // a whole frame in which it kept posting into the inbox.
+        //
+        // That is not merely late, it corrupts state. In the video example a
+        // seek bumps an epoch folded into the playback source id, so the old
+        // decoder should stop at once; instead it survived the frame and its
+        // in-flight frame landed in update(), overwriting the seek target with
+        // the position playback had reached. The scrub bar moved, the picture
+        // did not, and the next subscribe() captured the STALE time -- so the
+        // seek was lost and you had to click again. Measured: 4 of 12 clicks
+        // lost while playing.
+        //
+        // Cheap in the common case: subscribe() is a pure function and
+        // sync_sources() does nothing when the id set is unchanged.
+        sync_sources(current_subs());
+
         render();
     }
 

@@ -364,7 +364,20 @@ struct Video {
     struct Play {};
     struct Pause {};
     struct SeekTo { double seconds; bool preview = false; };
-    struct Frame { std::shared_ptr<const ImageData> pixels; double pts; float ms; };
+    /// A decoded picture, stamped with the seek EPOCH it was produced for.
+    ///
+    /// The stamp is what makes a frame's provenance checkable. Frames already
+    /// posted by a decoder that has since been stopped are still sitting in
+    /// the inbox when a seek is processed, and they arrive AFTER it -- so
+    /// assigning m.time unconditionally let a frame from the old position
+    /// overwrite the seek target. The scrub bar moved, the picture did not,
+    /// and you had to click again. Measured 4-6 of 12 clicks lost that way.
+    struct Frame {
+        std::shared_ptr<const ImageData> pixels;
+        double pts;
+        float  ms;
+        int    epoch = 0;
+    };
     struct Ended {};
     /// A seek that gave up because a newer one replaced it. Distinct from
     /// Ended: it is the normal outcome of dragging, and must not stop playback.
@@ -445,6 +458,7 @@ struct Video {
                 // exactly once, at the position the user chose.
                 if (!s.preview) ++m.epoch;
                 const double want = m.time;
+                const int    epoch = m.epoch;
                 // task_coalesce, NOT task_latest: one decode runs at a time and
                 // the newest pending position replaces the rest.
                 //
@@ -459,7 +473,7 @@ struct Video {
                 // Coalescing shows a frame every ~500 ms during the drag, each
                 // nearer the cursor, and the release position always lands.
                 return {m, Cmd<Msg>::task_coalesce("seek",
-                    [want, preview = s.preview] {
+                    [want, epoch, preview = s.preview] {
                         Decoder d;               // owned by this task alone
                         if (!d.open(g_path)) return Msg{Ended{}};
                         double pts = 0.0;
@@ -470,7 +484,7 @@ struct Video {
                         auto px = d.seek(want, &pts, !preview);
                         const float ms = std::chrono::duration<float, std::milli>(
                                              std::chrono::steady_clock::now() - t0).count();
-                        if (px) return Msg{Frame{std::move(px), pts, ms}};
+                        if (px) return Msg{Frame{std::move(px), pts, ms, epoch}};
                         return Msg{Ended{}};
                     },
                     // Delivered once no seek is running or pending. A frame
@@ -482,6 +496,15 @@ struct Video {
             },
 
             [&](Frame f) -> R {
+                // Drop frames produced for a superseded seek.
+                //
+                // Not defensive coding: the decoder that produced this frame
+                // may already have been stopped, its message queued before it
+                // noticed. Applying it rewinds m.time to wherever playback had
+                // got to, which is exactly the "the bar moves but it doesn't
+                // seek" bug. The runtime cannot filter these -- only the app
+                // knows what makes one frame current and another obsolete.
+                if (f.epoch != m.epoch) return {m, Cmd<Msg>::none()};
                 m.time      = f.pts;
                 m.decode_ms = f.ms;
                 ++m.frames;
@@ -586,9 +609,10 @@ struct Video {
     /// and starts one at the new time. That is the declarative contract doing
     /// the work; nothing has to remember to restart anything.
     static Sub<Msg> decoder(const Model& m) {
-        const double from = m.time;
+        const double from  = m.time;
+        const int    epoch = m.epoch;
         return Sub<Msg>::source("playback:" + std::to_string(m.epoch),
-                                [from](auto sink, auto alive) {
+                                [from, epoch](auto sink, auto alive) {
             Decoder d;                       // owned by this thread alone
             if (!d.open(g_path)) { sink(Msg{Ended{}}); return; }
             double ignored = 0.0;
@@ -636,7 +660,7 @@ struct Video {
                         std::chrono::duration<double>(target - elapsed));
                 }
                 if (!alive()) return;
-                sink(Msg{Frame{std::move(px), pts, ms}});
+                sink(Msg{Frame{std::move(px), pts, ms, epoch}});
             }
         });
     }
@@ -1040,6 +1064,50 @@ int main(int argc, char** argv) {
                 ok(rt.model().frames - decodes_before == 1,
                    "a single click decodes exactly one frame (" +
                        std::to_string(rt.model().frames - decodes_before) + ")");
+            }
+
+            // ── every click lands, while PLAYING ─────────────────
+            //
+            // The reported bug: the scrub bar jumps to where you clicked but
+            // the video keeps playing from the old spot, so you click again
+            // and again before it takes.
+            //
+            // Cause: the playback decoder posts frames continuously, so when
+            // a seek is processed the inbox ALREADY holds frames it queued
+            // before being stopped. They are applied after the seek and
+            // Frame{} assigned m.time unconditionally, rewinding it. No
+            // running thread to blame -- the messages were already in flight.
+            //
+            // One click hid it: both the press-seek and the stale frame
+            // targeted nearby positions. Only REPEATED clicks show it, which
+            // is exactly how it was reported. Measured 4-6 of 12 lost.
+            {
+                rt.send(Video::Msg{Video::Play{}});
+                pump([&] { return rt.model().time > 0.5; }, 15000);
+
+                int landed = 0;
+                constexpr int kClicks = 6;
+                for (int i = 0; i < kClicks; ++i) {
+                    const double frac = 0.15 + 0.09 * i;
+                    const double want = rt.model().duration * frac;
+                    rt.send(Video::Msg{Video::SeekTo{want, false}});
+                    // Let the seek land and playback carry on a little.
+                    const auto until = std::chrono::steady_clock::now() +
+                                       std::chrono::milliseconds(1200);
+                    while (std::chrono::steady_clock::now() < until) {
+                        rt.tick();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+                    }
+                    // Playing, so at or just after the target -- never back
+                    // at the position it was playing from before.
+                    const double got = rt.model().time;
+                    if (got >= want - 1.0 && got < want + 15.0) ++landed;
+                }
+                ok(landed == kClicks,
+                   "every seek lands while playing, no repeat clicks needed (" +
+                       std::to_string(landed) + "/" +
+                       std::to_string(kClicks) + ")");
+                rt.send(Video::Msg{Video::Pause{}});
             }
 
             // The ends must be reachable, and clamped rather than overshooting.
