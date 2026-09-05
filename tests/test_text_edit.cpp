@@ -37,6 +37,24 @@ const std::string kThumbUp = "\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBD";       // + skin
 const std::string kCombine = "e\xCC\x81";                              // e + U+0301
 const std::string kCJK     = "\xE4\xB8\xAD";                           // U+4E2D
 
+// Is every byte sequence a complete, well-formed UTF-8 character? A single
+// truncated sequence makes the whole string unrenderable, so this is the
+// invariant every mutation must preserve.
+[[nodiscard]] bool is_valid_utf8(const std::string& s) {
+    for (std::size_t i = 0; i < s.size();) {
+        const auto b = static_cast<unsigned char>(s[i]);
+        const int len = b < 0x80 ? 1 : (b & 0xE0) == 0xC0 ? 2
+                      : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 0;
+        if (len == 0 || i + static_cast<std::size_t>(len) > s.size()) return false;
+        for (int k = 1; k < len; ++k) {
+            if ((static_cast<unsigned char>(s[i + static_cast<std::size_t>(k)])
+                 & 0xC0) != 0x80) return false;
+        }
+        i += static_cast<std::size_t>(len);
+    }
+    return true;
+}
+
 // One backspace at the end must remove exactly the last cluster.
 void expect_backspace(const std::string& label, const std::string& prefix,
                       const std::string& cluster) {
@@ -114,29 +132,93 @@ int main() {
         st.set("a" + kFamily + kCombine + kFlagJP + kCJK + kThumbUp);
         int steps = 0;
         while (!st.text.empty() && steps++ < 100) {
-            st.caret = st.text.size();
+            st.caret = st.anchor = st.text.size();
             st.backspace();
-            bool valid = true;
-            for (std::size_t i = 0; i < st.text.size();) {
-                const auto b = static_cast<unsigned char>(st.text[i]);
-                const int len = b < 0x80 ? 1 : (b & 0xE0) == 0xC0 ? 2
-                              : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 0;
-                if (len == 0 || i + static_cast<std::size_t>(len) > st.text.size()) {
-                    valid = false; break;
-                }
-                for (int k = 1; k < len; ++k) {
-                    if ((static_cast<unsigned char>(st.text[i + static_cast<std::size_t>(k)])
-                         & 0xC0) != 0x80) { valid = false; break; }
-                }
-                if (!valid) break;
-                i += static_cast<std::size_t>(len);
-            }
-            if (!valid) {
+            if (!is_valid_utf8(st.text)) {
                 check(false, "string stayed valid UTF-8 while deleting");
                 break;
             }
         }
         check(st.text.empty(), "deleting to empty terminates and stays valid");
+    }
+
+    section("word motion never lands inside a character");
+    {
+        // word_left_of/word_right_of scan BYTES rather than codepoints. That
+        // is safe here for two reasons, and it is worth stating which:
+        //
+        //   1. is_word() classifies every byte >= 0x80 as a word byte, so a
+        //      multi-byte sequence is internally uniform;
+        //   2. the scan loops advance while the CLASS is unchanged, so a
+        //      sequence is consumed whole either way.
+        //
+        // Note (2) means this property survives even if (1) changes -- I
+        // verified that by flipping is_word() to reject >= 0x80, and these
+        // checks still passed. So this section is a genuine invariant test,
+        // not a proxy for the is_word heuristic: it pins the OUTPUT contract
+        // (never land mid-character, never truncate) without over-claiming
+        // that it protects any particular implementation of it.
+        const std::string samples[] = {
+            "hello world foo",
+            "\xE4\xB8\xAD\xE6\x96\x87 \xE6\xB5\x8B\xE8\xAF\x95",      // CJK
+            "caf\xC3\xA9 na\xC3\xAFve",                              // accented
+            "hi " + kSmiley + " there",
+            "a " + kFamily + " b",
+            "\xD9\x85\xD8\xB1\xD8\xAD\xD8\xA8\xD8\xA7 \xD8\xA8\xD8\xA7", // Arabic
+            "foo.bar(baz)  qux",
+        };
+
+        bool all_aligned = true, all_valid = true;
+        for (const auto& s : samples) {
+            TextEditState st;
+            st.set(s);
+
+            // Every landing spot of word-left must be a character boundary.
+            std::size_t i = st.text.size();
+            for (int guard = 0; i > 0 && guard < 200; ++guard) {
+                const std::size_t next = st.word_left_of(i);
+                if (next >= i) break;
+                if (next < st.text.size() &&
+                    (static_cast<unsigned char>(st.text[next]) & 0xC0) == 0x80) {
+                    all_aligned = false;
+                }
+                i = next;
+            }
+
+            // And deleting word-by-word must never leave a truncated sequence.
+            TextEditState d;
+            d.set(s);
+            for (int guard = 0; !d.text.empty() && guard < 200; ++guard) {
+                d.caret = d.anchor = d.text.size();
+                d.delete_word_left();
+                if (!is_valid_utf8(d.text)) { all_valid = false; break; }
+            }
+            if (!d.text.empty()) all_valid = false;   // must terminate
+        }
+        check(all_aligned, "word motion always lands on a character boundary");
+        check(all_valid, "delete_word_left keeps the text valid UTF-8 and terminates");
+    }
+
+    section("selection helpers");
+    {
+        TextEditState st;
+        st.set("hello world");
+        st.caret = st.anchor = 7;              // inside "world"
+        st.select_word();
+        check(st.text.substr(st.selection_start(),
+                             st.selection_end() - st.selection_start()) == "world",
+              "select_word selects the word under the caret");
+
+        st.set("line one\nline two\nline three");
+        st.caret = st.anchor = 12;             // inside line 2
+        st.select_line();
+        check(st.text.substr(st.selection_start(),
+                             st.selection_end() - st.selection_start()) == "line two",
+              "select_line selects the line, without its newline");
+
+        st.select_all();
+        check(st.selection_start() == 0 && st.selection_end() == st.text.size(),
+              "select_all covers the whole buffer");
     }
 
     section("IME preedit");
