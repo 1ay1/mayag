@@ -94,6 +94,10 @@ class Cmd {
     struct TaskLatest {
         std::string          key;
         std::function<Msg()> work;
+        /// Alternative form that receives a `still_wanted()` predicate, so
+        /// long work can abandon itself the moment a newer task with the same
+        /// key starts. Exactly one of `work` / `cancellable` is set.
+        std::function<Msg(std::function<bool()>)> cancellable;
     };
 
     /// A thread-safe message sink handed to a `Stream`. Calling it delivers a
@@ -184,8 +188,21 @@ class Cmd {
     /// discarded when a newer one starts. See TaskLatest.
     template <typename F>
     [[nodiscard]] static Cmd task_latest(std::string key, F&& f) {
-        return Cmd{Alt{TaskLatest{std::move(key),
-                                  std::function<Msg()>(std::forward<F>(f))}}};
+        if constexpr (std::is_invocable_v<F, std::function<bool()>>) {
+            // The work wants to know when it has been superseded.
+            //
+            // Dropping a stale RESULT is not always enough: if the work is
+            // long -- decoding forward to a video timestamp, walking a large
+            // directory -- every superseded task still runs to completion, and
+            // a drag that fires 60 of them queues a minute of pointless work
+            // per second. Handing it a `still_wanted()` predicate lets it stop
+            // at the next checkpoint instead.
+            return Cmd{Alt{TaskLatest{std::move(key), {},
+                std::function<Msg(std::function<bool()>)>(std::forward<F>(f))}}};
+        } else {
+            return Cmd{Alt{TaskLatest{std::move(key),
+                                      std::function<Msg()>(std::forward<F>(f)), {}}}};
+        }
     }
 
     /// Start a producer that runs until the APP EXITS.
@@ -345,8 +362,15 @@ class Cmd {
                 return Out::after_latest(a.key, a.delay, f(a.msg));
             else if constexpr (std::is_same_v<T, Task>)
                 return Out::task([work = a.work, f] { return f(work()); });
-            else if constexpr (std::is_same_v<T, TaskLatest>)
+            else if constexpr (std::is_same_v<T, TaskLatest>) {
+                if (a.cancellable) {
+                    return Out::task_latest(a.key,
+                        [work = a.cancellable, f](std::function<bool()> alive) {
+                            return f(work(std::move(alive)));
+                        });
+                }
                 return Out::task_latest(a.key, [work = a.work, f] { return f(work()); });
+            }
             else if constexpr (std::is_same_v<T, Perform>)
                 return Out::perform(a.action);
             else if constexpr (std::is_same_v<T, ReadClipboard>)

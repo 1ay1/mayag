@@ -1097,12 +1097,26 @@ class Runtime {
                 auto gen = task_generations_;   // shared_ptr: outlives teardown
                 const std::uint64_t mine = gen->begin(a.key);
                 auto inbox = inbox_;
-                std::thread([work = a.work, inbox, gen, key = a.key, mine] {
-                    Msg result = work();
-                    // Deliver only if no newer task with this key started
-                    // while we were working.
-                    if (gen->current(key, mine)) inbox->post(std::move(result));
-                }).detach();
+                if (a.cancellable) {
+                    // Hand the work a predicate so it can abandon itself the
+                    // moment a newer task with this key starts, instead of
+                    // running to completion and having its result discarded.
+                    std::thread([work = a.cancellable, inbox, gen,
+                                 key = a.key, mine] {
+                        auto still_wanted = [gen, key, mine] {
+                            return gen->current(key, mine);
+                        };
+                        Msg result = work(still_wanted);
+                        if (gen->current(key, mine)) inbox->post(std::move(result));
+                    }).detach();
+                } else {
+                    std::thread([work = a.work, inbox, gen, key = a.key, mine] {
+                        Msg result = work();
+                        // Deliver only if no newer task with this key started
+                        // while we were working.
+                        if (gen->current(key, mine)) inbox->post(std::move(result));
+                    }).detach();
+                }
             }
             else if constexpr (std::is_same_v<T, typename C::Stream>) {
                 // A long-lived producer. It runs on its own thread and pushes
