@@ -100,6 +100,16 @@ class Cmd {
         std::function<Msg(std::function<bool()>)> cancellable;
     };
 
+    /// At most one task per key runs at a time; while it runs, further
+    /// requests collapse into a single pending slot. See task_coalesce.
+    struct TaskCoalesce {
+        std::string          key;
+        std::function<Msg()> work;
+        /// Delivered after the last result for this key, once nothing is
+        /// running or pending. Empty if the app did not ask for one.
+        std::optional<Msg>   settled;
+    };
+
     /// A thread-safe message sink handed to a `Stream`. Calling it delivers a
     /// Msg to `update()` on the UI thread AND wakes a blocked UI thread, so a
     /// streamed message renders immediately rather than waiting for the next
@@ -154,7 +164,7 @@ class Cmd {
     struct ReleaseImage { std::uint32_t id = 0; };
 
     using Alt = std::variant<None, Quit, Batch, After, AfterLatest, Task,
-                             TaskLatest, Stream, Perform, SetTitle, SetCursor,
+                             TaskLatest, TaskCoalesce, Stream, Perform, SetTitle, SetCursor,
                              SetClipboard, ReadClipboard, SetWindowSize,
                              Fullscreen, Redraw, Focus, Screenshot,
                              UploadImage, ReleaseImage>;
@@ -182,6 +192,62 @@ class Cmd {
     template <typename F>
     [[nodiscard]] static Cmd task(F&& f) {
         return Cmd{Alt{Task{std::function<Msg()>(std::forward<F>(f))}}};
+    }
+
+    /// Run `f` with AT MOST ONE task per `key` in flight, coalescing the
+    /// rest: a request arriving while one runs replaces any other waiting
+    /// request, and starts as soon as the running one finishes.
+    ///
+    /// This is the policy for work driven by a CONTINUOUS gesture -- a scrub
+    /// bar, a resize preview, a live query -- and it is NOT task_latest.
+    ///
+    /// task_latest is "newest wins": a new request supersedes the running
+    /// one, whose result is dropped and which, if it polls the cancel
+    /// predicate, gives up early. Right for a DISCRETE request where only the
+    /// final answer matters. Under a continuous drag it STARVES -- a video
+    /// seek costs ~500 ms and a dragged scrub bar asks ~60 times a second, so
+    /// every decode is superseded before it can finish and the picture never
+    /// updates. Measured on a 1080p file: 117 seek requests over a 2 s drag
+    /// produced ZERO frames, the image catching up only 827 ms after release.
+    ///
+    /// task_coalesce keeps the pipe full instead. One worker runs to
+    /// completion and delivers, then immediately picks up the newest request
+    /// that arrived meanwhile, dropping the ones in between. The user sees
+    /// frames at whatever rate the work can sustain, each closer to the
+    /// cursor, and the final position always lands because the last request
+    /// is never discarded.
+    ///
+    ///     Cmd<Msg>::task_coalesce("seek", [t] { return decode_at(t); })
+    ///
+    /// Intermediate requests are dropped rather than queued, so a slow worker
+    /// cannot build a backlog however long the gesture lasts.
+    template <typename F>
+    [[nodiscard]] static Cmd task_coalesce(std::string key, F&& f) {
+        return Cmd{Alt{TaskCoalesce{std::move(key),
+                                    std::function<Msg()>(std::forward<F>(f)),
+                                    std::nullopt}}};
+    }
+
+    /// As above, plus `settled`: a message delivered once this key has no
+    /// work running OR pending -- i.e. the gesture is over and the result you
+    /// are looking at is the final one.
+    ///
+    /// This exists because coalescing breaks an assumption that holds for
+    /// every other task: that a result belongs to your most recent request.
+    /// Here the RUNNING task is allowed to finish, so its result lands after
+    /// a newer request was already recorded -- an app that treats each result
+    /// as authoritative adopts a stale value. Seen exactly that way in the
+    /// video example: seek to the middle, then to the start, and the frame
+    /// from the middle arrived first and cleared the "seeking" flag, so the
+    /// player reported it had landed 864 s from where it was asked to go.
+    ///
+    /// Intermediate results are still delivered -- they are what makes a drag
+    /// feel live. `settled` just tells you which one was last.
+    template <typename F>
+    [[nodiscard]] static Cmd task_coalesce(std::string key, F&& f, Msg settled) {
+        return Cmd{Alt{TaskCoalesce{std::move(key),
+                                    std::function<Msg()>(std::forward<F>(f)),
+                                    std::move(settled)}}};
     }
 
     /// Like `task`, but results from an earlier run with the same `key` are
@@ -362,6 +428,13 @@ class Cmd {
                 return Out::after_latest(a.key, a.delay, f(a.msg));
             else if constexpr (std::is_same_v<T, Task>)
                 return Out::task([work = a.work, f] { return f(work()); });
+            else if constexpr (std::is_same_v<T, TaskCoalesce>) {
+                if (a.settled) {
+                    return Out::task_coalesce(a.key,
+                        [work = a.work, f] { return f(work()); }, f(*a.settled));
+                }
+                return Out::task_coalesce(a.key, [work = a.work, f] { return f(work()); });
+            }
             else if constexpr (std::is_same_v<T, TaskLatest>) {
                 if (a.cancellable) {
                     return Out::task_latest(a.key,

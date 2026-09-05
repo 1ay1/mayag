@@ -137,7 +137,94 @@ struct Cycle {
     }
 };
 
+// ── task_coalesce: keep the pipe full under a continuous gesture ───────
+//
+// task_latest starves here. It supersedes the RUNNING task, so when requests
+// arrive faster than the work completes, nothing ever finishes -- the video
+// scrub bar showed zero frames across a 2 s drag. task_coalesce lets the
+// running task complete and collapses the waiting ones, so results keep
+// landing and the last request is never dropped.
+std::atomic<int> g_coalesce_ran{0};
+
+struct Coalesce {
+    struct Model { int done = 0; int last = -1; bool settled = false; };
+    struct Ask { int v; };
+    struct Done { int v; };
+    struct Settled {};
+    using Msg = std::variant<Ask, Done, Settled>;
+
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](Ask a) -> R {
+                m.settled = false;
+                return {m, Cmd<Msg>::task_coalesce("work",
+                    [v = a.v] {
+                        ++g_coalesce_ran;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                        return Msg{Done{v}};
+                    },
+                    Msg{Settled{}})};
+            },
+            [&](Done d) -> R { ++m.done; m.last = d.v; return {m, Cmd<Msg>::none()}; },
+            [&](Settled) -> R { m.settled = true; return {m, Cmd<Msg>::none()}; });
+    }
+
+    static Node view(const Model&, const Ctx& c) {
+        return (box() | width(px(80)) | height(px(40))
+                      | bg(c.theme.surface)).build();
+    }
+};
+
 std::atomic<int> g_finished{0};
+
+// ── replacing a slow source must not block the UI thread ────────────────
+//
+// The video example folds a seek position into its playback source id, so
+// every drag move asks for a DIFFERENT source and the runtime stops the old
+// one. If that stop joins inline, the frame waits for a producer that may be
+// mid-decode -- measured at 370 ms of frozen UI per drag move before the
+// runtime learned to retire sources instead of joining them.
+std::atomic<int> g_scrub_live{0};
+
+struct Scrub {
+    struct Model { int epoch = 0; };
+    struct Seek {};
+    struct Frame {};
+    using Msg = std::variant<Seek, Frame>;
+
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](Seek)  -> R { ++m.epoch; return {m, Cmd<Msg>::none()}; },
+            [&](Frame) -> R { return {m, Cmd<Msg>::none()}; });
+    }
+
+    static Node view(const Model&, const Ctx& c) {
+        return (box() | width(px(80)) | height(px(40))
+                      | bg(c.theme.surface)).build();
+    }
+
+    static Sub<Msg> subscribe(const Model& m) {
+        // Slow to notice it has been stopped, like a decoder that only polls
+        // alive() between frames.
+        return Sub<Msg>::source("scrub:" + std::to_string(m.epoch),
+                                [](auto sink, auto alive) {
+            ++g_scrub_live;
+            while (alive()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                if (alive()) sink(Msg{Frame{}});
+            }
+            --g_scrub_live;
+        });
+    }
+};
 
 struct Drag {
     struct Model { int value = 0; std::vector<int> seen; };
@@ -464,7 +551,93 @@ int main() {
               "the second is dropped (which is why the runtime warns)");
     }
 
-    // ── the threading contract ───────────────────────────────────────
+    // ── coalescing under a continuous gesture ────────────────────
+    section("task_coalesce: a fast gesture still gets results, and the last one lands");
+    {
+        AppConfig cfg;
+        cfg.size = {80, 40};
+        int done = 0, last = -1, requests = 0;
+        bool settled = false;
+
+        run_headless<Coalesce>(cfg, [&](auto& rt) {
+            // A "drag": a request every 5 ms against 40 ms of work, for
+            // 400 ms. task_latest would finish none of these.
+            const auto until = std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(400);
+            while (std::chrono::steady_clock::now() < until) {
+                rt.send(typename Coalesce::Msg{typename Coalesce::Ask{requests++}});
+                rt.tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            const int final_request = requests - 1;
+
+            // Release: let the queue drain.
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(10);
+            while (!rt.model().settled &&
+                   std::chrono::steady_clock::now() < deadline) {
+                rt.tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            done = rt.model().done;
+            last = rt.model().last;
+            settled = rt.model().settled;
+            requests = final_request;
+        });
+
+        check(done > 1,
+              "results keep arriving DURING the gesture (" +
+                  std::to_string(done) + " delivered)");
+        // The whole point: intermediate requests are dropped, not queued, so
+        // the worker never builds a backlog.
+        check(g_coalesce_ran.load() < 40,
+              "but far fewer tasks ran than were requested (" +
+                  std::to_string(g_coalesce_ran.load()) + " ran)");
+        check(last == requests,
+              "and the FINAL request is the one that lands (" +
+                  std::to_string(last) + " vs " + std::to_string(requests) + ")");
+        check(settled,
+              "`settled` fires once nothing is running or pending");
+    }
+
+    // ── replacing a source must not stall the frame ────────────────
+    section("a replaced source is retired off the UI thread, not joined on it");
+    {
+        AppConfig cfg;
+        cfg.size = {80, 40};
+        double worst_ms = 0;
+
+        run_headless<Scrub>(cfg, [&](auto& rt) {
+            rt.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            // Drag: a new source id per move, each replacing a producer that
+            // takes up to 300 ms to notice.
+            for (int i = 0; i < 6; ++i) {
+                rt.send(Scrub::Msg{Scrub::Seek{}});
+                const auto t0 = std::chrono::steady_clock::now();
+                rt.tick();               // reconciles: stops the old source
+                const double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                worst_ms = ms > worst_ms ? ms : worst_ms;
+                std::this_thread::sleep_for(std::chrono::milliseconds(15));
+            }
+        });
+
+        // The producer sleeps 300 ms between alive() polls. A tick that waits
+        // for it lands near that; a tick that retires it is sub-millisecond.
+        // 100 ms is far below the old 370 ms and far above the new ~0.5 ms.
+        check(worst_ms < 100.0,
+              "stopping a slow source does not block the frame (worst tick " +
+                  std::to_string(worst_ms) + " ms)");
+
+        // And nothing leaks: run_headless destroys the runtime, whose
+        // teardown joins retirees as well as running sources.
+        check(g_scrub_live.load() == 0,
+              "every retired producer was still joined by shutdown (" +
+                  std::to_string(g_scrub_live.load()) + " left running)");
+    }
+
+    // ── the threading contract ──────────────────────────────────
     section("contract: update() is single-threaded");
     check(g_update_off_ui.load() == 0,
           "update() only ever ran on the UI thread (" +
