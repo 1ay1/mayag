@@ -164,7 +164,7 @@ template <typename Ui>
 bool render_to_png(const Ui& ui, Vec2 viewport, const std::string& path,
                    const RenderOptions& opts = {}) {
     const auto pixels = render_to_pixels(ui, viewport, opts);
-    return image::write_png(path, pixels,
+    return imageio::write_png(path, pixels,
                             static_cast<int>(viewport.x * opts.dpi_scale),
                             static_cast<int>(viewport.y * opts.dpi_scale));
 }

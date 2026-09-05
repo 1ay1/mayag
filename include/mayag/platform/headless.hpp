@@ -85,7 +85,7 @@ class Headless {
         if (!record_dir_.empty()) {
             const auto path = record_dir_ + "/frame_" + pad6(frames_presented_) + ".png";
             const auto px = fb_.to_rgba8();
-            (void)image::write_png(path, px, w, h);
+            (void)imageio::write_png(path, px, w, h);
         }
     }
 

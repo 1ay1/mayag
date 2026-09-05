@@ -153,7 +153,7 @@ struct BitmapLoc {
         if (png_off + data_len > entry.size() || data_len < 8) return false;
         std::span<const std::uint8_t> png{entry.data() + png_off, data_len};
         if (png[0] != 0x89 || png[1] != 'P') return false;
-        auto img = image::decode_png(png);
+        auto img = imageio::decode_png(png);
         if (!img.ok()) return false;
         out.width = img.width; out.height = img.height; out.rgba = std::move(img.rgba);
         out.ppem = ppem;
@@ -201,7 +201,7 @@ struct BitmapLoc {
     const std::size_t png_off = entry + 8;
     const std::size_t png_len = o1 - o0 - 8;
     if (png_off + png_len > sbix.size()) return out;
-    auto img = image::decode_png({sbix.data() + png_off, png_len});
+    auto img = imageio::decode_png({sbix.data() + png_off, png_len});
     if (!img.ok()) return out;
     out.width = img.width; out.height = img.height; out.rgba = std::move(img.rgba);
     out.ppem = best_ppem;

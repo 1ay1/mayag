@@ -18,7 +18,7 @@
 #include <span>
 #include <vector>
 
-namespace mayag::image {
+namespace mayag::imageio {
 
 struct DecodedImage {
     int width = 0;
@@ -344,4 +344,4 @@ inline std::uint32_t be32(std::span<const std::uint8_t> d, std::size_t o) noexce
     return img;
 }
 
-}  // namespace mayag::image
+}  // namespace mayag::imageio

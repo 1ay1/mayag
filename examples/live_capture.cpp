@@ -193,7 +193,7 @@ int main(int argc, char** argv) {
         std::printf("no live pixels captured (no GPU window?)\n");
         return 1;
     }
-    (void)image::write_png(out, live, captured_w, captured_h);
+    (void)imageio::write_png(out, live, captured_w, captured_h);
     std::printf("wrote %s  (%dx%d)\n", out.c_str(), captured_w, captured_h);
 
     // The same frame, offscreen, at the window's REAL size.
@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
     ro.background = cfg.theme.background;
     ro.dpi_scale  = dpi;
     const auto off = render_to_pixels(n, logical, ro);
-    (void)image::write_png(ref, off, captured_w, captured_h);
+    (void)imageio::write_png(ref, off, captured_w, captured_h);
     std::printf("wrote %s  (offscreen reference)\n\n", ref.c_str());
 
     std::printf("live capture vs offscreen render:\n");

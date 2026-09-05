@@ -618,7 +618,7 @@ void test_png() {
         255, 0, 0, 255,   0, 255, 0, 255,
         0, 0, 255, 255,   255, 255, 255, 255,
     };
-    const auto bytes = image::encode_png(px, 2, 2);
+    const auto bytes = imageio::encode_png(px, 2, 2);
     check(bytes.size() > 40, "png has content");
     check(bytes[0] == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G',
           "png signature");

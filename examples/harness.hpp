@@ -269,7 +269,7 @@ template <Program P, typename Driver>
                 std::fprintf(stderr, "mayag: offscreen render failed\n");
                 return 1;
             }
-            if (!image::write_png(o.out_path, px, W, H)) {
+            if (!imageio::write_png(o.out_path, px, W, H)) {
                 std::fprintf(stderr, "mayag: failed to write %s\n", o.out_path.c_str());
                 return 1;
             }

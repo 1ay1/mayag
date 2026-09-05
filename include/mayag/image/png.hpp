@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace mayag::image {
+namespace mayag::imageio {
 
 namespace detail {
 
@@ -144,4 +144,4 @@ inline std::vector<std::uint8_t> zlib_store(std::span<const std::uint8_t> raw) {
     return true;
 }
 
-}  // namespace mayag::image
+}  // namespace mayag::imageio

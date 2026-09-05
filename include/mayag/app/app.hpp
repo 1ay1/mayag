@@ -1034,7 +1034,7 @@ class Runtime {
             }
             else if constexpr (std::is_same_v<T, typename C::Screenshot>) {
                 const auto px = window_.read_pixels();
-                (void)image::write_png(a.path, px,
+                (void)imageio::write_png(a.path, px,
                                        static_cast<int>(size_.x * dpi_),
                                        static_cast<int>(size_.y * dpi_));
             }

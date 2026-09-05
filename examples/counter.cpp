@@ -256,7 +256,7 @@ int main(int argc, char** argv) {
 
         // Pixels actually changed.
         check(rt.window().frames_presented() > 1, "frames were presented");
-        (void)image::write_png("counter_headless.png", rt.window().read_pixels(),
+        (void)imageio::write_png("counter_headless.png", rt.window().read_pixels(),
                                static_cast<int>(cfg.size.x), static_cast<int>(cfg.size.y));
 
         rt.window().press_key(Key::escape);

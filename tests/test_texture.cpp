@@ -60,7 +60,7 @@ int main() {
     const auto img = make_image(IW, IH);
 
     const int W = 200, H = 160;
-    auto ui = (v(dsl::image(1) | width(px(120)) | height(px(120)) | radius(12))
+    auto ui = (v(image(1) | width(px(120)) | height(px(120)) | radius(12))
                | pad(20) | width(px(W)) | height(px(H))
                | bg(rgb<0x101418>)).build();
     Node n = ui;
@@ -85,7 +85,7 @@ int main() {
     backend::Tiled::render(dl, fb, &smp, &backend::shared_pool(), rgb<0x101418>);
     std::vector<std::uint8_t> out;
     backend::Tiled::encode_parallel(fb, out, &backend::shared_pool());
-    (void)image::write_png("/tmp/tex_sw.png", out, W, H);
+    (void)imageio::write_png("/tmp/tex_sw.png", out, W, H);
 
     // Did the quadrant colours actually land where they should?
     const auto at = [&](int x, int y) {
@@ -114,7 +114,7 @@ int main() {
         gpu.upload_texture(img.data(), IW, IH);
         std::vector<std::uint8_t> gout;
         if (gpu.render_offscreen(dl, W, H, rgb<0x101418>, gout)) {
-            (void)image::write_png("/tmp/tex_gpu.png", gout, W, H);
+            (void)imageio::write_png("/tmp/tex_gpu.png", gout, W, H);
             double sum=0; int worst=0; long n=0;
             for (std::size_t i=0;i+3<std::min(out.size(),gout.size());i+=4)
                 for (int c=0;c<3;++c){ int d=std::abs(int(out[i+c])-int(gout[i+c]));
