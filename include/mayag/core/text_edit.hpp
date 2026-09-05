@@ -151,6 +151,144 @@ struct TextEditState {
         return i;
     }
 
+    // ── grapheme clusters ───────────────────────────────────────
+    //
+    // A codepoint is not a character. Backspace must delete what the user
+    // SEES as one thing, and for a lot of the world's text that is several
+    // codepoints:
+    //
+    //     cafe\u0301        e + combining acute  -- deleting the codepoint
+    //                       strips the accent and leaves "cafe"
+    //     \U0001F468 ZWJ \U0001F469 ...  a family emoji is 4 people joined by
+    //                       ZWJ; deleting one codepoint leaves a dangling ZWJ
+    //                       and a half-rendered cluster
+    //     \U0001F1EF\U0001F1F5  a flag is two regional indicators; deleting one
+    //                       leaves a stray letter-like glyph
+    //     \U0001F44D\U0001F3FD  an emoji plus a skin-tone modifier; deleting the
+    //                       modifier silently changes the emoji
+    //
+    // This implements the rules of UAX #29 that actually matter for editing,
+    // rather than the full table: extend/ZWJ joins, regional-indicator pairs,
+    // and Hangul syllables are the cases a user hits. It is deliberately
+    // data-light -- a complete Grapheme_Cluster_Break table is tens of
+    // kilobytes and mayag has no Unicode database.
+
+    /// Decode the codepoint starting at `i` (assumes `i` is on a boundary).
+    [[nodiscard]] std::uint32_t codepoint_at(std::size_t i) const noexcept {
+        if (i >= text.size()) return 0;
+        const auto b0 = static_cast<unsigned char>(text[i]);
+        const auto cont = [&](std::size_t k) -> std::uint32_t {
+            return k < text.size()
+                 ? static_cast<unsigned char>(text[k]) & 0x3Fu : 0u;
+        };
+        if (b0 < 0x80) return b0;
+        if ((b0 & 0xE0) == 0xC0) return ((b0 & 0x1Fu) << 6) | cont(i + 1);
+        if ((b0 & 0xF0) == 0xE0) {
+            return ((b0 & 0x0Fu) << 12) | (cont(i + 1) << 6) | cont(i + 2);
+        }
+        return ((b0 & 0x07u) << 18) | (cont(i + 1) << 12) |
+               (cont(i + 2) << 6) | cont(i + 3);
+    }
+
+    /// Does this codepoint attach to the one before it?
+    [[nodiscard]] static bool is_extending(std::uint32_t c) noexcept {
+        return c == 0x200Du ||                              // ZWJ
+               (c >= 0x0300u && c <= 0x036Fu) ||            // combining diacritics
+               (c >= 0x1AB0u && c <= 0x1AFFu) ||
+               (c >= 0x1DC0u && c <= 0x1DFFu) ||
+               (c >= 0x20D0u && c <= 0x20FFu) ||
+               (c >= 0xFE00u && c <= 0xFE0Fu) ||            // variation selectors
+               (c >= 0xFE20u && c <= 0xFE2Fu) ||
+               (c >= 0x1F3FBu && c <= 0x1F3FFu) ||          // skin-tone modifiers
+               (c >= 0xE0100u && c <= 0xE01EFu) ||          // variation supplement
+               c == 0x0640u ||                              // Arabic tatweel
+               (c >= 0x0483u && c <= 0x0489u) ||
+               (c >= 0x0591u && c <= 0x05BDu) ||            // Hebrew points
+               (c >= 0x0610u && c <= 0x061Au) ||            // Arabic marks
+               (c >= 0x064Bu && c <= 0x065Fu) ||
+               (c >= 0x0900u && c <= 0x0903u) ||            // Devanagari signs
+               (c >= 0x093Au && c <= 0x094Fu) ||
+               (c >= 0x0951u && c <= 0x0957u) ||
+               (c >= 0x0E31u && c <= 0x0E3Au) ||            // Thai
+               (c >= 0x0E47u && c <= 0x0E4Eu);
+    }
+
+    [[nodiscard]] static bool is_regional_indicator(std::uint32_t c) noexcept {
+        return c >= 0x1F1E6u && c <= 0x1F1FFu;
+    }
+
+    /// Start of the grapheme cluster before `i`. This is what backspace and
+    /// left-arrow should use.
+    [[nodiscard]] std::size_t prev_grapheme(std::size_t i) const noexcept {
+        if (i == 0) return 0;
+        std::size_t p = prev_boundary(i);
+
+        // Walk back over anything that attaches to what precedes it, and over
+        // the codepoint a ZWJ joins to.
+        while (p > 0) {
+            const std::uint32_t c = codepoint_at(p);
+            if (is_extending(c)) {
+                p = prev_boundary(p);
+                continue;
+            }
+            const std::size_t before = prev_boundary(p);
+            if (before != p && codepoint_at(before) == 0x200Du) {
+                // ...ZWJ <c> : the ZWJ and its left operand are part of this
+                // cluster too, so skip both and keep looking.
+                p = prev_boundary(before);
+                continue;
+            }
+            break;
+        }
+
+        // Regional indicators pair up: a flag is exactly two. Count how many
+        // precede this one -- an ODD count means we are the second of a pair
+        // and must take our partner with us.
+        if (is_regional_indicator(codepoint_at(p))) {
+            std::size_t scan = p, run = 0;
+            while (scan > 0) {
+                const std::size_t q = prev_boundary(scan);
+                if (!is_regional_indicator(codepoint_at(q))) break;
+                ++run;
+                scan = q;
+            }
+            if (run % 2 == 1) p = prev_boundary(p);
+        }
+        return p;
+    }
+
+    /// End of the grapheme cluster starting at `i` -- delete-forward, and
+    /// right-arrow. Mirrors prev_grapheme: same clusters, opposite direction.
+    [[nodiscard]] std::size_t next_grapheme(std::size_t i) const noexcept {
+        if (i >= text.size()) return text.size();
+
+        // A flag is exactly TWO regional indicators, so consume a pair and
+        // stop -- not the whole run, which would swallow adjacent flags.
+        if (is_regional_indicator(codepoint_at(i))) {
+            const std::size_t second = next_boundary(i);
+            if (second < text.size() && is_regional_indicator(codepoint_at(second))) {
+                return next_boundary(second);
+            }
+            return second;
+        }
+
+        std::size_t p = next_boundary(i);
+        while (p < text.size()) {
+            const std::uint32_t c = codepoint_at(p);
+            if (c == 0x200Du) {
+                // ZWJ binds the codepoint AFTER it into this cluster; if the
+                // ZWJ is trailing, stop before it rather than past the end.
+                const std::size_t after = next_boundary(p);
+                if (after >= text.size()) break;
+                p = next_boundary(after);
+                continue;
+            }
+            if (is_extending(c)) { p = next_boundary(p); continue; }
+            break;
+        }
+        return p;
+    }
+
     [[nodiscard]] std::size_t line_start_of(std::size_t i) const noexcept {
         while (i > 0 && text[i - 1] != '\n') --i;
         return i;
@@ -191,11 +329,11 @@ struct TextEditState {
                 // its EDGE, not one character from the caret. Every editor
                 // does this and it is the first thing users notice missing.
                 caret = (has_selection() && !extend) ? selection_start()
-                                                     : prev_boundary(caret);
+                                                     : prev_grapheme(caret);
                 break;
             case Motion::right:
                 caret = (has_selection() && !extend) ? selection_end()
-                                                     : next_boundary(caret);
+                                                     : next_grapheme(caret);
                 break;
 
             case Motion::word_left:  caret = word_left_of(caret); break;
@@ -285,7 +423,10 @@ struct TextEditState {
     void backspace() {
         if (delete_selection()) return;
         if (caret == 0) return;
-        const std::size_t from = prev_boundary(caret);
+        // A GRAPHEME, not a codepoint: one backspace removes one thing the
+        // user can see. Deleting a codepoint splits family emoji, halves
+        // flags, strips skin tones and orphans combining accents.
+        const std::size_t from = prev_grapheme(caret);
         text.erase(from, caret - from);
         caret = from;
         anchor = caret;
@@ -296,7 +437,7 @@ struct TextEditState {
     void del() {
         if (delete_selection()) return;
         if (caret >= text.size()) return;
-        const std::size_t to = next_boundary(caret);
+        const std::size_t to = next_grapheme(caret);
         text.erase(caret, to - caret);
         anchor = caret;
         goal_valid = false;

@@ -335,6 +335,12 @@ if(MAYAG_BUILD_TESTS)
     # the public interface, so it fails if adding a backend ever requires
     # touching the core again. Deliberately NOT inside any MAYAG_WITH_* guard —
     # the property it checks is that no such guard is needed.
+    # Editing must operate on graphemes, not codepoints.
+    add_executable(mayag_text_edit_tests tests/test_text_edit.cpp)
+    target_link_libraries(mayag_text_edit_tests PRIVATE mayag)
+    target_compile_options(mayag_text_edit_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_text_edit_tests COMMAND mayag_text_edit_tests)
+
     # Cmd::task / Cmd::stream / Sub::source under real contention.
     add_executable(mayag_concurrency_tests tests/test_concurrency.cpp)
     target_link_libraries(mayag_concurrency_tests PRIVATE mayag)
