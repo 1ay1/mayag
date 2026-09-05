@@ -49,7 +49,16 @@ struct Probe {
         const Theme& t = c.theme;
         const auto teal = rgb<0x17A2A2>;
         const auto warm = rgb<0xE0653C>;
-        const float x = 60.0f + 120.0f * (0.5f + 0.5f * std::sin(m.t * 2.0f));
+
+        // Deliberately NOT animated.
+        //
+        // The live capture is taken after N presented frames; the reference is
+        // rendered at t=0. Anything that moves with time therefore differs by
+        // its own animation phase, and the tool reports a divergence that is
+        // really just "these are different moments". A verification instrument
+        // has to compare the same instant, so this scene is static and the
+        // model carries time only to prove the frame clock is running.
+        (void)m;
 
         return (v(
             box() | width(pct(100)) | height(px(120))
@@ -63,7 +72,7 @@ struct Probe {
             text<"if these differ, presentation is lying"> | font(12)
                 | fg(t.text_secondary),
             box() | width(px(40)) | height(px(40)) | radius(20)
-                  | bg(colors::white) | offset(x, 0.0f))
+                  | bg(colors::white))
             | gap(14) | pad(20) | width(pct(100)) | height(pct(100))
             | bg(t.background)).build();
     }
@@ -108,13 +117,28 @@ void report(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>&
                 mean, worst, wx, wy,
                 px ? 100.0 * static_cast<double>(over8) / static_cast<double>(px) : 0.0);
 
-    if (worst > 24) {
+    // Judge on the WHOLE-IMAGE statistic, not the single worst pixel.
+    //
+    // A GPU and a CPU rasteriser legitimately disagree by tens of levels on
+    // individual antialiased edge pixels -- different but equally valid
+    // coverage arithmetic. Failing on `worst` alone reports every correct
+    // frame as broken, which trains you to ignore the tool. What cannot happen
+    // innocently is a large mean or a large FRACTION of differing pixels:
+    // that means something systematic (wrong size, wrong colour space, wrong
+    // channel order, stale buffer), which is the class of bug worth catching.
+    const bool systematic = mean > 3.0 ||
+                            (px && 100.0 * static_cast<double>(over8) /
+                                   static_cast<double>(px) > 5.0);
+
+    if (systematic) {
         const std::size_t i = (static_cast<std::size_t>(wy) * w + wx) * 4;
         std::printf("    live      = (%d,%d,%d)\n", a[i], a[i + 1], a[i + 2]);
         std::printf("    offscreen = (%d,%d,%d)\n", b[i], b[i + 1], b[i + 2]);
-        std::printf("\n  VERDICT: the window is NOT showing what the renderer produced.\n");
+        std::printf("\n  VERDICT: the window is NOT showing what the renderer "
+                    "produced.\n");
     } else {
-        std::printf("\n  VERDICT: live and offscreen agree.\n");
+        std::printf("\n  VERDICT: live and offscreen agree "
+                    "(residual is antialiased edges).\n");
     }
 }
 
@@ -156,7 +180,7 @@ int main(int argc, char** argv) {
     const Vec2 pix = rt.window().pixel_size();
     captured_w = static_cast<int>(pix.x + 0.5f);
     captured_h = static_cast<int>(pix.y + 0.5f);
-    const float dpi = cfg.size.x > 0.0f ? pix.x / cfg.size.x : 1.0f;
+    const float dpi = rt.window().dpi_scale();
 
     if (live.size() != static_cast<std::size_t>(captured_w) * captured_h * 4) {
         std::printf("capture is %zu bytes, which is not %dx%d RGBA -- "
@@ -172,10 +196,18 @@ int main(int argc, char** argv) {
     (void)image::write_png(out, live, captured_w, captured_h);
     std::printf("wrote %s  (%dx%d)\n", out.c_str(), captured_w, captured_h);
 
-    // The same frame, offscreen, at the SAME physical resolution.
+    // The same frame, offscreen, at the window's REAL size.
+    //
+    // Not cfg.size: the compositor is free to hand back a different surface
+    // than the one requested (it gave 1109x682 for a requested 520x400 here),
+    // and the runtime lays out against what it actually got. Comparing a
+    // reference laid out at the REQUESTED size against a live frame laid out
+    // at the GRANTED size compares two different scenes and blames the
+    // renderer for the difference.
+    const Vec2 logical = rt.window().size();
     Probe::Model m{};
     Ctx c;
-    c.size = cfg.size;
+    c.size = logical;
     c.dpi_scale = dpi;
     c.theme = cfg.theme;
     Node n = Probe::view(m, c);
@@ -183,7 +215,7 @@ int main(int argc, char** argv) {
     RenderOptions ro;
     ro.background = cfg.theme.background;
     ro.dpi_scale  = dpi;
-    const auto off = render_to_pixels(n, cfg.size, ro);
+    const auto off = render_to_pixels(n, logical, ro);
     (void)image::write_png(ref, off, captured_w, captured_h);
     std::printf("wrote %s  (offscreen reference)\n\n", ref.c_str());
 
