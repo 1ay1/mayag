@@ -530,6 +530,39 @@ class WaylandWindow {
             pending_.push_back(ResizeEvent{logical_, scale_});
         }
 
+        // Emit a frame tick so animations advance.
+        //
+        // This was MISSING, and it is why every `Sub::on_frame` /
+        // `every_frame` animation was dead in a real Linux window while
+        // working perfectly headless: `FrameEvent` was only ever produced by
+        // the headless platform and by the macOS backend. An app would update
+        // its model on input, but nothing ever delivered the per-frame tick
+        // that drives springs and time-based views, so the window just sat
+        // there.
+        //
+        // It is appended HERE, after the poll, and deliberately not before it:
+        // the top of this function promotes a non-empty `pending_` to
+        // Wait::immediate, so queueing the tick early would make every frame
+        // skip its own wait and the loop would free-run at thousands of fps.
+        //
+        // The runtime only asks for `Wait::poll` when something is actually
+        // animating (see Runtime::decide_wait), so this costs nothing for an
+        // idle app -- it is not a timer, it is the frame clock for a frame
+        // the runtime already decided it wanted.
+        //
+        // The delta is clamped: a compositor stall, a dragged window or a
+        // laptop resuming from sleep can hand back a huge gap, and feeding
+        // that to a spring integrator makes it explode. Same clamp the macOS
+        // backend uses, for the same reason.
+        if (wait == Wait::poll) {
+            const double t  = now();
+            const double dt = (last_tick_ > 0.0 && t > last_tick_)
+                            ? num::min(t - last_tick_, 0.1)
+                            : 1.0 / 60.0;
+            pending_.push_back(FrameEvent{t, dt});
+            last_tick_ = t;
+        }
+
         return std::move(pending_);
     }
 
@@ -1627,6 +1660,8 @@ class WaylandWindow {
     bool first_frame_      = true;
     bool damage_supported_ = false;
     bool frame_pending_    = false;
+    /// Timestamp of the last emitted FrameEvent, for the frame delta.
+    double last_tick_      = 0.0;
 
     Vec2        pointer_pos_{};
     Vec2        scroll_accum_{};
