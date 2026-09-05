@@ -26,7 +26,7 @@
 // shader is the shared SDF kernel. A frame is 1-3 draws, text included.
 
 #include "../render/draw_list.hpp"
-#include "../render/spirv_generated.hpp"
+#include "../render/shader_generated.hpp"
 #include "software.hpp"   // Framebuffer, for the offscreen readback path
 
 #include <cstdint>

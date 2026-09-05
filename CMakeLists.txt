@@ -191,20 +191,39 @@ if(MAYAG_WITH_VULKAN)
     if(MAYAG_GLSLC)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
-            message(STATUS "mayag: regenerating SPIR-V with ${MAYAG_GLSLC}")
-            execute_process(
+            # Transpile render/kernel.hpp -> every shader dialect + SPIR-V.
+            #
+            # This is a BUILD STEP with a real dependency on the kernel, not a
+            # configure-time convenience: editing kernel.hpp regenerates every
+            # backend's shader on the next build, automatically. The previous
+            # arrangement ran once at configure time and only WARNED on
+            # failure, which is how the checked-in SPIR-V silently drifted
+            # behind its own source and shipped shaders nobody had reviewed.
+            #
+            # If codegen fails the BUILD fails. A shader that does not match
+            # kernel.hpp must never reach a GPU.
+            set(MAYAG_SHADER_HEADER
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/mayag/render/shader_generated.hpp)
+            add_custom_command(
+                OUTPUT ${MAYAG_SHADER_HEADER}
                 COMMAND ${Python3_EXECUTABLE}
-                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_shaders.py
                         ${MAYAG_GLSLC}
-                        ${CMAKE_CURRENT_SOURCE_DIR}/include/mayag/render/spirv_generated.hpp
-                RESULT_VARIABLE MAYAG_SPIRV_RC
-                OUTPUT_VARIABLE MAYAG_SPIRV_OUT)
-            if(MAYAG_SPIRV_RC EQUAL 0)
-                message(STATUS "mayag: ${MAYAG_SPIRV_OUT}")
-            else()
-                message(WARNING "mayag: SPIR-V regeneration failed; using checked-in header")
-            endif()
+                        ${MAYAG_SHADER_HEADER}
+                DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/include/mayag/render/kernel.hpp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_shaders.py
+                COMMENT "mayag: transpiling render/kernel.hpp -> shaders + SPIR-V"
+                VERBATIM)
+            add_custom_target(mayag_shaders DEPENDS ${MAYAG_SHADER_HEADER})
+            # INTERFACE libraries carry dependencies to their consumers, so
+            # every example/test that links mayag regenerates the shaders first.
+            add_dependencies(mayag mayag_shaders)
+        else()
+            message(WARNING "mayag: no Python3; shaders cannot be regenerated "
+                            "from kernel.hpp (using the checked-in header)")
         endif()
+    else()
+        message(STATUS "mayag: no glslc; using the checked-in generated shaders")
     endif()
 endif()
 

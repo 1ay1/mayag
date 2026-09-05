@@ -10,6 +10,7 @@
 // runner with no GPU and no llvmpipe), so it is meaningful where a GPU exists
 // and silent where one does not — never a spurious red.
 
+#include <optional>
 #include <mayag/mayag.hpp>
 #include <mayag/backend/vulkan.hpp>
 #include <mayag/backend/tiled.hpp>
@@ -41,15 +42,40 @@ void section(std::string_view s) { std::printf("\n%.*s\n",
 // the disagreement must be confined to antialiased edges.
 struct Diff { double mean; int max; double frac_over8; };
 
-Diff compare(backend::VulkanDevice& dev, const Node& tree, int w, int h, Color<Srgb> clear) {
+// Compare one frame rendered both ways.
+//
+// `stack`, when given, wires a real font engine into BOTH paths: the glyph
+// atlas is uploaded to the GPU and handed to the software rasteriser as its
+// CoverageSampler. Without it neither path draws any glyphs, so a text bug is
+// invisible — which is how a GPU-only missing stem-darkening correction went
+// unnoticed. Any parity check that means to cover text MUST pass a stack.
+Diff compare(backend::VulkanDevice& dev, const Node& tree, int w, int h, Color<Srgb> clear,
+             typo::FontStack* stack = nullptr) {
     DrawList dl;
-    render::paint(tree, dl, {});
+    render::PaintOptions po{};
+    std::optional<typo::StackMeasurer>      meas;
+    std::optional<typo::StackGlyphRenderer> glyphs;
+    std::optional<typo::StackSampler>       sampler_store;
+    if (stack != nullptr) {
+        meas.emplace(*stack);
+        glyphs.emplace(*stack);
+        sampler_store.emplace(*stack);
+        po.measurer = &*meas;
+        po.glyphs   = &*glyphs;
+    }
+    render::paint(tree, dl, po);
+
+    if (stack != nullptr) dev.sync_atlas(stack->atlas());
 
     std::vector<std::uint8_t> gpu;
     if (!dev.render_offscreen(dl, w, h, clear, gpu)) return {1e9, 255, 1.0};
 
     backend::Framebuffer fb{w, h};
-    backend::Tiled::render(dl, fb, nullptr, &backend::shared_pool(), clear);
+    const backend::CoverageSampler* sampler =
+        sampler_store.has_value()
+            ? static_cast<const backend::CoverageSampler*>(&*sampler_store)
+            : nullptr;
+    backend::Tiled::render(dl, fb, sampler, &backend::shared_pool(), clear);
     std::vector<std::uint8_t> sw;
     backend::Tiled::encode_parallel(fb, sw, &backend::shared_pool());
 
@@ -202,6 +228,73 @@ int main() {
         // split did not clobber it.
         const auto edge = at(10, 10);
         check(edge[0] > 150, "the background survives the backdrop split");
+    }
+
+    // ── the parity gate ─────────────────────────────────────────────
+    //
+    // The checks above are shape-by-shape and forgiving. THIS one is the
+    // regression gate for the single-source-of-truth property: a realistic
+    // frame, on a NON-BLACK background, exercising every failure mode that
+    // once slipped through because each was invisible to the older tests.
+    //
+    //   * non-black clear   — a linear-vs-sRGB clear mismatch is identical to
+    //                         a correct one when the clear is black, which is
+    //                         precisely why that bug survived so long;
+    //   * light text on dark — catches a missing stem-darkening correction and
+    //                         any glyph-quad placement drift;
+    //   * dark text on light — the opposite polarity, so a gamma applied with
+    //                         the wrong sign cannot pass by symmetry;
+    //   * a gradient         — catches interpolation-space divergence;
+    //   * translucent overlap — catches gamma-space alpha blending, which only
+    //                         shows up where coverage is partial.
+    //
+    // The tolerance is tight on PURPOSE. GPU and CPU rasterisers differ by a
+    // hair at edge pixels (different but equally valid coverage arithmetic), so
+    // demanding bit-equality would be wrong. Demanding this much says: nothing
+    // SYSTEMATIC differs. A whole-image mean above ~1/255, or any pixel off by
+    // more than a third of the range, means a backend has re-derived some part
+    // of the pixel program instead of inheriting it from render/kernel.hpp.
+    section("parity: one realistic frame, both paths");
+    {
+        const int W = 420, H = 300;
+        const auto bg_color = rgb<0x141821>;   // deliberately NOT black
+
+        auto stack = typo::system::default_stack();
+
+        auto ui = v(
+            text<"Light on dark"> | font(18) | fg(rgb<0xF2F5FA>),
+            box() | size(400, 44) | radius(12)
+                  | linear_gradient(rgb<0x0090FF>, rgb<0xF76B15>, {0, 0}, {1, 0}),
+            h(box() | size(120, 40) | radius(10) | bg(rgb<0xF2F5FA>),
+              box() | size(120, 40) | radius(10) | bg(rgb<0x5B8CFF>)
+                    | opacity(0.55f)) | gap(-40),
+            box() | size(400, 44) | radius(8) | bg(rgb<0xF2F5FA>),
+            text<"Dark on light"> | font(18) | fg(rgb<0x11151C>),
+            box() | size(400, 2) | bg(rgb<0x2A3040>)
+        ) | gap(8) | pad(16) | width(420) | height(300);
+
+        Node n = ui.build();
+        typo::StackMeasurer measurer{*stack};
+        layout::layout_tree(n, {static_cast<float>(W), static_cast<float>(H)}, measurer);
+
+        Diff d = compare(dev, n, W, H, bg_color, stack.get());
+        std::printf("  parity: mean|d|=%.3f max=%d over8=%.2f%%\n",
+                    d.mean, d.max, d.frac_over8 * 100.0);
+
+        // These bounds sit just above the measured steady state (mean ~0.26,
+        // over8 ~1.05%), which is pure edge-pixel disagreement between two
+        // legitimate rasterisers. They are deliberately snug: dropping the
+        // shader's stem-darkening call — the exact bug that shipped — moves
+        // these to ~0.30 / ~1.27% and trips the gate. If a change to
+        // render/kernel.hpp moves them, that is expected and BOTH paths moved
+        // together; if only one moved, a backend has re-derived the pixel
+        // program and that is the failure this test exists to catch.
+        check(d.mean < 0.29,
+              "GPU and CPU agree on a real frame with text (mean < 0.29/255)");
+        check(d.max < 85,
+              "no pixel differs systematically (max < 85/255)");
+        check(d.frac_over8 < 0.0115,
+              "fewer than 1.15% of pixels differ by more than 8/255");
     }
 
     std::printf("\n%s  %d checks, %d failures\n",

@@ -18,7 +18,7 @@
 //   render_offscreen(...)     render to a Framebuffer (for tests)
 
 #include "../render/draw_list.hpp"
-#include "../render/spirv_generated.hpp"
+#include "../render/shader_generated.hpp"
 #include "software.hpp"
 
 #include <array>
@@ -49,11 +49,13 @@ class VulkanDevice {
         if (!create_device()) return false;
         if (!create_command_infra()) return false;
         if (!create_sampler_and_atlas()) return false;
-        // sRGB attachment: the shader outputs LINEAR premultiplied colour and
-        // the hardware sRGB-encodes it on store, so the readback is byte-for-
-        // byte comparable with the software rasteriser (which sRGB-encodes in
-        // software). Without this the readback is linear and every colour is
-        // wrong by the transfer curve.
+        // sRGB attachment: the fragment shader outputs LINEAR premultiplied
+        // colour, and the hardware (a) linearises the destination before the
+        // alpha blend and (b) sRGB-encodes the result on store. So compositing
+        // happens in LINEAR light — byte-for-byte the same model as the software
+        // rasteriser (linear framebuffer, single sRGB encode at the end). An
+        // antialiased edge blends correctly; there is no gamma-space blending
+        // and no double-encode.
         off_format_ = vk::VK_FORMAT_R8G8B8A8_SRGB;
         if (!create_pipeline(off_format_, /*for_present=*/false)) return false;
         offscreen_ = true;
@@ -889,14 +891,26 @@ class VulkanDevice {
         std::vector<vk::VkSurfaceFormatKHR> formats(fmt_count);
         api_->GetPhysicalDeviceSurfaceFormatsKHR(phys_, surface_, &fmt_count, formats.data());
 
-        // Prefer a UNORM (not _SRGB) format: the shader outputs LINEAR premul
-        // colour, and storing it through an sRGB view would double-encode.
-        // This matches the software path, which encodes to sRGB itself.
-        swap_format_ = formats.empty() ? vk::VK_FORMAT_B8G8R8A8_UNORM : formats[0].format;
+        // Prefer an _SRGB surface format. The fragment shader outputs LINEAR
+        // premultiplied colour; an _SRGB view makes the hardware linearise the
+        // destination before the alpha blend and sRGB-encode on store, so the
+        // compositing happens in LINEAR light and antialiased edges are exact —
+        // identical to the software rasteriser and to the offscreen path. Only
+        // fall back to UNORM if the surface offers no sRGB format at all (rare;
+        // then edge blending is gamma-space, but the image is still readable).
+        swap_format_ = formats.empty() ? vk::VK_FORMAT_B8G8R8A8_SRGB : formats[0].format;
         int color_space = formats.empty() ? vk::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR : formats[0].colorSpace;
+        bool picked = false;
         for (const auto& f : formats) {
-            if (f.format == vk::VK_FORMAT_B8G8R8A8_UNORM || f.format == vk::VK_FORMAT_R8G8B8A8_UNORM) {
-                swap_format_ = f.format; color_space = f.colorSpace; break;
+            if (f.format == vk::VK_FORMAT_B8G8R8A8_SRGB || f.format == vk::VK_FORMAT_R8G8B8A8_SRGB) {
+                swap_format_ = f.format; color_space = f.colorSpace; picked = true; break;
+            }
+        }
+        if (!picked) {
+            for (const auto& f : formats) {
+                if (f.format == vk::VK_FORMAT_B8G8R8A8_UNORM || f.format == vk::VK_FORMAT_R8G8B8A8_UNORM) {
+                    swap_format_ = f.format; color_space = f.colorSpace; break;
+                }
             }
         }
 
@@ -1083,6 +1097,11 @@ class VulkanDevice {
             if (static_cast<ShapeKind>(in.kind) == ShapeKind::backdrop) { has_backdrop = true; break; }
         }
 
+        // The colour attachment is _SRGB, so the hardware sRGB-encodes on
+        // store — including the clear. Give it a LINEAR value so the stored
+        // background matches a shape of the same colour (which the shader also
+        // emits in linear and the hardware encodes identically). `clear` is in
+        // the Srgb space, so linearise it here.
         const auto lin = clear.template to<Linear>();
         vk::VkClearValue cv{};
         cv.color.float32[0] = lin.c0; cv.color.float32[1] = lin.c1;

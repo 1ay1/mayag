@@ -18,6 +18,7 @@
 
 #include "../core/color.hpp"
 #include "../render/draw_list.hpp"
+#include "../render/kernel.hpp"
 #include "../render/sdf.hpp"
 
 #include <algorithm>
@@ -198,46 +199,15 @@ class Software {
     }
 
   private:
-    /// Perceptual correction for glyph coverage.
-    ///
-    /// `text_gamma_light` < 1 thickens light-on-dark strokes; the dark-on-
-    /// light case needs far less help, so its exponent sits near 1. Values
-    /// are the conventional ones (FreeType/Skia land in the same range) and
-    /// are deliberately mild: overcorrecting makes text look bold and muddy.
-    static constexpr float text_gamma_light = 0.80f;
-    static constexpr float text_gamma_dark  = 1.05f;
+    // Perceptual glyph correction (stem darkening) and the SDF threshold band
+    // both live in render/kernel.hpp, the single source of truth every backend
+    // shares. They used to live HERE, which is exactly why GPU text could never
+    // match this rasteriser: no shader had them.
+    static constexpr float sdf_edge = kernel::sdf_edge_fallback;
 
-    /// Coverage -> perceptually corrected coverage.
     [[nodiscard]] static float apply_text_gamma(float cov, Vec4 premul_color) noexcept {
-        if (cov <= 0.0f || cov >= 1.0f) return cov;
-
-        // Luminance of the glyph colour, un-premultiplied. Bright text is the
-        // case that needs thickening.
-        const float a = premul_color.w > 1e-4f ? premul_color.w : 1.0f;
-        const float lum = (0.2126f * premul_color.x +
-                           0.7152f * premul_color.y +
-                           0.0722f * premul_color.z) / a;
-
-        // Blend between the two exponents by how light the text is, so a
-        // mid-grey label does not jump discontinuously between regimes.
-        const float t = num::saturate(lum * 2.0f);
-        const float gamma = num::lerp(text_gamma_dark, text_gamma_light, t);
-        return num::pow(cov, gamma);
+        return kernel::apply_text_gamma(cov, premul_color);
     }
-
-    /// Half-width of the SDF threshold band, in normalised field units.
-    ///
-    /// This is the antialiasing width for distance-field glyphs, and it has
-    /// to be at least half the field's change across ONE texel or the
-    /// smoothstep lands entirely between samples and every edge snaps hard.
-    ///
-    /// Measured: at the default 48 px raster size and 6 px spread, one texel
-    /// step changes the field by ~0.082. So 0.04 (the value this started at)
-    /// was narrower than a single texel and produced no gradient at all —
-    /// exactly the jagged look that a distance field is supposed to prevent.
-    /// 0.09 gives a ~2-texel ramp, which reads as a clean edge without the
-    /// blur that a wider band would introduce.
-    static constexpr float sdf_edge = 0.09f;
 
     [[nodiscard]] static Rect clamp_scissor(const Rect& clip, const Framebuffer& fb) {
         const Rect screen{0.0f, 0.0f, static_cast<float>(fb.width()),
@@ -386,37 +356,29 @@ class Software {
                                            const CoverageSampler* sampler) {
         const Vec2 local = p - center;
 
+        // Geometric kinds are decided by the shared kernel, so this rasteriser
+        // and every shader evaluate byte-identical maths. Only the kinds that
+        // need a CPU-side resource (the glyph atlas via CoverageSampler) are
+        // handled here; the rest fall through to kernel::shape_coverage.
         switch (kind) {
-            case ShapeKind::rounded_box: {
-                float d = sdf::rounded_box(local, half, inst.radii);
-                if (inst.flags & instance_flags::stroke_only) {
-                    // A border is the outline of the same field. Offsetting by
-                    // half the width first keeps an inside stroke inside.
-                    d = sdf::outline(d + inst.params.x * 0.5f, inst.params.x);
-                }
-                return sdf::coverage_smooth(d);
-            }
+            case ShapeKind::rounded_box:
             case ShapeKind::circle:
-                return sdf::coverage_smooth(sdf::circle(local, num::min(half.x, half.y)));
-
             case ShapeKind::ring:
-                return sdf::coverage_smooth(
-                    sdf::ring(local, num::min(half.x, half.y), inst.params.x));
-
             case ShapeKind::arc:
-                return sdf::coverage_smooth(
-                    sdf::arc(local, num::min(half.x, half.y), inst.params.x,
-                             inst.params.y, inst.params.z));
-
             case ShapeKind::line:
-                return sdf::coverage_smooth(
-                    sdf::segment(p, Vec2{inst.axis.x, inst.axis.y},
-                                 Vec2{inst.axis.z, inst.axis.w}, inst.params.x));
-
-            case ShapeKind::shadow: {
-                const float d = sdf::rounded_box(local, half, inst.radii);
-                const float c = sdf::shadow_coverage(d, num::max(inst.params.x, 0.01f));
-                return (inst.flags & instance_flags::inset) ? 1.0f - c : c;
+            case ShapeKind::shadow:
+            case ShapeKind::texture: {
+                kernel::Fragment f;
+                f.local  = local;
+                f.frag   = p;
+                f.half   = half;
+                f.radii  = inst.radii;
+                f.axis   = inst.axis;
+                f.params = inst.params;
+                f.px     = 1.0f;
+                f.kind   = inst.kind;
+                f.flags  = inst.flags;
+                return kernel::shape_coverage(f);
             }
 
             case ShapeKind::glyph: {
@@ -461,9 +423,6 @@ class Software {
                 return apply_text_gamma(cov, inst.color);
             }
 
-            case ShapeKind::texture:
-                return sdf::coverage_smooth(sdf::rounded_box(local, half, inst.radii));
-
             case ShapeKind::color_glyph:
                 // Colour glyphs are blended per-pixel from the RGBA atlas in
                 // draw_instance before this coverage path runs, so control
@@ -481,70 +440,18 @@ class Software {
   public:
     /// Interpolate two LINEAR premultiplied colours through Ok**LCH**.
     ///
-    /// This is the gradient claim made real, and the choice of Oklch over
-    /// Oklab is the entire point. Oklab is CARTESIAN: a straight line between
-    /// two roughly-opposite hues passes close to the neutral axis, so an
-    /// Oklab ramp desaturates in the middle almost as badly as an RGB one.
-    /// Oklch is POLAR — it carries chroma and hue as separate coordinates, so
-    /// chroma is interpolated directly and the ramp stays vivid end to end.
+    /// The implementation lives in render/kernel.hpp so the shader and this
+    /// rasteriser cannot diverge — the shader is transpiled from that file.
+    /// Kept here as a named entry point because tests and the gradient path
+    /// call it directly.
     ///
-    /// Hue takes the shorter way around the wheel, so red -> magenta does not
-    /// detour through green.
-    ///
-    /// Same constants as color.hpp, so CPU and shader agree; the shader
-    /// version lives in shader_source.hpp.
+    /// Why Oklch and not Oklab: Oklab is CARTESIAN, so a straight line between
+    /// two roughly-opposite hues passes close to the neutral axis and the ramp
+    /// desaturates in the middle almost as badly as an RGB one. Oklch is POLAR,
+    /// so chroma is interpolated directly and the ramp stays vivid end to end.
+    /// Hue takes the shorter way around the wheel.
     [[nodiscard]] static Vec4 lerp_oklch(Vec4 a, Vec4 b, float t) noexcept {
-        // Un-premultiply: interpolating premultiplied chroma is meaningless.
-        const auto unpre = [](Vec4 c) -> Vec4 {
-            const float inv = c.w > 1e-6f ? 1.0f / c.w : 0.0f;
-            return {c.x * inv, c.y * inv, c.z * inv, c.w};
-        };
-        const Vec4 ca = unpre(a), cb = unpre(b);
-
-        // Linear sRGB -> LMS -> cube root -> Oklab. The cube root is the trick.
-        const auto to_lab = [](Vec4 c) -> Vec4 {
-            const float l = 0.4122214708f * c.x + 0.5363325363f * c.y + 0.0514459929f * c.z;
-            const float m = 0.2119034982f * c.x + 0.6806995451f * c.y + 0.1073969566f * c.z;
-            const float s = 0.0883024619f * c.x + 0.2817188376f * c.y + 0.6299787005f * c.z;
-            const float l_ = num::cbrt(l), m_ = num::cbrt(m), s_ = num::cbrt(s);
-            return {0.2104542553f * l_ + 0.7936177850f * m_ - 0.0040720468f * s_,
-                    1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_,
-                    0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_,
-                    c.w};
-        };
-
-        const Vec4 la = to_lab(ca), lb = to_lab(cb);
-
-        // -> polar
-        const float ca_chroma = Vec2{la.y, la.z}.length();
-        const float cb_chroma = Vec2{lb.y, lb.z}.length();
-        const float ha = num::atan2(la.z, la.y);
-        float       hb = num::atan2(lb.z, lb.y);
-
-        // Shortest path around the hue circle.
-        float dh = hb - ha;
-        if (dh >  num::pi) dh -= num::tau;
-        if (dh < -num::pi) dh += num::tau;
-
-        const float L      = num::lerp(la.x, lb.x, t);
-        const float chroma = num::lerp(ca_chroma, cb_chroma, t);
-        const float hue    = ha + dh * t;
-        const float alpha  = num::lerp(la.w, lb.w, t);
-
-        // -> back to Oklab -> linear sRGB
-        const float A = chroma * num::cos(hue);
-        const float B = chroma * num::sin(hue);
-
-        const float l_ = L + 0.3963377774f * A + 0.2158037573f * B;
-        const float m_ = L - 0.1055613458f * A - 0.0638541728f * B;
-        const float s_ = L - 0.0894841775f * A - 1.2914855480f * B;
-        const float l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
-
-        const float r  = num::max( 4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s, 0.0f);
-        const float g  = num::max(-1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s, 0.0f);
-        const float bl = num::max(-0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s, 0.0f);
-
-        return {r * alpha, g * alpha, bl * alpha, alpha};
+        return kernel::mix_oklch(a, b, t);
     }
 
   private:

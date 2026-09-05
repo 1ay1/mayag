@@ -1,11 +1,14 @@
 #pragma once
-// mayag::sdf — the shape kernel
+// mayag::sdf — legacy shape-kernel entry points
 //
-// This file is the single source of truth for what every mayag shape LOOKS
-// like. The software rasteriser calls these functions directly; the GPU
-// backends get shader source transpiled from the same formulas (see
-// render/shader_source.hpp, which keeps the GLSL/MSL/WGSL text next to the C++
-// so a change to one is an obvious diff against the other).
+// The single source of truth for what every mayag shape LOOKS like is now
+// render/kernel.hpp: the software rasteriser calls it directly and every GPU
+// backend runs shader text transpiled from it at build time, so no backend can
+// drift from another.
+//
+// This header remains as a thin, stable public surface (`mayag::sdf::circle`
+// and friends) for code and tests that want the distance functions on their
+// own. New shading logic belongs in kernel.hpp, not here.
 //
 // Everything is a signed distance: negative inside, zero on the boundary,
 // positive outside, and — critically — the gradient has unit magnitude, so

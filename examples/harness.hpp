@@ -16,6 +16,10 @@
 
 #include <mayag/mayag.hpp>
 
+#ifdef MAYAG_WITH_VULKAN
+#include <mayag/backend/vulkan.hpp>   // backend::VulkanDevice for --gpu
+#endif
+
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -26,7 +30,7 @@ namespace demo {
 using namespace mayag;
 
 struct Options {
-    enum class Mode { window, png, headless } mode = Mode::window;
+    enum class Mode { window, png, gpu, headless } mode = Mode::window;
     std::string out_path = "out.png";
     Vec2        size{1000, 720};
     float       dpi = 2.0f;
@@ -45,6 +49,10 @@ struct Options {
             o.mode = Options::Mode::png;
             if (i + 1 < argc && argv[i + 1][0] != '-') o.out_path = argv[++i];
         }
+        else if (a == "--gpu") {
+            o.mode = Options::Mode::gpu;
+            if (i + 1 < argc && argv[i + 1][0] != '-') o.out_path = argv[++i];
+        }
         else if (a == "--headless") { o.mode = Options::Mode::headless; }
         else if (a == "--window")   { o.mode = Options::Mode::window; }
         else if (a == "--last-resort") { o.use_system_fonts = false; }
@@ -58,7 +66,8 @@ struct Options {
             std::printf(
                 "usage: %s [options]\n"
                 "  (no args)         open a window\n"
-                "  --png [PATH]      render one frame to a PNG and exit\n"
+                "  --png [PATH]      render one frame to a PNG (software) and exit\n"
+                "  --gpu [PATH]      render one frame to a PNG via the GPU and exit\n"
                 "  --headless        run scripted, assert, and exit (CI)\n"
                 "  --size W H        viewport size in logical pixels\n"
                 "  --dpi SCALE       device pixel ratio (default 2.0)\n"
@@ -184,6 +193,69 @@ template <Program P, typename Driver>
             }
             report(root, o.size, ro, o.out_path.c_str());
             return 0;
+        }
+
+        case Options::Mode::gpu: {
+#ifndef MAYAG_WITH_VULKAN
+            std::fprintf(stderr,
+                "mayag: --gpu needs the Vulkan backend (build with "
+                "-DMAYAG_WITH_VULKAN=ON)\n");
+            return 1;
+#else
+            // Same Program, same layout + paint as --png; only the rasteriser
+            // differs. The DrawList is handed to the GPU instead of the tiled
+            // software path, so the screenshot is the actual GPU output.
+            typename P::Model model = [] {
+                if constexpr (detail::HasEffectfulInit<P>) return P::init().first;
+                else return P::init();
+            }();
+
+            Ctx ctx{o.size, o.dpi, 0.0, cfg.theme, nullptr};
+            Node root = [&] {
+                if constexpr (detail::ViewWithCtx<P>) return P::view(model, ctx);
+                else return P::view(model);
+            }();
+
+            const int W = static_cast<int>(o.size.x * o.dpi);
+            const int H = static_cast<int>(o.size.y * o.dpi);
+
+            // Lay out and paint with the font stack, exactly like --png.
+            DrawList dl;
+            render::PaintOptions po{};
+            po.dpi_scale = o.dpi;
+            auto fonts = cfg.fonts ? cfg.fonts : make_fonts(o);
+            typo::StackMeasurer measurer{*fonts};
+            typo::StackGlyphRenderer glyphs{*fonts};
+            layout::layout_tree(root, o.size, measurer);
+            po.measurer = &measurer;
+            po.glyphs   = &glyphs;
+            render::paint(root, dl, po);
+
+            backend::VulkanDevice dev;
+            if (!dev.init_offscreen()) {
+                std::fprintf(stderr, "mayag: no usable Vulkan device\n");
+                return 1;
+            }
+            dev.sync_atlas(fonts->atlas());   // upload glyph coverage + colour
+
+            std::vector<std::uint8_t> px;
+            if (!dev.render_offscreen(dl, W, H, cfg.theme.background, px)) {
+                std::fprintf(stderr, "mayag: GPU render_offscreen failed\n");
+                return 1;
+            }
+            if (!image::write_png(o.out_path, px, W, H)) {
+                std::fprintf(stderr, "mayag: failed to write %s\n", o.out_path.c_str());
+                return 1;
+            }
+
+            RenderOptions ro_gpu;
+            ro_gpu.background = cfg.theme.background;
+            ro_gpu.dpi_scale = o.dpi;
+            ro_gpu.fonts     = fonts;
+            report(root, o.size, ro_gpu, o.out_path.c_str());
+            std::printf("  renderer    vulkan (offscreen)\n");
+            return 0;
+#endif
         }
     }
     return 0;
