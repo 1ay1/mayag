@@ -70,6 +70,13 @@ class Decoder {
 
     [[nodiscard]] bool open(const std::string& path) {
         close();
+        // ffmpeg logs at INFO by default, and every container open re-reports
+        // whatever it dislikes about the file. A scrub drag opens the file
+        // repeatedly, so a harmless note like "UDTA parsing failed retrying
+        // raw" arrives dozens of times a second and buries anything real.
+        // Errors still print; the chatter does not.
+        av_log_set_level(AV_LOG_ERROR);
+
         if (avformat_open_input(&fmt_, path.c_str(), nullptr, nullptr) < 0) {
             error_ = "cannot open " + path;
             return false;
@@ -163,10 +170,24 @@ class Decoder {
     /// seek(3.0) both returned pts 0.000.
     ///
     /// So decode forward from the keyframe until reaching the requested time.
-    /// The bounded loop matters: a corrupt or unusual file must not spin here,
-    /// and a target past the end simply returns the last frame decoded.
-    [[nodiscard]] std::shared_ptr<const ImageData> seek(double seconds,
-                                                        double* pts_out) {
+    ///
+    /// `still_wanted` lets a caller abandon that walk. It matters more than it
+    /// looks: on a screen recording the keyframe interval is often the whole
+    /// file, so one seek decodes ~180 frames and takes ~660 ms. Dragging a
+    /// scrub bar asks for a new position ~60 times a second. task_latest
+    /// discards the stale RESULTS, but without this every one of those decodes
+    /// still runs to completion, and the machine falls a minute behind in a
+    /// second of dragging.
+    ///
+    /// The polarity matches the runtime's: TRUE means keep going. It is named
+    /// for what it asks rather than for what it stops, because the opposite
+    /// spelling (`cancel`) reads identically at the call site while meaning
+    /// the reverse -- and wiring the runtime's `still_wanted` into a `cancel`
+    /// parameter aborted every seek on its first frame, which surfaced only as
+    /// a video that would not scrub.
+    [[nodiscard]] std::shared_ptr<const ImageData> seek(
+            double seconds, double* pts_out,
+            const std::function<bool()>& still_wanted = {}) {
         if (ctx_ == nullptr) return nullptr;
         const AVStream* st = fmt_->streams[stream_];
         const int64_t ts = static_cast<int64_t>(seconds / av_q2d(st->time_base));
@@ -179,6 +200,9 @@ class Decoder {
         // cap is generous enough to cross one and small enough to bound the
         // work if the file lies about its timestamps.
         for (int guard = 0; guard < 600; ++guard) {
+            // Superseded by a newer seek: stop rather than finish work whose
+            // result is already destined for the bin.
+            if (still_wanted && !still_wanted()) return nullptr;
             auto frame = next(&pts);
             if (!frame) break;
             last = std::move(frame);
@@ -304,6 +328,10 @@ struct Video {
         /// Last known window size, so the Scrub handler can work out the
         /// track's width. Updated from Ctx on every pointer event.
         Vec2   window{860.0f, 620.0f};
+        /// Bumped by every seek. It is part of the playback source's id, so a
+        /// seek replaces the decoder thread rather than leaving it running
+        /// from the old position. See decoder().
+        int    epoch = 0;
     };
 
     /// Inset and track width, shared by view() and the Scrub handler so a
@@ -320,14 +348,17 @@ struct Video {
     struct SeekTo { double seconds; };
     struct Frame { std::shared_ptr<const ImageData> pixels; double pts; float ms; };
     struct Ended {};
+    /// A seek that gave up because a newer one replaced it. Distinct from
+    /// Ended: it is the normal outcome of dragging, and must not stop playback.
+    struct SeekAbandoned {};
     struct Pointer { Vec2 at; };
     /// Pointer x INSIDE the scrub track, in logical pixels.
     struct Scrub { float local_x; };
     struct Resized { Vec2 size; };
     struct Tick { float dt; };
     struct Quit {};
-    using Msg = std::variant<Play, Pause, SeekTo, Frame, Ended, Pointer,
-                             Scrub, Resized, Tick, Quit>;
+    using Msg = std::variant<Play, Pause, SeekTo, Frame, Ended, SeekAbandoned,
+                             Pointer, Scrub, Resized, Tick, Quit>;
 
     static inline const auto play_btn  = action(node_id("play"), Msg{Play{}});
     static inline const auto pause_btn = action(node_id("pause"), Msg{Pause{}});
@@ -375,21 +406,42 @@ struct Video {
             [&](SeekTo s) -> R {
                 m.time = num::clamp(s.seconds, 0.0, m.duration);
                 m.seeking = true;
+                // New epoch -> new playback source id, so a seek while playing
+                // restarts the decoder at the new position instead of leaving
+                // the old thread running from where it was.
+                ++m.epoch;
                 const double want = m.time;
                 // task_latest: dragging the bar fires one of these per move
                 // and only the newest can deliver, so the picture cannot jump
                 // backwards to a frame the user already scrubbed past.
-                return {m, Cmd<Msg>::task_latest("seek", [want] {
-                    Decoder d;               // owned by this task alone
-                    if (!d.open(g_path)) return Msg{Ended{}};
-                    double pts = 0.0;
-                    const auto t0 = std::chrono::steady_clock::now();
-                    auto px = d.seek(want, &pts);
-                    const float ms = std::chrono::duration<float, std::milli>(
-                                         std::chrono::steady_clock::now() - t0).count();
-                    if (!px) return Msg{Ended{}};
-                    return Msg{Frame{std::move(px), pts, ms}};
-                })};
+                return {m, Cmd<Msg>::task_latest("seek",
+                    [want](std::function<bool()> still_wanted) {
+                        Decoder d;               // owned by this task alone
+                        if (!d.open(g_path)) return Msg{Ended{}};
+                        double pts = 0.0;
+                        const auto t0 = std::chrono::steady_clock::now();
+                        // Pass the predicate down: a seek can decode hundreds
+                        // of frames forward from a keyframe, and during a drag
+                        // all but the last one are already obsolete before
+                        // they finish.
+                        auto px = d.seek(want, &pts, still_wanted);
+                        const float ms = std::chrono::duration<float, std::milli>(
+                                             std::chrono::steady_clock::now() - t0).count();
+                        if (px) return Msg{Frame{std::move(px), pts, ms}};
+
+                        // No frame. Two very different reasons:
+                        //
+                        //   superseded -- a newer scrub position arrived and
+                        //                 this decode gave up on purpose. The
+                        //                 newer task will deliver; say nothing.
+                        //   real failure -- the file ended or would not decode.
+                        //
+                        // Reporting both as Ended stopped playback every time
+                        // the user dragged the scrub bar, because cancellation
+                        // is the NORMAL case during a drag.
+                        if (!still_wanted()) return Msg{SeekAbandoned{}};
+                        return Msg{Ended{}};
+                    })};
             },
 
             [&](Frame f) -> R {
@@ -404,6 +456,12 @@ struct Video {
                 m.playing = false;
                 m.status  = "end of stream";
                 m.chrome.to(1.0f);          // always show controls when stopped
+                return {m, Cmd<Msg>::none()};
+            },
+
+            [&](SeekAbandoned) -> R {
+                // A newer scrub superseded this decode. Leave `seeking` set:
+                // the task that replaced it is still running and will clear it.
                 return {m, Cmd<Msg>::none()};
             },
 
@@ -456,9 +514,21 @@ struct Video {
 
     /// The playback decoder: a subscription, so it exists exactly while
     /// `playing` is true and the runtime joins the thread when it is not.
+    ///
+    /// The id carries the seek EPOCH, not just "playback".
+    ///
+    /// Sources are reconciled by id: an unchanged id means "still the same
+    /// producer, leave it alone". With a constant id the thread started at the
+    /// original position and kept running, so seeking while playing moved the
+    /// scrub bar and the picture carried on from where it was -- the seek
+    /// appeared to do nothing until you paused. Folding the epoch in makes a
+    /// seek a DIFFERENT source, so the runtime stops the old thread, joins it,
+    /// and starts one at the new time. That is the declarative contract doing
+    /// the work; nothing has to remember to restart anything.
     static Sub<Msg> decoder(const Model& m) {
         const double from = m.time;
-        return Sub<Msg>::source("playback", [from](auto sink, auto alive) {
+        return Sub<Msg>::source("playback:" + std::to_string(m.epoch),
+                                [from](auto sink, auto alive) {
             Decoder d;                       // owned by this thread alone
             if (!d.open(g_path)) { sink(Msg{Ended{}}); return; }
             double ignored = 0.0;
@@ -472,7 +542,25 @@ struct Video {
                 double pts = 0.0;
                 const auto t0 = clk::now();
                 std::shared_ptr<const ImageData> px = d.next(&pts);
-                if (!px) { if (alive()) sink(Msg{Ended{}}); return; }
+
+                // No frame. Only report end-of-stream if this producer is
+                // still the one the model wants.
+                //
+                // A seek bumps the epoch, which changes this source's id, so
+                // the runtime stops THIS thread and starts a new one at the new
+                // position. On the way out `next()` can legitimately return
+                // null -- and reporting that as Ended set playing=false, so
+                // every seek during playback stopped the video and left the
+                // status reading "end of stream". Measured exactly that way.
+                //
+                // `alive()` is the runtime telling us we have been replaced.
+                // Checking it BEFORE attributing meaning to a null frame is
+                // the difference between "the file ended" and "you were
+                // superseded".
+                if (!px) {
+                    if (alive()) sink(Msg{Ended{}});
+                    return;
+                }
                 const float ms = std::chrono::duration<float, std::milli>(
                                      clk::now() - t0).count();
                 if (first_pts < 0.0) first_pts = pts;
@@ -867,6 +955,44 @@ int main(int argc, char** argv) {
             pump([&] { return !rt.model().seeking; }, 15000);
             ok(rt.model().time <= rt.model().duration + 0.01,
                "and a click past the end clamps instead of overshooting");
+        }
+
+        // ── seeking WHILE PLAYING ───────────────────────────────
+        //
+        // Two bugs lived here, both reported from actually using the thing.
+        //
+        // A cancelled seek returned no frame, and the handler mapped "no
+        // frame" to Ended -- which stops playback. Cancellation is the NORMAL
+        // case while dragging, so scrubbing killed the video every time.
+        //
+        // And the playback source's id was the constant "playback", so the
+        // runtime saw an unchanged id, left the existing thread alone, and the
+        // picture carried on from the old position: the seek looked like it
+        // did nothing until you paused.
+        {
+            rt.send(Video::Msg{Video::SeekTo{0.0}});
+            pump([&] { return !rt.model().seeking; }, 15000);
+            rt.send(Video::Msg{Video::Play{}});
+            pump([&] { return rt.model().frames > 0; }, 5000);
+
+            const double target = rt.model().duration * 0.6;
+            rt.send(Video::Msg{Video::SeekTo{target}});
+            pump([&] { return !rt.model().seeking; }, 15000);
+
+            ok(rt.model().playing,
+               "seeking during playback does not stop the video");
+
+            // And it must carry on FROM the new position, not the old one.
+            const double after_seek = rt.model().time;
+            pump([] { return false; }, 600);
+            ok(rt.model().playing, "it is still playing after the seek settles");
+            ok(rt.model().time >= after_seek - 0.1,
+               "and playback resumed from the seek target, not the old spot (" +
+                   std::to_string(rt.model().time) + " >= " +
+                   std::to_string(after_seek) + ")");
+
+            rt.send(Video::Msg{Video::Pause{}});
+            rt.tick();
         }
 
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
