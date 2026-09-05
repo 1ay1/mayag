@@ -301,7 +301,19 @@ struct Video {
         Animated<float> chrome{1.0f};
         double idle = 0.0;
         Vec2   pointer{};
+        /// Last known window size, so the Scrub handler can work out the
+        /// track's width. Updated from Ctx on every pointer event.
+        Vec2   window{860.0f, 620.0f};
     };
+
+    /// Inset and track width, shared by view() and the Scrub handler so a
+    /// click maps to the same geometry that was drawn.
+    static float control_inset(Vec2 vp) {
+        return num::clamp(vp.x * 0.03f, 12.0f, 40.0f);
+    }
+    static float track_width(Vec2 vp) {
+        return num::max(vp.x - control_inset(vp) * 2.0f, 120.0f);
+    }
 
     struct Play {};
     struct Pause {};
@@ -309,10 +321,13 @@ struct Video {
     struct Frame { std::shared_ptr<const ImageData> pixels; double pts; float ms; };
     struct Ended {};
     struct Pointer { Vec2 at; };
+    /// Pointer x INSIDE the scrub track, in logical pixels.
+    struct Scrub { float local_x; };
+    struct Resized { Vec2 size; };
     struct Tick { float dt; };
     struct Quit {};
     using Msg = std::variant<Play, Pause, SeekTo, Frame, Ended, Pointer,
-                             Tick, Quit>;
+                             Scrub, Resized, Tick, Quit>;
 
     static inline const auto play_btn  = action(node_id("play"), Msg{Play{}});
     static inline const auto pause_btn = action(node_id("pause"), Msg{Pause{}});
@@ -398,6 +413,29 @@ struct Video {
                 m.chrome.to(1.0f);
                 return {m, Cmd<Msg>::none()};
             },
+
+            [&](Scrub s) -> R {
+                // Local x inside the track -> a time.
+                //
+                // The track's width is derived from the last known window
+                // size using the SAME formula the view uses, rather than
+                // stored: view() is pure and cannot write to the model, and
+                // duplicating one expression is better than a mutable field
+                // that can silently go stale for a frame after a resize.
+                const float w = track_width(m.window);
+                if (w <= 1.0f || m.duration <= 0.0) return {m, Cmd<Msg>::none()};
+
+                const double frac =
+                    num::clamp(static_cast<double>(s.local_x) / w, 0.0, 1.0);
+                m.idle = 0.0;
+                m.chrome.to(1.0f);
+                // Reuse the seek path, which is already task_latest -- so
+                // dragging fires one decode per pointer move and only the
+                // newest can land.
+                return update(std::move(m), Msg{SeekTo{frac * m.duration}});
+            },
+
+            [&](Resized r) -> R { m.window = r.size; return {m, Cmd<Msg>::none()}; },
 
             [&](Tick t) -> R {
                 m.chrome.step(t.dt);
@@ -514,8 +552,8 @@ struct Video {
         // Controls sit in a bar across the bottom, inset from the edges, and
         // scale their padding with the window so they do not swamp a small one.
         const float bar_h   = 64.0f;
-        const float inset   = num::clamp(vp.x * 0.03f, 12.0f, 40.0f);
-        const float bar_w   = num::max(vp.x - inset * 2.0f, 120.0f);
+        const float inset   = control_inset(vp);
+        const float bar_w   = track_width(vp);
         const float bar_y   = num::max(vp.y - bar_h - inset, 0.0f);
 
         return (z(
@@ -593,6 +631,9 @@ struct Video {
             Sub<Msg>::on_key(Key::space, m.playing ? Msg{Pause{}} : Msg{Play{}}),
             Sub<Msg>::on_key(Key::escape, Msg{Quit{}}),
             Sub<Msg>::on_close(Msg{Quit{}}),
+            // Keep the model's idea of the window current, so a scrub after a
+            // resize maps to the track that is actually on screen.
+            Sub<Msg>::on_resize([](Vec2 sz) { return Msg{Resized{sz}}; }),
 
             // Pointer movement un-hides the controls. There is no dedicated
             // on_mouse_move, so this reads the raw event -- which is the
@@ -603,6 +644,26 @@ struct Video {
                 }
                 return std::nullopt;
             }),
+
+            // The scrub bar, wired for BOTH a tap and a drag.
+            //
+            // `on_node_motion` reports the pointer's LOCAL position inside the
+            // node, which is what a slider needs. But the gesture kinds are
+            // disjoint -- `matches()` maps drag to Kind::drag only -- so a
+            // drag subscription alone never fires on a plain click, and
+            // tapping the bar does nothing. That was the reported bug, and it
+            // survived a first fix because the test sent the message instead
+            // of clicking the widget.
+            //
+            // `press` covers the tap and the start of a drag; `drag` covers
+            // the rest of the movement. Together they give click-to-seek and
+            // scrub from one handler.
+            Sub<Msg>::on_node_motion(
+                node_id("track"), Sub<Msg>::Gesture::press,
+                [](Vec2 local) { return Msg{Scrub{local.x}}; }),
+            Sub<Msg>::on_node_motion(
+                node_id("track"), Sub<Msg>::Gesture::drag,
+                [](Vec2 local) { return Msg{Scrub{local.x}}; }),
 
             when(m.playing, decoder(m)),
 
@@ -757,6 +818,56 @@ int main(int argc, char** argv) {
         rt.tick();
         ok(static_cast<float>(rt.model().chrome) > 0.8f,
            "a paused player keeps its controls up");
+
+        // ── the scrub bar seeks ─────────────────────────────────
+        //
+        // This is the bug that prompted the control: the track rendered a
+        // progress fill, carried an id, and had NO subscription -- so every
+        // click on it did nothing. A control that looks interactive and is
+        // not is worse than no control, and nothing caught it because the
+        // tests drove SeekTo directly and never touched the widget.
+        {
+            // Park somewhere the click will not land, so "it moved" means
+            // something. An earlier check already left the player at the
+            // midpoint, and comparing against that made the assertion vacuous.
+            rt.send(Video::Msg{Video::SeekTo{0.0}});
+            pump([&] { return !rt.model().seeking; }, 15000);
+            const double before = rt.model().time;
+
+            // Click the widget for real, through hit testing, rather than
+            // sending Scrub directly.
+            //
+            // This distinction matters: the first version of this check sent
+            // the message, and it PASSED with the subscription deleted --
+            // testing my handler while the bug was in the wiring. Driving the
+            // widget is the only thing that proves a control is connected.
+            //
+            // rt.click() targets a node's centre, so this is a seek to the
+            // middle of the track.
+            const auto track = rt.node_rect("track");
+            ok(track.has_value(), "the scrub track exists in the laid-out tree");
+
+            rt.click(node_id("track"));
+            pump([&] { return !rt.model().seeking; }, 15000);
+
+            const double want = rt.model().duration * 0.5;
+            ok(std::abs(rt.model().time - want) < 0.35,
+               "clicking the middle of the track seeks there (" +
+                   std::to_string(rt.model().time) + " vs " +
+                   std::to_string(want) + ")");
+            ok(rt.model().time != before, "and it actually moved");
+
+            // The ends must be reachable, and clamped rather than overshooting.
+            const float w = Video::track_width(rt.model().window);
+            rt.send(Video::Msg{Video::Scrub{0.0f}});
+            pump([&] { return !rt.model().seeking; }, 15000);
+            ok(rt.model().time < 0.35, "the left end seeks to the start");
+
+            rt.send(Video::Msg{Video::Scrub{w * 4.0f}});   // far past the right
+            pump([&] { return !rt.model().seeking; }, 15000);
+            ok(rt.model().time <= rt.model().duration + 0.01,
+               "and a click past the end clamps instead of overshooting");
+        }
 
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
     });
