@@ -232,11 +232,17 @@ class ImageStore final : public CoverageSampler {
   public:
     void set_glyphs(const CoverageSampler* s) noexcept { glyphs_ = s; }
 
-    void upload(std::uint32_t id, const ImageData& img) {
-        auto& slot = images_[id];
-        slot.rgba = img.rgba;
-        slot.width = img.width;
-        slot.height = img.height;
+    /// Take SHARED OWNERSHIP of the pixels. Never copies them.
+    ///
+    /// This used to do `slot.rgba = img.rgba`, which copied the whole buffer
+    /// on every upload. For a video player that is 8 MB per frame at 1080p --
+    /// about 500 MB/s of memcpy at 60fps, moving bytes that already existed
+    /// and had not changed. The Cmd carries a shared_ptr precisely so the
+    /// pixels can travel from decoder to renderer without being duplicated;
+    /// copying here silently threw that away.
+    void upload(std::uint32_t id, std::shared_ptr<const ImageData> img) {
+        if (!img) return;
+        images_[id] = std::move(img);
         bound_ = id;
     }
 
@@ -262,21 +268,14 @@ class ImageStore final : public CoverageSampler {
     }
     [[nodiscard]] Vec4 sample_texture(float u, float v) const override {
         const auto it = images_.find(bound_);
-        if (it == images_.end()) return Vec4{1.0f, 1.0f, 1.0f, 1.0f};
-        return it->second.sample(u, v);
+        if (it == images_.end() || !it->second) return Vec4{1.0f, 1.0f, 1.0f, 1.0f};
+        const ImageData& img = *it->second;
+        TextureSource src{img.rgba.data(), img.width, img.height};
+        return src.sample(u, v);
     }
 
   private:
-    struct Entry {
-        std::vector<std::uint8_t> rgba;
-        int width = 0, height = 0;
-
-        [[nodiscard]] Vec4 sample(float u, float v) const noexcept {
-            TextureSource src{rgba.data(), width, height};
-            return src.sample(u, v);
-        }
-    };
-    std::unordered_map<std::uint32_t, Entry> images_;
+    std::unordered_map<std::uint32_t, std::shared_ptr<const ImageData>> images_;
     std::uint32_t bound_ = 0;
     const CoverageSampler* glyphs_ = nullptr;
 };

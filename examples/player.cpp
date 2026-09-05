@@ -41,6 +41,7 @@ struct Player {
     // ── state ───────────────────────────────────────────────────────────
     struct Model {
         bool  playing   = false;
+        bool  seeking   = false;   // a seek decode is in flight
         int   frame     = 0;
         int   decoded   = 0;      // how many the decoder has produced
         float last_ms   = 0.0f;   // decode cost, so the UI can show it
@@ -113,28 +114,47 @@ struct Player {
             [&](Play) -> R {
                 if (m.playing) return {m, Cmd<Msg>::none()};
                 m.playing = true;
-                // The decoder runs while `playing` is true and stops when it
-                // is not -- the runtime joins the thread for us.
-                return {m, decoder_stream(m.frame)};
+                // No Cmd needed: the decoder is a SUBSCRIPTION, so it starts
+                // simply because `playing` became true. See subscribe().
+                return {m, Cmd<Msg>::none()};
             },
             [&](Pause) -> R { m.playing = false; return {m, Cmd<Msg>::none()}; },
 
             [&](Seek s) -> R {
                 m.frame = num::clamp(s.frame, 0, kTotalFrames - 1);
                 m.scrub.to(static_cast<float>(m.frame));
-                // Seeking while paused still updates the picture: decode one
-                // frame inline. It is 320x180; at 1080p this would be a
-                // Cmd::task so the UI thread never waits.
-                return {m, Cmd<Msg>::upload_image(kVideoImage, decode(m.frame))};
+                m.seeking = true;
+
+                // Decode OFF the UI thread, and let the RUNTIME handle
+                // supersession.
+                //
+                // Measured: this generator costs 0.54 ms for a 320x180 frame,
+                // which scales to ~19 ms at 1080p -- more than a whole 60 Hz
+                // budget, so decoding inline would drop a frame on every
+                // scrub. task_latest additionally guarantees that dragging
+                // the bar cannot deliver an old frame after a newer one: only
+                // the most recent "seek" task can reach update(). Without it
+                // this handler needs a generation counter and a comparison,
+                // which is precisely the code that is easy to get wrong.
+                const int want = m.frame;
+                return {m, Cmd<Msg>::task_latest("seek", [want] {
+                    const auto t0 = std::chrono::steady_clock::now();
+                    auto pixels = decode(want);
+                    const float ms = std::chrono::duration<float, std::milli>(
+                                         std::chrono::steady_clock::now() - t0).count();
+                    return Msg{Frame{std::move(pixels), want, ms}};
+                })};
             },
 
             [&](Frame f) -> R {
-                // A frame arrived from the worker. Hand it to the renderer
-                // and remember what we are showing. This is the whole of
-                // "display a video frame".
+                // A frame arrived from a worker -- the decoder subscription,
+                // or a seek task. No staleness check is needed here: a
+                // superseded seek never reaches this point, and the decoder
+                // is stopped by its subscription disappearing.
                 m.frame   = f.index;
                 m.decoded = f.index + 1;
                 m.last_ms = f.ms;
+                m.seeking = false;
                 m.scrub.snap(static_cast<float>(f.index));
                 if (f.index + 1 >= kTotalFrames) m.playing = false;
                 return {m, Cmd<Msg>::upload_image(kVideoImage, f.pixels)};
@@ -144,9 +164,22 @@ struct Player {
             [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
     }
 
-    /// The decoder thread: produce frames at ~60fps until told to stop.
-    static Cmd<Msg> decoder_stream(int from) {
-        return Cmd<Msg>::stream([from](auto sink, auto alive) {
+    /// The decoder, as a SUBSCRIPTION rather than a command.
+    ///
+    /// This started as Cmd::stream and that was wrong. A Cmd is fire-and-
+    /// forget: once started, the producer runs to completion, so `pause` set a
+    /// flag the decoder never saw and frames kept arriving -- measured at
+    /// 22 -> 29 -> 36 -> 42 -> 49 long after pausing, and a seek was then
+    /// overwritten by the stream still running underneath it.
+    ///
+    /// A Sub is DECLARATIVE: it exists exactly while the model says it should.
+    /// `when(m.playing, ...)` means pausing removes the subscription, and the
+    /// runtime signals and joins the thread. Nothing has to remember to stop
+    /// it, which is the same reason animation uses on_frame rather than a
+    /// self-perpetuating timer.
+    static Sub<Msg> decoder(const Model& m) {
+        const int from = m.frame;
+        return Sub<Msg>::source("decoder", [from](auto sink, auto alive) {
             using clk = std::chrono::steady_clock;
             for (int i = from; i < kTotalFrames && alive(); ++i) {
                 const auto t0 = clk::now();
@@ -172,11 +205,12 @@ struct Player {
                 | width(px(640)) | height(px(360)) | radius(10),
 
             // Scrub bar: a track with a fill, width driven by the model.
-            z(box() | width(px(640)) | height(px(6)) | radius(3)
+            z(box() | width(px(640)) | height(px(10)) | radius(5)
                     | bg(t.surface_raised),
-              box() | width(px(640.0f * progress)) | height(px(6)) | radius(3)
-                    | bg(t.accent))
-              | width(px(640)) | height(px(6)),
+              box() | width(px(640.0f * progress)) | height(px(10)) | radius(5)
+                    | bg(m.seeking ? t.warning : t.accent))
+              | width(px(640)) | height(px(10))
+              | dsl::id<"track">,
 
             h(text_owned(m.playing ? "pause" : "play") | font(13) | semibold
                   | fg(t.on_accent)
@@ -206,6 +240,9 @@ struct Player {
             Sub<Msg>::on_key(Key::space, m.playing ? Msg{Pause{}} : Msg{Play{}}),
             Sub<Msg>::on_key(Key::escape, Msg{Quit{}}),
             Sub<Msg>::on_close(Msg{Quit{}}),
+            // The decoder exists exactly while playing. Pausing removes it and
+            // the runtime joins the thread.
+            when(m.playing, decoder(m)),
             // Only while the scrub spring is settling; a paused player idles.
             when(m.scrub.animating(),
                  Sub<Msg>::on_frame([](float dt) { return Msg{Tick{dt}}; })),
@@ -232,12 +269,18 @@ int main(int argc, char** argv) {
         ok(rt.model().frame == 0, "showing frame 0");
 
         // Play: the decoder thread starts and frames flow in.
+        //
+        // The decoder paces itself at ~60fps in WALL CLOCK, because that is
+        // what a player does. Headless tick() returns immediately, so a loop
+        // counting ticks would spin through thousands of iterations while the
+        // producer had barely started -- the wait has to be in real time.
         rt.click("play");
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::seconds(10);
         while (rt.model().frame < 5 &&
                std::chrono::steady_clock::now() < deadline) {
             rt.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         ok(rt.model().playing, "play starts the decoder");
         ok(rt.model().frame >= 5, "frames arrive from the worker thread");
@@ -246,15 +289,41 @@ int main(int argc, char** argv) {
         // Pause: the source disappears, the runtime joins the thread.
         rt.click("pause");
         rt.tick();
-        const int at_pause = rt.model().frame;
-        for (int i = 0; i < 40; ++i) rt.tick();
         ok(!rt.model().playing, "pause stops playback");
-        ok(rt.model().frame == at_pause, "and no further frames arrive");
 
-        // Seek while paused still updates the picture.
+        // Let anything already in flight land, THEN check nothing new
+        // arrives. A frame decoded just before the pause is legitimately
+        // still on its way; asserting immediately would test a race.
+        for (int i = 0; i < 50; ++i) {
+            rt.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const int settled = rt.model().frame;
+        for (int i = 0; i < 50; ++i) {
+            rt.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ok(rt.model().frame == settled, "and no further frames arrive");
+
+        // Seek is ASYNCHRONOUS: the decode runs on a worker so the UI thread
+        // never blocks. `frame` moves immediately -- that is what keeps the
+        // scrub bar glued to the cursor -- so the thing to wait on is
+        // `seeking` going false, which happens when the decoded picture
+        // actually lands. Waiting on `frame` would pass instantly and assert
+        // nothing.
         rt.send(Player::Msg{Player::Seek{120}});
-        rt.tick();
-        ok(rt.model().frame == 120, "seek moves to the requested frame");
+        ok(rt.model().frame == 120, "seek moves the model immediately");
+        ok(rt.model().seeking, "and marks a decode in flight");
+
+        const auto seek_deadline = std::chrono::steady_clock::now() +
+                                   std::chrono::seconds(10);
+        while (rt.model().seeking &&
+               std::chrono::steady_clock::now() < seek_deadline) {
+            rt.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ok(!rt.model().seeking, "the decoded frame lands and clears the flag");
+        ok(rt.model().frame == 120, "and it is the frame that was asked for");
 
         ok(rt.window().frames_presented() >= 1, "the player rendered");
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");

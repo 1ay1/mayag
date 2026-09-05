@@ -781,13 +781,14 @@ class WaylandWindow {
     /// Uploading to both costs one copy of an image the app already built,
     /// and means a GPU that fails to initialise does not silently lose every
     /// picture in the app.
-    void upload_image(std::uint32_t id, const ImageData& img) {
-        images_.upload(id, img);
+    void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
+        if (!img) return;
 #ifdef MAYAG_WITH_VULKAN
         if (gpu_active_) {
-            (void)gpu_.upload_texture(img.rgba.data(), img.width, img.height);
+            (void)gpu_.upload_texture(img->rgba.data(), img->width, img->height);
         }
 #endif
+        images_.upload(id, std::move(img));
     }
 
     void release_image(std::uint32_t id) {
@@ -1806,7 +1807,9 @@ class WaylandWindow {
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() { return p_->read_pixels(); }
 
-    void upload_image(std::uint32_t id, const ImageData& img) { p_->upload_image(id, img); }
+    void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
+        p_->upload_image(id, std::move(img));
+    }
     void release_image(std::uint32_t id) { p_->release_image(id); }
 
     void set_coverage_sampler(const backend::CoverageSampler* s) {

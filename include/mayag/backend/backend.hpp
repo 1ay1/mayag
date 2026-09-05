@@ -247,7 +247,8 @@ class Device {
     /// Upload pixels for `image(id)` to sample. The default does nothing, so
     /// a backend without image support still satisfies the interface and an
     /// app that uploads simply draws nothing rather than failing to build.
-    virtual void upload_image(std::uint32_t /*id*/, const ImageData& /*img*/) {}
+    virtual void upload_image(std::uint32_t /*id*/,
+                              std::shared_ptr<const ImageData> /*img*/) {}
     virtual void release_image(std::uint32_t /*id*/) {}
 
     virtual void release_texture(std::uint32_t /*slot*/) {}

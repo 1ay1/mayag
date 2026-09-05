@@ -193,9 +193,10 @@ inline void report(const Ui& ui, Vec2 viewport, const RenderOptions& opts,
 /// running runtime by definition, and half-running them would be worse than
 /// not running them at all.
 template <typename Msg>
-inline void apply_still_effects(const Cmd<Msg>& cmd,
-                                const std::function<void(std::uint32_t,
-                                                         const ImageData&)>& upload) {
+inline void apply_still_effects(
+        const Cmd<Msg>& cmd,
+        const std::function<void(std::uint32_t,
+                                 std::shared_ptr<const ImageData>)>& upload) {
     using C = Cmd<Msg>;
     std::visit([&](const auto& a) {
         using T = std::decay_t<decltype(a)>;
@@ -203,7 +204,7 @@ inline void apply_still_effects(const Cmd<Msg>& cmd,
             for (const auto& c : a.cmds) apply_still_effects(c, upload);
         }
         else if constexpr (std::is_same_v<T, typename C::UploadImage>) {
-            if (a.image && a.image->valid()) upload(a.id, *a.image);
+            if (a.image && a.image->valid()) upload(a.id, a.image);
         }
     }, cmd.alternative());
 }
@@ -273,8 +274,8 @@ template <Program P, typename Driver>
                     // Honour init()'s image uploads, so an app whose first
                     // frame IS an image does not screenshot blank.
                     apply_still_effects(cmd, [&](std::uint32_t id,
-                                                 const ImageData& img) {
-                        device->upload_image(id, img);
+                                                 std::shared_ptr<const ImageData> img) {
+                        device->upload_image(id, std::move(img));
                     });
                     return m;
                 } else {

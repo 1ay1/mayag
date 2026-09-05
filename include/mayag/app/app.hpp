@@ -380,13 +380,46 @@ struct StackBindings {
 template <typename Msg>
 class Inbox {
   public:
-    void set_waker(platform::Waker* w) noexcept { waker_ = w; }
+    void set_waker(platform::Waker* w) noexcept {
+        std::lock_guard lock{mutex_};
+        waker_ = w;
+    }
+
+    /// Stop delivering. Called by ~Runtime BEFORE the waker it points at is
+    /// destroyed.
+    ///
+    /// Cmd::task and Cmd::task_latest run on DETACHED threads -- there is no
+    /// handle to join, by design, because a task must not be able to block
+    /// shutdown. So a worker can finish after the Runtime is gone and call
+    /// post(), which used to dereference a dangling waker: ThreadSanitizer
+    /// caught exactly that, a write in ~Waker racing a read in Waker::wake().
+    ///
+    /// Closing under the lock means a late post either happens entirely
+    /// before the close (and is simply never drained) or sees closed_ and
+    /// does nothing. The inbox is held by shared_ptr so its own storage
+    /// outlives the Runtime regardless.
+    void close() {
+        std::lock_guard lock{mutex_};
+        closed_ = true;
+        waker_ = nullptr;
+        queue_.clear();
+    }
 
     void post(Msg m) {
-        {
-            std::lock_guard lock{mutex_};
-            queue_.push_back(std::move(m));
-        }
+        // The waker is signalled INSIDE the lock, deliberately.
+        //
+        // Reading the pointer under the lock and then waking outside it looks
+        // like the careful thing to do -- hold locks briefly -- but it leaves
+        // the exact window this guards against: close() can run, ~Waker can
+        // destroy the pipe, and the wake() then writes to a closed fd.
+        // ThreadSanitizer reports it as ~Waker racing Waker::wake(), and it is
+        // a real use-after-free, not a false positive.
+        //
+        // wake() is a single write() to an eventfd/pipe: microseconds, never
+        // blocking. Holding the mutex across it is cheaper than the bug.
+        std::lock_guard lock{mutex_};
+        if (closed_) return;
+        queue_.push_back(std::move(m));
         if (waker_ != nullptr) waker_->wake();
     }
     [[nodiscard]] std::vector<Msg> drain() {
@@ -404,6 +437,31 @@ class Inbox {
     std::mutex          mutex_;
     std::deque<Msg>     queue_;
     platform::Waker*    waker_ = nullptr;
+    bool                closed_ = false;
+};
+
+/// Generation counters for `Cmd::task_latest`, keyed by series.
+///
+/// Shared with detached workers, so it must outlive the Runtime AND be safe
+/// to touch from any thread -- a bare map here would be the exact data race
+/// this feature exists to remove.
+class TaskGenerations {
+  public:
+    /// Begin a new task in `key`'s series; returns its generation.
+    [[nodiscard]] std::uint64_t begin(const std::string& key) {
+        std::lock_guard lock{mutex_};
+        return ++current_[key];
+    }
+    /// Is `gen` still the newest task for `key`?
+    [[nodiscard]] bool current(const std::string& key, std::uint64_t gen) {
+        std::lock_guard lock{mutex_};
+        const auto it = current_.find(key);
+        return it != current_.end() && it->second == gen;
+    }
+
+  private:
+    std::mutex mutex_;
+    std::unordered_map<std::string, std::uint64_t> current_;
 };
 
 /// A timer created by `Cmd::after` or `Sub::every`.
@@ -435,6 +493,10 @@ class Runtime {
     /// well-behaved streams see `keep_running()` become false and return, and
     /// this waits for them.
     ~Runtime() {
+        // Close the inbox FIRST. Detached task workers may still be running
+        // and will call post(); after this, those calls are no-ops instead of
+        // touching a waker that is about to be destroyed.
+        inbox_->close();
         stop_all_sources();
         streams_alive_->store(false, std::memory_order_release);
         waker_.wake();   // nudge any stream sleeping on its own condition
@@ -481,7 +543,7 @@ class Runtime {
         // window watches it in poll(), so a background producer wakes an idle
         // UI thread instead of leaving its message unrendered. This is what
         // makes streaming apps live rather than frozen-until-you-move-the-mouse.
-        inbox_.set_waker(&waker_);
+        inbox_->set_waker(&waker_);
         window_.set_waker(&waker_);
 
         // Adopt the platform's multi-click interval. Only used when a backend
@@ -612,7 +674,7 @@ class Runtime {
         last_motion_time_ = now;
 
         // Messages that arrived from worker threads.
-        for (auto& m : inbox_.drain()) {
+        for (auto& m : inbox_->drain()) {
             step(std::move(m));
             if (quit_) return;
         }
@@ -995,9 +1057,32 @@ class Runtime {
                 // Detached worker; its result lands in the inbox and is
                 // consumed by the UI thread next tick. The Program never
                 // learns a thread was involved.
-                auto* inbox = &inbox_;
+                auto inbox = inbox_;
                 std::thread([work = a.work, inbox] {
                     inbox->post(work());
+                }).detach();
+            }
+            else if constexpr (std::is_same_v<T, typename C::TaskLatest>) {
+                // Supersedable work. Each key holds a generation counter;
+                // starting a task bumps it, and the worker only posts if its
+                // own generation is still current when it finishes.
+                //
+                // The check happens HERE rather than in update() because the
+                // alternative is every app re-deriving it: a bool, a counter,
+                // a comparison against the model. I wrote that by hand in the
+                // player example and got it wrong three times -- frames kept
+                // arriving after pause, a seek was overwritten by a stale
+                // decode, then the in-flight flag never cleared. If it is that
+                // easy to get wrong while looking straight at it, it belongs
+                // in the runtime.
+                auto gen = task_generations_;   // shared_ptr: outlives teardown
+                const std::uint64_t mine = gen->begin(a.key);
+                auto inbox = inbox_;
+                std::thread([work = a.work, inbox, gen, key = a.key, mine] {
+                    Msg result = work();
+                    // Deliver only if no newer task with this key started
+                    // while we were working.
+                    if (gen->current(key, mine)) inbox->post(std::move(result));
                 }).detach();
             }
             else if constexpr (std::is_same_v<T, typename C::Stream>) {
@@ -1007,7 +1092,7 @@ class Runtime {
                 // outlives this call by design; the runtime signals it to stop
                 // via `streams_alive_` at shutdown and joins it in the
                 // destructor, so no detached thread survives the app.
-                auto* inbox = &inbox_;
+                auto inbox = inbox_;
                 auto  alive = streams_alive_;   // shared_ptr<atomic<bool>>
                 typename C::Sink sink = [inbox](Msg m) { inbox->post(std::move(m)); };
                 stream_threads_.emplace_back(
@@ -1026,7 +1111,7 @@ class Runtime {
                 window_.set_clipboard(a.text);
             }
             else if constexpr (std::is_same_v<T, typename C::ReadClipboard>) {
-                inbox_.post(a.then(window_.get_clipboard()));
+                inbox_->post(a.then(window_.get_clipboard()));
             }
             else if constexpr (std::is_same_v<T, typename C::Focus>) {
                 input_.set_focus(a.node_id);
@@ -1050,8 +1135,11 @@ class Runtime {
                 // which is the same contract the backend registry uses for
                 // optional device features.
                 if (a.image && a.image->valid()) {
-                    if constexpr (requires { window_.upload_image(a.id, *a.image); }) {
-                        window_.upload_image(a.id, *a.image);
+                    if constexpr (requires { window_.upload_image(a.id, a.image); }) {
+                        // Hand over the POINTER. Dereferencing here would bind
+                        // to a const& parameter and copy the whole buffer --
+                        // 8 MB per frame at 1080p, ~500 MB/s at 60fps.
+                        window_.upload_image(a.id, a.image);
                         dirty_ = true;   // new pixels mean the frame changed
                     }
                 }
@@ -1154,7 +1242,7 @@ class Runtime {
             if (running || w->work == nullptr) continue;
 
             auto alive = std::make_shared<std::atomic<bool>>(true);
-            auto* inbox = &inbox_;
+            auto inbox = inbox_;
             auto  work  = w->work;   // shared_ptr keeps the callable alive
 
             RunningSource rs;
@@ -1476,7 +1564,13 @@ class Runtime {
     bool                                 busy_warned_ = false;
     std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
 
-    detail::Inbox<Msg>              inbox_;
+    /// shared_ptr, not a member value: detached task workers capture it and
+    /// may outlive the Runtime, so the storage must too.
+    std::shared_ptr<detail::Inbox<Msg>> inbox_ =
+        std::make_shared<detail::Inbox<Msg>>();
+    /// Shared with detached task_latest workers, so it must outlive `this`.
+    std::shared_ptr<detail::TaskGenerations> task_generations_ =
+        std::make_shared<detail::TaskGenerations>();
     platform::Waker                 waker_;
     // Streaming producers (`Cmd::stream`). `streams_alive_` is shared with the
     // worker threads as their shutdown signal; the runtime joins them in its

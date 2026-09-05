@@ -204,8 +204,8 @@ class Headless {
     }
 
     /// Optional window capability: hand pixels to the renderer for image(id).
-    void upload_image(std::uint32_t id, const ImageData& img) {
-        images_.upload(id, img);
+    void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
+        images_.upload(id, std::move(img));
     }
     void release_image(std::uint32_t id) { images_.release(id); }
 

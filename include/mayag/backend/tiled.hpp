@@ -367,8 +367,9 @@ class SoftwareBackend final : public Device {
 
     void sync_atlas(const AtlasView& v) override { atlas_ = v; }
 
-    void upload_image(std::uint32_t id, const ImageData& img) override {
-        images_.upload(id, img);
+    void upload_image(std::uint32_t id,
+                      std::shared_ptr<const ImageData> img) override {
+        images_.upload(id, std::move(img));
     }
     void release_image(std::uint32_t id) override { images_.release(id); }
 

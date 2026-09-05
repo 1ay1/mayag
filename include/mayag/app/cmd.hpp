@@ -52,6 +52,27 @@ class Cmd {
     /// reads, or anything slow without blocking the frame.
     struct Task { std::function<Msg()> work; };
 
+    /// Work that SUPERSEDES its own previous run.
+    ///
+    /// `Cmd::task` starts a detached thread with no identity, so nothing can
+    /// tell two of them apart. Dragging a scrub bar fires one per pointer
+    /// move, they finish out of order, and the last result to arrive wins --
+    /// which is not the last one the user asked for. Every app that hits this
+    /// invents the same defence: a bool, a generation counter, a comparison
+    /// against the model, all of it easy to get subtly wrong.
+    ///
+    /// This makes it the runtime's job. Tasks sharing a `key` form a series;
+    /// starting a new one abandons any earlier result from the same key, so
+    /// only the most recent request can update the model. Different keys are
+    /// independent.
+    ///
+    ///     // a scrub drag: only the frame the user landed on matters
+    ///     Cmd<Msg>::task_latest("seek", [f]{ return Decoded{decode(f), f}; })
+    struct TaskLatest {
+        std::string          key;
+        std::function<Msg()> work;
+    };
+
     /// A thread-safe message sink handed to a `Stream`. Calling it delivers a
     /// Msg to `update()` on the UI thread AND wakes a blocked UI thread, so a
     /// streamed message renders immediately rather than waiting for the next
@@ -105,10 +126,10 @@ class Cmd {
     /// should not hold them all.
     struct ReleaseImage { std::uint32_t id = 0; };
 
-    using Alt = std::variant<None, Quit, Batch, After, Task, Stream, Perform,
-                             SetTitle, SetCursor, SetClipboard, ReadClipboard,
-                             SetWindowSize, Fullscreen, Redraw, Focus, Screenshot,
-                             UploadImage, ReleaseImage>;
+    using Alt = std::variant<None, Quit, Batch, After, Task, TaskLatest, Stream,
+                             Perform, SetTitle, SetCursor, SetClipboard,
+                             ReadClipboard, SetWindowSize, Fullscreen, Redraw,
+                             Focus, Screenshot, UploadImage, ReleaseImage>;
 
     // ── construction ────────────────────────────────────────────────────
 
@@ -126,6 +147,14 @@ class Cmd {
     template <typename F>
     [[nodiscard]] static Cmd task(F&& f) {
         return Cmd{Alt{Task{std::function<Msg()>(std::forward<F>(f))}}};
+    }
+
+    /// Like `task`, but results from an earlier run with the same `key` are
+    /// discarded when a newer one starts. See TaskLatest.
+    template <typename F>
+    [[nodiscard]] static Cmd task_latest(std::string key, F&& f) {
+        return Cmd{Alt{TaskLatest{std::move(key),
+                                  std::function<Msg()>(std::forward<F>(f))}}};
     }
 
     /// Start a streaming producer. `f` has signature
@@ -258,6 +287,8 @@ class Cmd {
                 return Out::after(a.delay, f(a.msg));
             else if constexpr (std::is_same_v<T, Task>)
                 return Out::task([work = a.work, f] { return f(work()); });
+            else if constexpr (std::is_same_v<T, TaskLatest>)
+                return Out::task_latest(a.key, [work = a.work, f] { return f(work()); });
             else if constexpr (std::is_same_v<T, Perform>)
                 return Out::perform(a.action);
             else if constexpr (std::is_same_v<T, ReadClipboard>)

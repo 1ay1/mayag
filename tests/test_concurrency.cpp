@@ -137,6 +137,42 @@ struct Cycle {
     }
 };
 
+std::atomic<int> g_finished{0};
+
+struct Drag {
+    struct Model { int value = 0; std::vector<int> seen; };
+    struct Request { int v; int delay_ms; };
+    struct Done { int v; };
+    using Msg = std::variant<Request, Done>;
+
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        using R = std::pair<Model, Cmd<Msg>>;
+        return match(msg,
+            [&](Request r) -> R {
+                // Deliberately INVERTED delays: the first request is slowest,
+                // so a naive implementation delivers it last and it wins.
+                return {m, Cmd<Msg>::task_latest("scrub", [r] {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(r.delay_ms));
+                    ++g_finished;
+                    return Msg{Done{r.v}};
+                })};
+            },
+            [&](Done d) -> R {
+                m.value = d.v;
+                m.seen.push_back(d.v);
+                return {m, Cmd<Msg>::none()};
+            });
+    }
+    static Node view(const Model&, const Ctx& c) {
+        return (box() | width(px(10)) | height(px(10)) | bg(c.theme.surface)).build();
+    }
+    static Sub<Msg> subscribe(const Model&) { return Sub<Msg>::none(); }
+};
+
+
 }  // namespace
 
 int main() {
@@ -251,6 +287,47 @@ int main() {
             });
         }
         check(true, "20 teardowns mid-send completed without crash or hang");
+    }
+
+    // ── supersession ─────────────────────────────────────────────────
+    section("task_latest: only the newest request can reach update()");
+    {
+        // A scrub drag fires a task per pointer move. They finish OUT OF
+        // ORDER -- here deliberately so, slowest first -- and without
+        // supersession the last one to finish wins, which is not the one the
+        // user asked for last. Every app hits this and re-invents the same
+        // generation-counter defence; task_latest makes it the runtime's job.
+        AppConfig cfg;
+        cfg.size = {10, 10};
+        std::size_t delivered = 0;
+        int final_value = 0;
+
+        run_headless<Drag>(cfg, [&](auto& rt) {
+            rt.send(Drag::Msg{Drag::Request{1, 220}});
+            rt.send(Drag::Msg{Drag::Request{2, 170}});
+            rt.send(Drag::Msg{Drag::Request{3, 120}});
+            rt.send(Drag::Msg{Drag::Request{4,  70}});
+            rt.send(Drag::Msg{Drag::Request{5,  20}});
+
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(15);
+            while (g_finished.load() < 5 &&
+                   std::chrono::steady_clock::now() < deadline) {
+                rt.tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            for (int i = 0; i < 50; ++i) {
+                rt.tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            delivered = rt.model().seen.size();
+            final_value = rt.model().value;
+        });
+
+        check(g_finished.load() == 5, "every worker ran (nothing is killed)");
+        check(delivered == 1, "but only ONE result reached update()");
+        check(final_value == 5,
+              "and it is the newest request, not the last to finish");
     }
 
     // ── the threading contract ───────────────────────────────────────
