@@ -455,6 +455,37 @@ struct Video {
         });
     }
 
+    /// Play / pause, drawn from primitives rather than from a font glyph.
+    ///
+    /// Pause is two bars, which is exact.
+    ///
+    /// Play is a stack of rounded bars of decreasing height, which reads as a
+    /// triangle at icon size. The obvious implementation -- a square with
+    /// `rotate(45)` -- does NOT work: Style::transform is stored and the
+    /// painter never reads it, so rotate() compiles and does nothing. That is
+    /// worth knowing before reaching for it elsewhere; it is filed as a
+    /// separate defect rather than worked around silently here.
+    static Node transport_icon(bool playing, float fade) {
+        const auto ink = colors::white.fade(fade);
+        if (playing) {
+            return (h(box() | width(px(4)) | height(px(14)) | radius(1) | bg(ink),
+                      box() | width(px(4)) | height(px(14)) | radius(1) | bg(ink))
+                    | gap(4) | center).build();
+        }
+        // Six slices, tallest at the left, forming a right-pointing wedge.
+        // Each is one rounded box, so the whole icon is six instances in the
+        // same batch as everything else on screen.
+        std::vector<Node> slices;
+        slices.reserve(6);
+        for (int i = 0; i < 6; ++i) {
+            const float h_px = 14.0f - static_cast<float>(i) * 2.2f;
+            slices.push_back((box() | width(px(2)) | height(px(h_px))
+                                    | radius(0.5f) | bg(ink)).build());
+        }
+        return (h_list(std::move(slices), 0.0f) | center
+                | width(px(12)) | height(px(14))).build();
+    }
+
     static Node view(const Model& m, const Ctx& c) {
         const Theme& t = c.theme;
         const Vec2   vp = c.size;          // the LIVE window size, every frame
@@ -509,10 +540,24 @@ struct Video {
                   | width(px(bar_w)) | height(px(6))
                   | dsl::id<"track">,
 
-                h(text_owned(m.playing ? "\u2016  pause" : "\u25B6  play")
+                h(// Transport icon, drawn as SHAPES rather than as a glyph.
+                  //
+                  // "\u25B6 play" looks like the obvious thing to write and is
+                  // not: U+25B6 is absent from Noto Sans, so it falls back to
+                  // Noto Sans CJK JP, whose version is a FULL-WIDTH
+                  // ideographic symbol -- 16x17 px in a run whose letters are
+                  // 10x15. It is a different typeface at a different optical
+                  // size, so it renders visibly softer and larger than the
+                  // text beside it.
+                  //
+                  // mayag's whole premise is that a shape is one distance
+                  // field on the same instanced quad, so a triangle and two
+                  // bars cost the same as the glyph would and are sharp at
+                  // any size. Iconography does not need a font.
+                  node(transport_icon(m.playing, fade)),
+                  text_owned(m.playing ? "pause" : "play")
                       | font(14) | semibold
-                      | fg(colors::white.fade(fade))
-                      | (m.playing ? pause_btn.on : play_btn.on),
+                      | fg(colors::white.fade(fade)),
                   box() | grow(),
                   text_owned(fmt_time(m.time) + " / " + fmt_time(m.duration))
                       | font(12) | fg(colors::white.fade(0.85f * fade)),
@@ -520,7 +565,8 @@ struct Video {
                       | fg(colors::white.fade(0.55f * fade)),
                   text_owned(fmt_ms(m.decode_ms)) | font(12)
                       | fg(colors::white.fade(0.55f * fade)))
-                  | gap(16) | center | width(px(bar_w)))
+                  | gap(16) | center | width(px(bar_w))
+                  | (m.playing ? pause_btn.on : play_btn.on))
               | gap(10) | width(px(bar_w))
               | absolute(inset, bar_y))
             )
