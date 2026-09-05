@@ -293,6 +293,14 @@ struct Video {
         int    frames  = 0;
         float  decode_ms = 0.0f;
         std::string status;
+
+        /// Controls fade out during playback and come back on pointer
+        /// movement -- the behaviour every video player has. Held as a spring
+        /// so it eases rather than blinking, and `idle` counts the seconds
+        /// since the pointer last moved.
+        Animated<float> chrome{1.0f};
+        double idle = 0.0;
+        Vec2   pointer{};
     };
 
     struct Play {};
@@ -300,8 +308,11 @@ struct Video {
     struct SeekTo { double seconds; };
     struct Frame { std::shared_ptr<const ImageData> pixels; double pts; float ms; };
     struct Ended {};
+    struct Pointer { Vec2 at; };
+    struct Tick { float dt; };
     struct Quit {};
-    using Msg = std::variant<Play, Pause, SeekTo, Frame, Ended, Quit>;
+    using Msg = std::variant<Play, Pause, SeekTo, Frame, Ended, Pointer,
+                             Tick, Quit>;
 
     static inline const auto play_btn  = action(node_id("play"), Msg{Play{}});
     static inline const auto pause_btn = action(node_id("pause"), Msg{Pause{}});
@@ -377,8 +388,31 @@ struct Video {
             [&](Ended) -> R {
                 m.playing = false;
                 m.status  = "end of stream";
+                m.chrome.to(1.0f);          // always show controls when stopped
                 return {m, Cmd<Msg>::none()};
             },
+
+            [&](Pointer p) -> R {
+                m.pointer = p.at;
+                m.idle    = 0.0;
+                m.chrome.to(1.0f);
+                return {m, Cmd<Msg>::none()};
+            },
+
+            [&](Tick t) -> R {
+                m.chrome.step(t.dt);
+                // Only playback hides the chrome. A paused player keeps its
+                // controls up, because the user is looking at them.
+                if (m.playing) {
+                    m.idle += t.dt;
+                    if (m.idle > 2.5) m.chrome.to(0.0f);
+                } else {
+                    m.idle = 0.0;
+                    m.chrome.to(1.0f);
+                }
+                return {m, Cmd<Msg>::none()};
+            },
+
             [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
     }
 
@@ -423,35 +457,75 @@ struct Video {
 
     static Node view(const Model& m, const Ctx& c) {
         const Theme& t = c.theme;
+        const Vec2   vp = c.size;          // the LIVE window size, every frame
+        const float  fade = static_cast<float>(m.chrome);
+
+        // ── fit the video to the window, preserving aspect ───────────
+        //
+        // Letterbox arithmetic, done against c.size rather than a constant,
+        // is the whole of "responsive" here: resize the window and the video
+        // grows to fill it, gaining bars on whichever axis has slack. Hard-
+        // coding a box would make the app look fine at one size only.
+        const float src_aspect = g_info.height > 0
+            ? static_cast<float>(g_info.width) / static_cast<float>(g_info.height)
+            : 16.0f / 9.0f;
+        const float win_aspect = vp.y > 0.0f ? vp.x / vp.y : src_aspect;
+
+        float vw = vp.x, vh = vp.y;
+        if (win_aspect > src_aspect) vw = vp.y * src_aspect;   // pillarbox
+        else                         vh = vp.x / src_aspect;   // letterbox
+        const float vx = (vp.x - vw) * 0.5f;
+        const float vy = (vp.y - vh) * 0.5f;
+
         const float progress = m.duration > 0.0
-                             ? static_cast<float>(m.time / m.duration) : 0.0f;
+            ? static_cast<float>(m.time / m.duration) : 0.0f;
 
-        // Fit the video into a fixed box, preserving aspect.
-        const float box_w = 800.0f;
-        const float aspect = g_info.height > 0
-                           ? static_cast<float>(g_info.width) / g_info.height : 1.6f;
-        const float box_h = box_w / (aspect > 0.01f ? aspect : 1.6f);
+        // Controls sit in a bar across the bottom, inset from the edges, and
+        // scale their padding with the window so they do not swamp a small one.
+        const float bar_h   = 64.0f;
+        const float inset   = num::clamp(vp.x * 0.03f, 12.0f, 40.0f);
+        const float bar_w   = num::max(vp.x - inset * 2.0f, 120.0f);
+        const float bar_y   = num::max(vp.y - bar_h - inset, 0.0f);
 
-        return (v(
-            image(kImage) | width(px(box_w)) | height(px(box_h)) | radius(8),
+        return (z(
+            // 1. THE VIDEO, letterboxed into the window.
+            image(kImage)
+                | width(px(vw)) | height(px(vh))
+                | absolute(vx, vy),
 
-            z(box() | width(px(box_w)) | height(px(8)) | radius(4)
-                    | bg(t.surface_raised),
-              box() | width(px(box_w * progress)) | height(px(8)) | radius(4)
-                    | bg(m.seeking ? t.warning : t.accent))
-              | width(px(box_w)) | height(px(8)),
+            // 2. A scrim behind the controls so white text stays legible over
+            //    a bright frame. It fades with them.
+            box() | width(px(vp.x)) | height(px(bar_h + inset * 2.0f))
+                  | bg(colors::black.fade(0.45f * fade))
+                  | absolute(0.0f, num::max(vp.y - bar_h - inset * 2.0f, 0.0f)),
 
-            h(text_owned(m.playing ? "pause" : "play") | font(13) | semibold
-                  | fg(t.on_accent)
-                  | (m.playing ? pause_btn.on : play_btn.on),
-              box() | grow(),
-              text_owned(fmt_time(m.time) + " / " + fmt_time(m.duration))
-                  | font(12) | fg(t.text_secondary),
-              text_owned(m.status) | font(12) | fg(t.text_secondary),
-              text_owned("decode " + fmt_ms(m.decode_ms)) | font(12)
-                  | fg(t.text_secondary))
-              | gap(16) | center | width(px(box_w)))
-            | gap(14) | center | pad(24) | bg(t.background)).build();
+            // 3. The controls themselves, floating over the picture.
+            (v(
+                // Scrub track. Full width of the bar, so it is easy to hit.
+                z(box() | width(px(bar_w)) | height(px(6)) | radius(3)
+                        | bg(colors::white.fade(0.25f * fade)),
+                  box() | width(px(bar_w * progress)) | height(px(6)) | radius(3)
+                        | bg((m.seeking ? t.warning : t.accent).fade(fade)))
+                  | width(px(bar_w)) | height(px(6))
+                  | dsl::id<"track">,
+
+                h(text_owned(m.playing ? "\u2016  pause" : "\u25B6  play")
+                      | font(14) | semibold
+                      | fg(colors::white.fade(fade))
+                      | (m.playing ? pause_btn.on : play_btn.on),
+                  box() | grow(),
+                  text_owned(fmt_time(m.time) + " / " + fmt_time(m.duration))
+                      | font(12) | fg(colors::white.fade(0.85f * fade)),
+                  text_owned(m.status) | font(12)
+                      | fg(colors::white.fade(0.55f * fade)),
+                  text_owned(fmt_ms(m.decode_ms)) | font(12)
+                      | fg(colors::white.fade(0.55f * fade)))
+                  | gap(16) | center | width(px(bar_w)))
+              | gap(10) | width(px(bar_w))
+              | absolute(inset, bar_y))
+            )
+            | width(px(vp.x)) | height(px(vp.y))
+            | bg(colors::black)).build();
     }
 
     static std::string fmt_time(double s) {
@@ -473,7 +547,25 @@ struct Video {
             Sub<Msg>::on_key(Key::space, m.playing ? Msg{Pause{}} : Msg{Play{}}),
             Sub<Msg>::on_key(Key::escape, Msg{Quit{}}),
             Sub<Msg>::on_close(Msg{Quit{}}),
+
+            // Pointer movement un-hides the controls. There is no dedicated
+            // on_mouse_move, so this reads the raw event -- which is the
+            // escape hatch working as intended rather than a gap.
+            Sub<Msg>::on_event([](const Event& e) -> std::optional<Msg> {
+                if (const auto* mv = std::get_if<MouseMove>(&e)) {
+                    return Msg{Pointer{mv->position}};
+                }
+                return std::nullopt;
+            }),
+
             when(m.playing, decoder(m)),
+
+            // Frames are requested only while something is moving: the chrome
+            // spring settling, or playback counting down to auto-hide. A
+            // paused player with its controls up asks for nothing and idles at
+            // 0% CPU, which is the property the whole runtime is built on.
+            when(m.chrome.animating() || (m.playing && m.idle <= 2.5),
+                 Sub<Msg>::on_frame([](float dt) { return Msg{Tick{dt}}; })),
         });
     }
 };
@@ -574,6 +666,51 @@ int main(int argc, char** argv) {
            "and lands near the requested time (" +
                std::to_string(rt.model().time) + " vs " +
                std::to_string(target) + ")");
+
+        // ── the layout is responsive ─────────────────────────────
+        //
+        // Check the letterbox arithmetic directly rather than by inspecting
+        // pixels. A pixel probe cannot separate the video from the scrim and
+        // the controls drawn over it -- three attempts at one disagreed with
+        // each other while the math was right all along.
+        const auto fits = [](float vpx, float vpy) {
+            const float src = static_cast<float>(g_info.width) /
+                              static_cast<float>(g_info.height);
+            const float win = vpx / vpy;
+            float vw = vpx, vh = vpy;
+            if (win > src) vw = vpy * src; else vh = vpx / src;
+            // The video must fit INSIDE the window on both axes, and keep the
+            // source aspect. Either failing means the picture is cropped or
+            // stretched at that window size.
+            return vw <= vpx + 0.5f && vh <= vpy + 0.5f &&
+                   std::abs((vw / vh) - src) < 0.01f;
+        };
+        ok(fits(640, 360),  "letterboxes into a wide window");
+        ok(fits(500, 900),  "pillarboxes into a tall window");
+        ok(fits(200, 200),  "and still fits a tiny square one");
+
+        // ── controls hide during playback, return on movement ────
+        rt.send(Video::Msg{Video::Play{}});
+        for (int i = 0; i < 200; ++i) {
+            rt.send(Video::Msg{Video::Tick{0.05f}});   // 10s of idle time
+        }
+        rt.tick();
+        ok(static_cast<float>(rt.model().chrome) < 0.2f,
+           "controls fade out while playing and idle");
+
+        rt.send(Video::Msg{Video::Pointer{Vec2{10.0f, 10.0f}}});
+        // 1.0 s of ticks: enough for the spring to rise, and comfortably
+        // inside the 2.5 s idle window so it does not immediately re-hide.
+        for (int i = 0; i < 20; ++i) rt.send(Video::Msg{Video::Tick{0.05f}});
+        rt.tick();
+        ok(static_cast<float>(rt.model().chrome) > 0.8f,
+           "and come back when the pointer moves");
+
+        rt.send(Video::Msg{Video::Pause{}});
+        for (int i = 0; i < 200; ++i) rt.send(Video::Msg{Video::Tick{0.05f}});
+        rt.tick();
+        ok(static_cast<float>(rt.model().chrome) > 0.8f,
+           "a paused player keeps its controls up");
 
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
     });
