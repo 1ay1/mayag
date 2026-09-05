@@ -19,6 +19,7 @@
 
 #include "../render/draw_list.hpp"
 #include "../render/shader_generated.hpp"
+#include "backend.hpp"   // AtlasView / view_of
 #include "software.hpp"
 
 #include <array>
@@ -108,11 +109,13 @@ class VulkanDevice {
     /// Upload the glyph atlas's dirty region. The atlas rasterises coverage on
     /// the CPU; this mirrors the dirty rect to an R8 image the shader samples,
     /// so glyphs batch into the same instanced draw as every shape.
-    template <typename AtlasT>
-    void sync_atlas(AtlasT& atlas) {
+    ///
+    /// Takes the type-erased AtlasView so the font engine's types never reach a
+    /// backend. `sync_atlas` is the convenience wrapper for direct callers.
+    void sync_atlas_view(const AtlasView& atlas) {
         if (!valid_) return;
-        const int w = atlas.width(), h = atlas.height();
-        if (w <= 0 || h <= 0) return;
+        const int w = atlas.width, h = atlas.height;
+        if (w <= 0 || h <= 0 || atlas.coverage == nullptr) return;
 
         // (Re)create the coverage image if the size changed, forcing a full
         // re-upload.
@@ -121,31 +124,39 @@ class VulkanDevice {
             recreate_atlas_image(w, h);
             full = true;
         }
-        if (full || !atlas.dirty_region().empty()) {
+        if (full || atlas.coverage_dirty) {
             const std::size_t bytes = static_cast<std::size_t>(w) * h;
             ensure_staging(bytes);
-            std::memcpy(staging_ptr_, atlas.pixels().data(), bytes);
+            std::memcpy(staging_ptr_, atlas.coverage, bytes);
             upload_plane(atlas_image_, w, h, /*channels=*/1);
-            atlas.clear_dirty();
+            atlas.ack_coverage();
         }
 
         // The colour plane (emoji) is uploaded the same way, into its own RGBA
         // image, and only exists once a colour glyph has been cached.
-        if (atlas.has_color()) {
+        if (atlas.has_color && atlas.color != nullptr) {
             bool color_full = false;
             if (w != color_w_ || h != color_h_) {
                 recreate_color_image(w, h);
                 color_full = true;
             }
-            if (color_full || !atlas.color_dirty_region().empty()) {
+            if (color_full || atlas.color_dirty) {
                 const std::size_t bytes = static_cast<std::size_t>(w) * h * 4;
                 ensure_staging(bytes);
-                std::memcpy(staging_ptr_, atlas.color_pixels().data(), bytes);
+                std::memcpy(staging_ptr_, atlas.color, bytes);
                 upload_plane(color_image_, w, h, /*channels=*/4);
-                atlas.clear_color_dirty();
+                atlas.ack_color();
             }
         }
     }
+
+    template <typename AtlasT>
+    void sync_atlas(AtlasT& atlas) { sync_atlas_view(view_of(atlas)); }
+
+    /// Human-readable adapter name. Vulkan exposes this via
+    /// vkGetPhysicalDeviceProperties, which this loader does not currently
+    /// pull in; the api tag is the honest answer until it does.
+    [[nodiscard]] std::string adapter_name() const { return "vulkan"; }
 
     /// Copy the current staging buffer into `image`, wrapping the transfer in
     /// the layout transitions a sampled image needs.

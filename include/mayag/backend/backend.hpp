@@ -19,6 +19,8 @@
 // A backend that fails to initialise falls through to the next candidate, so
 // a missing driver degrades to a slower frame instead of a crash.
 
+#include "../core/color.hpp"
+#include "../core/geometry.hpp"
 #include "../render/draw_list.hpp"
 
 #include <cstdint>
@@ -106,6 +108,22 @@ enum class Api : std::uint8_t {
     return v;
 }
 
+/// The order backends are actually TRIED in: an explicit MAYAG_BACKEND request
+/// first (so a user can force or exclude a backend without a rebuild), then the
+/// platform preference, and software last because it can never fail.
+///
+/// This is the ONLY place selection policy lives. A new backend joins by
+/// registering itself and appearing in `preferred_order()`; it does not need a
+/// branch anywhere in the core, the platform layer, or the app runtime.
+[[nodiscard]] inline std::vector<Api> selection_order() {
+    std::vector<Api> v;
+    if (const char* forced = std::getenv("MAYAG_BACKEND")) {
+        v.push_back(api_from_name(forced));
+    }
+    for (Api a : preferred_order()) v.push_back(a);
+    return v;
+}
+
 // ── device interface ────────────────────────────────────────────────────
 
 struct DeviceInfo {
@@ -122,10 +140,80 @@ struct FrameStats {
     double        gpu_ms     = 0.0;
 };
 
-/// What every backend implements. Note what is NOT here: no shaders, no
-/// pipelines, no descriptor sets, no render passes. Those are backend-private
+/// A window/surface to render into, in whatever the platform's native terms
+/// are. The core never interprets these; it only passes them through to the
+/// backend that claimed it can use them.
+struct SurfaceHandle {
+    /// Wayland: wl_display*. X11: Display*. Win32: HINSTANCE. macOS: unused.
+    void* display = nullptr;
+    /// Wayland: wl_surface*. X11: Window. Win32: HWND. macOS: NSView*/CALayer*.
+    void* surface = nullptr;
+};
+
+/// The glyph atlas, type-erased.
+///
+/// FontStack's atlas is a template parameter, so the core cannot name its type
+/// here without dragging the font engine into the backend interface. This hands
+/// over the two planes a backend needs to upload, plus the DIRTY FLAGS — the
+/// atlas grows by small rects and re-uploading a 1024² texture every frame
+/// because the abstraction forgot what changed would be a real cost, so the
+/// flags travel with the data.
+///
+/// A backend uploads a plane when `*_dirty` is set (or when its cached size no
+/// longer matches) and then calls `clear_dirty`, which hands the acknowledgement
+/// back to the atlas that owns the state.
+struct AtlasView {
+    const std::uint8_t* coverage = nullptr;   ///< R8 plane, w*h bytes
+    const std::uint8_t* color    = nullptr;   ///< RGBA8 plane (emoji), or null
+    int  width = 0, height = 0;               ///< both planes share these
+    bool coverage_dirty = false;
+    bool color_dirty    = false;
+    bool has_color      = false;
+
+    /// Acknowledge a successful upload. Cleared through the owner so the atlas
+    /// stops reporting the region as dirty on the next frame.
+    void (*clear_dirty)(void* owner, bool coverage_plane) = nullptr;
+    void* owner = nullptr;
+
+    void ack_coverage() const { if (clear_dirty) clear_dirty(owner, true); }
+    void ack_color() const    { if (clear_dirty) clear_dirty(owner, false); }
+};
+
+/// Build an AtlasView from any atlas exposing mayag's atlas surface. Keeping
+/// this here (rather than in each backend) means the font engine's type never
+/// reaches a backend, and a new backend gets the adaptation for free.
+template <typename AtlasT>
+[[nodiscard]] inline AtlasView view_of(AtlasT& atlas) {
+    AtlasView v;
+    v.width  = atlas.width();
+    v.height = atlas.height();
+    v.coverage = atlas.pixels().data();
+    v.coverage_dirty = !atlas.dirty_region().empty();
+    v.has_color = atlas.has_color();
+    if (v.has_color) {
+        v.color = atlas.color_pixels().data();
+        v.color_dirty = !atlas.color_dirty_region().empty();
+    }
+    v.owner = &atlas;
+    v.clear_dirty = [](void* o, bool coverage_plane) {
+        auto* a = static_cast<AtlasT*>(o);
+        if (coverage_plane) a->clear_dirty();
+        else                a->clear_color_dirty();
+    };
+    return v;
+}
+
+/// What every backend implements.
+///
+/// Note what is NOT here: no shaders, no pipelines, no descriptor sets, no
+/// render passes, and no shading maths of any kind. Those are backend-private
 /// because they differ irreconcilably between APIs, and leaking them into a
-/// common interface is what makes most abstractions leak.
+/// common interface is what makes most abstractions leak. How a pixel is
+/// SHADED is not a backend concern at all — it lives once in render/kernel.hpp
+/// and every backend runs code generated from it.
+///
+/// So a backend is a TRANSPORT: get buffers to the GPU, run N instanced draws,
+/// get pixels back. That is the whole job.
 class Device {
   public:
     virtual ~Device() = default;
@@ -133,29 +221,46 @@ class Device {
     [[nodiscard]] virtual DeviceInfo info() const = 0;
 
     /// Resize the target surface. Backends recreate swapchains here.
-    virtual void resize(int width, int height) = 0;
+    /// `dpi` is the device pixel ratio; physical size is logical * dpi.
+    virtual void resize(Vec2 logical, float dpi) = 0;
 
-    /// Submit one frame's draw list. `clear` is the background colour.
+    /// Submit one frame's draw list to the attached surface and present it.
     virtual FrameStats submit(const DrawList& list, Color<Srgb> clear) = 0;
+
+    /// Upload the glyph atlas. Called before submit when the atlas changed.
+    /// Backends with no texture concept (the software rasteriser) ignore it.
+    virtual void sync_atlas(const AtlasView&) {}
+
+    /// Render into an offscreen target and read it back as RGBA8, sRGB-encoded
+    /// so it is directly comparable with any other backend's output. This is
+    /// the screenshot and golden-test path, and it is REQUIRED: it is how the
+    /// parity gate proves a backend agrees with the reference rasteriser.
+    [[nodiscard]] virtual bool render_offscreen(const DrawList& list, int w, int h,
+                                                Color<Srgb> clear,
+                                                std::vector<std::uint8_t>& out_rgba) = 0;
 
     /// Upload an RGBA8 texture; returns a slot id usable in `Instance`.
     /// Slot 0 is reserved for "no texture".
-    virtual std::uint32_t upload_texture(std::span<const std::uint8_t> rgba,
-                                         int width, int height) = 0;
+    virtual std::uint32_t upload_texture(std::span<const std::uint8_t> /*rgba*/,
+                                         int /*width*/, int /*height*/) { return 0; }
 
-    virtual void release_texture(std::uint32_t slot) = 0;
+    virtual void release_texture(std::uint32_t /*slot*/) {}
 
-    /// Read the target back as RGBA8 — screenshots and golden-image tests.
-    [[nodiscard]] virtual std::vector<std::uint8_t> read_pixels() = 0;
+    [[nodiscard]] virtual std::uint64_t frames_presented() const noexcept { return 0; }
 };
 
 /// A backend factory. Registering one is how a new API is added; nothing in
-/// the core needs to change.
+/// the core changes.
+///
+/// `create` returns nullptr when the backend cannot run here (no driver, no
+/// device, wrong surface type), which is the signal to try the next candidate.
+/// `create_offscreen` builds a device with no surface, for screenshots and
+/// tests; a backend that cannot do that returns nullptr and is simply skipped
+/// by the parity gate.
 struct Registration {
-    Api  api;
-    /// Returns nullptr when this backend cannot initialise on this machine,
-    /// which is the signal to try the next candidate.
-    std::unique_ptr<Device> (*create)(void* native_window, int width, int height);
+    Api api;
+    std::unique_ptr<Device> (*create)(const SurfaceHandle&, Vec2 logical, float dpi);
+    std::unique_ptr<Device> (*create_offscreen)() = nullptr;
 };
 
 /// The registry. Backends append at static-init time.
@@ -166,24 +271,39 @@ struct Registration {
 
 inline void register_backend(Registration reg) { registry().push_back(reg); }
 
-/// Create the best available device, honouring MAYAG_BACKEND and falling
-/// through failures. Never returns null: the software backend cannot fail.
-[[nodiscard]] inline std::unique_ptr<Device> create_device(void* native_window,
-                                                           int width, int height) {
-    std::vector<Api> order;
-
-    if (const char* forced = std::getenv("MAYAG_BACKEND")) {
-        order.push_back(api_from_name(forced));
-    }
-    for (Api a : preferred_order()) order.push_back(a);
-
-    for (Api want : order) {
+/// Create the best available device for a surface, honouring MAYAG_BACKEND and
+/// falling through failures. Returns nullptr only if no registered backend can
+/// drive this surface — callers fall back to their own CPU path.
+[[nodiscard]] inline std::unique_ptr<Device> create_device(const SurfaceHandle& surface,
+                                                           Vec2 logical, float dpi) {
+    for (Api want : selection_order()) {
         for (const auto& reg : registry()) {
-            if (reg.api != want) continue;
-            if (auto dev = reg.create(native_window, width, height)) return dev;
+            if (reg.api != want || reg.create == nullptr) continue;
+            if (auto dev = reg.create(surface, logical, dpi)) return dev;
         }
     }
-    return nullptr;   // only if the software backend was never registered
+    return nullptr;
+}
+
+/// Create a surfaceless device for offscreen rendering (screenshots, tests).
+[[nodiscard]] inline std::unique_ptr<Device> create_offscreen_device() {
+    for (Api want : selection_order()) {
+        for (const auto& reg : registry()) {
+            if (reg.api != want || reg.create_offscreen == nullptr) continue;
+            if (auto dev = reg.create_offscreen()) return dev;
+        }
+    }
+    return nullptr;
+}
+
+/// Create a device for one SPECIFIC api, ignoring preference order. Used by
+/// tests that must compare two named backends against each other.
+[[nodiscard]] inline std::unique_ptr<Device> create_offscreen_device(Api api) {
+    for (const auto& reg : registry()) {
+        if (reg.api != api || reg.create_offscreen == nullptr) continue;
+        if (auto dev = reg.create_offscreen()) return dev;
+    }
+    return nullptr;
 }
 
 }  // namespace mayag::backend

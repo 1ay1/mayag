@@ -604,4 +604,82 @@ inline bool load_global(Api& a, T& fn, const char* name) noexcept {
 
 #include "vulkan_device.hpp"
 
+// ── the Device adapter ──────────────────────────────────────────────
+//
+// VulkanDevice is the raw transport. This wraps it in backend::Device and
+// registers it, which is the ENTIRE integration cost of a backend: no core
+// file names Vulkan, no #ifdef in the platform layer selects it, and the app
+// runtime never learns it exists. Deleting this block removes Vulkan from the
+// build completely without touching anything else.
+//
+// A new backend copies this file's shape: a transport class, an adapter, a
+// registration. Nothing else.
+
+#include "backend.hpp"
+
+namespace mayag::backend {
+
+class VulkanBackend final : public Device {
+  public:
+    [[nodiscard]] static std::unique_ptr<Device> create(const SurfaceHandle& s,
+                                                        Vec2 logical, float dpi) {
+        // Vulkan can only drive a surface it has a WSI extension for. Returning
+        // nullptr (rather than asserting) is how a backend declines politely
+        // and lets the next candidate try.
+        if (s.display == nullptr || s.surface == nullptr) return nullptr;
+        auto self = std::make_unique<VulkanBackend>();
+        if (!self->dev_.attach_wayland(s.display, s.surface, logical, dpi)) return nullptr;
+        return self;
+    }
+
+    [[nodiscard]] static std::unique_ptr<Device> create_offscreen() {
+        auto self = std::make_unique<VulkanBackend>();
+        if (!self->dev_.init_offscreen()) return nullptr;
+        return self;
+    }
+
+    [[nodiscard]] DeviceInfo info() const override {
+        DeviceInfo i;
+        i.api = Api::vulkan;
+        i.adapter = dev_.adapter_name();
+        return i;
+    }
+
+    void resize(Vec2 logical, float dpi) override { dev_.resize(logical, dpi); }
+
+    FrameStats submit(const DrawList& list, Color<Srgb> clear) override {
+        dev_.submit(list, clear);
+        ++frames_;
+        FrameStats st;
+        st.instances = static_cast<std::uint32_t>(list.instances().size());
+        st.draw_calls = static_cast<std::uint32_t>(list.batches().size());
+        return st;
+    }
+
+    void sync_atlas(const AtlasView& v) override { dev_.sync_atlas_view(v); }
+
+    [[nodiscard]] bool render_offscreen(const DrawList& list, int w, int h,
+                                        Color<Srgb> clear,
+                                        std::vector<std::uint8_t>& out) override {
+        return dev_.render_offscreen(list, w, h, clear, out);
+    }
+
+    [[nodiscard]] std::uint64_t frames_presented() const noexcept override { return frames_; }
+
+    [[nodiscard]] VulkanDevice& raw() noexcept { return dev_; }
+
+  private:
+    VulkanDevice  dev_{};
+    std::uint64_t frames_ = 0;
+};
+
+/// Self-registration. A static initialiser is what makes "add a backend" a
+/// matter of compiling one more file rather than editing a dispatch table.
+inline const bool vulkan_registered = [] {
+    register_backend({Api::vulkan, &VulkanBackend::create, &VulkanBackend::create_offscreen});
+    return true;
+}();
+
+}  // namespace mayag::backend
+
 #endif  // platform guard

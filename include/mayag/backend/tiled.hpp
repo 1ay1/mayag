@@ -22,6 +22,7 @@
 // Output is bit-identical to `Software`. That is asserted by a test, and it
 // is what lets the fast path be the default without risk.
 
+#include "backend.hpp"   // Device / AtlasView / register_backend
 #include "simd.hpp"
 #include "software.hpp"
 #include "thread_pool.hpp"
@@ -252,5 +253,150 @@ class Tiled {
         }
     }
 };
+
+// ── the Device adapter ──────────────────────────────────────────────
+//
+// The software rasteriser is a PEER of every GPU backend, not a special case:
+// it implements the same backend::Device and registers itself the same way.
+// That is the load-bearing test of the interface — if `Device` had leaked GPU
+// assumptions (command buffers, descriptor sets, a swapchain), a CPU renderer
+// could not implement it, and every caller would need a "but if software..."
+// branch. None do.
+//
+// It registers LAST in preference order and never fails to initialise, which
+// is what makes "a missing driver degrades to a slower frame" true.
+
+/// Samples the glyph atlas out of an AtlasView, so the software path gets
+/// glyphs through the same type-erased handle the GPU backends use.
+///
+/// Filtering is BILINEAR with a half-texel offset, which is what a GPU sampler
+/// does. Nearest-neighbour here would make the software backend disagree with
+/// every GPU backend along glyph edges — the abstraction has to preserve the
+/// filtering, not just the bytes.
+class AtlasViewSampler final : public CoverageSampler {
+  public:
+    explicit AtlasViewSampler(const AtlasView& v) : v_{v} {}
+
+    [[nodiscard]] float sample(std::uint32_t, float u, float v) const override {
+        if (v_.coverage == nullptr || v_.width <= 0 || v_.height <= 0) return 0.0f;
+        Bilinear b{v_, u, v};
+        const auto px = [&](int x, int y) -> float {
+            return static_cast<float>(
+                v_.coverage[static_cast<std::size_t>(y) * v_.width + x]) / 255.0f;
+        };
+        return b.blend(px);
+    }
+
+    [[nodiscard]] Vec4 sample_rgba(std::uint32_t, float u, float v) const override {
+        if (!v_.has_color || v_.color == nullptr) return Vec4{1, 1, 1, 0};
+        Bilinear b{v_, u, v};
+        const auto chan = [&](int c) {
+            return b.blend([&](int x, int y) -> float {
+                const std::size_t i = (static_cast<std::size_t>(y) * v_.width + x) * 4;
+                return static_cast<float>(v_.color[i + static_cast<std::size_t>(c)]) / 255.0f;
+            });
+        };
+        return Vec4{chan(0), chan(1), chan(2), chan(3)};
+    }
+
+  private:
+    /// The four taps and weights, computed once per sample.
+    struct Bilinear {
+        int x0, y0, x1, y1;
+        float tx, ty;
+        Bilinear(const AtlasView& v, float u, float vv) {
+            const float fx = num::clamp(u  * static_cast<float>(v.width)  - 0.5f, 0.0f,
+                                        static_cast<float>(v.width  - 1));
+            const float fy = num::clamp(vv * static_cast<float>(v.height) - 0.5f, 0.0f,
+                                        static_cast<float>(v.height - 1));
+            x0 = static_cast<int>(fx); y0 = static_cast<int>(fy);
+            x1 = std::min(x0 + 1, v.width  - 1);
+            y1 = std::min(y0 + 1, v.height - 1);
+            tx = fx - static_cast<float>(x0);
+            ty = fy - static_cast<float>(y0);
+        }
+        template <typename F>
+        [[nodiscard]] float blend(F&& px) const {
+            return num::lerp(num::lerp(px(x0, y0), px(x1, y0), tx),
+                             num::lerp(px(x0, y1), px(x1, y1), tx), ty);
+        }
+    };
+
+    AtlasView v_;
+};
+
+class SoftwareBackend final : public Device {
+  public:
+    /// Accepts any surface, including none: there is nothing to attach to.
+    /// Presenting is the caller's job (an shm buffer, a blit, a PNG), because
+    /// how CPU pixels reach a screen is a platform question, not a renderer
+    /// one. `render_offscreen` is the portable way to get them.
+    [[nodiscard]] static std::unique_ptr<Device> create(const SurfaceHandle&,
+                                                        Vec2 logical, float dpi) {
+        auto self = std::make_unique<SoftwareBackend>();
+        self->resize(logical, dpi);
+        return self;
+    }
+
+    [[nodiscard]] static std::unique_ptr<Device> create_offscreen() {
+        return std::make_unique<SoftwareBackend>();
+    }
+
+    [[nodiscard]] DeviceInfo info() const override {
+        DeviceInfo i;
+        i.api = Api::software;
+        i.adapter = "CPU";
+        return i;
+    }
+
+    void resize(Vec2 logical, float dpi) override {
+        w_ = static_cast<int>(logical.x * dpi);
+        h_ = static_cast<int>(logical.y * dpi);
+    }
+
+    FrameStats submit(const DrawList& list, Color<Srgb> clear) override {
+        std::vector<std::uint8_t> px;
+        (void)render_offscreen(list, w_, h_, clear, px);
+        last_frame_ = std::move(px);
+        ++frames_;
+        FrameStats st;
+        st.instances  = static_cast<std::uint32_t>(list.instances().size());
+        st.draw_calls = static_cast<std::uint32_t>(list.batches().size());
+        return st;
+    }
+
+    void sync_atlas(const AtlasView& v) override { atlas_ = v; }
+
+    [[nodiscard]] bool render_offscreen(const DrawList& list, int w, int h,
+                                        Color<Srgb> clear,
+                                        std::vector<std::uint8_t>& out) override {
+        if (w <= 0 || h <= 0) return false;
+        Framebuffer fb{w, h};
+        AtlasViewSampler sampler{atlas_};
+        const CoverageSampler* s = atlas_.coverage != nullptr ? &sampler : nullptr;
+        Tiled::render(list, fb, s, &shared_pool(), clear);
+        Tiled::encode_parallel(fb, out, &shared_pool());
+        return true;
+    }
+
+    [[nodiscard]] std::uint64_t frames_presented() const noexcept override { return frames_; }
+
+    /// The most recent frame, for platforms that present CPU pixels themselves.
+    [[nodiscard]] const std::vector<std::uint8_t>& last_frame() const noexcept {
+        return last_frame_;
+    }
+
+  private:
+    int           w_ = 0, h_ = 0;
+    AtlasView     atlas_{};
+    std::vector<std::uint8_t> last_frame_;
+    std::uint64_t frames_ = 0;
+};
+
+inline const bool software_registered = [] {
+    register_backend({Api::software, &SoftwareBackend::create,
+                      &SoftwareBackend::create_offscreen});
+    return true;
+}();
 
 }  // namespace mayag::backend

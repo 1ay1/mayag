@@ -16,8 +16,13 @@
 
 #include <mayag/mayag.hpp>
 
+// The example harness names NO backend. `--gpu` asks the registry for the best
+// available device and renders through backend::Device, so a new backend is
+// picked up here with no change to this file (and MAYAG_BACKEND=<api> selects
+// one by hand). Including a specific backend header is what registers it.
+#include <mayag/backend/tiled.hpp>     // software backend, always available
 #ifdef MAYAG_WITH_VULKAN
-#include <mayag/backend/vulkan.hpp>   // backend::VulkanDevice for --gpu
+#include <mayag/backend/vulkan.hpp>
 #endif
 
 #include <cstdio>
@@ -196,15 +201,10 @@ template <Program P, typename Driver>
         }
 
         case Options::Mode::gpu: {
-#ifndef MAYAG_WITH_VULKAN
-            std::fprintf(stderr,
-                "mayag: --gpu needs the Vulkan backend (build with "
-                "-DMAYAG_WITH_VULKAN=ON)\n");
-            return 1;
-#else
             // Same Program, same layout + paint as --png; only the rasteriser
-            // differs. The DrawList is handed to the GPU instead of the tiled
-            // software path, so the screenshot is the actual GPU output.
+            // differs. Note there is no mention of Vulkan, Metal or any other
+            // API here: the registry hands back whatever is best on this
+            // machine, and everything below talks to backend::Device.
             typename P::Model model = [] {
                 if constexpr (detail::HasEffectfulInit<P>) return P::init().first;
                 else return P::init();
@@ -219,7 +219,6 @@ template <Program P, typename Driver>
             const int W = static_cast<int>(o.size.x * o.dpi);
             const int H = static_cast<int>(o.size.y * o.dpi);
 
-            // Lay out and paint with the font stack, exactly like --png.
             DrawList dl;
             render::PaintOptions po{};
             po.dpi_scale = o.dpi;
@@ -231,16 +230,16 @@ template <Program P, typename Driver>
             po.glyphs   = &glyphs;
             render::paint(root, dl, po);
 
-            backend::VulkanDevice dev;
-            if (!dev.init_offscreen()) {
-                std::fprintf(stderr, "mayag: no usable Vulkan device\n");
+            auto device = backend::create_offscreen_device();
+            if (!device) {
+                std::fprintf(stderr, "mayag: no usable rendering backend\n");
                 return 1;
             }
-            dev.sync_atlas(fonts->atlas());   // upload glyph coverage + colour
+            device->sync_atlas(backend::view_of(fonts->atlas()));
 
             std::vector<std::uint8_t> px;
-            if (!dev.render_offscreen(dl, W, H, cfg.theme.background, px)) {
-                std::fprintf(stderr, "mayag: GPU render_offscreen failed\n");
+            if (!device->render_offscreen(dl, W, H, cfg.theme.background, px)) {
+                std::fprintf(stderr, "mayag: offscreen render failed\n");
                 return 1;
             }
             if (!image::write_png(o.out_path, px, W, H)) {
@@ -253,9 +252,11 @@ template <Program P, typename Driver>
             ro_gpu.dpi_scale = o.dpi;
             ro_gpu.fonts     = fonts;
             report(root, o.size, ro_gpu, o.out_path.c_str());
-            std::printf("  renderer    vulkan (offscreen)\n");
+            const auto dinfo = device->info();
+            std::printf("  renderer    %s (%s, offscreen)\n",
+                        std::string{backend::name_of(dinfo.api)}.c_str(),
+                        dinfo.adapter.c_str());
             return 0;
-#endif
         }
     }
     return 0;

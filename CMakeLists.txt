@@ -331,6 +331,15 @@ if(MAYAG_BUILD_TESTS)
         add_test(NAME mayag_vulkan_tests COMMAND mayag_vulkan_tests)
     endif()
 
+    # The backend boundary: builds a backend for a nonexistent API using only
+    # the public interface, so it fails if adding a backend ever requires
+    # touching the core again. Deliberately NOT inside any MAYAG_WITH_* guard —
+    # the property it checks is that no such guard is needed.
+    add_executable(mayag_backend_tests tests/test_backend_api.cpp)
+    target_link_libraries(mayag_backend_tests PRIVATE mayag)
+    target_compile_options(mayag_backend_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_backend_tests COMMAND mayag_backend_tests)
+
     # The Linux backend. The protocol tables, the evdev keymap and the damage
     # arithmetic are pure logic and run everywhere — they are where the real
     # bugs were, since a wrong signature or a shifted argument is invisible
