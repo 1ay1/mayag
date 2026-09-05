@@ -185,8 +185,21 @@ class Decoder {
     /// the reverse -- and wiring the runtime's `still_wanted` into a `cancel`
     /// parameter aborted every seek on its first frame, which surfaced only as
     /// a video that would not scrub.
+    /// `precise` chooses between the two useful answers to "seek here".
+    ///
+    /// true  -- the EXACT frame at `seconds`. Decodes forward from the
+    ///          keyframe; ~500 ms on a 1080p file whose keyframes are up to
+    ///          10 s apart.
+    /// false -- the nearest keyframe at or before it, decoding nothing extra:
+    ///          ~50 ms on the same file, a 10x difference, at the cost of
+    ///          landing up to a keyframe interval early.
+    ///
+    /// A drag wants the cheap one -- the user is sweeping past this position
+    /// and needs a picture NOW to aim with, not the exact frame -- and the
+    /// release wants the precise one. Nothing else in the two paths differs,
+    /// so it is one flag rather than two functions.
     [[nodiscard]] std::shared_ptr<const ImageData> seek(
-            double seconds, double* pts_out,
+            double seconds, double* pts_out, bool precise = true,
             const std::function<bool()>& still_wanted = {}) {
         if (ctx_ == nullptr) return nullptr;
         const AVStream* st = fmt_->streams[stream_];
@@ -206,6 +219,7 @@ class Decoder {
             auto frame = next(&pts);
             if (!frame) break;
             last = std::move(frame);
+            if (!precise) break;                 // the keyframe is the answer
             if (pts >= seconds - 0.001) break;   // reached the target
         }
         if (pts_out != nullptr) *pts_out = pts;
@@ -345,20 +359,27 @@ struct Video {
 
     struct Play {};
     struct Pause {};
-    struct SeekTo { double seconds; };
+    struct SeekTo { double seconds; bool preview = false; };
     struct Frame { std::shared_ptr<const ImageData> pixels; double pts; float ms; };
     struct Ended {};
     /// A seek that gave up because a newer one replaced it. Distinct from
     /// Ended: it is the normal outcome of dragging, and must not stop playback.
     struct SeekAbandoned {};
     struct Pointer { Vec2 at; };
-    /// Pointer x INSIDE the scrub track, in logical pixels.
-    struct Scrub { float local_x; };
+    /// Pointer x INSIDE the scrub track, in logical pixels. `dragging` is
+    /// true while the button is held: the seek can then be a cheap keyframe
+    /// preview, because the user is still aiming.
+    struct Scrub { float local_x; bool dragging = false; };
+    /// The scrub button came up. Re-seek precisely to where it landed.
+    struct ScrubEnd {};
+    /// No seek is running or pending: the picture is where it was asked to be.
+    struct SeekSettled {};
     struct Resized { Vec2 size; };
     struct Tick { float dt; };
     struct Quit {};
     using Msg = std::variant<Play, Pause, SeekTo, Frame, Ended, SeekAbandoned,
-                             Pointer, Scrub, Resized, Tick, Quit>;
+                             Pointer, Scrub, ScrubEnd, SeekSettled,
+                             Resized, Tick, Quit>;
 
     static inline const auto play_btn  = action(node_id("play"), Msg{Play{}});
     static inline const auto pause_btn = action(node_id("pause"), Msg{Pause{}});
@@ -411,45 +432,56 @@ struct Video {
                 // the old thread running from where it was.
                 ++m.epoch;
                 const double want = m.time;
-                // task_latest: dragging the bar fires one of these per move
-                // and only the newest can deliver, so the picture cannot jump
-                // backwards to a frame the user already scrubbed past.
-                return {m, Cmd<Msg>::task_latest("seek",
-                    [want](std::function<bool()> still_wanted) {
+                // task_coalesce, NOT task_latest: one decode runs at a time and
+                // the newest pending position replaces the rest.
+                //
+                // task_latest starves under a drag. A seek on a 1080p file
+                // costs ~500 ms (av_seek_frame lands on a keyframe up to ~10 s
+                // back, and the frames between it and the target must all be
+                // decoded), while a dragged scrub bar asks ~60 times a second
+                // -- so every decode was superseded before it could finish and
+                // the picture never moved until the mouse stopped. Measured:
+                // 117 requests over a 2 s drag produced ZERO frames.
+                //
+                // Coalescing shows a frame every ~500 ms during the drag, each
+                // nearer the cursor, and the release position always lands.
+                return {m, Cmd<Msg>::task_coalesce("seek",
+                    [want, preview = s.preview] {
                         Decoder d;               // owned by this task alone
                         if (!d.open(g_path)) return Msg{Ended{}};
                         double pts = 0.0;
                         const auto t0 = std::chrono::steady_clock::now();
-                        // Pass the predicate down: a seek can decode hundreds
-                        // of frames forward from a keyframe, and during a drag
-                        // all but the last one are already obsolete before
-                        // they finish.
-                        auto px = d.seek(want, &pts, still_wanted);
+                        // No cancel predicate: under task_coalesce this decode
+                        // is the only one running and its frame is wanted.
+                        // Abandoning it is what made the drag show nothing.
+                        auto px = d.seek(want, &pts, !preview);
                         const float ms = std::chrono::duration<float, std::milli>(
                                              std::chrono::steady_clock::now() - t0).count();
                         if (px) return Msg{Frame{std::move(px), pts, ms}};
-
-                        // No frame. Two very different reasons:
-                        //
-                        //   superseded -- a newer scrub position arrived and
-                        //                 this decode gave up on purpose. The
-                        //                 newer task will deliver; say nothing.
-                        //   real failure -- the file ended or would not decode.
-                        //
-                        // Reporting both as Ended stopped playback every time
-                        // the user dragged the scrub bar, because cancellation
-                        // is the NORMAL case during a drag.
-                        if (!still_wanted()) return Msg{SeekAbandoned{}};
                         return Msg{Ended{}};
-                    })};
+                    },
+                    // Delivered once no seek is running or pending. A frame
+                    // arriving is NOT proof the seek finished: the decode that
+                    // was already running when a newer position arrived still
+                    // delivers, and treating that as the answer reported the
+                    // player as landed 864 s from where it was sent.
+                    Msg{SeekSettled{}})};
             },
 
             [&](Frame f) -> R {
                 m.time      = f.pts;
                 m.decode_ms = f.ms;
-                m.seeking   = false;
                 ++m.frames;
+                // NOT `m.seeking = false`: this frame may belong to a
+                // superseded request. SeekSettled owns that flag.
                 return {m, Cmd<Msg>::upload_image(kImage, f.pixels)};
+            },
+
+            [&](SeekSettled) -> R {
+                // Every seek for this key has finished and none is waiting, so
+                // the frame on screen is the one that was asked for.
+                m.seeking = false;
+                return {m, Cmd<Msg>::none()};
             },
 
             [&](Ended) -> R {
@@ -487,10 +519,18 @@ struct Video {
                     num::clamp(static_cast<double>(s.local_x) / w, 0.0, 1.0);
                 m.idle = 0.0;
                 m.chrome.to(1.0f);
-                // Reuse the seek path, which is already task_latest -- so
-                // dragging fires one decode per pointer move and only the
-                // newest can land.
-                return update(std::move(m), Msg{SeekTo{frac * m.duration}});
+                // Reuse the seek path, which is already coalescing. While the
+                // button is held this asks for a cheap keyframe preview: a
+                // 10x faster decode the user can aim with. ScrubEnd re-seeks
+                // precisely once they let go.
+                return update(std::move(m),
+                              Msg{SeekTo{frac * m.duration, s.dragging}});
+            },
+
+            [&](ScrubEnd) -> R {
+                // The button came up. Land exactly where they left it -- the
+                // previews during the drag were keyframe-accurate only.
+                return update(std::move(m), Msg{SeekTo{m.time, false}});
             },
 
             [&](Resized r) -> R { m.window = r.size; return {m, Cmd<Msg>::none()}; },
@@ -746,12 +786,20 @@ struct Video {
             // `press` covers the tap and the start of a drag; `drag` covers
             // the rest of the movement. Together they give click-to-seek and
             // scrub from one handler.
+            //
+            // A drag move asks for a PREVIEW (keyframe-accurate, ~10x faster)
+            // because the user is still aiming; the release re-seeks exactly.
+            // A press is a tap until proven otherwise, so it seeks precisely
+            // and a click lands on the right frame immediately.
             Sub<Msg>::on_node_motion(
                 node_id("track"), Sub<Msg>::Gesture::press,
-                [](Vec2 local) { return Msg{Scrub{local.x}}; }),
+                [](Vec2 local) { return Msg{Scrub{local.x, false}}; }),
             Sub<Msg>::on_node_motion(
                 node_id("track"), Sub<Msg>::Gesture::drag,
-                [](Vec2 local) { return Msg{Scrub{local.x}}; }),
+                [](Vec2 local) { return Msg{Scrub{local.x, true}}; }),
+            Sub<Msg>::on_click_id_gesture(node_id("track"),
+                                          Sub<Msg>::Gesture::release,
+                                          Msg{ScrubEnd{}}),
 
             when(m.playing, decoder(m)),
 
