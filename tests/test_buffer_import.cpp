@@ -24,6 +24,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -313,6 +314,89 @@ int main() {
         const auto bad = sw.acquire(Buffer{});
         check(!bad.has_value() && bad.error() == ImportError::invalid_buffer,
               "an empty buffer is still invalid_buffer");
+    }
+
+    // ── wl_shm: the most common client in the world ────────────────
+    //
+    // A wl_shm client sends a pool fd, an offset, a stride and a DRM format.
+    // None of those match what a renderer wants: the format is usually
+    // ARGB8888 where mayag needs RGBA8, and the stride is padded to whatever
+    // the toolkit's allocator liked.
+    //
+    // If mayag cannot take that, EVERY protocol implementation writes channel
+    // swizzling and stride handling, and one of them gets the byte order
+    // wrong and ships a desktop with red and blue swapped.
+    section("a wl_shm buffer is usable without the caller touching pixels");
+    {
+        auto dev = backend::SoftwareBackend::create({}, Vec2{64, 64}, 1.0f);
+        backend::Device& sw = *dev;
+
+        // ARGB8888 with stride PADDING, which real toolkits emit constantly.
+        const int w = 4, h = 4;
+        const std::uint32_t stride = 32;          // 16 tight, padded to 32
+        std::vector<std::uint8_t> pool(stride * h, 0);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                std::uint8_t* p = pool.data() + y * stride + x * 4;
+                p[0] = 0x10; p[1] = 0x20; p[2] = 0x30; p[3] = 0xff;  // B G R A
+            }
+
+        Shm shm;
+        shm.pixels = std::span<const std::uint8_t>(pool.data(), pool.size());
+        shm.stride = stride;
+        shm.format = formats::argb8888;
+        const Buffer buf{shm, w, h};
+
+        check(buf.valid(), "a wl_shm buffer is a valid Buffer");
+        const auto a = sw.acquire(buf);
+        check(a.has_value(),
+              "and acquire takes it -- no protocol code writes a conversion");
+        check(a->copied, "reporting that shm always costs a copy");
+
+        // The conversion itself, checked directly. DRM names channels in
+        // little-endian WORD order, so ARGB8888 is B,G,R,A in MEMORY, while
+        // ImageData is R,G,B,A. They are reverses, and confusing them is the
+        // classic "why is everything teal" compositor bug.
+        const auto rgba = to_rgba8(shm, w, h);
+        check(rgba != nullptr, "ARGB8888 converts");
+        check(rgba->rgba[0] == 0x30 && rgba->rgba[1] == 0x20 &&
+              rgba->rgba[2] == 0x10 && rgba->rgba[3] == 0xff,
+              "with R and B in the right places -- DRM word order is the "
+              "reverse of memory order");
+        check(rgba->rgba.size() == static_cast<std::size_t>(w) * h * 4,
+              "and the stride padding removed (" +
+                  std::to_string(rgba->rgba.size()) + " bytes, tight)");
+
+        // An X format has no alpha: the fourth byte is padding and may hold
+        // anything. Reading it as alpha is why some clients render invisible.
+        std::vector<std::uint8_t> xpool(stride * h, 0x00);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                std::uint8_t* p = xpool.data() + y * stride + x * 4;
+                p[0] = 0x11; p[1] = 0x22; p[2] = 0x33; p[3] = 0x00;  // pad = 0
+            }
+        Shm xshm;
+        xshm.pixels = std::span<const std::uint8_t>(xpool.data(), xpool.size());
+        xshm.stride = stride;
+        xshm.format = formats::xrgb8888;
+        const auto xrgba = to_rgba8(xshm, w, h);
+        check(xrgba != nullptr && xrgba->rgba[3] == 0xff,
+              "an X format is forced OPAQUE -- its padding byte is not alpha, "
+              "and reading it as one renders the client invisible");
+
+        // A client that lies about its buffer size must be refused, not read
+        // out of bounds.
+        Shm liar = shm;
+        liar.pixels = std::span<const std::uint8_t>(pool.data(), 8);
+        check(to_rgba8(liar, w, h) == nullptr,
+              "a buffer too small for its stated size is refused rather than "
+              "read past its end");
+
+        Shm unknown = shm;
+        unknown.format = fourcc('N', 'V', '1', '2');
+        check(to_rgba8(unknown, w, h) == nullptr,
+              "an unconvertible format returns null, so the client is told "
+              "rather than shown garbage");
     }
 
     std::printf("\n%s  %d checks, %d failures\n",

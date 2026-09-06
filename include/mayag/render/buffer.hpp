@@ -176,6 +176,67 @@ struct Buffer {
     }
 };
 
+/// Copy `src` into tightly-packed RGBA8, converting format and dropping any
+/// stride padding.
+///
+/// This exists so a protocol implementation never writes graphics code. A
+/// `wl_shm` client -- the most common client there is -- sends a pool fd, an
+/// offset, a stride and a DRM format, and none of those match what a renderer
+/// wants: the format is usually ARGB8888 where mayag needs RGBA8, and the
+/// stride is padded to whatever the toolkit's allocator liked. Without this,
+/// every compositor written on mayag reimplements channel swizzling and
+/// stride removal, gets the byte order subtly wrong, and ships a UI where red
+/// and blue are swapped.
+///
+/// Returns nullptr for a format mayag cannot convert, so the caller reports
+/// an unsupported format to the client rather than showing it garbage.
+///
+/// The byte-order trap, stated once so nobody has to rediscover it: DRM names
+/// channels in LITTLE-ENDIAN WORD order, so DRM_FORMAT_ARGB8888 is B,G,R,A in
+/// MEMORY. mayag's ImageData is R,G,B,A in memory. They are reverses of each
+/// other, not the same thing spelled differently.
+[[nodiscard]] inline std::shared_ptr<const ImageData>
+to_rgba8(const Shm& src, int width, int height) {
+    if (width <= 0 || height <= 0 || src.stride == 0) return nullptr;
+
+    // Which byte of the source maps to R, G, B, A.
+    int r = 0, g = 0, b = 0, a = 0;
+    bool opaque = false;
+    if (src.format == formats::argb8888)      { b = 0; g = 1; r = 2; a = 3; }
+    else if (src.format == formats::xrgb8888) { b = 0; g = 1; r = 2; opaque = true; }
+    else if (src.format == formats::abgr8888) { r = 0; g = 1; b = 2; a = 3; }
+    else if (src.format == formats::xbgr8888) { r = 0; g = 1; b = 2; opaque = true; }
+    else return nullptr;
+
+    const std::size_t need =
+        static_cast<std::size_t>(src.stride) * static_cast<std::size_t>(height);
+    if (src.pixels.size() < need) return nullptr;   // client lied about size
+
+    auto out = std::make_shared<ImageData>();
+    out->width = width;
+    out->height = height;
+    out->rgba.resize(static_cast<std::size_t>(width) * height * 4);
+
+    for (int y = 0; y < height; ++y) {
+        const std::uint8_t* in = src.pixels.data() +
+                                 static_cast<std::size_t>(y) * src.stride;
+        std::uint8_t* dst = out->rgba.data() +
+                            static_cast<std::size_t>(y) * width * 4;
+        for (int x = 0; x < width; ++x) {
+            const std::uint8_t* p = in + static_cast<std::size_t>(x) * 4;
+            std::uint8_t* q = dst + static_cast<std::size_t>(x) * 4;
+            q[0] = p[r];
+            q[1] = p[g];
+            q[2] = p[b];
+            // An X format has no alpha channel: the fourth byte is padding
+            // and may hold anything. Reading it as alpha is why some clients
+            // render invisible.
+            q[3] = opaque ? 0xff : p[a];
+        }
+    }
+    return out;
+}
+
 /// Why an import failed. A compositor needs to tell "this device will never
 /// take that format" (renegotiate with the client) from "out of memory right
 /// now" (retry), because the responses are completely different.

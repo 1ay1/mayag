@@ -274,6 +274,114 @@ int main() {
               "and the next frame lands at the predicted time");
     }
 
+    // ── what a protocol implementation must NOT have to write ───────
+    //
+    // The seam is: protocol code deals with protocol, mayag deals with
+    // pixels. Each of these was something a compositor author would
+    // otherwise reimplement -- and get subtly wrong, because they are all
+    // coordinate or byte-order problems with a plausible wrong answer.
+    section("transforms are a graphics concern, not a protocol one");
+    {
+        check(swaps_axes(Transform::rotate_90),
+              "a 90-degree buffer swaps width and height");
+        check(swaps_axes(Transform::flipped_270),
+              "and so does a flipped 270");
+        check(!swaps_axes(Transform::rotate_180),
+              "180 does not");
+        check(!swaps_axes(Transform::flipped),
+              "nor does a plain flip");
+
+        Layer l;
+        check(l.transform == Transform::normal,
+              "a layer is untransformed until said otherwise, so a compositor "
+              "that ignores rotation still works on unrotated displays");
+    }
+
+    section("opacity is a REGION, so rounded windows keep their fast path");
+    {
+        // A window with rounded corners is opaque everywhere except four
+        // small arcs. With opacity as a bool it must declare itself fully
+        // transparent, and the compositor redraws everything behind it every
+        // frame for the sake of a few dozen pixels.
+        Layer rounded = make_layer(800, 600, Rect{{0, 0}, {800, 600}}, 0, false);
+        rounded.opaque_region.add(Rect{{0, 0}, {800, 600}});
+
+        Layer on_top = make_layer(400, 300, Rect{{0, 0}, {400, 300}}, 1, false);
+        const Layer layers[] = {rounded, on_top};
+
+        const auto plan = plan_planes(layers, PlaneCaps{4, false, false});
+        check(plan[0].direct(),
+              "a layer whose OPAQUE REGION covers it can take a plane even "
+              "though its opaque flag is false");
+        check(!plan[1].direct(),
+              "while one with no opaque region still cannot");
+
+        Region r;
+        check(r.empty(), "an empty region is empty");
+        r.add(Rect{{10, 10}, {100, 50}});
+        r.add(Rect{{200, 0}, {50, 200}});
+        check(r.bounds().left() == 10.0f && r.bounds().right() == 250.0f,
+              "and bounds() spans every rect in it");
+        check(r.contains(Vec2{20, 20}) && !r.contains(Vec2{150, 100}),
+              "contains() asks the rects, not the bounds");
+
+        Region zero;
+        zero.add(Rect{{0, 0}, {0, 50}});
+        check(zero.empty(),
+              "a degenerate rect is not added -- a zero-area damage rect from "
+              "a client must not look like real damage");
+    }
+
+    section("damage defaults to EVERYTHING, which is the safe direction");
+    {
+        Layer l;
+        check(l.damage.empty(),
+              "a layer with no damage means 'all of it changed'");
+        // The asymmetry is deliberate: believing nothing changed shows a
+        // stale frame, while redrawing too much only wastes power.
+    }
+
+    section("the cursor moves without costing a frame");
+    {
+        HeadlessOutput out;
+        check(out.has_cursor_plane(), "a display reports its cursor plane");
+        check(out.max_cursor_size().x > 0.0f,
+              "and the largest cursor it accepts");
+
+        const auto before = out.sequence();
+        Cursor c;
+        c.buffer = make_layer(64, 64, Rect{{0, 0}, {64, 64}}, 0, true).buffer;
+        c.hotspot = Vec2{4, 4};
+
+        // Twenty pointer motions.
+        bool all_moved = true;
+        for (int i = 0; i < 20; ++i) {
+            c.position = Vec2{static_cast<float>(i * 10), 100.0f};
+            if (!out.set_cursor(c).has_value()) all_moved = false;
+        }
+        check(all_moved, "twenty pointer motions all succeed");
+        check(out.cursor_updates() == 20, "all twenty moves landed");
+        check(out.sequence() == before,
+              "and NOT ONE cost a frame -- compositing the cursor instead is "
+              "the most visible latency mistake a compositor can make");
+        check(out.cursor().hotspot.x == 4.0f,
+              "the hotspot travels with it, so the tip lands on the pointer "
+              "position rather than the corner");
+
+        // A cursor too big for the plane must be REFUSED, not silently
+        // scaled, so the compositor knows to composite it instead.
+        Cursor big;
+        big.buffer = make_layer(512, 512, Rect{{0, 0}, {512, 512}}, 0, true).buffer;
+        const auto r = out.set_cursor(big);
+        check(!r.has_value() && r.error() == CommitError::buffer_unusable,
+              "an oversized cursor is refused so the compositor can fall back");
+
+        out.set_max_cursor_size(Vec2{0, 0});
+        check(!out.has_cursor_plane(),
+              "a display with no cursor plane says so, rather than failing "
+              "mysteriously");
+    }
+
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;

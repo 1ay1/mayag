@@ -59,6 +59,72 @@ struct DisplayMode {
     [[nodiscard]] friend constexpr bool operator==(DisplayMode, DisplayMode) = default;
 };
 
+/// How a buffer is oriented relative to the output.
+///
+/// `wl_output.transform`'s eight values, and the compositor's job is to make
+/// the picture come out upright whichever one a client used. Kept here rather
+/// than in protocol code because applying a rotation is a rendering question:
+/// the display controller can often do it for free on a plane, and only the
+/// graphics layer knows that.
+///
+/// The naming is the one thing everybody gets wrong, so it is stated here:
+/// `rotate_90` means the BUFFER is rotated 90 degrees clockwise relative to
+/// the output, so the compositor rotates it 90 degrees COUNTER-clockwise to
+/// display it. It describes the buffer, not the correction.
+enum class Transform : std::uint8_t {
+    normal = 0,
+    rotate_90,
+    rotate_180,
+    rotate_270,
+    flipped,
+    flipped_90,
+    flipped_180,
+    flipped_270,
+};
+
+/// Does this transform swap width and height?
+[[nodiscard]] constexpr bool swaps_axes(Transform t) noexcept {
+    return t == Transform::rotate_90  || t == Transform::rotate_270 ||
+           t == Transform::flipped_90 || t == Transform::flipped_270;
+}
+
+/// A set of rectangles: what changed, or what is opaque.
+///
+/// Both questions are regions rather than single rects, and treating them as
+/// rects is a real loss. A client that is opaque in the middle and
+/// transparent at its rounded corners has to declare itself entirely
+/// transparent if opacity is a bool, which throws away every occlusion
+/// optimisation for the whole window.
+///
+/// Deliberately a plain vector, not an interval tree. A surface has a handful
+/// of damage rects, not thousands, and the cost of getting this wrong is
+/// paid every frame in cache misses rather than in asymptotics.
+struct Region {
+    std::vector<Rect> rects;
+
+    [[nodiscard]] bool empty() const noexcept { return rects.empty(); }
+    void add(const Rect& r) { if (r.size.x > 0 && r.size.y > 0) rects.push_back(r); }
+    void clear() noexcept { rects.clear(); }
+
+    /// Does any rect cover `p`?
+    [[nodiscard]] bool contains(Vec2 p) const noexcept {
+        return std::any_of(rects.begin(), rects.end(),
+                           [&](const Rect& r) { return r.contains(p); });
+    }
+
+    /// The smallest rect containing everything. Empty when the region is.
+    [[nodiscard]] Rect bounds() const noexcept {
+        if (rects.empty()) return Rect{};
+        float l = rects[0].left(), t = rects[0].top();
+        float r = rects[0].right(), b = rects[0].bottom();
+        for (const Rect& x : rects) {
+            l = num::min(l, x.left());   t = num::min(t, x.top());
+            r = num::max(r, x.right());  b = num::max(b, x.bottom());
+        }
+        return Rect{{l, t}, {r - l, b - t}};
+    }
+};
+
 /// How a buffer is placed on a display.
 ///
 /// A layer is one composited element: a client window, a cursor, a video.
@@ -76,11 +142,28 @@ struct Layer {
     int        z = 0;
     /// True when the layer covers `dst` completely with no transparency.
     ///
-    /// Not a hint — it is what lets the hardware skip everything underneath,
-    /// and getting it wrong shows as content bleeding through. The scene
-    /// graph knows this exactly, which is why mayag can answer it where a
-    /// compositor bolted onto a renderer has to guess.
+    /// A fast path for the common case. When only PART of the layer is
+    /// opaque, leave this false and fill `opaque_region` instead.
     bool       opaque = false;
+    /// Which parts of the layer are fully opaque, in layer-local coordinates.
+    ///
+    /// wl_surface.set_opaque_region is a region, not a flag, and the
+    /// difference matters: a window with rounded corners is opaque
+    /// everywhere except four small arcs. Collapsing that to "transparent"
+    /// means the compositor draws everything behind it, every frame, for the
+    /// sake of a few dozen pixels.
+    Region     opaque_region;
+    /// How the buffer is oriented relative to the output.
+    Transform  transform = Transform::normal;
+    /// What changed since the last frame, in layer-local coordinates.
+    ///
+    /// Empty means "everything", which is the safe default: a compositor that
+    /// wrongly believes nothing changed shows a stale frame, while one that
+    /// redraws too much only wastes power. Damage arrives from clients in
+    /// BUFFER coordinates and has to cross scale, transform and position to
+    /// become screen coordinates -- that arithmetic is a graphics question,
+    /// so it belongs on this side of the seam rather than in protocol code.
+    Region     damage;
     /// When these pixels are ready, and how to say we are done. Default means
     /// implicit sync: ready now, nobody to tell.
     BufferSync sync;
@@ -166,6 +249,27 @@ common_formats(std::span<const FormatModifier> renderer,
     return out;
 }
 
+/// A hardware cursor: a small buffer the display moves without a full commit.
+///
+/// Almost every display controller has a dedicated cursor plane, and using it
+/// is the difference between a pointer that tracks the hand and one that lags
+/// a frame behind everything. Moving it costs one register write; compositing
+/// it means redrawing the screen for every mouse motion, which is the most
+/// visible latency mistake a compositor can make and the easiest to avoid.
+///
+/// Separate from Layer because the hardware treats it separately: it updates
+/// on its own schedule, it does not participate in plane assignment, and it
+/// has size limits (often 64x64 or 256x256) that ordinary planes do not.
+struct Cursor {
+    /// The image. An empty buffer hides the cursor.
+    Buffer buffer;
+    /// Where the pointer tip is inside the image, so the compositor can place
+    /// the hotspot on the actual pointer position rather than the corner.
+    Vec2   hotspot{};
+    /// Top-left position on screen, in physical pixels.
+    Vec2   position{};
+};
+
 /// A physical display mayag drives.
 ///
 /// A CONCEPT rather than a base class, matching platform::Window: the
@@ -174,7 +278,7 @@ common_formats(std::span<const FormatModifier> renderer,
 /// surface and a headless test double all satisfy it.
 template <typename O>
 concept Output = requires(O o, const O co, std::span<const Layer> layers,
-                          const DisplayMode& mode) {
+                          const DisplayMode& mode, const Cursor& cursor) {
     /// Modes the hardware supports. Never empty for a connected display.
     { co.modes() } -> std::ranges::range;
     /// The mode currently set, if any. Nullopt means the display is off.
@@ -191,6 +295,17 @@ concept Output = requires(O o, const O co, std::span<const Layer> layers,
     /// and the GPU have different capabilities, and the intersection is what
     /// a compositor should advertise to clients that want the fast path.
     { co.scanout_formats() } -> std::ranges::range;
+
+    /// Move or replace the hardware cursor.
+    ///
+    /// Separate from commit() because that is the entire point: a pointer
+    /// motion must not cost a frame. A display that has no cursor plane
+    /// reports so via has_cursor_plane(), and the compositor composites one
+    /// as an ordinary layer instead.
+    { o.set_cursor(cursor) } -> std::same_as<CommitResult>;
+    { co.has_cursor_plane() } -> std::same_as<bool>;
+    /// Largest cursor the hardware plane accepts, {0,0} when there is none.
+    { co.max_cursor_size() } -> std::same_as<Vec2>;
 
     /// A stable identity, so a compositor can remember per-display settings
     /// across unplugs. Typically connector name plus EDID serial.

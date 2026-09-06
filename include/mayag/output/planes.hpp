@@ -40,6 +40,12 @@
 
 namespace mayag::output {
 
+/// Does `outer` fully contain `inner`?
+[[nodiscard]] inline bool covers(const Rect& outer, const Rect& inner) noexcept {
+    return outer.left() <= inner.left() && outer.top() <= inner.top() &&
+           outer.right() >= inner.right() && outer.bottom() >= inner.bottom();
+}
+
 /// What the hardware can do, so the planner does not have to guess.
 struct PlaneCaps {
     /// Total planes usable for content, excluding the cursor plane.
@@ -104,11 +110,19 @@ plan_planes(std::span<const Layer> layers, const PlaneCaps& caps) {
         // because a transparent one needs to mix with what is underneath and
         // the plane cannot. The bottom-most layer is exempt: there is nothing
         // beneath it to blend with.
+        //
+        // `opaque` covers the whole layer; a layer that is opaque only in
+        // PART -- a window with rounded corners, say -- qualifies when its
+        // opaque region covers the destination, which is the common case and
+        // exactly what would be lost by treating opacity as a bool.
         if (!caps.blending && !l.opaque) {
+            const bool region_covers =
+                !l.opaque_region.empty() &&
+                covers(l.opaque_region.bounds(), Rect{{0, 0}, l.dst.size});
             const bool is_bottom = std::none_of(
                 layers.begin(), layers.end(),
                 [&](const Layer& other) { return other.z < l.z; });
-            if (!is_bottom) continue;
+            if (!region_covers && !is_bottom) continue;
         }
 
         ranked.push_back(Candidate{i, l.dst.size.x * l.dst.size.y, l.z});

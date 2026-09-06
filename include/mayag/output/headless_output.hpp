@@ -65,6 +65,30 @@ class HeadlessOutput {
     [[nodiscard]] std::span<const FormatModifier> scanout_formats() const noexcept {
         return scanout_;
     }
+
+    /// Move or replace the cursor, WITHOUT a frame.
+    ///
+    /// Counted separately from commits so a test can prove a compositor is
+    /// using the plane rather than redrawing: N pointer motions must produce
+    /// N cursor updates and zero new frames.
+    [[nodiscard]] CommitResult set_cursor(const Cursor& c) {
+        if (!current_) return std::unexpected(CommitError::disconnected);
+        if (!has_cursor_plane()) return std::unexpected(CommitError::unsupported_layout);
+        if (c.buffer.valid() &&
+            (c.buffer.width > static_cast<int>(max_cursor_.x) ||
+             c.buffer.height > static_cast<int>(max_cursor_.y))) {
+            // Too big for the plane. A real compositor falls back to
+            // compositing it as an ordinary layer.
+            return std::unexpected(CommitError::buffer_unusable);
+        }
+        cursor_ = c;
+        ++cursor_updates_;
+        return Presented{time_, sequence_, 0, time_};
+    }
+    [[nodiscard]] bool has_cursor_plane() const noexcept {
+        return max_cursor_.x > 0.0f && max_cursor_.y > 0.0f;
+    }
+    [[nodiscard]] Vec2 max_cursor_size() const noexcept { return max_cursor_; }
     [[nodiscard]] std::string_view name() const noexcept { return name_; }
     [[nodiscard]] Vec2 physical_size_mm() const noexcept { return physical_mm_; }
 
@@ -82,7 +106,11 @@ class HeadlessOutput {
 
     void set_modes(std::vector<DisplayMode> m) { modes_ = std::move(m); }
     void set_scanout_formats(std::vector<FormatModifier> f) { scanout_ = std::move(f); }
+    void set_max_cursor_size(Vec2 s) noexcept { max_cursor_ = s; }
     void disconnect() noexcept { current_.reset(); }
+
+    [[nodiscard]] const Cursor& cursor() const noexcept { return cursor_; }
+    [[nodiscard]] int cursor_updates() const noexcept { return cursor_updates_; }
 
     [[nodiscard]] std::span<const Layer> last_commit() const noexcept { return last_; }
     [[nodiscard]] std::span<const Assignment> last_plan() const noexcept { return last_plan_; }
@@ -99,6 +127,9 @@ class HeadlessOutput {
 
     std::vector<Layer>          last_;
     std::vector<Assignment>     last_plan_;
+    Cursor                      cursor_;
+    Vec2                        max_cursor_{256.0f, 256.0f};
+    int                         cursor_updates_ = 0;
     std::uint64_t               sequence_ = 0;
     double                      time_ = 0.0;
     int                         refused_ = 0;

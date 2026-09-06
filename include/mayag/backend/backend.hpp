@@ -328,16 +328,31 @@ class Device {
             return Acquired{*imported, false};
         }
 
-        // Fallback. Only CPU-side pixels can be copied; a dmabuf that the
-        // device refused would have to be mapped first, which is a decision
-        // (and a performance cliff) that belongs to the caller rather than
-        // happening silently inside a function called "acquire".
+        // Fallback: get the pixels onto the GPU by copying.
+        //
+        // A CPU buffer is already in mayag's own format. An Shm buffer is a
+        // client's memory in a DRM format with whatever stride its allocator
+        // chose, so it is converted here -- doing it in the renderer is the
+        // point of this whole layer, because otherwise every protocol
+        // implementation writes channel swizzling and stride handling and
+        // one of them gets the byte order wrong.
+        std::shared_ptr<const ImageData> pixels;
         if (const auto* cpu = std::get_if<Buffer::Cpu>(&buf.storage)) {
-            const std::uint32_t slot = next_upload_slot();
-            upload_image(slot, cpu->image);
-            return Acquired{TextureHandle{slot}, true};
+            pixels = cpu->image;
+        } else if (const auto* shm = std::get_if<Shm>(&buf.storage)) {
+            pixels = to_rgba8(*shm, buf.width, buf.height);
+            if (!pixels) return std::unexpected(ImportError::unsupported_format);
+        } else {
+            // A dmabuf the device refused. Mapping it to copy is a severe
+            // performance cliff -- reading GPU memory over PCIe -- so that is
+            // the caller's decision to make explicitly, not something to do
+            // silently inside a function called "acquire".
+            return std::unexpected(ImportError::unsupported_format);
         }
-        return std::unexpected(ImportError::unsupported_format);
+
+        const std::uint32_t slot = next_upload_slot();
+        upload_image(slot, std::move(pixels));
+        return Acquired{TextureHandle{slot}, true};
     }
 
     /// An unused texture id.
