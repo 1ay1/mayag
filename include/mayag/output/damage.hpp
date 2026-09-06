@@ -122,13 +122,20 @@ frame_damage(std::span<const Layer> layers, std::span<const Rect> previous) {
     for (const Rect& d : damage.rects) {
         const bool hidden = std::any_of(
             layers.begin(), layers.end(), [&](const Layer& l) {
-                if (!l.opaque && l.opaque_region.empty()) return false;
+                // Effects can make a layer transparent whatever its buffer
+                // holds -- a faded or rounded window hides nothing. Asked
+                // through the same predicate the planner uses, so the two
+                // cannot drift apart and start disagreeing about what is
+                // opaque.
+                const bool whole = effectively_opaque(l);
+                if (!whole && l.opaque_region.empty()) return false;
+                if (!whole && l.effects.opacity < 1.0f) return false;
                 const Rect bounds = l.opaque_region.bounds();
                 const Rect cover =
-                    l.opaque ? l.dst
-                             : Rect{{l.dst.origin.x + bounds.left(),
-                                     l.dst.origin.y + bounds.top()},
-                                    bounds.size};
+                    whole ? l.dst
+                          : Rect{{l.dst.origin.x + bounds.left(),
+                                  l.dst.origin.y + bounds.top()},
+                                 bounds.size};
                 return covers(cover, d);
             });
         if (!hidden) out.add(d);

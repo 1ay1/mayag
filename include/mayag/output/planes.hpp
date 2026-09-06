@@ -46,6 +46,22 @@ namespace mayag::output {
            outer.right() >= inner.right() && outer.bottom() >= inner.bottom();
 }
 
+/// Is this layer opaque AS DRAWN?
+///
+/// `Layer::opaque` describes the BUFFER; effects can make the result
+/// transparent whatever the buffer holds. A faded window is not opaque, and
+/// neither is a rounded one -- its corners show what is behind them.
+///
+/// Asked in one place because getting it wrong is invisible in the good case
+/// and shows as content bleeding through in the bad one, which is exactly the
+/// kind of bug that survives review.
+[[nodiscard]] inline bool effectively_opaque(const Layer& l) noexcept {
+    if (!l.opaque) return false;
+    if (l.effects.opacity < 1.0f) return false;
+    if (l.effects.corner_radius > 0.0f) return false;
+    return true;
+}
+
 /// What the hardware can do, so the planner does not have to guess.
 struct PlaneCaps {
     /// Total planes usable for content, excluding the cursor plane.
@@ -95,6 +111,12 @@ plan_planes(std::span<const Layer> layers, const PlaneCaps& caps) {
         // A plane reads a real buffer. Nothing else can be scanned out.
         if (!l.buffer.valid()) continue;
 
+        // A plane BLITS A RECTANGLE. It cannot round a corner, blur a
+        // backdrop or draw a shadow, so any layer asking for one has to be
+        // composited. The rule lives on Effects rather than here so that
+        // adding an effect later cannot forget to disqualify itself.
+        if (!l.effects.scanout_capable()) continue;
+
         // Scaling: a plane without a scaler shows the buffer at its own size,
         // so any layer drawn at a different size must be composited. Compared
         // exactly rather than with a tolerance -- a half-pixel difference is
@@ -115,7 +137,7 @@ plan_planes(std::span<const Layer> layers, const PlaneCaps& caps) {
         // PART -- a window with rounded corners, say -- qualifies when its
         // opaque region covers the destination, which is the common case and
         // exactly what would be lost by treating opacity as a bool.
-        if (!caps.blending && !l.opaque) {
+        if (!caps.blending && !effectively_opaque(l)) {
             const bool region_covers =
                 !l.opaque_region.empty() &&
                 covers(l.opaque_region.bounds(), Rect{{0, 0}, l.dst.size});

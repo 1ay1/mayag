@@ -125,6 +125,80 @@ struct Region {
     }
 };
 
+/// What to do to a layer's pixels beyond placing them.
+///
+/// Effects belong in mayag by the same rule everything else does: they are
+/// pixel decisions, getting them wrong is a rendering bug, and none of them
+/// needs a device. mayag could already DRAW all of this -- rounded boxes,
+/// analytic shadows, backdrop blur are ShapeKinds the renderer has had all
+/// along -- but a Layer could not ASK for any of it. The renderer and the
+/// output layer disagreed about what a picture is.
+///
+/// That gap is not cosmetic. Every desktop rounds window corners, and a
+/// compositor that cannot say "round this one" must composite a mask itself,
+/// which costs a pass AND the hardware plane. The effect is cheaper as a
+/// property of the layer than as an extra layer.
+///
+/// A default Effects does nothing, so this is additive: a compositor that
+/// ignores it renders exactly as before.
+struct Effects {
+    /// Corner radius in physical pixels. 0 is square.
+    ///
+    /// Worth stating because it is the one that interacts with planes: a
+    /// rounded layer is no longer rectangular, so it cannot be scanned out
+    /// directly and cannot be treated as fully opaque. The planner enforces
+    /// both rather than trusting the caller to remember.
+    float corner_radius = 0.0f;
+
+    /// Multiplied into the layer's alpha. 1 is unchanged.
+    ///
+    /// Distinct from `opaque`, which is an occlusion HINT about the buffer's
+    /// contents. This is a compositor-applied fade -- a window animating in,
+    /// or an inactive one dimmed -- and it makes the layer non-opaque
+    /// whatever the buffer contains.
+    float opacity = 1.0f;
+
+    /// Blur applied to what is BEHIND the layer, in pixels. 0 is off.
+    ///
+    /// The frosted-glass look. Expensive and unmistakable, which is why it
+    /// is opt-in per layer rather than a global mode.
+    float backdrop_blur = 0.0f;
+    /// Saturation and brightness applied with the backdrop blur. 1 is
+    /// unchanged. These travel together because a blur alone reads as murky;
+    /// every real implementation lifts saturation slightly to compensate.
+    float backdrop_saturation = 1.0f;
+    float backdrop_brightness = 1.0f;
+
+    /// Drop shadow radius in pixels. 0 is off.
+    ///
+    /// mayag's shadow is ANALYTIC -- a closed-form falloff, not a blur pass
+    /// over a rendered copy -- so it costs one instance rather than a
+    /// render-to-texture and a two-pass gaussian. That is why a compositor
+    /// can afford one per window.
+    float shadow_radius = 0.0f;
+    Vec2  shadow_offset{};
+    Color<Srgb> shadow_color = colors::black.fade(0.35f);
+
+    /// Does this layer need anything beyond a plain blit?
+    [[nodiscard]] bool is_identity() const noexcept {
+        return corner_radius == 0.0f && opacity == 1.0f &&
+               backdrop_blur == 0.0f && shadow_radius == 0.0f &&
+               backdrop_saturation == 1.0f && backdrop_brightness == 1.0f;
+    }
+
+    /// Can a layer with these effects still be scanned out by the hardware?
+    ///
+    /// Only when nothing is asked for. A display plane blits a rectangle: it
+    /// cannot round a corner, blur a backdrop or draw a shadow. Answering
+    /// this here rather than in the planner keeps the rule in one place --
+    /// adding an effect later cannot forget to disqualify itself.
+    ///
+    /// Opacity is the one exception in principle, since some planes have a
+    /// constant-alpha register, but it is not assumed: a wrong yes shows the
+    /// wrong thing on screen, and a wrong no costs a little power.
+    [[nodiscard]] bool scanout_capable() const noexcept { return is_identity(); }
+};
+
 /// How a buffer is placed on a display.
 ///
 /// A layer is one composited element: a client window, a cursor, a video.
@@ -167,6 +241,8 @@ struct Layer {
     /// When these pixels are ready, and how to say we are done. Default means
     /// implicit sync: ready now, nobody to tell.
     BufferSync sync;
+    /// What to do to the pixels beyond placing them. Default does nothing.
+    Effects    effects;
 };
 
 /// Why an atomic commit was refused.

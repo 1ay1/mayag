@@ -17,6 +17,7 @@
 // reconstruct it from a flattened command stream.
 
 #include <mayag/mayag.hpp>
+#include <mayag/output/composite.hpp>
 #include <mayag/output/damage.hpp>
 #include <mayag/output/headless_output.hpp>
 #include <mayag/output/output.hpp>
@@ -529,6 +530,128 @@ int main() {
         check(foreign.valid(),
               "a dmabuf descriptor is just data -- mayag never opens a device "
               "node to make sense of it");
+    }
+
+    // ── effects ──────────────────────────────────────────────
+    //
+    // These belong in mayag by its own rule: pixel decisions, wrong in a way
+    // that is a rendering bug, needing no device. The renderer could already
+    // DRAW all of them -- rounded boxes, analytic shadows and backdrop blur
+    // are ShapeKinds -- but a Layer could not ASK, so the renderer and the
+    // output layer disagreed about what a picture is.
+    section("a layer can ask for what the renderer could always draw");
+    {
+        Effects fx;
+        check(fx.is_identity(), "a default Effects does nothing");
+        check(fx.scanout_capable(),
+              "so an untouched layer can still take a hardware plane");
+
+        fx.corner_radius = 12.0f;
+        check(!fx.is_identity() && !fx.scanout_capable(),
+              "a rounded layer cannot be scanned out -- a plane blits a "
+              "RECTANGLE, it cannot round a corner");
+
+        Effects blur;
+        blur.backdrop_blur = 20.0f;
+        check(!blur.scanout_capable(),
+              "nor can a blurred one, for the same reason");
+
+        Effects faded;
+        faded.opacity = 0.5f;
+        check(!faded.scanout_capable(),
+              "nor a faded one -- some planes have a constant-alpha register, "
+              "but assuming it would show the wrong thing on screen");
+    }
+
+    section("effects change what counts as opaque");
+    {
+        // Layer::opaque describes the BUFFER. Effects can make the result
+        // transparent whatever the buffer holds, and forgetting that shows as
+        // content bleeding through -- invisible in the good case, which is
+        // exactly the kind of bug that survives review.
+        Layer solid = make_layer(800, 600, Rect{{0, 0}, {800, 600}}, 0, true);
+        check(effectively_opaque(solid), "an untouched opaque layer is opaque");
+
+        Layer faded = solid;
+        faded.effects.opacity = 0.6f;
+        check(!effectively_opaque(faded),
+              "a FADED window is not opaque, however solid its buffer");
+
+        Layer rounded = solid;
+        rounded.effects.corner_radius = 16.0f;
+        check(!effectively_opaque(rounded),
+              "and neither is a rounded one -- its corners show what is "
+              "behind them");
+
+        // The planner and the occlusion pass must agree, or one will drop
+        // damage the other still draws.
+        const Layer layers[] = {faded};
+        const auto plan = plan_planes(layers, PlaneCaps{2, false, false});
+        check(!plan[0].direct(),
+              "the planner refuses a faded layer");
+
+        Region d;
+        d.add(Rect{{100, 100}, {50, 50}});
+        check(occlude(d, layers).rects.size() == 1,
+              "and occlusion agrees it hides nothing -- the two ask the same "
+              "predicate, so they cannot drift apart");
+    }
+
+    section("compositing draws effects in the only order that works");
+    {
+        Layer l = make_layer(400, 300, Rect{{50, 50}, {400, 300}}, 0, true);
+        l.effects.shadow_radius = 24.0f;
+        l.effects.backdrop_blur = 10.0f;
+        l.effects.corner_radius = 12.0f;
+
+        DrawList out;
+        composite_layer(out, l, TextureHandle{5});
+
+        const auto& inst = out.instances();
+        check(inst.size() == 3, "shadow, backdrop and content are all emitted");
+
+        // The order is the whole subtlety. A shadow after the content draws
+        // OVER the window; a backdrop after the content blurs the window into
+        // itself.
+        check(inst[0].kind == static_cast<std::uint32_t>(ShapeKind::shadow),
+              "shadow FIRST, because it falls behind the window");
+        check(inst[1].kind == static_cast<std::uint32_t>(ShapeKind::backdrop),
+              "backdrop SECOND -- it snapshots the framebuffer, so anything "
+              "drawn later is not in the blur");
+        check(inst[2].kind == static_cast<std::uint32_t>(ShapeKind::texture),
+              "content LAST, on top of both");
+
+        // A layer whose buffer has not arrived still casts its shadow, so a
+        // window fades in rather than popping.
+        DrawList pending;
+        composite_layer(pending, l, TextureHandle{});
+        check(pending.instances().size() == 2,
+              "a layer with no texture yet still draws its shadow and "
+              "backdrop, rather than popping in");
+
+        // Nothing asked for means one draw call.
+        Layer plain = make_layer(100, 100, Rect{{0, 0}, {100, 100}}, 0, true);
+        DrawList simple;
+        composite_layer(simple, plain, TextureHandle{7});
+        check(simple.instances().size() == 1,
+              "and a layer with no effects costs exactly one instance");
+    }
+
+    section("a frame composites only what the hardware did not take");
+    {
+        const Layer layers[] = {
+            make_layer(1920, 1080, Rect{{0, 0}, {1920, 1080}}, 0, true),
+            make_layer(300, 200, Rect{{50, 50}, {300, 200}}, 1, true),
+        };
+        const auto plan = plan_planes(layers, PlaneCaps{1, false, false});
+        const TextureHandle textures[] = {TextureHandle{1}, TextureHandle{2}};
+
+        DrawList out;
+        composite_frame(out, layers, plan, textures);
+        check(out.instances().size() == 1,
+              "the layer on a plane is NOT drawn again on the GPU -- two "
+              "answers to the same question is how a compositor draws a "
+              "layer twice");
     }
 
     std::printf("\n%s  %d checks, %d failures\n",
