@@ -104,51 +104,43 @@ or event model changes: a `texture` instance still names a handle. Only the
 
 Sizes are honest estimates, against wlroots' ~60k lines.
 
-### 1. Buffer import — ~500 lines
-The unblocker. Nothing else is worth starting first.
+### 1. Buffer import — ~500 lines — **DONE** (`4bdcfea`)
+The unblocker. `render/buffer.hpp` defines `Buffer{Cpu|Dmabuf|Shm}`;
+`Device::import()` returns `expected<TextureHandle, ImportError>`. Verified
+against the real NVIDIA driver: 28 format/modifier pairs advertised.
 
-### 2. Explicit synchronisation — ~400 lines
-A compositor must not `DeviceWaitIdle`. Client buffers arrive with
-`drm_syncobj` timeline points meaning "ready at T"; the compositor waits on a
-*semaphore* and signals back when done reading. mayag's current model — one
-`in_flight_` fence, plus the `DeviceWaitIdle` on resize added to fix the
-fullscreen hang — is a single-app model.
+Two things only running it could find. The instance requested Vulkan 1.0, so
+`vkGetPhysicalDeviceFormatProperties2` — 1.1 core — resolved to null and the
+modifier list came back empty, silently degrading zero-copy to "unsupported"
+on hardware that supports it. And Vulkan *closes* the fd it is handed, so
+`import` must `dup()` first or it closes a descriptor the client still owns.
 
-Generalising to timeline semaphores helps the app case too: it is exactly what
-removes that device-wide stall. **Highest leverage after import**, because
-implicit sync is why compositors stutter.
+### 2. Explicit synchronisation — ~400 lines — **DONE** (`612d1e4`)
+`backend/reclaim.hpp` retires a resource tagged with the current frame and
+frees it once that frame completes, replacing three per-resource
+`DeviceWaitIdle` calls. The completion clock is `submit()`'s existing
+in-flight fence; keeping it *outside* the Reclaimer means the whole thing is
+pure bookkeeping and unit-testable with no GPU.
 
-### 3. Output abstraction: DRM/KMS — ~2500 lines
-Today mayag renders *into* a window someone else owns. A compositor **is** the
-display server: opens `/dev/dri/card0`, enumerates connectors, sets modes,
-page-flips. Needs libdrm + GBM + libseat.
+`render/sync.hpp` adds `TimelinePoint`, `BufferSync{acquire, release}`,
+`SyncCaps`. A default `BufferSync` means implicit sync, so the type is
+additive.
 
-Make the existing Wayland/macOS windows and a new DRM backend implement one
-concept:
+### 3. Output abstraction — **CONCEPT DONE** (`41e164f`), DRM backend pending
+`output/output.hpp` defines the concept, with `commit()` returning a
+`CommitResult` because an atomic commit legitimately fails.
+`output/planes.hpp` decides which layers can be scanned out directly, ranking
+by area since a plane saves exactly what it covers. `HeadlessOutput` proves
+the concept has more than one implementation and makes the refusal path
+testable via `fail_next()`.
 
-```cpp
-concept Output = requires(O o, Frame& f) {
-    { o.modes() }         -> std::ranges::range;          // resolution + refresh
-    { o.commit(f) }       -> std::same_as<CommitResult>;  // atomic, MAY FAIL
-    { o.present_time() }  -> std::same_as<Timestamp>;
-};
-```
+What remains is the DRM/KMS implementation itself — libdrm + GBM + libseat,
+connector enumeration, atomic commits, page flips. ~2500 lines.
 
-`commit` returning a result rather than void is load-bearing: an atomic KMS
-commit legitimately fails and must be retried with a simpler plane
-configuration. A void present cannot express that, and retrofitting it later
-is a breaking change — so it belongs in the signature from day one.
-
-### 4. Hardware planes / direct scanout — ~800 lines
-The payoff. If a fullscreen video's buffer is scanout-capable, hand it to a
-KMS plane and **do no rendering at all**: no composite, no power draw. This is
-what gamescope does on the Steam Deck via libliftoff, and what most wlroots
-compositors still skip.
-
-mayag is unusually well positioned. It already has a DrawList of rectangles
-with known z-order, so "these quads are opaque, axis-aligned, and map 1:1 to a
-plane" is a *scene-graph* question and mayag already owns the scene graph.
-wlroots bolts this on; mayag could make it the default path.
+### 4. Hardware planes / direct scanout — ~800 lines — **planner done**
+The policy lives in `planes.hpp` and is tested. What is missing is the half
+that needs hardware: asking DRM for the real plane count and capabilities,
+and handing buffers to `drmModeAtomicCommit`.
 
 ### 5. Input: libinput — ~900 lines
 Reading `/dev/input/event*`: pointer acceleration, tablets, touch, switches,
