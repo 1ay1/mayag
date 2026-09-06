@@ -724,55 +724,25 @@ class VulkanDevice {
 
     /// Format+modifier pairs this driver will accept for import.
     ///
-    /// Built once and cached: a compositor advertises this list to every
-    /// client that binds zwp_linux_dmabuf_v1, so it is asked constantly and
-    /// never changes. Querying the driver rather than hardcoding LINEAR is
-    /// the difference between clients allocating tiled buffers the GPU
-    /// samples directly and clients allocating linear ones that force a
-    /// detiling blit on every frame.
+    /// A compositor advertises this list to every client that binds
+    /// zwp_linux_dmabuf_v1, so it is asked constantly and never changes.
+    /// Querying the driver rather than hardcoding LINEAR is the difference
+    /// between clients allocating tiled buffers the GPU samples directly and
+    /// clients allocating linear ones that force a detiling blit every frame.
+    ///
+    /// Built EAGERLY at device creation, not lazily on first call.
+    ///
+    /// Lazy was the obvious choice and it is a race: this is a const method,
+    /// and the one place a compositor calls it is from a client connection,
+    /// which is not the render thread. Two clients binding at once would both
+    /// see an unbuilt cache and both fill it. Nothing about the signature
+    /// warns you -- it looks like a pure getter.
+    ///
+    /// Building it once at creation makes the method genuinely const and
+    /// genuinely thread-safe: after init nothing writes, so any number of
+    /// threads may read. That is the same answer mayag reaches everywhere
+    /// else -- remove the shared mutable state rather than lock it.
     [[nodiscard]] std::span<const FormatModifier> importable_formats() const {
-        if (!formats_cached_) {
-            formats_cached_ = true;
-            if (!dmabuf_import_ ||
-                api_->GetPhysicalDeviceFormatProperties2 == nullptr) {
-                return {};
-            }
-            for (const Fourcc f : {formats::argb8888, formats::xrgb8888,
-                                   formats::abgr8888, formats::xbgr8888}) {
-                const int vkf = vk_format_of(f);
-                if (vkf == 0) continue;
-
-                // Two-call idiom: ask for the count, then the values.
-                vk::VkDrmFormatModifierPropertiesListEXT list{};
-                list.sType = vk::VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
-                vk::VkFormatProperties2 props{};
-                props.sType = vk::VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
-                props.pNext = &list;
-                api_->GetPhysicalDeviceFormatProperties2(phys_, vkf, &props);
-                if (list.drmFormatModifierCount == 0) continue;
-
-                std::vector<vk::VkDrmFormatModifierPropertiesEXT>
-                    mods(list.drmFormatModifierCount);
-                list.pDrmFormatModifierProperties = mods.data();
-                api_->GetPhysicalDeviceFormatProperties2(phys_, vkf, &props);
-
-                for (const auto& m : mods) {
-                    // Only advertise what can actually be SAMPLED. A modifier
-                    // the driver lists but cannot sample would have clients
-                    // allocate buffers that fail to import later, which reads
-                    // as a broken client rather than a bad advertisement.
-                    constexpr vk::Flags kSampled = 0x00000001;  // SAMPLED_IMAGE_BIT
-                    if ((m.drmFormatModifierTilingFeatures & kSampled) == 0) continue;
-                    importable_.push_back(FormatModifier{
-                        f, static_cast<Modifier>(m.drmFormatModifier),
-                        // Scanout capability is a KMS question, not a Vulkan
-                        // one -- it depends on the display hardware, not the
-                        // renderer. Left false until a DRM backend can answer
-                        // it, rather than guessed here.
-                        false});
-                }
-            }
-        }
         return importable_;
     }
 
@@ -926,6 +896,51 @@ class VulkanDevice {
         MG_LOAD(GetPhysicalDeviceSurfacePresentModesKHR, "vkGetPhysicalDeviceSurfacePresentModesKHR");
         MG_LOAD(CreateWaylandSurfaceKHR, "vkCreateWaylandSurfaceKHR");
         #undef MG_LOAD
+    }
+
+    /// Query the driver's importable format+modifier pairs, once.
+    ///
+    /// Called from create_device() so importable_formats() is a plain read of
+    /// immutable state afterwards. See that method for why this is not lazy.
+    void build_importable_formats() {
+        if (!dmabuf_import_ ||
+            api_->GetPhysicalDeviceFormatProperties2 == nullptr) return;
+
+        for (const Fourcc f : {formats::argb8888, formats::xrgb8888,
+                               formats::abgr8888, formats::xbgr8888}) {
+            const int vkf = vk_format_of(f);
+            if (vkf == 0) continue;
+
+            // Two-call idiom: ask for the count, then the values.
+            vk::VkDrmFormatModifierPropertiesListEXT list{};
+            list.sType = vk::VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+            vk::VkFormatProperties2 props{};
+            props.sType = vk::VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+            props.pNext = &list;
+            api_->GetPhysicalDeviceFormatProperties2(phys_, vkf, &props);
+            if (list.drmFormatModifierCount == 0) continue;
+
+            std::vector<vk::VkDrmFormatModifierPropertiesEXT>
+                mods(list.drmFormatModifierCount);
+            list.pDrmFormatModifierProperties = mods.data();
+            api_->GetPhysicalDeviceFormatProperties2(phys_, vkf, &props);
+
+            for (const auto& m : mods) {
+                // Only advertise what can actually be SAMPLED. A modifier the
+                // driver lists but cannot sample would have clients allocate
+                // buffers that fail to import later, which reads as a broken
+                // client rather than a bad advertisement.
+                constexpr vk::Flags kSampled = 0x00000001;  // SAMPLED_IMAGE_BIT
+                if ((m.drmFormatModifierTilingFeatures & kSampled) == 0) continue;
+                importable_.push_back(FormatModifier{
+                    f, static_cast<Modifier>(m.drmFormatModifier),
+                    // Scanout capability is a KMS question, not a Vulkan one:
+                    // it depends on the display hardware, not the renderer.
+                    // Left false until an Output can answer it, rather than
+                    // guessed here.
+                    false});
+            }
+        }
     }
 
     /// Create a timeline semaphore starting at `initial`.
@@ -1167,6 +1182,10 @@ class VulkanDevice {
         load_device_procs();
         if (api_->GetDeviceQueue == nullptr) return false;
         api_->GetDeviceQueue(device_, queue_family_, 0, &queue_);
+        // Now that the procs exist, ask the driver what it can import. Done
+        // once, here, so the query is immutable afterwards and safe to read
+        // from any thread -- a compositor asks it per client connection.
+        build_importable_formats();
         return queue_ != nullptr;
     }
 
@@ -2003,11 +2022,8 @@ class VulkanDevice {
     /// submit() right after the in-flight fence returns, which is the only
     /// moment that fact is known.
     std::uint64_t frames_completed_ = 0;
-    /// Built lazily by importable_formats(); mutable because that query is
-    /// logically const and is called from const context every time a client
-    /// asks what the compositor supports.
-    mutable std::vector<FormatModifier> importable_;
-    mutable bool                        formats_cached_ = false;
+    /// Built at device creation; see importable_formats() for why not lazily.
+    std::vector<FormatModifier> importable_;
 
     /// DRM fourcc -> VkFormat.
     ///

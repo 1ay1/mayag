@@ -27,8 +27,10 @@
 /// version is easier, because a frame counter is a perfect completion clock —
 /// there is no ambiguity about whether frame N is done.
 
+#include <cassert>
 #include <cstdint>
 #include <functional>
+#include <thread>
 #include <vector>
 
 namespace mayag::backend {
@@ -38,17 +40,33 @@ namespace mayag::backend {
 /// The contract is one number: `frames_completed`. Anything retired while
 /// rendering frame N is safe to free once the GPU has finished N, and the
 /// caller is the only one who knows when that is. Keeping the clock outside
-/// this class is what stops it needing a device, a queue, or a fence — it is
+/// this class is what stops it needing a device, a queue, or a fence -- it is
 /// pure bookkeeping and can be unit-tested without a GPU at all.
+///
+/// THREADING: single-threaded, and deliberately not made otherwise.
+///
+/// Every call must happen on the thread that owns the device. That is not a
+/// limitation to work around, it is the same rule the runtime already keeps
+/// for update(): one thread owns the state, so there is nothing to race and
+/// nothing to lock. A mutex here would be worse than useless -- it would make
+/// the vector safe while leaving the actual hazard untouched, because the
+/// DELETERS call into Vulkan, and a VkDevice may not be used concurrently
+/// from two threads either. Locking the bookkeeping would hide that.
+///
+/// The rule is checked in debug builds rather than documented and hoped for:
+/// the first call binds the owning thread and every later one asserts. A
+/// compositor that releases buffers off the render thread finds out
+/// immediately, instead of via a corrupted free list under load.
 class Reclaimer {
   public:
     /// Retire `free_it`, to be called once frame `used_in` has completed.
     ///
     /// The deleter is a closure rather than a handle+type pair because the
-    /// resources being freed are heterogeneous — image, view, memory, and
-    /// they must be destroyed in that order — and expressing that as a
+    /// resources being freed are heterogeneous -- image, view, memory, and
+    /// they must be destroyed in that order -- and expressing that as a
     /// tagged union buys nothing over letting the caller say it directly.
     void retire(std::uint64_t used_in, std::function<void()> free_it) {
+        check_thread();
         pending_.push_back(Entry{used_in, std::move(free_it)});
     }
 
@@ -58,6 +76,7 @@ class Reclaimer {
     /// there is nothing to do, which is the common case: the vector is empty
     /// and this is a branch.
     void collect(std::uint64_t frames_completed) {
+        check_thread();
         for (auto it = pending_.begin(); it != pending_.end();) {
             if (it->used_in > frames_completed) { ++it; continue; }
             if (it->free_it) it->free_it();
@@ -67,10 +86,11 @@ class Reclaimer {
 
     /// Free EVERYTHING, regardless of frame.
     ///
-    /// Only correct after the device really is idle — teardown, where a
+    /// Only correct after the device really is idle -- teardown, where a
     /// blocking wait is the right answer because the device is going away and
     /// nothing can be left holding its memory.
     void collect_all() {
+        check_thread();
         for (auto& e : pending_)
             if (e.free_it) e.free_it();
         pending_.clear();
@@ -84,6 +104,29 @@ class Reclaimer {
         std::function<void()> free_it;
     };
     std::vector<Entry> pending_;
+
+    /// Bind the owning thread on first use, then assert on every call.
+    ///
+    /// Debug-only: in a release build this compiles to nothing, because the
+    /// check exists to catch a programming error during development, not to
+    /// defend against one at runtime. A wrong-thread call is a bug in the
+    /// compositor, and the earliest possible crash is the kindest outcome.
+    void check_thread() const noexcept {
+#ifndef NDEBUG
+        const auto self = std::this_thread::get_id();
+        if (owner_ == std::thread::id{}) {
+            owner_ = self;
+        } else {
+            assert(owner_ == self &&
+                   "Reclaimer is single-threaded: every call must be on the "
+                   "thread that owns the device. Releasing a buffer off the "
+                   "render thread is the usual cause.");
+        }
+#endif
+    }
+#ifndef NDEBUG
+    mutable std::thread::id owner_{};
+#endif
 };
 
 }  // namespace mayag::backend

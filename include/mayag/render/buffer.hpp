@@ -36,6 +36,7 @@
 #include <variant>
 #include <vector>
 
+#include "mayag/core/math.hpp"
 #include "mayag/render/draw_list.hpp"   // ImageData
 
 namespace mayag {
@@ -64,6 +65,22 @@ inline constexpr Fourcc abgr8888 = fourcc('A', 'B', '2', '4');
 inline constexpr Fourcc xbgr8888 = fourcc('X', 'B', '2', '4');
 /// What ImageData is: 8 bits per channel, R first in memory.
 inline constexpr Fourcc rgba8888 = abgr8888;
+
+// Planar YUV, which is what every video source produces. A media player or a
+// screen-capture client hands the compositor one of these, not RGB, so a
+// framework that cannot take them makes every video path pay a conversion it
+// should not.
+//
+// Named here rather than left to each caller because the PLANE LAYOUT is part
+// of the format and easy to get wrong: NV12 interleaves U and V in one plane,
+// YUV420 keeps them separate, and both subsample chroma by two in each
+// direction.
+
+/// Y plane + interleaved UV plane, chroma at half resolution. The most common
+/// hardware decoder output there is.
+inline constexpr Fourcc nv12 = fourcc('N', 'V', '1', '2');
+/// Y, U and V in three separate planes, chroma at half resolution.
+inline constexpr Fourcc yuv420 = fourcc('Y', 'U', '1', '2');
 }  // namespace formats
 
 /// A DRM format modifier: how the pixels are arranged in memory.
@@ -232,6 +249,91 @@ to_rgba8(const Shm& src, int width, int height) {
             // and may hold anything. Reading it as alpha is why some clients
             // render invisible.
             q[3] = opaque ? 0xff : p[a];
+        }
+    }
+    return out;
+}
+
+/// Convert planar YUV to tightly-packed RGBA8.
+///
+/// Every video source produces YUV, so a framework that cannot take it makes
+/// each video path do this itself -- and the colour maths is exactly the kind
+/// of thing that is wrong in a way nobody notices until they compare two
+/// players side by side.
+///
+/// `planes` are the per-plane bases and strides, matching a Dmabuf's layout.
+/// NV12 wants two, YUV420 three.
+///
+/// The conversion is BT.601 limited-range, which is what almost every buffer
+/// arriving over Wayland actually is: Y spans 16..235 and chroma 16..240,
+/// with the remaining values reserved. Treating limited range as full washes
+/// blacks grey and clips highlights -- the single most common colour bug in
+/// video pipelines, and invisible unless you know to look for it.
+///
+/// Returns nullptr for anything unsupported.
+struct YuvPlane {
+    const std::uint8_t* data = nullptr;
+    std::uint32_t       stride = 0;
+};
+
+[[nodiscard]] inline std::shared_ptr<const ImageData>
+yuv_to_rgba8(Fourcc format, std::span<const YuvPlane> planes,
+             int width, int height) {
+    if (width <= 0 || height <= 0) return nullptr;
+
+    const bool is_nv12 = format == formats::nv12;
+    const bool is_i420 = format == formats::yuv420;
+    if (!is_nv12 && !is_i420) return nullptr;
+    if (planes.size() < (is_nv12 ? 2u : 3u)) return nullptr;
+    for (std::size_t i = 0; i < (is_nv12 ? 2u : 3u); ++i) {
+        if (planes[i].data == nullptr || planes[i].stride == 0) return nullptr;
+    }
+
+    auto out = std::make_shared<ImageData>();
+    out->width = width;
+    out->height = height;
+    out->rgba.resize(static_cast<std::size_t>(width) * height * 4);
+
+    for (int y = 0; y < height; ++y) {
+        const std::uint8_t* yr =
+            planes[0].data + static_cast<std::size_t>(y) * planes[0].stride;
+        // Chroma is subsampled by two vertically as well as horizontally, so
+        // two output rows read the same chroma row.
+        const int cy = y / 2;
+        std::uint8_t* dst =
+            out->rgba.data() + static_cast<std::size_t>(y) * width * 4;
+
+        for (int x = 0; x < width; ++x) {
+            const int cx = x / 2;
+            int u = 0, v = 0;
+            if (is_nv12) {
+                // U and V interleaved in one plane, two bytes per chroma
+                // sample.
+                const std::uint8_t* uv = planes[1].data +
+                    static_cast<std::size_t>(cy) * planes[1].stride +
+                    static_cast<std::size_t>(cx) * 2;
+                u = uv[0];
+                v = uv[1];
+            } else {
+                u = planes[1].data[static_cast<std::size_t>(cy) * planes[1].stride + cx];
+                v = planes[2].data[static_cast<std::size_t>(cy) * planes[2].stride + cx];
+            }
+
+            // BT.601 limited range. The 16 and 128 offsets are the whole
+            // point: Y starts at 16, not 0, and chroma is centred on 128.
+            const int c = static_cast<int>(yr[x]) - 16;
+            const int d = u - 128;
+            const int e = v - 128;
+
+            const int r = (298 * c + 409 * e + 128) >> 8;
+            const int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+            const int b = (298 * c + 516 * d + 128) >> 8;
+
+            std::uint8_t* q = dst + static_cast<std::size_t>(x) * 4;
+            q[0] = static_cast<std::uint8_t>(num::clamp(r, 0, 255));
+            q[1] = static_cast<std::uint8_t>(num::clamp(g, 0, 255));
+            q[2] = static_cast<std::uint8_t>(num::clamp(b, 0, 255));
+            q[3] = 0xff;    // video is opaque
         }
     }
     return out;

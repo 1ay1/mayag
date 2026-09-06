@@ -216,6 +216,19 @@ template <typename AtlasT>
 ///
 /// So a backend is a TRANSPORT: get buffers to the GPU, run N instanced draws,
 /// get pixels back. That is the whole job.
+///
+/// THREADING: everything here belongs to ONE thread -- the one that owns the
+/// device -- and that is a contract, not an oversight.
+///
+/// It is the same rule the runtime keeps for update(), for the same reason:
+/// a graphics API does not allow concurrent use of a device from two threads
+/// anyway, so making the bookkeeping thread-safe would buy nothing while
+/// hiding the real hazard. A compositor that wants to import buffers off the
+/// render thread must hand them across, not call in.
+///
+/// The two things that genuinely are safe from any thread say so on
+/// themselves: `importable_formats()` and `sync_caps()` read state fixed at
+/// device creation, which is what makes them usable from a client connection.
 class Device {
   public:
     virtual ~Device() = default;
@@ -294,6 +307,11 @@ class Device {
     /// is how clients end up allocating buffers that force a copy on every
     /// frame. Empty means "cannot import", which is the honest answer for the
     /// software rasteriser.
+    ///
+    /// Safe from ANY thread: built at device creation and immutable after,
+    /// because the call site is a client connection rather than the frame
+    /// loop. A lazily-filled cache here would look like a pure getter and
+    /// race the moment two clients bound at once.
     [[nodiscard]] virtual std::span<const FormatModifier>
     importable_formats() const { return {}; }
 
@@ -363,6 +381,11 @@ class Device {
     /// per client surface: two subsystems pick the same number and silently
     /// overwrite each other's pixels. Slot 0 is reserved for the glyph atlas,
     /// so allocation starts at 1.
+    ///
+    /// Device-thread only, like everything else here. Deliberately NOT an
+    /// atomic: making the counter safe while `acquire()` around it is not
+    /// would advertise a guarantee that does not hold, which is worse than
+    /// the plain increment that at least reads as what it is.
     [[nodiscard]] virtual std::uint32_t next_upload_slot() {
         return ++upload_slot_;
     }
@@ -379,6 +402,10 @@ class Device {
     /// is: promising a client explicit sync and then falling back to implicit
     /// is worse than never offering it, because the client will have stopped
     /// inserting its own barriers.
+    ///
+    /// Safe from ANY thread: fixed at device creation and never written
+    /// afterwards, which is what lets a compositor answer a client connection
+    /// without hopping to the render thread.
     [[nodiscard]] virtual SyncCaps sync_caps() const noexcept { return {}; }
 
     /// Wait until a client's timeline point passes.

@@ -399,6 +399,110 @@ int main() {
               "rather than shown garbage");
     }
 
+    // ── YUV: what every video client actually sends ────────────────
+    //
+    // A media player or screen-capture client hands over NV12, not RGB. This
+    // belongs in mayag by its own rule -- pixel format handling, wrong in a
+    // way that shows as wrong colours -- while the DRM backend that receives
+    // it does not.
+    section("planar YUV converts, with the right colour range");
+    {
+        const int w = 4, h = 4;
+        // Mid-grey in BT.601 LIMITED range: Y=126 is the middle of 16..235,
+        // chroma centred at 128 means no colour.
+        std::vector<std::uint8_t> yp(static_cast<std::size_t>(w) * h, 126);
+        std::vector<std::uint8_t> uv(static_cast<std::size_t>(w / 2) * (h / 2) * 2, 128);
+
+        const YuvPlane nv12_planes[] = {
+            {yp.data(), static_cast<std::uint32_t>(w)},
+            {uv.data(), static_cast<std::uint32_t>(w)},
+        };
+        const auto rgb = yuv_to_rgba8(formats::nv12, nv12_planes, w, h);
+        check(rgb != nullptr, "NV12 converts");
+        check(rgb->rgba[0] == rgb->rgba[1] && rgb->rgba[1] == rgb->rgba[2],
+              "chroma at 128 is neutral grey, with no colour cast");
+        check(rgb->rgba[3] == 0xff, "and video is opaque");
+
+        // The range check that matters. Y=16 is BLACK in limited range, not
+        // dark grey -- treating limited as full washes blacks out, which is
+        // the most common colour bug in video pipelines and invisible unless
+        // you compare two players side by side.
+        std::vector<std::uint8_t> black(static_cast<std::size_t>(w) * h, 16);
+        const YuvPlane black_planes[] = {
+            {black.data(), static_cast<std::uint32_t>(w)},
+            {uv.data(), static_cast<std::uint32_t>(w)},
+        };
+        const auto dark = yuv_to_rgba8(formats::nv12, black_planes, w, h);
+        check(dark != nullptr && dark->rgba[0] == 0,
+              "Y=16 is BLACK, because the range is limited (16..235) not full");
+
+        // And Y=235 is white, not merely bright.
+        std::vector<std::uint8_t> white(static_cast<std::size_t>(w) * h, 235);
+        const YuvPlane white_planes[] = {
+            {white.data(), static_cast<std::uint32_t>(w)},
+            {uv.data(), static_cast<std::uint32_t>(w)},
+        };
+        const auto bright = yuv_to_rgba8(formats::nv12, white_planes, w, h);
+        check(bright != nullptr && bright->rgba[0] == 255,
+              "and Y=235 is white, so the full range is used");
+
+        // Three-plane I420, where U and V are separate rather than
+        // interleaved -- the layout is part of the format.
+        std::vector<std::uint8_t> up(static_cast<std::size_t>(w / 2) * (h / 2), 128);
+        std::vector<std::uint8_t> vp(static_cast<std::size_t>(w / 2) * (h / 2), 128);
+        const YuvPlane i420_planes[] = {
+            {yp.data(), static_cast<std::uint32_t>(w)},
+            {up.data(), static_cast<std::uint32_t>(w / 2)},
+            {vp.data(), static_cast<std::uint32_t>(w / 2)},
+        };
+        const auto i420 = yuv_to_rgba8(formats::yuv420, i420_planes, w, h);
+        check(i420 != nullptr, "YUV420 converts through its three planes");
+        check(i420->rgba[0] == rgb->rgba[0],
+              "agreeing with NV12 for the same colour, so the plane layout is "
+              "handled rather than guessed");
+
+        // Too few planes must be refused, not read out of bounds.
+        const YuvPlane one[] = {{yp.data(), static_cast<std::uint32_t>(w)}};
+        check(yuv_to_rgba8(formats::nv12, one, w, h) == nullptr,
+              "a buffer with too few planes is refused rather than read past "
+              "its end");
+        check(yuv_to_rgba8(formats::argb8888, nv12_planes, w, h) == nullptr,
+              "and an RGB format is not mistaken for planar");
+    }
+
+    // ── the threading contract ───────────────────────────────────
+    //
+    // A Device belongs to ONE thread, like update() does. The two queries a
+    // compositor makes from a client connection -- which is NOT the render
+    // thread -- are the exceptions, and they are safe because they read state
+    // fixed at device creation.
+    //
+    // This was a real bug: importable_formats() built its cache lazily, so
+    // two clients binding zwp_linux_dmabuf_v1 at once would both fill it. It
+    // is const and looks like a pure getter, which is exactly why nothing
+    // warned. Now the list is built once at creation and only read after.
+    section("queries a compositor makes off-thread are immutable");
+    {
+        auto dev = backend::SoftwareBackend::create({}, Vec2{64, 64}, 1.0f);
+        backend::Device& sw = *dev;
+
+        // Reading these from many threads must be safe by construction, not
+        // by luck. TSan on the concurrency suite is what proves it; this
+        // asserts the values are stable, which is the observable half.
+        const auto a = sw.importable_formats();
+        const auto b = sw.importable_formats();
+        check(a.data() == b.data() && a.size() == b.size(),
+              "importable_formats returns the SAME storage every call -- "
+              "nothing is built on demand");
+
+        const auto c1 = sw.sync_caps();
+        const auto c2 = sw.sync_caps();
+        check(c1.timeline == c2.timeline &&
+              c1.import_syncobj == c2.import_syncobj,
+              "and sync_caps is fixed at creation, so a client connection can "
+              "ask without hopping to the render thread");
+    }
+
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;
