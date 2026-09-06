@@ -22,6 +22,12 @@
 #include "backend.hpp"   // AtlasView / view_of
 #include "software.hpp"
 
+// dup()/close(): a dmabuf fd is borrowed, and Vulkan takes ownership of the
+// descriptor it is handed, so import duplicates first.
+#if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
+
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -390,6 +396,239 @@ class VulkanDevice {
         return 1;
     }
 
+    /// Import a dmabuf as a sampleable image WITHOUT copying its pixels.
+    ///
+    /// This is the operation a compositor is built on. A client hands over an
+    /// fd; the driver maps that same physical memory as a VkImage, and the
+    /// bytes never travel. The alternative — read the fd, convert, upload —
+    /// costs ~8 MB and ~6 ms per 1080p frame and is what makes naive
+    /// compositors stutter.
+    ///
+    /// Three things must line up or the import silently samples garbage:
+    ///   * the FORMAT (DRM fourcc -> VkFormat)
+    ///   * the MODIFIER, which describes the tiling; a mismatch is not an
+    ///     error, it is wrong pixels
+    ///   * the per-plane offset/stride, passed explicitly rather than guessed
+    ///
+    /// The fd is BORROWED: dup() before handing it to Vulkan, which takes
+    /// ownership of what it is given. See render/buffer.hpp for why the
+    /// borrow lasts exactly one call.
+    [[nodiscard]] ImportResult import_dmabuf(const Dmabuf& d, int w, int h) {
+        if (!valid_ || !dmabuf_import_) {
+            return std::unexpected(ImportError::not_supported);
+        }
+        if (d.n_planes <= 0 || d.planes[0].fd < 0 || w <= 0 || h <= 0) {
+            return std::unexpected(ImportError::invalid_buffer);
+        }
+        const int vk_format = vk_format_of(d.format);
+        if (vk_format == 0) {
+            return std::unexpected(ImportError::unsupported_format);
+        }
+
+        // Describe the layout EXPLICITLY. The driver must be told the
+        // modifier and each plane's offset and stride; asking it to infer
+        // them is how tiled buffers come out scrambled.
+        std::array<vk::VkSubresourceLayout, 4> layouts{};
+        for (int i = 0; i < d.n_planes; ++i) {
+            layouts[static_cast<std::size_t>(i)].offset = d.planes[static_cast<std::size_t>(i)].offset;
+            layouts[static_cast<std::size_t>(i)].rowPitch = d.planes[static_cast<std::size_t>(i)].stride;
+        }
+        vk::VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info{};
+        mod_info.sType = vk::VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
+        mod_info.drmFormatModifier = static_cast<std::uint64_t>(d.modifier);
+        mod_info.drmFormatModifierPlaneCount = static_cast<std::uint32_t>(d.n_planes);
+        mod_info.pPlaneLayouts = layouts.data();
+
+        vk::VkExternalMemoryImageCreateInfo ext_info{};
+        ext_info.sType = vk::VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+        ext_info.handleTypes = vk::VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+        ext_info.pNext = &mod_info;
+
+        vk::VkImageCreateInfo ici{};
+        ici.sType = vk::VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.pNext = &ext_info;
+        ici.imageType = 1;                    // VK_IMAGE_TYPE_2D
+        ici.format = vk_format;
+        ici.extent = {static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), 1};
+        ici.mipLevels = 1;
+        ici.arrayLayers = 1;
+        ici.samples = 1;
+        ici.tiling = vk::VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+        ici.usage = vk::VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.sharingMode = 0;
+        ici.initialLayout = 0;                // VK_IMAGE_LAYOUT_UNDEFINED
+
+        vk::VkImage image = nullptr;
+        if (api_->CreateImage(device_, &ici, nullptr, &image) != vk::VK_SUCCESS ||
+            image == nullptr) {
+            return std::unexpected(ImportError::unsupported_format);
+        }
+
+        // Which memory types can back THIS fd? Asking the driver rather than
+        // reusing the requirements of a normal image matters: an imported
+        // buffer may live in memory an ordinary allocation would never pick.
+        vk::VkMemoryFdPropertiesKHR fd_props{};
+        fd_props.sType = vk::VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
+        if (api_->GetMemoryFdPropertiesKHR == nullptr ||
+            api_->GetMemoryFdPropertiesKHR(
+                device_, vk::VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+                d.planes[0].fd, &fd_props) != vk::VK_SUCCESS) {
+            api_->DestroyImage(device_, image, nullptr);
+            return std::unexpected(ImportError::invalid_buffer);
+        }
+
+        vk::VkMemoryRequirements req{};
+        api_->GetImageMemoryRequirements(device_, image, &req);
+        const std::uint32_t usable = req.memoryTypeBits & fd_props.memoryTypeBits;
+        // Imported memory is device-local by nature; ask for no host
+        // properties so any matching type qualifies.
+        const std::uint32_t type = find_memory(usable, 0);
+        if (usable == 0) {
+            api_->DestroyImage(device_, image, nullptr);
+            return std::unexpected(ImportError::unsupported_format);
+        }
+
+        // dup() because Vulkan CLOSES the fd it is given, on success and on
+        // failure. Handing over the caller's fd would close a descriptor the
+        // client still owns -- a bug that shows up much later as a client
+        // whose next frame is silently corrupt.
+        const int dup_fd = ::dup(d.planes[0].fd);
+        if (dup_fd < 0) {
+            api_->DestroyImage(device_, image, nullptr);
+            return std::unexpected(ImportError::out_of_memory);
+        }
+
+        vk::VkImportMemoryFdInfoKHR import_info{};
+        import_info.sType = vk::VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+        import_info.handleType = vk::VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+        import_info.fd = dup_fd;
+
+        // A dedicated allocation, which most drivers require for imported
+        // images and none are harmed by.
+        vk::VkMemoryDedicatedAllocateInfo ded{};
+        ded.sType = vk::VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+        ded.image = image;
+        import_info.pNext = &ded;
+
+        vk::VkMemoryAllocateInfo mai{};
+        mai.sType = vk::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.pNext = &import_info;
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = type;
+
+        vk::VkDeviceMemory mem = nullptr;
+        if (api_->AllocateMemory(device_, &mai, nullptr, &mem) != vk::VK_SUCCESS) {
+            ::close(dup_fd);              // Vulkan did not take it after all
+            api_->DestroyImage(device_, image, nullptr);
+            return std::unexpected(ImportError::out_of_memory);
+        }
+        if (api_->BindImageMemory(device_, image, mem, 0) != vk::VK_SUCCESS) {
+            api_->FreeMemory(device_, mem, nullptr);
+            api_->DestroyImage(device_, image, nullptr);
+            return std::unexpected(ImportError::invalid_buffer);
+        }
+
+        vk::VkImageView view = nullptr;
+        vk::VkImageViewCreateInfo vci{};
+        vci.sType = vk::VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image = image;
+        vci.viewType = 1;                     // VK_IMAGE_VIEW_TYPE_2D
+        vci.format = vk_format;
+        vci.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (api_->CreateImageView(device_, &vci, nullptr, &view) != vk::VK_SUCCESS) {
+            api_->FreeMemory(device_, mem, nullptr);
+            api_->DestroyImage(device_, image, nullptr);
+            return std::unexpected(ImportError::invalid_buffer);
+        }
+
+        // The client wrote these pixels with the GPU, outside any layout mayag
+        // knows about, so the image arrives in UNDEFINED and must be moved to
+        // a layout a shader can sample.
+        one_shot([&](vk::VkCommandBuffer cb) {
+            constexpr vk::Flags kShaderRead = 0x00000020;   // ACCESS_SHADER_READ_BIT
+            constexpr vk::Flags kTopOfPipe  = 0x00000001;   // STAGE_TOP_OF_PIPE_BIT
+            constexpr vk::Flags kFragment   = 0x00000080;   // STAGE_FRAGMENT_SHADER_BIT
+            barrier_image(cb, image, 0 /*UNDEFINED*/,
+                          vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          0, kShaderRead, kTopOfPipe, kFragment);
+        });
+
+        const std::uint32_t slot = next_import_slot_++;
+        imports_.push_back(Imported{slot, image, view, mem});
+        return TextureHandle{slot};
+    }
+
+    /// Drop an imported texture. Waits, for the same reason release_texture
+    /// does: a frame in flight may still be sampling it.
+    void release_import(std::uint32_t slot) {
+        const auto it = std::find_if(imports_.begin(), imports_.end(),
+                                     [&](const Imported& i) { return i.slot == slot; });
+        if (it == imports_.end()) return;
+        if (api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
+        if (it->view) api_->DestroyImageView(device_, it->view, nullptr);
+        if (it->image) api_->DestroyImage(device_, it->image, nullptr);
+        if (it->memory) api_->FreeMemory(device_, it->memory, nullptr);
+        imports_.erase(it);
+    }
+
+    /// Whether this device can import at all. False on a driver without the
+    /// external-memory extensions, which is a normal configuration.
+    [[nodiscard]] bool can_import() const noexcept { return dmabuf_import_; }
+
+    /// Format+modifier pairs this driver will accept for import.
+    ///
+    /// Built once and cached: a compositor advertises this list to every
+    /// client that binds zwp_linux_dmabuf_v1, so it is asked constantly and
+    /// never changes. Querying the driver rather than hardcoding LINEAR is
+    /// the difference between clients allocating tiled buffers the GPU
+    /// samples directly and clients allocating linear ones that force a
+    /// detiling blit on every frame.
+    [[nodiscard]] std::span<const FormatModifier> importable_formats() const {
+        if (!formats_cached_) {
+            formats_cached_ = true;
+            if (!dmabuf_import_ ||
+                api_->GetPhysicalDeviceFormatProperties2 == nullptr) {
+                return {};
+            }
+            for (const Fourcc f : {formats::argb8888, formats::xrgb8888,
+                                   formats::abgr8888, formats::xbgr8888}) {
+                const int vkf = vk_format_of(f);
+                if (vkf == 0) continue;
+
+                // Two-call idiom: ask for the count, then the values.
+                vk::VkDrmFormatModifierPropertiesListEXT list{};
+                list.sType = vk::VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+                vk::VkFormatProperties2 props{};
+                props.sType = vk::VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+                props.pNext = &list;
+                api_->GetPhysicalDeviceFormatProperties2(phys_, vkf, &props);
+                if (list.drmFormatModifierCount == 0) continue;
+
+                std::vector<vk::VkDrmFormatModifierPropertiesEXT>
+                    mods(list.drmFormatModifierCount);
+                list.pDrmFormatModifierProperties = mods.data();
+                api_->GetPhysicalDeviceFormatProperties2(phys_, vkf, &props);
+
+                for (const auto& m : mods) {
+                    // Only advertise what can actually be SAMPLED. A modifier
+                    // the driver lists but cannot sample would have clients
+                    // allocate buffers that fail to import later, which reads
+                    // as a broken client rather than a bad advertisement.
+                    constexpr vk::Flags kSampled = 0x00000001;  // SAMPLED_IMAGE_BIT
+                    if ((m.drmFormatModifierTilingFeatures & kSampled) == 0) continue;
+                    importable_.push_back(FormatModifier{
+                        f, static_cast<Modifier>(m.drmFormatModifier),
+                        // Scanout capability is a KMS question, not a Vulkan
+                        // one -- it depends on the display hardware, not the
+                        // renderer. Left false until a DRM backend can answer
+                        // it, rather than guessed here.
+                        false});
+                }
+            }
+        }
+        return importable_;
+    }
+
     void release_texture() {
         // Same hazard as the resize path in upload_texture: a frame in flight
         // may still be sampling this image, and freeing it under the GPU is
@@ -472,7 +711,20 @@ class VulkanDevice {
         app.sType = vk::VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app.pApplicationName = "mayag";
         app.pEngineName = "mayag";
-        app.apiVersion = (1u << 22);   // VK_API_VERSION_1_0
+        // Vulkan 1.1.
+        //
+        // 1.0 would do for everything mayag draws, but the DRM format
+        // modifier query is vkGetPhysicalDeviceFormatProperties2, which is
+        // 1.1 CORE -- under a 1.0 instance the loader resolves it to null and
+        // the driver's modifier list comes back empty, so zero-copy import
+        // silently degrades to "unsupported" on hardware that supports it
+        // perfectly well. That failure is invisible: no error, just no
+        // formats.
+        //
+        // 1.1 is from 2018 and is present on every driver that has the
+        // external-memory extensions in the first place, so this costs no
+        // compatibility. The instance falls back below if creation fails.
+        app.apiVersion = (1u << 22) | (1u << 12);   // VK_API_VERSION_1_1
 
         std::vector<const char*> exts;
         if (want_surface) {
@@ -502,6 +754,10 @@ class VulkanDevice {
         MG_LOAD(EnumeratePhysicalDevices, "vkEnumeratePhysicalDevices");
         MG_LOAD(GetPhysicalDeviceQueueFamilyProperties, "vkGetPhysicalDeviceQueueFamilyProperties");
         MG_LOAD(GetPhysicalDeviceMemoryProperties, "vkGetPhysicalDeviceMemoryProperties");
+        // Needed before device creation to decide whether zero-copy import
+        // can be requested at all.
+        MG_LOAD(EnumerateDeviceExtensionProperties, "vkEnumerateDeviceExtensionProperties");
+        MG_LOAD(GetPhysicalDeviceFormatProperties2, "vkGetPhysicalDeviceFormatProperties2");
         MG_LOAD(CreateDevice, "vkCreateDevice");
         MG_LOAD(DestroyInstance, "vkDestroyInstance");
         MG_LOAD(GetDeviceProcAddr, "vkGetDeviceProcAddr");
@@ -512,6 +768,23 @@ class VulkanDevice {
         MG_LOAD(GetPhysicalDeviceSurfacePresentModesKHR, "vkGetPhysicalDeviceSurfacePresentModesKHR");
         MG_LOAD(CreateWaylandSurfaceKHR, "vkCreateWaylandSurfaceKHR");
         #undef MG_LOAD
+    }
+
+    /// Is `name` among the physical device's supported extensions?
+    ///
+    /// Asked before requesting anything optional: enabling an unsupported
+    /// device extension makes vkCreateDevice fail outright, which would turn
+    /// "this GPU cannot do zero-copy" into "mayag does not start".
+    [[nodiscard]] bool has_device_extension(const char* name) const {
+        if (api_->EnumerateDeviceExtensionProperties == nullptr) return false;
+        std::uint32_t n = 0;
+        api_->EnumerateDeviceExtensionProperties(phys_, nullptr, &n, nullptr);
+        if (n == 0) return false;
+        std::vector<vk::VkExtensionProperties> props(n);
+        api_->EnumerateDeviceExtensionProperties(phys_, nullptr, &n, props.data());
+        for (const auto& p : props)
+            if (std::strcmp(p.extensionName, name) == 0) return true;
+        return false;
     }
 
     void load_device_procs() {
@@ -540,6 +813,10 @@ class VulkanDevice {
         MG_LOAD(CreateImage, "vkCreateImage");
         MG_LOAD(DestroyImage, "vkDestroyImage");
         MG_LOAD(GetImageMemoryRequirements, "vkGetImageMemoryRequirements");
+        // Zero-copy import. Null when the extensions were not enabled, which
+        // import() checks before doing anything.
+        MG_LOAD(GetMemoryFdPropertiesKHR, "vkGetMemoryFdPropertiesKHR");
+        MG_LOAD(GetImageSubresourceLayout, "vkGetImageSubresourceLayout");
         MG_LOAD(BindImageMemory, "vkBindImageMemory");
         MG_LOAD(CreateImageView, "vkCreateImageView");
         MG_LOAD(DestroyImageView, "vkDestroyImageView");
@@ -630,6 +907,29 @@ class VulkanDevice {
 
         std::vector<const char*> dev_exts;
         if (!offscreen_ || surface_ != nullptr) dev_exts.push_back("VK_KHR_swapchain");
+
+        // Zero-copy dmabuf import, if the driver has it.
+        //
+        // Requested opportunistically rather than required: a device without
+        // these still runs every app, it just cannot import a client's buffer
+        // without copying. import() reports that honestly instead of failing
+        // to create a device at all. Together these are what let a compositor
+        // sample a client's window contents with the bytes never leaving the
+        // GPU.
+        if (has_device_extension("VK_EXT_image_drm_format_modifier") &&
+            has_device_extension("VK_KHR_external_memory_fd") &&
+            has_device_extension("VK_EXT_external_memory_dma_buf")) {
+            dev_exts.push_back("VK_KHR_external_memory");
+            dev_exts.push_back("VK_KHR_external_memory_fd");
+            dev_exts.push_back("VK_EXT_external_memory_dma_buf");
+            dev_exts.push_back("VK_EXT_image_drm_format_modifier");
+            // Required by image_drm_format_modifier.
+            dev_exts.push_back("VK_KHR_image_format_list");
+            dev_exts.push_back("VK_KHR_sampler_ycbcr_conversion");
+            dev_exts.push_back("VK_KHR_bind_memory2");
+            dev_exts.push_back("VK_KHR_get_memory_requirements2");
+            dmabuf_import_ = true;
+        }
 
         vk::VkDeviceCreateInfo dci{};
         dci.sType = vk::VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -1455,6 +1755,43 @@ class VulkanDevice {
     }
 
     // ── state ────────────────────────────────────────────────────────────
+
+    /// A buffer imported from a dmabuf. Kept in a list rather than a single
+    /// slot because a compositor holds one per client surface, not one total.
+    struct Imported {
+        std::uint32_t     slot = 0;
+        vk::VkImage       image = nullptr;
+        vk::VkImageView   view = nullptr;
+        vk::VkDeviceMemory memory = nullptr;
+    };
+    std::vector<Imported> imports_;
+    /// Slot 0 means "invalid handle", so numbering starts at 1.
+    std::uint32_t next_import_slot_ = 1;
+    bool          dmabuf_import_ = false;
+    /// Built lazily by importable_formats(); mutable because that query is
+    /// logically const and is called from const context every time a client
+    /// asks what the compositor supports.
+    mutable std::vector<FormatModifier> importable_;
+    mutable bool                        formats_cached_ = false;
+
+    /// DRM fourcc -> VkFormat.
+    ///
+    /// Returns 0 for anything unmapped, which import() turns into
+    /// unsupported_format. Deliberately small: these four cover almost every
+    /// desktop client, and adding YUV means adding sampler-ycbcr conversion,
+    /// which is a separate piece of work rather than another table row.
+    ///
+    /// Note the byte-order flip. DRM names channels in LITTLE-ENDIAN word
+    /// order and Vulkan names them in memory order, so DRM's ARGB8888 is
+    /// Vulkan's B8G8R8A8. Getting this backwards swaps red and blue -- the
+    /// classic "why is everything teal" compositor bug.
+    [[nodiscard]] static int vk_format_of(Fourcc f) noexcept {
+        constexpr int kB8G8R8A8_UNORM = 44;
+        constexpr int kR8G8B8A8_UNORM = 37;
+        if (f == formats::argb8888 || f == formats::xrgb8888) return kB8G8R8A8_UNORM;
+        if (f == formats::abgr8888 || f == formats::xbgr8888) return kR8G8B8A8_UNORM;
+        return 0;
+    }
 
     const A* api_ = nullptr;
     A local_api_{};

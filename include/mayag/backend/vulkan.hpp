@@ -258,6 +258,73 @@ struct VkImageViewCreateInfo {
     int sType; const void* pNext; Flags flags; VkImage image; int viewType; int format;
     VkComponentMapping components; VkImageSubresourceRange subresourceRange;
 };
+
+// ── external memory (VK_KHR_external_memory_fd) ──────────────────────────
+//
+// What makes zero-copy possible: a dmabuf fd becomes VkDeviceMemory without
+// the bytes ever passing through the CPU. Layouts mirror the real headers,
+// like every other struct here — mayag loads Vulkan dynamically and never
+// includes vulkan.h, so these must match the ABI exactly.
+
+enum : int {
+    VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR = 1000074000,
+    VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO = 1000127001,
+    VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR = 1000074001,
+    VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO = 1000072001,
+    VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT = 1000158004,
+    VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT = 1000158000,
+    VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2 = 1000059002,
+};
+
+/// The handle type mayag imports. dmabuf is the only one that matters here.
+inline constexpr Flags VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT = 0x00000200;
+
+/// Tiling that says "the layout is described by a DRM format modifier",
+/// as opposed to OPTIMAL (driver's choice) or LINEAR (row-major).
+inline constexpr int VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT = 1000158000;
+
+struct VkImportMemoryFdInfoKHR {
+    int sType; const void* pNext; Flags handleType; int fd;
+};
+struct VkMemoryDedicatedAllocateInfo {
+    int sType; const void* pNext; VkImage image; VkBuffer buffer;
+};
+struct VkMemoryFdPropertiesKHR {
+    int sType; void* pNext; std::uint32_t memoryTypeBits;
+};
+struct VkExternalMemoryImageCreateInfo {
+    int sType; const void* pNext; Flags handleTypes;
+};
+struct VkSubresourceLayout {
+    DeviceSize offset, size, rowPitch, arrayPitch, depthPitch;
+};
+struct VkImageDrmFormatModifierExplicitCreateInfoEXT {
+    int sType; const void* pNext;
+    std::uint64_t drmFormatModifier;
+    std::uint32_t drmFormatModifierPlaneCount;
+    const VkSubresourceLayout* pPlaneLayouts;
+};
+struct VkDrmFormatModifierPropertiesEXT {
+    std::uint64_t drmFormatModifier;
+    std::uint32_t drmFormatModifierPlaneCount;
+    Flags         drmFormatModifierTilingFeatures;
+};
+struct VkDrmFormatModifierPropertiesListEXT {
+    int sType; void* pNext;
+    std::uint32_t drmFormatModifierCount;
+    VkDrmFormatModifierPropertiesEXT* pDrmFormatModifierProperties;
+};
+struct VkFormatProperties {
+    Flags linearTilingFeatures, optimalTilingFeatures, bufferFeatures;
+};
+struct VkFormatProperties2 {
+    int sType; void* pNext; VkFormatProperties formatProperties;
+};
+/// Layout must match the real header: a fixed 256-byte name, then a version.
+struct VkExtensionProperties {
+    char          extensionName[256];
+    std::uint32_t specVersion;
+};
 struct VkSamplerCreateInfo {
     int sType; const void* pNext; Flags flags; int magFilter, minFilter, mipmapMode;
     int addressModeU, addressModeV, addressModeW; float mipLodBias; Bool32 anisotropyEnable;
@@ -490,6 +557,19 @@ struct Api {
     VkResult (*CreateImage)(VkDevice, const VkImageCreateInfo*, const void*, VkImage*) = nullptr;
     void (*DestroyImage)(VkDevice, VkImage, const void*) = nullptr;
     void (*GetImageMemoryRequirements)(VkDevice, VkImage, VkMemoryRequirements*) = nullptr;
+
+    // Extension entry points for zero-copy dmabuf import. Null when the
+    // extension is absent, which is how Device::import() reports
+    // ImportError::not_supported rather than crashing.
+    VkResult (*GetMemoryFdPropertiesKHR)(VkDevice, Flags, int,
+                                         VkMemoryFdPropertiesKHR*) = nullptr;
+    VkResult (*EnumerateDeviceExtensionProperties)(VkPhysicalDevice, const char*,
+                                                   std::uint32_t*,
+                                                   VkExtensionProperties*) = nullptr;
+    void (*GetPhysicalDeviceFormatProperties2)(VkPhysicalDevice, int,
+                                               VkFormatProperties2*) = nullptr;
+    VkResult (*GetImageSubresourceLayout)(VkDevice, VkImage, const void*,
+                                          VkSubresourceLayout*) = nullptr;
     VkResult (*BindImageMemory)(VkDevice, VkImage, VkDeviceMemory, DeviceSize) = nullptr;
     VkResult (*CreateImageView)(VkDevice, const VkImageViewCreateInfo*, const void*, VkImageView*) = nullptr;
     void (*DestroyImageView)(VkDevice, VkImageView, const void*) = nullptr;
@@ -666,6 +746,26 @@ class VulkanBackend final : public Device {
         (void)dev_.upload_texture(img->rgba.data(), img->width, img->height);
     }
     void release_image(std::uint32_t) override { dev_.release_texture(); }
+
+    /// Zero-copy import. Falls through to the copying path only when the
+    /// caller hands over memory mayag already owns.
+    [[nodiscard]] ImportResult import(const Buffer& buf) override {
+        if (!buf.valid()) return std::unexpected(ImportError::invalid_buffer);
+        if (const auto* d = std::get_if<Dmabuf>(&buf.storage)) {
+            return dev_.import_dmabuf(*d, buf.width, buf.height);
+        }
+        // Cpu and Shm are already CPU-side, so there is nothing to import --
+        // the caller should upload them. Saying so explicitly beats silently
+        // copying behind a name that promises not to.
+        return std::unexpected(ImportError::not_supported);
+    }
+
+    [[nodiscard]] std::span<const FormatModifier>
+    importable_formats() const override {
+        return dev_.importable_formats();
+    }
+
+    void release_texture(std::uint32_t slot) override { dev_.release_import(slot); }
 
     [[nodiscard]] bool render_offscreen(const DrawList& list, int w, int h,
                                         Color<Srgb> clear,

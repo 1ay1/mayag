@@ -21,7 +21,8 @@
 
 #include "../core/color.hpp"
 #include "../core/geometry.hpp"
-#include "../render/draw_list.hpp"
+#include "mayag/render/buffer.hpp"
+#include "mayag/render/draw_list.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -252,6 +253,48 @@ class Device {
     virtual void release_image(std::uint32_t /*id*/) {}
 
     virtual void release_texture(std::uint32_t /*slot*/) {}
+
+    // ── zero-copy buffer import ──────────────────────────────────────────
+    //
+    // upload_texture COPIES: it takes bytes the caller owns, in RGBA8, in
+    // system memory. That is the right contract for an app drawing its own
+    // UI, and the wrong one for a compositor, which never owns its pixels —
+    // a client hands it a dmabuf and the whole point is that those bytes are
+    // never copied and never touched by the CPU.
+    //
+    // So `import` is the general operation and `upload_texture` is the
+    // special case that happens to own its memory. A backend that implements
+    // neither still satisfies the interface.
+
+    /// Import `buf` WITHOUT copying, if this device can.
+    ///
+    /// Returning `expected` rather than a bare handle is deliberate: a
+    /// compositor must distinguish "this device will never accept that
+    /// format" (renegotiate with the client) from "no memory right now"
+    /// (retry), and it must be able to fall back to a copy without that
+    /// fallback looking like an error. A bool return collapses all three.
+    ///
+    /// The fds in a Dmabuf are BORROWED for the duration of this call. A
+    /// device that keeps the memory must dup() them. See render/buffer.hpp.
+    [[nodiscard]] virtual ImportResult import(const Buffer& buf) {
+        // Validate FIRST, so "you sent nonsense" and "this device cannot
+        // import" stay distinguishable even on a backend that supports
+        // nothing. A compositor answers those two very differently: one is a
+        // protocol error to report to the client, the other is a capability
+        // it should never have advertised.
+        if (!buf.valid()) return std::unexpected(ImportError::invalid_buffer);
+        return std::unexpected(ImportError::not_supported);
+    }
+
+    /// Format+modifier pairs this device can import.
+    ///
+    /// A compositor advertises these to clients (zwp_linux_dmabuf_v1) so they
+    /// allocate buffers the GPU can actually sample — getting this list wrong
+    /// is how clients end up allocating buffers that force a copy on every
+    /// frame. Empty means "cannot import", which is the honest answer for the
+    /// software rasteriser.
+    [[nodiscard]] virtual std::span<const FormatModifier>
+    importable_formats() const { return {}; }
 
     [[nodiscard]] virtual std::uint64_t frames_presented() const noexcept { return 0; }
 };
