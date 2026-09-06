@@ -437,6 +437,12 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_buffer_import_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_buffer_import_tests COMMAND mayag_buffer_import_tests)
 
+    # Outputs and hardware plane assignment: the compositor-side display path.
+    add_executable(mayag_output_tests tests/test_output.cpp)
+    target_link_libraries(mayag_output_tests PRIVATE mayag)
+    target_compile_options(mayag_output_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_output_tests COMMAND mayag_output_tests)
+
     # The same test under ThreadSanitizer. Not part of the default suite --
     # TSan is ~10x slower and needs a compatible toolchain -- but it is the
     # only thing that finds a race which does not happen to fire today.
