@@ -481,6 +481,56 @@ int main() {
               "a transparent layer hides nothing, whatever its size");
     }
 
+    // ── the seam holds ──────────────────────────────────────────
+    //
+    // mayag has no build-time dependencies: Vulkan and Wayland are dlopen'd
+    // at runtime, so a binary built anywhere runs anywhere. Every compositor
+    // addition has to keep that, and the moment it does not, an ordinary GUI
+    // app starts requiring compositor libraries it will never call and the
+    // headless test path gains a hardware dependency.
+    //
+    // This section is compiled proof rather than a promise: it uses the whole
+    // output layer while including nothing but mayag and the standard
+    // library. If someone adds a libdrm include to these headers, this file
+    // stops building.
+    //
+    // See docs/what-belongs-in-mayag.md for where the line is and why.
+    section("the compositor layer decides, it does not open devices");
+    {
+        // Everything below runs with no GPU, no display and no /dev access.
+        HeadlessOutput out;
+        out.set_plane_caps(PlaneCaps{2, false, false});
+
+        const Layer layers[] = {
+            make_layer(1920, 1080, Rect{{0, 0}, {1920, 1080}}, 0, true),
+            make_layer(300, 200, Rect{{50, 50}, {300, 200}}, 1, false),
+        };
+        const Rect previous[] = {Rect{{0, 0}, {1920, 1080}}};
+
+        const auto plan   = plan_planes(layers, out.plane_caps());
+        const auto dmg    = frame_damage(layers, previous);
+        const auto vis    = occlude(dmg, layers);
+        const auto commit = out.commit(layers);
+
+        check(!plan.empty(), "planes are assigned with no hardware present");
+        check(!dmg.empty(), "damage is computed with no display present");
+        check(vis.rects.size() <= dmg.rects.size(),
+              "occlusion only ever removes damage, never invents it");
+        check(commit.has_value(), "and a frame commits against a test double");
+
+        // A dmabuf fd is an int mayag stores and passes on. It NEVER opens
+        // one, which is exactly why libdrm is not a dependency: the fd comes
+        // from a client, through protocol code, and mayag only hands it to
+        // the driver it already loaded.
+        Dmabuf d{};
+        d.n_planes = 1;
+        d.planes[0] = DmabufPlane{99, 0, 4096};   // not a real fd, never used
+        const Buffer foreign{d, 64, 64};
+        check(foreign.valid(),
+              "a dmabuf descriptor is just data -- mayag never opens a device "
+              "node to make sense of it");
+    }
+
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;
