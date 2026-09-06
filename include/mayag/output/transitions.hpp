@@ -55,6 +55,13 @@ enum class WindowTransition : std::uint8_t {
 ///
 /// Holds springs rather than timers, so a window closed while still opening
 /// reverses smoothly from wherever it had reached, with the velocity it had.
+///
+/// NOT ANIMATED, on purpose: `Effects::backdrop_blur`. Animating a blur means
+/// re-blurring every frame of the transition, which is the one effect where
+/// "just animate it" costs real power -- a blur is a multi-tap sample per
+/// pixel, so a fading one is the most expensive thing on screen for exactly
+/// as long as it is least noticeable. A compositor that wants it can drive
+/// the field itself; deliberately not made easy.
 struct WindowMotion {
     /// 0 while absent, 1 while fully present. Everything else is derived from
     /// this, so a transition cannot get into a state where its opacity and
