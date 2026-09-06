@@ -17,6 +17,7 @@
 // reconstruct it from a flattened command stream.
 
 #include <mayag/mayag.hpp>
+#include <mayag/backend/tiled.hpp>
 #include <mayag/output/composite.hpp>
 #include <mayag/output/damage.hpp>
 #include <mayag/output/headless_output.hpp>
@@ -816,6 +817,77 @@ int main() {
         check(!w.animating() && !ws.animating() && !o.animating(),
               "and every transition eventually STOPS, so the compositor can "
               "go back to sleep");
+    }
+
+    // ── what a PROTOCOL LIBRARY needs ───────────────────────────
+    //
+    // A library that implements Wayland on top of mayag has obligations a
+    // compositor application does not, because it must serve clients it has
+    // never seen. These two came from asking what such a library would be
+    // forced to guess at.
+    section("a released buffer reports WHEN it is actually free");
+    {
+        // wl_buffer.release is a protocol library's hardest obligation and
+        // has no safe guess. Too early and the client overwrites pixels
+        // still being scanned out -- tearing that looks like a driver bug.
+        // Too late and the client blocks with nothing to draw into, which
+        // looks like the client stuttering. Only the renderer knows, because
+        // only it knows which frame last sampled the buffer.
+        auto dev = backend::SoftwareBackend::create({}, Vec2{64, 64}, 1.0f);
+        backend::Device& sw = *dev;
+
+        auto img = std::make_shared<ImageData>();
+        img->width = 8; img->height = 8;
+        img->rgba.assign(8 * 8 * 4, 0xAA);
+
+        const auto a = sw.acquire(Buffer::from(img));
+        check(a.has_value(), "a buffer is acquired");
+
+        bool freed = false;
+        sw.release_texture(a->handle.slot, [&] { freed = true; });
+        check(freed,
+              "a device holding nothing reports the buffer free immediately");
+
+        // The callback must fire even for a slot the device never held --
+        // otherwise a protocol library has to guess whether its callback was
+        // dropped, and a dropped release hangs the client forever.
+        bool unknown_freed = false;
+        sw.release_texture(9999, [&] { unknown_freed = true; });
+        check(unknown_freed,
+              "and for an unknown slot too -- a DROPPED release hangs the "
+              "client forever, so silence is never an acceptable answer");
+
+        // No callback is still valid: an app that does not care pays nothing.
+        sw.release_texture(a->handle.slot);
+        check(true, "releasing without a callback still works");
+    }
+
+    section("a display reports what wl_output.geometry has to send");
+    {
+        HeadlessOutput out;
+        const auto id = out.identity();
+        check(!id.make.empty() && !id.model.empty(),
+              "make and model are reported, so a protocol layer forwards "
+              "rather than inventing them");
+
+        // Identity is how a compositor remembers per-display settings across
+        // unplugs: a connector name like DP-1 is reused by whatever is
+        // plugged in next, while make/model/serial identify the actual panel.
+        out.set_identity(DisplayIdentity{"Dell", "U2720Q", "ABC123"});
+        check(out.identity().serial == "ABC123",
+              "including a serial, which is what actually identifies a panel "
+              "rather than the port it happens to be in");
+
+        check(out.subpixel() == Subpixel::unknown,
+              "subpixel layout defaults to UNKNOWN -- guessing RGB because it "
+              "is common gives a minority of users fringed text forever");
+        out.set_subpixel(Subpixel::horizontal_bgr);
+        check(out.subpixel() == Subpixel::horizontal_bgr,
+              "and is reported honestly when the display does say");
+
+        check(static_cast<int>(Subpixel::unknown) == 0,
+              "the values match wl_output.subpixel, so a protocol layer "
+              "forwards the number instead of translating it");
     }
 
     std::printf("\n%s  %d checks, %d failures\n",

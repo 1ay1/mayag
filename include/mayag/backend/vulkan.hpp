@@ -842,7 +842,10 @@ class VulkanBackend final : public Device {
         return dev_.importable_formats();
     }
 
-    void release_texture(std::uint32_t slot) override { dev_.release_import(slot); }
+    void release_texture(std::uint32_t slot,
+                         std::function<void()> on_free = {}) override {
+        dev_.release_import(slot, std::move(on_free));
+    }
 
     [[nodiscard]] SyncCaps sync_caps() const noexcept override {
         return dev_.sync_caps();

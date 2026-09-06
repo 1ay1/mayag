@@ -27,6 +27,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -266,7 +267,33 @@ class Device {
                               std::shared_ptr<const ImageData> /*img*/) {}
     virtual void release_image(std::uint32_t /*id*/) {}
 
-    virtual void release_texture(std::uint32_t /*slot*/) {}
+    /// Stop using a texture, and be told WHEN it is actually free.
+    ///
+    /// `on_free` is called on the device thread once the GPU has genuinely
+    /// finished with the buffer -- not when release was requested.
+    ///
+    /// This exists for `wl_buffer.release`, which is a protocol library's
+    /// hardest obligation and has no safe guess. Send it too early and the
+    /// client overwrites pixels still being scanned out, which looks like a
+    /// driver bug. Send it too late and the client blocks with nothing to
+    /// draw into, which looks like the client stuttering. Only the renderer
+    /// knows the answer, because only it knows which frame last sampled the
+    /// buffer.
+    ///
+    /// `export_release_point()` answers the same question for clients that
+    /// speak linux-drm-syncobj. This is the answer for everyone else -- the
+    /// wl_shm and implicit-sync majority -- which is why both exist.
+    ///
+    /// The callback runs on the DEVICE THREAD, like everything else here. A
+    /// protocol library that must send from another thread should post to
+    /// its own loop rather than send from inside this.
+    virtual void release_texture(std::uint32_t /*slot*/,
+                                 std::function<void()> on_free = {}) {
+        // The default device holds nothing, so a buffer is free immediately.
+        // Calling back rather than dropping the callback matters: a caller
+        // must never have to special-case "this backend does not report".
+        if (on_free) on_free();
+    }
 
     // ── zero-copy buffer import ──────────────────────────────────────────
     //

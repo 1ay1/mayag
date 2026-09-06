@@ -42,6 +42,38 @@
 
 namespace mayag::output {
 
+/// How a display's subpixels are arranged.
+///
+/// A client uses this to decide whether subpixel text antialiasing will help
+/// or hurt: rendering RGB-ordered subpixels on a BGR panel produces coloured
+/// fringes that look worse than no antialiasing at all. So it must be
+/// reported, and reported honestly -- `unknown` is the right answer when the
+/// display does not say, and guessing `horizontal_rgb` because it is the
+/// common case is how a minority of users get fringed text forever.
+///
+/// Values match wl_output.subpixel so a protocol layer forwards rather than
+/// translates.
+enum class Subpixel : std::uint8_t {
+    unknown = 0,
+    none,                ///< no subpixel structure: a projector, an OLED
+    horizontal_rgb,
+    horizontal_bgr,
+    vertical_rgb,
+    vertical_bgr,
+};
+
+/// Who made the display, as it identifies itself.
+///
+/// Carried because wl_output.geometry sends it, and because a compositor uses
+/// it to remember per-display settings across unplugs -- a connector name
+/// like "DP-1" is reused by whatever is plugged in next, while make/model and
+/// serial identify the actual panel.
+struct DisplayIdentity {
+    std::string make;      ///< manufacturer, from EDID
+    std::string model;
+    std::string serial;    ///< empty when the display does not report one
+};
+
 /// A display mode: resolution plus refresh rate.
 struct DisplayMode {
     int           width  = 0;
@@ -386,6 +418,11 @@ concept Output = requires(O o, const O co, std::span<const Layer> layers,
     /// A stable identity, so a compositor can remember per-display settings
     /// across unplugs. Typically connector name plus EDID serial.
     { co.name() } -> std::convertible_to<std::string_view>;
+    /// Make, model and serial, as wl_output.geometry reports them. A
+    /// protocol layer forwards these rather than inventing them.
+    { co.identity() } -> std::same_as<DisplayIdentity>;
+    /// Subpixel layout, for clients deciding how to antialias text.
+    { co.subpixel() } -> std::same_as<Subpixel>;
     /// Physical size in millimetres, for computing real DPI. {0,0} when the
     /// display does not say.
     { co.physical_size_mm() } -> std::same_as<Vec2>;

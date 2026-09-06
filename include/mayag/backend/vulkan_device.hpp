@@ -598,26 +598,39 @@ class VulkanDevice {
         return TextureHandle{slot};
     }
 
-    /// Drop an imported texture.
+    /// Drop an imported texture, reporting when it is genuinely free.
     ///
     /// Retired, not freed: a frame in flight may still be sampling it. This
     /// is the hottest destruction path in a compositor -- every client that
     /// closes a window, resizes, or swaps its buffer chain arrives here --
     /// so a device-wide stall per call would be felt directly as jank.
-    void release_import(std::uint32_t slot) {
+    ///
+    /// `on_free` runs at the same moment the resources are destroyed, which
+    /// is the moment the GPU provably finished with the client's buffer.
+    /// That is exactly what wl_buffer.release needs, and the Reclaimer
+    /// already knew it -- it simply had nobody to tell.
+    void release_import(std::uint32_t slot, std::function<void()> on_free = {}) {
         const auto it = std::find_if(imports_.begin(), imports_.end(),
                                      [&](const Imported& i) { return i.slot == slot; });
-        if (it == imports_.end()) return;
+        if (it == imports_.end()) {
+            // Unknown slot: nothing is holding the buffer, so it is free now.
+            // Reporting rather than staying silent means a caller never has
+            // to guess whether its callback was dropped.
+            if (on_free) on_free();
+            return;
+        }
 
         auto* api = api_;
         auto dev = device_;
         auto view = it->view;
         auto image = it->image;
         auto mem = it->memory;
-        reclaim_.retire(frames_completed_ + 1, [api, dev, view, image, mem] {
+        reclaim_.retire(frames_completed_ + 1,
+                        [api, dev, view, image, mem, on_free = std::move(on_free)] {
             if (view) api->DestroyImageView(dev, view, nullptr);
             if (image) api->DestroyImage(dev, image, nullptr);
             if (mem) api->FreeMemory(dev, mem, nullptr);
+            if (on_free) on_free();
         });
         imports_.erase(it);
     }

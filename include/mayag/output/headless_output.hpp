@@ -90,6 +90,8 @@ class HeadlessOutput {
     }
     [[nodiscard]] Vec2 max_cursor_size() const noexcept { return max_cursor_; }
     [[nodiscard]] std::string_view name() const noexcept { return name_; }
+    [[nodiscard]] DisplayIdentity identity() const { return identity_; }
+    [[nodiscard]] Subpixel subpixel() const noexcept { return subpixel_; }
     [[nodiscard]] Vec2 physical_size_mm() const noexcept { return physical_mm_; }
 
     // ── test control ─────────────────────────────────────────────────────
@@ -107,6 +109,8 @@ class HeadlessOutput {
     void set_modes(std::vector<DisplayMode> m) { modes_ = std::move(m); }
     void set_scanout_formats(std::vector<FormatModifier> f) { scanout_ = std::move(f); }
     void set_max_cursor_size(Vec2 s) noexcept { max_cursor_ = s; }
+    void set_identity(DisplayIdentity id) { identity_ = std::move(id); }
+    void set_subpixel(Subpixel s) noexcept { subpixel_ = s; }
     void disconnect() noexcept { current_.reset(); }
 
     [[nodiscard]] const Cursor& cursor() const noexcept { return cursor_; }
@@ -119,7 +123,9 @@ class HeadlessOutput {
 
   private:
     std::string                 name_;
-    std::vector<DisplayMode>           modes_;
+    DisplayIdentity             identity_{"mayag", "headless", ""};
+    Subpixel                    subpixel_ = Subpixel::unknown;
+    std::vector<DisplayMode>    modes_;
     std::optional<DisplayMode>         current_;
     std::vector<FormatModifier> scanout_;
     PlaneCaps                   caps_{};
