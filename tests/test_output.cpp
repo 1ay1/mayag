@@ -22,6 +22,7 @@
 #include <mayag/output/headless_output.hpp>
 #include <mayag/output/output.hpp>
 #include <mayag/output/planes.hpp>
+#include <mayag/output/transitions.hpp>
 
 #include <cstdio>
 #include <cmath>
@@ -652,6 +653,169 @@ int main() {
               "the layer on a plane is NOT drawn again on the GPU -- two "
               "answers to the same question is how a compositor draws a "
               "layer twice");
+    }
+
+    // ── transitions ───────────────────────────────────────
+    //
+    // A compositor's motion is not decoration -- it is how a user keeps track
+    // of where things went. These build on the springs and Effects that
+    // already exist rather than adding a parallel animation system, because
+    // an effect only animations can produce is one a compositor cannot
+    // compose with anything else.
+    section("a window transition is a spring driving Effects");
+    {
+        WindowMotion m;
+        m.kind = WindowTransition::scale;
+        check(!m.animating(), "a window at rest is not animating");
+
+        m.open();
+        check(m.animating(), "opening starts it moving");
+
+        // Mid-flight: partially present, so partially transparent and
+        // slightly small.
+        for (int i = 0; i < 3; ++i) m.step(1.0f / 60.0f);
+        Layer l = make_layer(400, 300, Rect{{100, 100}, {400, 300}}, 0, true);
+        const Layer mid = animate(l, m);
+        check(mid.effects.opacity < 1.0f && mid.effects.opacity > 0.0f,
+              "a window mid-open is partly transparent");
+        check(mid.dst.size.x < l.dst.size.x,
+              "and slightly smaller, growing INTO place");
+        check(mid.dst.size.x > l.dst.size.x * 0.9f,
+              "but not from nothing -- growing from zero reads as an "
+              "explosion, not an arrival");
+
+        // Settle.
+        for (int i = 0; i < 200; ++i) m.step(1.0f / 60.0f);
+        const Layer done = animate(l, m);
+        check(!m.animating(), "it settles");
+        check(done.effects.opacity > 0.99f,
+              "fully opaque when open");
+        check(std::abs(done.dst.size.x - l.dst.size.x) < 0.5f,
+              "and back at its true size, so the layout is not permanently "
+              "shifted by the animation");
+    }
+
+    section("an interrupted transition keeps its velocity");
+    {
+        // The case duration-based animation gets wrong: closing a window
+        // while it is still opening. A duration has to restart and loses the
+        // velocity, which is why so many desktops stutter here. A spring
+        // carries it through, so interruption is not a special case.
+        WindowMotion m;
+        m.open();
+        for (int i = 0; i < 4; ++i) m.step(1.0f / 60.0f);
+        const float caught = static_cast<float>(m.presence);
+        check(caught > 0.0f && caught < 1.0f, "caught mid-open");
+
+        m.close();
+        m.step(1.0f / 60.0f);
+        check(static_cast<float>(m.presence) != caught,
+              "reversing continues from where it was, rather than snapping to "
+              "a restart");
+
+        for (int i = 0; i < 300; ++i) m.step(1.0f / 60.0f);
+        check(m.gone(), "and it finishes closing, so the window can be freed");
+    }
+
+    section("a genie shrinks toward where the window went");
+    {
+        // The one transition that carries INFORMATION rather than polish: it
+        // tells the user which dock icon their window is in.
+        WindowMotion m;
+        m.kind = WindowTransition::genie;
+        m.anchor = Vec2{960, 1050};        // a dock icon at the bottom
+        m.presence.to(1.0f);
+        for (int i = 0; i < 300; ++i) m.step(1.0f / 60.0f);
+        m.close();
+        for (int i = 0; i < 6; ++i) m.step(1.0f / 60.0f);
+
+        Layer l = make_layer(400, 300, Rect{{100, 100}, {400, 300}}, 0, true);
+        const Layer g = animate(l, m);
+        const float cy = g.dst.origin.y + g.dst.size.y * 0.5f;
+        check(cy > 250.0f,
+              "a closing window moves TOWARD its anchor (" +
+                  std::to_string(cy) + ")");
+        check(g.dst.size.x < l.dst.size.x, "shrinking as it goes");
+    }
+
+    section("workspaces move as one continuous position");
+    {
+        // A from/to pair cannot express flicking past three workspaces before
+        // the first animation finishes. One continuous offset can.
+        WorkspaceMotion w;
+        w.kind = WorkspaceTransition::slide;
+        w.go_to(2);
+        for (int i = 0; i < 4; ++i) w.step(1.0f / 60.0f);
+
+        const Vec2 vp{1920, 1080};
+        Layer l = make_layer(400, 300, Rect{{0, 0}, {400, 300}}, 0, true);
+
+        const Layer on_2 = animate(l, w, 2, vp);
+        const Layer on_0 = animate(l, w, 0, vp);
+        check(on_2.dst.origin.x > on_0.dst.origin.x,
+              "workspace 2 is to the RIGHT of workspace 0 while sliding");
+
+        // Depth mode also scales, so the outgoing workspace recedes rather
+        // than merely sliding off.
+        w.kind = WorkspaceTransition::slide_depth;
+        const Layer away = animate(l, w, 0, vp);
+        check(away.dst.size.x < l.dst.size.x,
+              "a distant workspace is scaled down, reading as depth");
+
+        // Fade mode makes no spatial claim.
+        w.kind = WorkspaceTransition::fade;
+        const Layer faded = animate(l, w, 0, vp);
+        check(faded.effects.opacity < 1.0f,
+              "in fade mode a distant workspace is transparent instead");
+        check(faded.dst.origin.x == l.dst.origin.x,
+              "and does not move, because fade makes no claim about where "
+              "workspaces are");
+    }
+
+    section("overview interpolates toward a slot the compositor chose");
+    {
+        OverviewMotion o;
+        check(!o.active(), "overview starts closed");
+        o.show();
+        for (int i = 0; i < 300; ++i) o.step(1.0f / 60.0f);
+        check(o.active() && !o.animating(), "and settles open");
+
+        Layer l = make_layer(1920, 1080, Rect{{0, 0}, {1920, 1080}}, 0, true);
+        const Rect slot{{100, 100}, {400, 225}};
+        const Layer in_grid = animate(l, o, slot);
+
+        check(std::abs(in_grid.dst.size.x - slot.size.x) < 1.0f,
+              "a fully-open overview puts the window in its slot");
+        check(in_grid.effects.corner_radius > 0.0f,
+              "rounded on the way in -- a grid of sharp rectangles reads as a "
+              "screenshot, rounding says these are objects");
+
+        // Closed overview must not touch the layer at all.
+        OverviewMotion closed;
+        const Layer untouched = animate(l, closed, slot);
+        check(untouched.dst.size.x == l.dst.size.x &&
+              untouched.effects.corner_radius == 0.0f,
+              "a closed overview leaves the layer exactly as it was");
+    }
+
+    section("an idle desktop costs nothing");
+    {
+        // The property that matters most: a compositor asks `animating()` to
+        // know whether it may stop requesting frames. Anything that stays
+        // true forever turns an idle desktop into a spinning fan.
+        WindowMotion w;
+        WorkspaceMotion ws;
+        OverviewMotion o;
+        check(!w.animating() && !ws.animating() && !o.animating(),
+              "nothing animates at rest");
+
+        w.open(); ws.go_to(3); o.show();
+        for (int i = 0; i < 600; ++i) { w.step(1.0f / 60.0f);
+                                       ws.step(1.0f / 60.0f);
+                                       o.step(1.0f / 60.0f); }
+        check(!w.animating() && !ws.animating() && !o.animating(),
+              "and every transition eventually STOPS, so the compositor can "
+              "go back to sleep");
     }
 
     std::printf("\n%s  %d checks, %d failures\n",
