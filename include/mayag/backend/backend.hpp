@@ -23,6 +23,7 @@
 #include "../core/geometry.hpp"
 #include "mayag/render/buffer.hpp"
 #include "mayag/render/draw_list.hpp"
+#include "mayag/render/sync.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -365,6 +366,40 @@ class Device {
     [[nodiscard]] virtual std::uint32_t next_upload_slot() {
         return ++upload_slot_;
     }
+
+    // ── explicit synchronisation ──────────────────────────────────
+    //
+    // Without these a compositor must GUESS when a client finished drawing:
+    // either stall conservatively, or show a torn frame. With them the GPU
+    // schedules around the dependency and neither happens.
+
+    /// What this device can do about synchronisation.
+    ///
+    /// Reported rather than assumed, for the same reason importable_formats()
+    /// is: promising a client explicit sync and then falling back to implicit
+    /// is worse than never offering it, because the client will have stopped
+    /// inserting its own barriers.
+    [[nodiscard]] virtual SyncCaps sync_caps() const noexcept { return {}; }
+
+    /// Wait until a client's timeline point passes.
+    ///
+    /// False when unsupported or the wait timed out. A timeout rather than an
+    /// infinite wait is deliberate: a client can die holding a point that
+    /// will never be signalled, and a compositor that waits forever on one
+    /// client freezes the whole desktop.
+    [[nodiscard]] virtual bool wait_timeline(const TimelinePoint& /*p*/,
+                                             std::uint64_t /*timeout_ns*/) {
+        return false;
+    }
+
+    /// Export a point a client can wait on: "I have finished reading your
+    /// buffer, you may reuse it". Returns -1 when unsupported; the caller
+    /// owns the fd.
+    ///
+    /// The half people forget. Without it a client cannot know when its
+    /// buffer is free, so it either allocates a new one every frame or
+    /// guesses and tears.
+    [[nodiscard]] virtual int export_release_point() { return -1; }
 
     [[nodiscard]] virtual std::uint64_t frames_presented() const noexcept { return 0; }
 

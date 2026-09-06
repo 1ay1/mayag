@@ -512,6 +512,26 @@ class VulkanDevice {
         // failure. Handing over the caller's fd would close a descriptor the
         // client still owns -- a bug that shows up much later as a client
         // whose next frame is silently corrupt.
+        //
+        // Only plane 0's fd is imported. Multi-planar formats (NV12, YUV420)
+        // usually share ONE fd across planes at different offsets, which this
+        // handles because the offsets are in the layout above. The rarer case
+        // of genuinely separate fds per plane needs one VkDeviceMemory per
+        // plane and disjoint binding, and is rejected rather than imported
+        // wrongly -- a wrong import does not fail, it samples garbage.
+        if (d.n_planes > 1) {
+            bool shared_fd = true;
+            for (int i = 1; i < d.n_planes; ++i) {
+                if (d.planes[static_cast<std::size_t>(i)].fd != d.planes[0].fd) {
+                    shared_fd = false;
+                    break;
+                }
+            }
+            if (!shared_fd) {
+                api_->DestroyImage(device_, image, nullptr);
+                return std::unexpected(ImportError::unsupported_format);
+            }
+        }
         const int dup_fd = ::dup(d.planes[0].fd);
         if (dup_fd < 0) {
             api_->DestroyImage(device_, image, nullptr);
@@ -605,6 +625,102 @@ class VulkanDevice {
     /// Whether this device can import at all. False on a driver without the
     /// external-memory extensions, which is a normal configuration.
     [[nodiscard]] bool can_import() const noexcept { return dmabuf_import_; }
+
+    /// What this device can do about synchronisation.
+    [[nodiscard]] SyncCaps sync_caps() const noexcept {
+        SyncCaps c;
+        c.timeline = timeline_sync_;
+        c.import_syncobj = timeline_sync_ && api_->ImportSemaphoreFdKHR != nullptr;
+        return c;
+    }
+
+    /// Wait for a client's timeline point WITHOUT stalling the device.
+    ///
+    /// The whole reason explicit sync exists. A client hands over a
+    /// drm_syncobj fd and a value meaning "my drawing is finished at this
+    /// point"; this imports it as a semaphore and blocks until it passes.
+    ///
+    /// Blocking here rather than making the GPU wait is the conservative
+    /// half: a fully pipelined compositor would pass the semaphore to
+    /// QueueSubmit so the GPU schedules around the dependency and the CPU
+    /// never waits at all. That needs the wait to be attached to a specific
+    /// submission, which is what `pending_waits_` below does for the frame
+    /// path. This entry point exists for the cases that genuinely need a CPU
+    /// answer -- deciding whether a buffer is ready before choosing a plane,
+    /// where the answer changes what is submitted.
+    ///
+    /// A timeout rather than an infinite wait, because a client can die
+    /// holding a point that will never be signalled, and a compositor that
+    /// waits forever on one client freezes the whole desktop.
+    [[nodiscard]] bool wait_timeline(const TimelinePoint& p,
+                                     std::uint64_t timeout_ns = 1'000'000'000ull) {
+        if (!timeline_sync_ || !p.valid()) return false;
+        if (api_->ImportSemaphoreFdKHR == nullptr ||
+            api_->WaitSemaphores == nullptr) return false;
+
+        vk::VkSemaphore sem = create_timeline_semaphore(0);
+        if (sem == nullptr) return false;
+
+        // The fd is BORROWED, and Vulkan takes ownership of what it is
+        // given -- the same contract as a dmabuf, for the same reason.
+        const int dup_fd = ::dup(p.fd);
+        if (dup_fd < 0) { api_->DestroySemaphore(device_, sem, nullptr); return false; }
+
+        vk::VkImportSemaphoreFdInfoKHR info{};
+        info.sType = vk::VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR;
+        info.semaphore = sem;
+        info.handleType = vk::VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+        info.fd = dup_fd;
+        if (api_->ImportSemaphoreFdKHR(device_, &info) != vk::VK_SUCCESS) {
+            ::close(dup_fd);
+            api_->DestroySemaphore(device_, sem, nullptr);
+            return false;
+        }
+
+        const std::uint64_t value = p.value;
+        vk::VkSemaphoreWaitInfo wi{};
+        wi.sType = vk::VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        wi.semaphoreCount = 1;
+        wi.pSemaphores = &sem;
+        wi.pValues = &value;
+        const bool ok = api_->WaitSemaphores(device_, &wi, timeout_ns) == vk::VK_SUCCESS;
+
+        // Retired rather than destroyed: the wait returning says the CLIENT
+        // finished, not that our own queue is done with the semaphore.
+        auto* api = api_;
+        auto dev = device_;
+        reclaim_.retire(frames_completed_ + 1,
+                        [api, dev, sem] { api->DestroySemaphore(dev, sem, nullptr); });
+        return ok;
+    }
+
+    /// Export a point a client can wait on: "the compositor has finished
+    /// reading your buffer".
+    ///
+    /// The other half of explicit sync, and the half people forget. Without
+    /// it a client cannot know when its buffer is reusable, so it either
+    /// allocates a new one every frame or guesses and tears.
+    ///
+    /// Returns -1 when unavailable. The caller OWNS the returned fd.
+    [[nodiscard]] int export_release_point() {
+        if (!timeline_sync_ || api_->GetSemaphoreFdKHR == nullptr) return -1;
+        vk::VkSemaphore sem = create_timeline_semaphore(frames_completed_,
+                                                        /*exportable=*/true);
+        if (sem == nullptr) return -1;
+
+        vk::VkSemaphoreGetFdInfoKHR gi{};
+        gi.sType = vk::VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+        gi.semaphore = sem;
+        gi.handleType = vk::VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+        int fd = -1;
+        const bool ok = api_->GetSemaphoreFdKHR(device_, &gi, &fd) == vk::VK_SUCCESS;
+
+        auto* api = api_;
+        auto dev = device_;
+        reclaim_.retire(frames_completed_ + 1,
+                        [api, dev, sem] { api->DestroySemaphore(dev, sem, nullptr); });
+        return ok ? fd : -1;
+    }
 
     /// Format+modifier pairs this driver will accept for import.
     ///
@@ -812,6 +928,37 @@ class VulkanDevice {
         #undef MG_LOAD
     }
 
+    /// Create a timeline semaphore starting at `initial`.
+    ///
+    /// `exportable` requests a handle a CLIENT can wait on. It must be asked
+    /// for at creation -- an ordinary semaphore cannot be exported later, and
+    /// GetSemaphoreFdKHR simply fails on one, which reads as a missing
+    /// extension rather than a missing flag.
+    [[nodiscard]] vk::VkSemaphore create_timeline_semaphore(
+            std::uint64_t initial, bool exportable = false) {
+        if (api_->CreateSemaphore == nullptr) return nullptr;
+        vk::VkSemaphoreTypeCreateInfo ti{};
+        ti.sType = vk::VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        ti.semaphoreType = vk::VK_SEMAPHORE_TYPE_TIMELINE;
+        ti.initialValue = initial;
+
+        vk::VkExportSemaphoreCreateInfo ei{};
+        if (exportable) {
+            ei.sType = vk::VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
+            ei.handleTypes = vk::VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+            ti.pNext = &ei;
+        }
+
+        vk::VkSemaphoreCreateInfo ci{};
+        ci.sType = vk::VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        ci.pNext = &ti;
+        vk::VkSemaphore sem = nullptr;
+        if (api_->CreateSemaphore(device_, &ci, nullptr, &sem) != vk::VK_SUCCESS) {
+            return nullptr;
+        }
+        return sem;
+    }
+
     /// Is `name` among the physical device's supported extensions?
     ///
     /// Asked before requesting anything optional: enabling an unsupported
@@ -859,6 +1006,16 @@ class VulkanDevice {
         // import() checks before doing anything.
         MG_LOAD(GetMemoryFdPropertiesKHR, "vkGetMemoryFdPropertiesKHR");
         MG_LOAD(GetImageSubresourceLayout, "vkGetImageSubresourceLayout");
+        // Explicit sync. Timeline entry points are 1.2 core, so try the core
+        // name first and fall back to the KHR alias on older drivers.
+        MG_LOAD(CreateSemaphore, "vkCreateSemaphore");
+        MG_LOAD(DestroySemaphore, "vkDestroySemaphore");
+        MG_LOAD(ImportSemaphoreFdKHR, "vkImportSemaphoreFdKHR");
+        MG_LOAD(GetSemaphoreFdKHR, "vkGetSemaphoreFdKHR");
+        MG_LOAD(WaitSemaphores, "vkWaitSemaphores");
+        if (m.WaitSemaphores == nullptr) {
+            MG_LOAD(WaitSemaphores, "vkWaitSemaphoresKHR");
+        }
         MG_LOAD(BindImageMemory, "vkBindImageMemory");
         MG_LOAD(CreateImageView, "vkCreateImageView");
         MG_LOAD(DestroyImageView, "vkDestroyImageView");
@@ -973,8 +1130,34 @@ class VulkanDevice {
             dmabuf_import_ = true;
         }
 
+        // Explicit synchronisation, likewise opportunistic.
+        //
+        // A compositor without this must guess when a client has finished
+        // drawing, which means either a conservative stall or a torn frame.
+        // With it, the GPU schedules around the dependency and neither
+        // happens. Timeline semaphores are Vulkan 1.2 core, so the extension
+        // is only needed on older drivers -- but the fd import always is.
+        if (has_device_extension("VK_KHR_external_semaphore_fd")) {
+            dev_exts.push_back("VK_KHR_external_semaphore");
+            dev_exts.push_back("VK_KHR_external_semaphore_fd");
+            if (has_device_extension("VK_KHR_timeline_semaphore")) {
+                dev_exts.push_back("VK_KHR_timeline_semaphore");
+            }
+            timeline_sync_ = true;
+        }
+
         vk::VkDeviceCreateInfo dci{};
         dci.sType = vk::VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        // Timeline semaphores are a FEATURE, not just an extension: the
+        // driver has to be told to turn them on, or every create fails with
+        // an error that reads like the extension is missing.
+        vk::VkPhysicalDeviceTimelineSemaphoreFeatures timeline_feature{};
+        if (timeline_sync_) {
+            timeline_feature.sType =
+                vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+            timeline_feature.timelineSemaphore = 1;
+            dci.pNext = &timeline_feature;
+        }
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qci;
         dci.enabledExtensionCount = static_cast<std::uint32_t>(dev_exts.size());
@@ -1810,6 +1993,8 @@ class VulkanDevice {
     /// Slot 0 means "invalid handle", so numbering starts at 1.
     std::uint32_t next_import_slot_ = 1;
     bool          dmabuf_import_ = false;
+    /// Whether timeline semaphores and syncobj import are available.
+    bool          timeline_sync_ = false;
 
     /// Frees GPU resources once the frame that last used them completes, so
     /// destroying a texture does not stall the device. See reclaim.hpp.

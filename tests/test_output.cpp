@@ -17,6 +17,7 @@
 // reconstruct it from a flattened command stream.
 
 #include <mayag/mayag.hpp>
+#include <mayag/output/damage.hpp>
 #include <mayag/output/headless_output.hpp>
 #include <mayag/output/output.hpp>
 #include <mayag/output/planes.hpp>
@@ -380,6 +381,104 @@ int main() {
         check(!out.has_cursor_plane(),
               "a display with no cursor plane says so, rather than failing "
               "mysteriously");
+    }
+
+    // ── damage: redrawing as little as possible ───────────────────
+    //
+    // A compositor that redraws the whole screen because a clock ticked is
+    // burning a GPU to change four digits. Every rule here is conservative in
+    // ONE direction: too much damage wastes power, too little shows a stale
+    // frame.
+    section("damage is computed in screen space, from buffer space");
+    {
+        Layer l = make_layer(1000, 500, Rect{{100, 50}, {1000, 500}}, 0, true);
+        l.damage.add(Rect{{10, 20}, {30, 40}});
+
+        const Rect screen = buffer_to_screen(Rect{{10, 20}, {30, 40}}, l);
+        check(screen.left() == 110.0f && screen.top() == 70.0f,
+              "buffer coords are offset by the layer's position");
+        check(screen.size.x == 30.0f && screen.size.y == 40.0f,
+              "and unscaled when src and dst match");
+
+        // Crop-and-scale (wp_viewporter) falls out of the same arithmetic.
+        Layer scaled = make_layer(500, 250, Rect{{0, 0}, {1000, 500}}, 0, true);
+        scaled.src = Rect{{0, 0}, {500, 250}};
+        const Rect big = buffer_to_screen(Rect{{10, 10}, {20, 20}}, scaled);
+        check(big.size.x == 40.0f && big.size.y == 40.0f,
+              "a 2x-scaled layer scales its damage too (viewporter for free)");
+
+        // Fractional placement must round OUTWARDS. Rounding to nearest
+        // leaves a one-pixel seam that only appears at fractional scales,
+        // which is exactly where nobody tests.
+        Layer frac = make_layer(100, 100, Rect{{0.5f, 0.5f}, {150, 150}}, 0, true);
+        const Rect r = buffer_to_screen(Rect{{0, 0}, {10, 10}}, frac);
+        check(r.left() == 0.0f && r.right() >= 15.0f,
+              "fractional damage rounds outwards, covering every pixel it "
+              "touches");
+    }
+
+    section("a layer that moves damages where it WAS and where it is");
+    {
+        const Layer layers[] = {
+            make_layer(200, 200, Rect{{300, 300}, {200, 200}}, 0, true),
+        };
+        const Rect previous[] = {Rect{{100, 100}, {200, 200}}};
+
+        const Region d = frame_damage(layers, previous);
+        check(d.rects.size() == 2,
+              "both rectangles are damaged -- damaging only the new position "
+              "leaves a trail of the old one");
+        check(d.contains(Vec2{150, 150}) && d.contains(Vec2{350, 350}),
+              "covering the vacated pixels and the newly covered ones");
+
+        // A layer that did not move contributes only its own damage.
+        Layer still = make_layer(200, 200, Rect{{100, 100}, {200, 200}}, 0, true);
+        still.damage.add(Rect{{0, 0}, {10, 10}});
+        const Layer same[] = {still};
+        const Rect was[] = {Rect{{100, 100}, {200, 200}}};
+        const Region d2 = frame_damage(same, was);
+        check(d2.rects.size() == 1 && d2.rects[0].size.x == 10.0f,
+              "a stationary layer damages only what the client said changed");
+
+        // No damage at all means EVERYTHING, which is the safe reading.
+        const Layer quiet[] = {make_layer(200, 200, Rect{{0, 0}, {200, 200}}, 0, true)};
+        const Rect quiet_was[] = {Rect{{0, 0}, {200, 200}}};
+        const Region d3 = frame_damage(quiet, quiet_was);
+        check(d3.rects.size() == 1 && d3.rects[0].size.x == 200.0f,
+              "an empty damage region means the whole layer, not nothing");
+
+        // A vanished layer damages where it was.
+        const Region d4 = frame_damage({}, was);
+        check(d4.rects.size() == 1,
+              "a layer that disappeared damages the space it left");
+    }
+
+    section("damage hidden behind an opaque layer costs nothing");
+    {
+        // The optimisation that pays for the whole file: a video playing
+        // behind a fullscreen window damages itself every frame and none of
+        // it can be seen.
+        const Layer layers[] = {
+            make_layer(400, 300, Rect{{100, 100}, {400, 300}}, 0, false),
+            make_layer(1920, 1080, Rect{{0, 0}, {1920, 1080}}, 1, true),
+        };
+        Region d;
+        d.add(Rect{{150, 150}, {50, 50}});      // behind the fullscreen window
+        d.add(Rect{{2000, 100}, {50, 50}});     // outside it
+
+        const Region visible = occlude(d, layers);
+        check(visible.rects.size() == 1,
+              "damage under an opaque layer is dropped");
+        check(visible.rects[0].left() == 2000.0f,
+              "and only the visible damage survives");
+
+        // Conservative: a TRANSPARENT layer occludes nothing, however big.
+        const Layer glass[] = {
+            make_layer(1920, 1080, Rect{{0, 0}, {1920, 1080}}, 1, false),
+        };
+        const Region through = occlude(d, glass);
+        check(through.rects.size() == 2,
+              "a transparent layer hides nothing, whatever its size");
     }
 
     std::printf("\n%s  %d checks, %d failures\n",

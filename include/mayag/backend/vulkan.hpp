@@ -325,6 +325,74 @@ struct VkExtensionProperties {
     char          extensionName[256];
     std::uint32_t specVersion;
 };
+
+// ── timeline semaphores + syncobj import (explicit sync) ───────────────
+//
+// What lets a compositor wait for a client's drawing WITHOUT stalling the
+// device. A client hands over a drm_syncobj fd and a value meaning "my work
+// is done at this point"; the compositor imports it as a semaphore and makes
+// its own submission wait on it. The GPU schedules around the dependency
+// instead of the CPU blocking on it.
+//
+// VkSemaphore and its CREATE_INFO already exist above -- only the TIMELINE
+// half is new.
+
+enum : int {
+    VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO = 1000207002,
+    VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO = 1000207003,
+    VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO = 1000207004,
+    VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO = 1000207005,
+    VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR = 1000079000,
+    VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR = 1000079001,
+};
+
+/// A semaphore that carries a monotonically increasing VALUE, not just
+/// signalled/unsignalled. That is what makes it waitable before the work
+/// exists: a compositor can submit a frame that waits on point 42 of a
+/// client's timeline while the client is still rendering point 41.
+inline constexpr int VK_SEMAPHORE_TYPE_TIMELINE = 1;
+/// The handle type a DRM syncobj arrives as.
+inline constexpr Flags VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT = 0x00000001;
+inline constexpr Flags VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT   = 0x00000008;
+
+struct VkSemaphoreTypeCreateInfo {
+    int sType; const void* pNext; int semaphoreType; std::uint64_t initialValue;
+};
+struct VkTimelineSemaphoreSubmitInfo {
+    int sType; const void* pNext;
+    std::uint32_t waitSemaphoreValueCount;   const std::uint64_t* pWaitSemaphoreValues;
+    std::uint32_t signalSemaphoreValueCount; const std::uint64_t* pSignalSemaphoreValues;
+};
+struct VkSemaphoreWaitInfo {
+    int sType; const void* pNext; Flags flags;
+    std::uint32_t semaphoreCount;
+    const VkSemaphore* pSemaphores;
+    const std::uint64_t* pValues;
+};
+struct VkImportSemaphoreFdInfoKHR {
+    int sType; const void* pNext;
+    VkSemaphore semaphore; Flags flags; Flags handleType; int fd;
+};
+struct VkSemaphoreGetFdInfoKHR {
+    int sType; const void* pNext; VkSemaphore semaphore; Flags handleType;
+};
+/// A semaphore must be created EXPORTABLE; it cannot be made so later.
+/// Without this GetSemaphoreFdKHR just fails, which reads as a missing
+/// extension rather than a missing flag.
+struct VkExportSemaphoreCreateInfo {
+    int sType; const void* pNext; Flags handleTypes;
+};
+inline constexpr int VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO = 1000077000;
+/// Timeline semaphores must be explicitly ENABLED, not merely supported.
+/// Chaining this into VkDeviceCreateInfo::pNext is what turns "the driver
+/// has the extension" into "the driver will accept a timeline semaphore";
+/// without it every create fails with a validation error that reads like a
+/// missing extension.
+struct VkPhysicalDeviceTimelineSemaphoreFeatures {
+    int sType; void* pNext; Bool32 timelineSemaphore;
+};
+inline constexpr int VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES
+    = 1000207000;
 struct VkSamplerCreateInfo {
     int sType; const void* pNext; Flags flags; int magFilter, minFilter, mipmapMode;
     int addressModeU, addressModeV, addressModeW; float mipLodBias; Bool32 anisotropyEnable;
@@ -570,6 +638,15 @@ struct Api {
                                                VkFormatProperties2*) = nullptr;
     VkResult (*GetImageSubresourceLayout)(VkDevice, VkImage, const void*,
                                           VkSubresourceLayout*) = nullptr;
+
+    // Explicit synchronisation. Null when the extensions are absent, which
+    // SyncCaps reports so a compositor never advertises what it cannot do.
+    VkResult (*ImportSemaphoreFdKHR)(VkDevice,
+                                     const VkImportSemaphoreFdInfoKHR*) = nullptr;
+    VkResult (*GetSemaphoreFdKHR)(VkDevice, const VkSemaphoreGetFdInfoKHR*,
+                                  int*) = nullptr;
+    VkResult (*WaitSemaphores)(VkDevice, const VkSemaphoreWaitInfo*,
+                               std::uint64_t) = nullptr;
     VkResult (*BindImageMemory)(VkDevice, VkImage, VkDeviceMemory, DeviceSize) = nullptr;
     VkResult (*CreateImageView)(VkDevice, const VkImageViewCreateInfo*, const void*, VkImageView*) = nullptr;
     void (*DestroyImageView)(VkDevice, VkImageView, const void*) = nullptr;
@@ -766,6 +843,17 @@ class VulkanBackend final : public Device {
     }
 
     void release_texture(std::uint32_t slot) override { dev_.release_import(slot); }
+
+    [[nodiscard]] SyncCaps sync_caps() const noexcept override {
+        return dev_.sync_caps();
+    }
+    [[nodiscard]] bool wait_timeline(const TimelinePoint& p,
+                                     std::uint64_t timeout_ns) override {
+        return dev_.wait_timeline(p, timeout_ns);
+    }
+    [[nodiscard]] int export_release_point() override {
+        return dev_.export_release_point();
+    }
 
     [[nodiscard]] bool render_offscreen(const DrawList& list, int w, int h,
                                         Color<Srgb> clear,
