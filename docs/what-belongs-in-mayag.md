@@ -13,6 +13,39 @@ That is not an accident, and it is the test for what comes next.
 
 ---
 
+## Honest status
+
+What has been **verified against real hardware**, not just unit-tested:
+
+- **Zero-copy import works.** Six real GBM buffers, allocated on the NVIDIA
+  driver with genuine tiled modifiers (`0x0300000000606010`-`15`, not
+  linear), imported through `Device::import()` and accepted. Every
+  format/modifier pair mayag advertises was allocatable and importable, which
+  is the property that matters -- advertising a pair clients cannot use is
+  worse than not advertising it.
+- **Explicit sync works.** Timeline semaphores create, export an fd a client
+  could wait on, and a wait on an already-passed point returns immediately.
+
+What is **tested but only on the software backend**: everything else. The
+unit tests run on `SoftwareBackend`, which cannot import at all, so the
+suite's import assertions exercise the *refusal* path. That is deliberate --
+the tests must run on a machine with no GPU -- but it means the Vulkan code
+is covered by the probes above rather than by CI.
+
+What is **not exercised at all**:
+
+- importing a buffer and *sampling* it in a real frame. Import succeeds; no
+  test draws the result and checks the pixels.
+- multi-planar YUV import. `yuv_to_rgba8()` is unit-tested on CPU buffers,
+  but no YUV dmabuf has been imported.
+- the whole layer under a compositor that is actually running.
+
+The verification harness lives outside the repo on purpose: it links libgbm,
+which is on the compositor side of the seam, and mayag must not gain a build
+dependency on it. A compositor project should own that test.
+
+---
+
 ## The rule
 
 **mayag owns pixels and the decisions about them. It does not own devices.**
