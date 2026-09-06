@@ -18,7 +18,9 @@
 
 #include <mayag/mayag.hpp>
 #include <mayag/backend/tiled.hpp>
+#include <mayag/backend/reclaim.hpp>
 #include <mayag/render/buffer.hpp>
+#include <mayag/render/sync.hpp>
 
 #include <cstdio>
 #include <string>
@@ -163,6 +165,94 @@ int main() {
         check(!r.has_value(),
               "importing CPU memory fails rather than copying behind a name "
               "that promises not to");
+    }
+
+    // ── deferred reclamation ──────────────────────────────────
+    //
+    // Destroying a GPU resource safely used to mean DeviceWaitIdle: stop the
+    // whole GPU to answer a question about one image. A compositor destroys
+    // buffers constantly -- every window that closes or resizes -- so that
+    // stall is felt directly as jank.
+    //
+    // Retirement is the same move mayag already made for source teardown on
+    // the CPU side: don't block, set the thing aside and collect it once it
+    // is genuinely safe. The clock lives OUTSIDE the reclaimer so this is
+    // pure bookkeeping and testable with no GPU at all.
+    section("resources are freed when their frame completes, not by stalling");
+    {
+        backend::Reclaimer r;
+        int freed = 0;
+
+        // Retired while rendering frame 5: not safe until 5 completes.
+        r.retire(5, [&] { ++freed; });
+        check(r.pending() == 1, "a retired resource is held, not freed");
+
+        r.collect(4);
+        check(freed == 0,
+              "and is NOT freed while its frame is still in flight");
+
+        r.collect(5);
+        check(freed == 1, "it is freed once that frame completes");
+        check(r.pending() == 0, "and dropped from the pending list");
+
+        // Out-of-order retirement must still be safe: a later frame's
+        // resource cannot be freed by an earlier collect.
+        int a = 0, b = 0;
+        r.retire(10, [&] { ++a; });
+        r.retire(7,  [&] { ++b; });
+        r.collect(8);
+        check(b == 1 && a == 0,
+              "collect frees only what is due, whatever order it was retired "
+              "in");
+        r.collect(10);
+        check(a == 1, "and the rest once their frames land");
+
+        // Teardown: the device really is idle, so everything goes.
+        int late = 0;
+        r.retire(9999, [&] { ++late; });
+        check(late == 0, "a far-future resource is not freed by collect()");
+        r.collect_all();
+        check(late == 1,
+              "collect_all frees it -- the one case where the device is known "
+              "idle");
+        check(r.pending() == 0, "leaving nothing behind at teardown");
+    }
+
+    // ── sync points travel WITH the buffer ─────────────────────────
+    //
+    // Same principle as the runtime's message gating: readiness is a property
+    // of the thing being used, checked at the point of use -- not a global
+    // "is everything done?" asked from somewhere else.
+    section("BufferSync describes readiness per buffer");
+    {
+        const BufferSync implicit{};
+        check(implicit.is_implicit(),
+              "a default BufferSync means implicit sync -- what mayag does "
+              "today, so this type is additive");
+        check(!implicit.acquire.has_value(),
+              "no acquire point means the pixels are ready NOW");
+        check(!implicit.release.has_value(),
+              "no release point means nobody wants to be told we finished");
+
+        BufferSync explicit_sync;
+        explicit_sync.acquire = TimelinePoint{7, 42};
+        check(!explicit_sync.is_implicit(),
+              "an acquire point makes it explicit");
+        check(explicit_sync.acquire->valid(),
+              "and the point carries a real syncobj fd");
+        check(explicit_sync.acquire->value == 42,
+              "plus the timeline value to wait for");
+
+        const TimelinePoint none{};
+        check(!none.valid(),
+              "a default timeline point is invalid, so it cannot be waited on "
+              "by accident");
+
+        const SyncCaps caps{};
+        check(!caps.timeline && !caps.import_syncobj,
+              "a device advertises no sync capability until it proves one -- "
+              "promising explicit sync and falling back is worse than never "
+              "offering it");
     }
 
     std::printf("\n%s  %d checks, %d failures\n",

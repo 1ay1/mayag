@@ -20,6 +20,7 @@
 #include "../render/draw_list.hpp"
 #include "../render/shader_generated.hpp"
 #include "backend.hpp"   // AtlasView / view_of
+#include "reclaim.hpp"
 #include "software.hpp"
 
 // dup()/close(): a dmabuf fd is borrowed, and Vulkan takes ownership of the
@@ -194,6 +195,17 @@ class VulkanDevice {
 
         api_->WaitForFences(device_, 1, &in_flight_, 1, ~0ull);
 
+        // That wait is the completion clock. It returned, so the frame
+        // submitted last time is finished, and anything retired during it is
+        // now safe to free -- without a DeviceWaitIdle, and without freeing
+        // anything the GPU might still be reading.
+        //
+        // Doing it HERE rather than at the point of destruction is the whole
+        // trick: destruction sites do not have to know whether the GPU is
+        // busy, and the frame loop does not have to know what was destroyed.
+        ++frames_completed_;
+        reclaim_.collect(frames_completed_);
+
         std::uint32_t image_index = 0;
         VkResultCheck acq = api_->AcquireNextImageKHR(device_, swapchain_, ~0ull,
                                                       image_available_, nullptr, &image_index);
@@ -244,6 +256,14 @@ class VulkanDevice {
                                         std::vector<std::uint8_t>& out_rgba) {
         if (!valid_ || !offscreen_) return false;
         if (w <= 0 || h <= 0) return false;
+
+        // Offscreen rendering submits and WAITS (one_shot below), so by the
+        // time this returns the frame is complete. Advancing the clock here
+        // keeps retirement working on a device that never calls submit() --
+        // otherwise a headless or screenshot device would hold every retired
+        // resource until teardown, which is a leak in everything but name.
+        ++frames_completed_;
+        reclaim_.collect(frames_completed_);
 
         if (w != off_w_ || h != off_h_) { recreate_offscreen_target(w, h); }
         viewport_ = Vec2{static_cast<float>(w), static_cast<float>(h)};
@@ -356,30 +376,30 @@ class VulkanDevice {
         if (!valid_ || rgba == nullptr || w <= 0 || h <= 0) return 0;
 
         if (w != tex_w_ || h != tex_h_) {
-            // The size changed, so the old image must go -- but a frame that
-            // is still in flight may be SAMPLING it, and destroying a
-            // resource the GPU is reading is undefined behaviour. In practice
-            // it hangs or faults inside the driver, with no stack that points
-            // back here.
+            // The size changed, so the old image must go -- but a frame in
+            // flight may still be SAMPLING it, and freeing a resource the GPU
+            // is reading is undefined behaviour. In practice it hangs inside
+            // the driver with no stack that points back here, which is how
+            // this first showed up: "it hung in fullscreen on pause".
             //
-            // one_shot() below waits on its own fence, which says nothing
-            // about the render submission; submit() waits on in_flight_.
-            // Only a device-level wait covers both.
-            //
-            // Reported as "it hung in fullscreen on pause": going fullscreen
-            // changes the decode size (860 -> 2560 wide), so the next frame
-            // uploaded takes exactly this path while a frame is in flight.
-            // Rare enough to look random, which is what a missing barrier
-            // always looks like.
-            //
-            // A full DeviceWaitIdle is heavy, but this runs only when the
-            // size actually changes -- a resize or a fullscreen toggle, not
-            // per frame.
-            if (api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
+            // The obvious fix is DeviceWaitIdle, and it works, and it stalls
+            // the entire GPU to answer a question about ONE image. Retire it
+            // instead: hand the handles to the reclaimer tagged with the
+            // current frame, and they are freed once that frame completes.
+            // Same correctness, no stall, and a compositor destroying a
+            // buffer per closing window does not stop the world each time.
+            const std::uint64_t frame = frames_completed_;
+            auto* api = api_;
+            auto dev = device_;
+            auto old_view = tex_view_;
+            auto old_image = tex_image_;
+            auto old_mem = tex_mem_;
+            reclaim_.retire(frame + 1, [api, dev, old_view, old_image, old_mem] {
+                if (old_view) api->DestroyImageView(dev, old_view, nullptr);
+                if (old_image) api->DestroyImage(dev, old_image, nullptr);
+                if (old_mem) api->FreeMemory(dev, old_mem, nullptr);
+            });
 
-            if (tex_view_) api_->DestroyImageView(device_, tex_view_, nullptr);
-            if (tex_image_) api_->DestroyImage(device_, tex_image_, nullptr);
-            if (tex_mem_) api_->FreeMemory(device_, tex_mem_, nullptr);
             tex_view_ = nullptr; tex_image_ = nullptr; tex_mem_ = nullptr;
             make_sampled_image(w, h, vk::VK_FORMAT_R8G8B8A8_UNORM,
                                tex_image_, tex_mem_, tex_view_);
@@ -558,16 +578,27 @@ class VulkanDevice {
         return TextureHandle{slot};
     }
 
-    /// Drop an imported texture. Waits, for the same reason release_texture
-    /// does: a frame in flight may still be sampling it.
+    /// Drop an imported texture.
+    ///
+    /// Retired, not freed: a frame in flight may still be sampling it. This
+    /// is the hottest destruction path in a compositor -- every client that
+    /// closes a window, resizes, or swaps its buffer chain arrives here --
+    /// so a device-wide stall per call would be felt directly as jank.
     void release_import(std::uint32_t slot) {
         const auto it = std::find_if(imports_.begin(), imports_.end(),
                                      [&](const Imported& i) { return i.slot == slot; });
         if (it == imports_.end()) return;
-        if (api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
-        if (it->view) api_->DestroyImageView(device_, it->view, nullptr);
-        if (it->image) api_->DestroyImage(device_, it->image, nullptr);
-        if (it->memory) api_->FreeMemory(device_, it->memory, nullptr);
+
+        auto* api = api_;
+        auto dev = device_;
+        auto view = it->view;
+        auto image = it->image;
+        auto mem = it->memory;
+        reclaim_.retire(frames_completed_ + 1, [api, dev, view, image, mem] {
+            if (view) api->DestroyImageView(dev, view, nullptr);
+            if (image) api->DestroyImage(dev, image, nullptr);
+            if (mem) api->FreeMemory(dev, mem, nullptr);
+        });
         imports_.erase(it);
     }
 
@@ -630,15 +661,20 @@ class VulkanDevice {
     }
 
     void release_texture() {
-        // Same hazard as the resize path in upload_texture: a frame in flight
-        // may still be sampling this image, and freeing it under the GPU is
-        // undefined behaviour. Releasing happens on teardown and when an app
-        // drops its last image -- both rare, so the wait costs nothing that
-        // matters.
-        if (api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
-        if (tex_view_) api_->DestroyImageView(device_, tex_view_, nullptr);
-        if (tex_image_) api_->DestroyImage(device_, tex_image_, nullptr);
-        if (tex_mem_) api_->FreeMemory(device_, tex_mem_, nullptr);
+        // Retired rather than waited on, like the resize path above. This one
+        // runs when an app drops its last image and at teardown; teardown
+        // calls collect_all() after the device really is idle, which is the
+        // one place a blocking wait is the right answer.
+        auto* api = api_;
+        auto dev = device_;
+        auto view = tex_view_;
+        auto image = tex_image_;
+        auto mem = tex_mem_;
+        reclaim_.retire(frames_completed_ + 1, [api, dev, view, image, mem] {
+            if (view) api->DestroyImageView(dev, view, nullptr);
+            if (image) api->DestroyImage(dev, image, nullptr);
+            if (mem) api->FreeMemory(dev, mem, nullptr);
+        });
         tex_view_ = nullptr; tex_image_ = nullptr; tex_mem_ = nullptr;
         tex_w_ = tex_h_ = 0;
         atlas_dirty_binding_ = true;
@@ -659,6 +695,12 @@ class VulkanDevice {
     void destroy() {
         if (device_ == nullptr || api_ == nullptr) return;
         if (api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
+
+        // The device really is idle now, so everything retired is safe to
+        // free regardless of which frame it belonged to. This is the ONE
+        // place a blocking wait is the right answer: the device is going away
+        // and nothing may be left holding its memory.
+        reclaim_.collect_all();
 
         destroy_swapchain_objects();
         if (swapchain_) api_->DestroySwapchainKHR(device_, swapchain_, nullptr);
@@ -1768,6 +1810,14 @@ class VulkanDevice {
     /// Slot 0 means "invalid handle", so numbering starts at 1.
     std::uint32_t next_import_slot_ = 1;
     bool          dmabuf_import_ = false;
+
+    /// Frees GPU resources once the frame that last used them completes, so
+    /// destroying a texture does not stall the device. See reclaim.hpp.
+    Reclaimer     reclaim_;
+    /// Counts frames the GPU has FINISHED, not frames submitted. Bumped in
+    /// submit() right after the in-flight fence returns, which is the only
+    /// moment that fact is known.
+    std::uint64_t frames_completed_ = 0;
     /// Built lazily by importable_formats(); mutable because that query is
     /// logically const and is called from const context every time a client
     /// asks what the compositor supports.
