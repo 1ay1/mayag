@@ -296,7 +296,66 @@ class Device {
     [[nodiscard]] virtual std::span<const FormatModifier>
     importable_formats() const { return {}; }
 
+    /// Get `buf` onto the GPU by whatever route works, and say which was used.
+    ///
+    /// This is what a compositor actually calls. `import` is the fast path
+    /// and it FAILS routinely -- a software renderer, a modifier the driver
+    /// refuses, a wl_shm client that never had a dmabuf. Every one of those
+    /// still has to appear on screen, so a compositor needs "make this
+    /// drawable" rather than "import this or else".
+    ///
+    /// Without it the fallback was not merely awkward but impossible:
+    /// upload_image takes a shared_ptr<const ImageData>, which a Dmabuf or
+    /// Shm buffer does not have, so a failed import left the layer with no
+    /// path to the GPU at all and it silently vanished from the frame.
+    ///
+    /// Returns the handle plus whether it cost a copy, because that is the
+    /// difference between a compositor that idles and one that burns a core,
+    /// and it should be observable rather than guessed at.
+    struct Acquired {
+        TextureHandle handle;
+        /// False when the pixels were imported in place; true when they had
+        /// to be copied. A compositor can log or expose this to find clients
+        /// allocating buffers it cannot use directly.
+        bool          copied = false;
+    };
+    [[nodiscard]] virtual std::expected<Acquired, ImportError>
+    acquire(const Buffer& buf) {
+        if (!buf.valid()) return std::unexpected(ImportError::invalid_buffer);
+
+        // Fast path first, always.
+        if (auto imported = import(buf)) {
+            return Acquired{*imported, false};
+        }
+
+        // Fallback. Only CPU-side pixels can be copied; a dmabuf that the
+        // device refused would have to be mapped first, which is a decision
+        // (and a performance cliff) that belongs to the caller rather than
+        // happening silently inside a function called "acquire".
+        if (const auto* cpu = std::get_if<Buffer::Cpu>(&buf.storage)) {
+            const std::uint32_t slot = next_upload_slot();
+            upload_image(slot, cpu->image);
+            return Acquired{TextureHandle{slot}, true};
+        }
+        return std::unexpected(ImportError::unsupported_format);
+    }
+
+    /// An unused texture id.
+    ///
+    /// Ids used to be invented by the caller, which is fine for one app
+    /// uploading a handful of images and wrong for a compositor holding one
+    /// per client surface: two subsystems pick the same number and silently
+    /// overwrite each other's pixels. Slot 0 is reserved for the glyph atlas,
+    /// so allocation starts at 1.
+    [[nodiscard]] virtual std::uint32_t next_upload_slot() {
+        return ++upload_slot_;
+    }
+
     [[nodiscard]] virtual std::uint64_t frames_presented() const noexcept { return 0; }
+
+  private:
+    /// Counter behind next_upload_slot(). Slot 0 is the glyph atlas.
+    std::uint32_t upload_slot_ = 0;
 };
 
 /// A backend factory. Registering one is how a new API is added; nothing in

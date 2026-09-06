@@ -22,6 +22,7 @@
 #include <mayag/output/planes.hpp>
 
 #include <cstdio>
+#include <cmath>
 #include <string>
 
 using namespace mayag;
@@ -183,6 +184,94 @@ int main() {
         check(plan.size() == 1,
               "but every layer still gets an answer, so the caller never has "
               "to guess what happened to one");
+    }
+
+    // ── gaps found by actually writing a compositor frame loop ──────
+    //
+    // The abstractions above were designed, then used. These three are what
+    // the using found -- each one blocked a line of the loop, and none was
+    // visible from the design alone.
+    section("what a compositor advertises is the INTERSECTION of two lists");
+    {
+        // The GPU decides what it can sample; the display decides what it can
+        // scan out. They are different hardware. A client wants a buffer that
+        // satisfies both, and neither list alone answers that.
+        const FormatModifier gpu[] = {
+            {formats::argb8888, Modifier::linear, false},
+            {formats::abgr8888, static_cast<Modifier>(0x1234), false},
+            {formats::xrgb8888, Modifier::linear, false},
+        };
+        const FormatModifier display[] = {
+            {formats::argb8888, Modifier::linear, false},
+            {formats::xrgb8888, static_cast<Modifier>(0x9999), false},
+        };
+
+        const auto both = common_formats(gpu, display);
+        check(both.size() == 1,
+              "only pairs on BOTH lists survive (" +
+                  std::to_string(both.size()) + ")");
+        check(both[0].format == formats::argb8888 &&
+              both[0].modifier == Modifier::linear,
+              "and it is the pair both sides named");
+        check(both[0].scanout,
+              "marked scanout, so a caller need not intersect again to know it "
+              "is on the fast path");
+
+        // The MODIFIER is part of the match, not decoration. Same format,
+        // different tiling, is a different buffer layout entirely -- treating
+        // them as equal would advertise a pair the display cannot scan out.
+        const FormatModifier same_fmt[] = {
+            {formats::xrgb8888, Modifier::linear, false},
+        };
+        const auto none = common_formats(same_fmt, display);
+        check(none.empty(),
+              "a format both support with DIFFERENT modifiers does not match");
+    }
+
+    section("an imported buffer can be composited, not only scanned out");
+    {
+        // Planes are few, so most layers lose and must be composited. Import
+        // returned a TextureHandle, DrawList indexed textures by id, and
+        // nothing joined the two -- zero-copy could feed direct scanout and
+        // nothing else, which is exactly backwards: the fallback is the path
+        // that must never be missing.
+        DrawList list;
+        const TextureHandle imported{7};
+        list.imported(Rect{{0, 0}, {800, 600}}, imported);
+        check(list.instances().size() == 1,
+              "an imported buffer can be drawn");
+        check(list.batches().size() == 1 && list.batches()[0].texture == 7,
+              "and batches on its own texture id, like any other image");
+
+        // An invalid handle draws nothing rather than sampling slot 0, which
+        // is the glyph atlas -- a compositor that lost an import would
+        // otherwise paint text atlas garbage over a client's window.
+        DrawList empty;
+        empty.imported(Rect{{0, 0}, {10, 10}}, TextureHandle{});
+        check(empty.instances().empty(),
+              "an invalid handle draws NOTHING, rather than sampling the "
+              "atlas in slot 0");
+    }
+
+    section("a frame reports when the NEXT one is due");
+    {
+        HeadlessOutput out;   // 60 Hz
+        const auto r = out.commit({});
+        check(r.has_value(), "a commit with no layers still presents");
+        check(r->next_vblank > r->time,
+              "and predicts the next vblank AFTER this one");
+
+        const double period = r->next_vblank - r->time;
+        check(std::abs(period - 1.0 / 60.0) < 1e-9,
+              "one refresh period ahead at 60 Hz (" +
+                  std::to_string(period * 1000.0) + " ms)");
+
+        // Without this a client can only pace to when its LAST frame landed,
+        // which drifts and under load collapses into rendering frames nobody
+        // sees.
+        const auto r2 = out.commit({});
+        check(r2->time >= r->next_vblank - 1e-9,
+              "and the next frame lands at the predicted time");
     }
 
     std::printf("\n%s  %d checks, %d failures\n",

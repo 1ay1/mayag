@@ -255,6 +255,66 @@ int main() {
               "offering it");
     }
 
+    // ── acquire: import if you can, copy if you must ───────────────
+    //
+    // Found by writing the frame loop. import() is the fast path and fails
+    // ROUTINELY -- a software renderer, a modifier the driver refuses, a
+    // wl_shm client that never had a dmabuf. Every one of those still has to
+    // appear on screen.
+    //
+    // Before this the fallback was not awkward but impossible: upload_image
+    // takes a shared_ptr<const ImageData>, which a Dmabuf or Shm buffer does
+    // not have, so a failed import left a layer with no route to the GPU and
+    // it silently vanished from the frame.
+    section("every buffer reaches the GPU somehow, and says what it cost");
+    {
+        auto dev = backend::SoftwareBackend::create({}, Vec2{64, 64}, 1.0f);
+        backend::Device& sw = *dev;
+
+        auto img = std::make_shared<ImageData>();
+        img->width = 8; img->height = 8;
+        img->rgba.assign(8 * 8 * 4, 0xAA);
+
+        // This device cannot import at all, so acquire must fall back.
+        const auto a = sw.acquire(Buffer::from(img));
+        check(a.has_value(),
+              "a CPU buffer is acquired even on a device that cannot import");
+        check(a->handle.valid(), "and comes back with a usable texture");
+        check(a->copied,
+              "reporting that it COST A COPY -- the difference between a "
+              "compositor that idles and one that burns a core");
+
+        // Ids must not collide. A compositor holds one texture per client
+        // surface; two subsystems inventing ids by hand overwrite each
+        // other's pixels silently.
+        const auto b = sw.acquire(Buffer::from(img));
+        check(b.has_value() && b->handle.slot != a->handle.slot,
+              "a second acquire gets a DIFFERENT slot, so surfaces cannot "
+              "overwrite each other");
+        check(a->handle.slot != 0 && b->handle.slot != 0,
+              "and never slot 0, which is the glyph atlas");
+
+        // A foreign buffer that cannot be imported cannot be copied either --
+        // it would have to be mapped first, which is a performance cliff the
+        // caller must choose, not something to do silently inside acquire().
+        Dmabuf d{};
+        d.n_planes = 1;
+        d.planes[0] = DmabufPlane{scratch_fd(), 0, 4096};
+        d.format = formats::argb8888;
+        const Buffer foreign{d, 64, 64};
+        const auto f = sw.acquire(foreign);
+        check(!f.has_value(),
+              "a dmabuf this device cannot import fails rather than being "
+              "mapped and copied behind the caller's back");
+        check(fd_open(d.planes[0].fd),
+              "and still does not close the caller's fd");
+        ::close(d.planes[0].fd);
+
+        const auto bad = sw.acquire(Buffer{});
+        check(!bad.has_value() && bad.error() == ImportError::invalid_buffer,
+              "an empty buffer is still invalid_buffer");
+    }
+
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;

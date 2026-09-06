@@ -32,6 +32,7 @@
 #include "../render/buffer.hpp"
 #include "../render/sync.hpp"
 
+#include <algorithm>
 #include <concepts>
 #include <cstdint>
 #include <optional>
@@ -120,9 +121,50 @@ struct Presented {
     /// video composited costs a full-screen blend every frame. Reported so an
     /// app can see whether it is on the fast path instead of guessing.
     int           direct_scanout = 0;
+    /// When the NEXT frame is expected to reach the screen.
+    ///
+    /// A compositor hands this to clients as a deadline: draw by then and
+    /// your frame is shown, miss it and it waits a whole refresh. Without a
+    /// predicted time a client can only pace to when its LAST frame landed,
+    /// which is the wrong clock -- it drifts, and under load it collapses
+    /// into rendering frames nobody ever sees.
+    ///
+    /// Predicted, not promised: a mode change or a missed vblank moves it.
+    /// Zero means the display cannot say, which a client must treat as "draw
+    /// when you like" rather than "draw immediately".
+    double        next_vblank = 0.0;
 };
 
 using CommitResult = std::expected<Presented, CommitError>;
+
+/// Format+modifier pairs usable on BOTH the renderer and the display.
+///
+/// A compositor advertises this to clients, and neither side can answer it
+/// alone: the GPU decides what it can sample, the display engine decides what
+/// it can scan out, and they are different hardware with different rules. A
+/// client wants a buffer that satisfies both, because one only the GPU
+/// accepts can never reach a plane, and one only the display accepts cannot
+/// be composited when it loses a plane.
+///
+/// Provided here rather than left to each compositor because getting it wrong
+/// is SILENT: clients allocate buffers that work, just slowly, forever.
+///
+/// `scanout` is set on every result, so a caller can tell which pairs are on
+/// the fast path without intersecting the lists again.
+[[nodiscard]] inline std::vector<FormatModifier>
+common_formats(std::span<const FormatModifier> renderer,
+               std::span<const FormatModifier> display) {
+    std::vector<FormatModifier> out;
+    for (const FormatModifier& r : renderer) {
+        const auto it = std::find_if(
+            display.begin(), display.end(), [&](const FormatModifier& d) {
+                return d.format == r.format && d.modifier == r.modifier;
+            });
+        if (it == display.end()) continue;
+        out.push_back(FormatModifier{r.format, r.modifier, /*scanout=*/true});
+    }
+    return out;
+}
 
 /// A physical display mayag drives.
 ///

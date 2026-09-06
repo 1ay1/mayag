@@ -35,6 +35,21 @@ namespace mayag {
 /// 8 MB; a player producing 60 a second would otherwise burn half a gigabyte
 /// per second copying frames into messages that are themselves copied through
 /// the queue. Sharing also lets a decoder hand over a buffer it already owns.
+/// A texture the renderer can sample, whatever produced it.
+///
+/// Lives here rather than with Buffer because it is a TEXTURE identity, not a
+/// buffer one: `DrawList` indexes textures by id and this is that id, so an
+/// imported buffer and an uploaded image are the same currency at draw time.
+/// Opaque so the backend can decide whether the slot means a VkImage, an
+/// MTLTexture, or an index into a software array.
+struct TextureHandle {
+    std::uint32_t slot = 0;
+    [[nodiscard]] bool valid() const noexcept { return slot != 0; }
+    [[nodiscard]] friend constexpr bool operator==(TextureHandle,
+                                                   TextureHandle) = default;
+};
+
+/// Decoded pixels the renderer can upload.
 ///
 /// `rgba` is straight (not premultiplied), sRGB-encoded RGBA8 -- what every
 /// decoder and image loader produces. The shading kernel decodes it.
@@ -367,6 +382,27 @@ class DrawList {
         i.uv    = {src_uv.left(), src_uv.top(), src_uv.right(), src_uv.bottom()};
         i.color = premultiplied(tint);
         push(i, texture);
+    }
+
+    /// Draw a buffer imported with `Device::import`.
+    ///
+    /// A compositor needs this for the path that must ALWAYS work. A layer
+    /// that wins a hardware plane never reaches the GPU at all, but planes
+    /// are few and most layers lose: they have to be composited, and
+    /// compositing an imported buffer was impossible without this. Import
+    /// returns a TextureHandle, DrawList indexes textures by id, and nothing
+    /// joined the two -- so zero-copy import could feed direct scanout and
+    /// nothing else, which is exactly backwards. The fallback is the case
+    /// that must never be missing.
+    ///
+    /// A TextureHandle's slot IS a texture id; they were always the same
+    /// currency. Taking the handle rather than the raw slot keeps that an
+    /// implementation detail and stops a caller inventing an id by hand.
+    void imported(const Rect& dst, TextureHandle handle,
+                  const Rect& src_uv = Rect{{0, 0}, {1, 1}},
+                  Color<Srgb> tint = colors::white) {
+        if (!handle.valid()) return;
+        textured(dst, src_uv, handle.slot, tint);
     }
 
     /// A colour glyph (emoji). Unlike `glyph`, which samples a coverage atlas

@@ -176,19 +176,6 @@ struct Buffer {
     }
 };
 
-/// A texture the device has imported and can sample.
-///
-/// Opaque on purpose: the backend decides whether this is a VkImage, an
-/// MTLTexture, or an index into a software array. It is returned by value and
-/// released explicitly, because a compositor imports and drops buffers
-/// constantly and needs the lifetime to be its own decision.
-struct TextureHandle {
-    std::uint32_t slot = 0;
-    [[nodiscard]] bool valid() const noexcept { return slot != 0; }
-    [[nodiscard]] friend constexpr bool operator==(TextureHandle,
-                                                   TextureHandle) = default;
-};
-
 /// Why an import failed. A compositor needs to tell "this device will never
 /// take that format" (renegotiate with the client) from "out of memory right
 /// now" (retry), because the responses are completely different.

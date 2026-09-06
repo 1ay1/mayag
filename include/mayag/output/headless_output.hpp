@@ -35,7 +35,7 @@ class HeadlessOutput {
         const bool known = std::find(modes_.begin(), modes_.end(), m) != modes_.end();
         if (!known) return std::unexpected(CommitError::unsupported_layout);
         current_ = m;
-        return Presented{time_, sequence_, 0};
+        return Presented{time_, sequence_, 0, time_};
     }
 
     /// Record a commit, honouring whatever failure a test has armed.
@@ -56,8 +56,10 @@ class HeadlessOutput {
         last_ = std::vector<Layer>{layers.begin(), layers.end()};
         last_plan_ = plan;
         ++sequence_;
-        time_ += current_->refresh_hz() > 0.0 ? 1.0 / current_->refresh_hz() : 0.0;
-        return Presented{time_, sequence_, direct_count(plan)};
+        const double period = current_->refresh_hz() > 0.0
+                            ? 1.0 / current_->refresh_hz() : 0.0;
+        time_ += period;
+        return Presented{time_, sequence_, direct_count(plan), time_ + period};
     }
 
     [[nodiscard]] std::span<const FormatModifier> scanout_formats() const noexcept {
