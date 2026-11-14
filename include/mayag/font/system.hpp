@@ -521,7 +521,8 @@ class Database {
 /// "CPU 温度 🔥" renders every character rather than three tofu boxes.
 [[nodiscard]] inline std::shared_ptr<FontStack> default_stack(FontConfig cfg = {},
                                                               std::uint16_t weight = 400,
-                                                              bool italic = false) {
+                                                              bool italic = false,
+                                                              std::span<const std::string_view> primary = {}) {
     auto stack = std::make_shared<FontStack>(cfg);
     const Database& db = Database::instance();
 
@@ -546,9 +547,25 @@ class Database {
     };
 
     // 1. The primary UI font, honouring the requested weight/slant. This is
-    //    the face that renders body text, so it leads the stack.
+    //    the face that renders body text, so it leads the stack. A caller may
+    //    lead with its own families (a monospace-first app); the system UI
+    //    font still follows as the first fallback.
+    if (!primary.empty()) add_entry(db.first_available(primary, weight, italic));
     if (const FontEntry* ui = db.first_available(ui_font_families(), weight, italic)) {
         add_entry(ui);
+    }
+    // The leading face's other static weights and slants (Menlo Bold, Menlo
+    // Italic), so bold text uses the real Bold instead of an emboldened
+    // Regular. Variable faces reach every weight on their own axis.
+    if (stack->face_count() > 0 && !stack->primary()->is_variable()) {
+        const std::string fam = stack->primary()->family();
+        for (const auto& e : db.entries()) {
+            if (e.family != fam || already(&e)) continue;
+            if (auto face = Face::from_file(e.path, e.face_index)) {
+                added.emplace_back(e.path, e.face_index);
+                stack->add_sibling(0, std::move(face), e.weight, e.italic);
+            }
+        }
     }
 
     // 2. One covering face for EVERY script the machine has a font for. This

@@ -58,6 +58,17 @@ struct Theme {
     [[nodiscard]] constexpr float space(float multiple) const noexcept {
         return space_unit * multiple;
     }
+
+    /// An OPAQUE wash of `c` over the background, `amount` of the way there in
+    /// sRGB (perceptual) terms. For row highlights and diff lines.
+    ///
+    /// Not `c.fade(amount)`: translucent fills blend in linear light, which is
+    /// physically right and perceptually lopsided -- on a near-black
+    /// background 4% of a bright amber decodes to ~40/255, a loud band rather
+    /// than a hint. Designers pick tints perceptually; so does this.
+    [[nodiscard]] constexpr Color<Srgb> tint(Color<Srgb> c, float amount) const noexcept {
+        return mix(background, c, amount);
+    }
 };
 
 namespace detail {

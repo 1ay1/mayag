@@ -59,10 +59,13 @@
 #include <mayag/widget/card.hpp>
 #include <mayag/widget/checkbox.hpp>
 #include <mayag/widget/color_swatch.hpp>
+#include <mayag/widget/diff_view.hpp>
 #include <mayag/widget/divider.hpp>
 #include <mayag/widget/dot.hpp>
 #include <mayag/widget/dropdown.hpp>
+#include <mayag/widget/fuzzy.hpp>
 #include <mayag/widget/kbd.hpp>
+#include <mayag/widget/key_hint.hpp>
 #include <mayag/widget/keybind.hpp>
 #include <mayag/widget/layout.hpp>
 #include <mayag/widget/nav_item.hpp>

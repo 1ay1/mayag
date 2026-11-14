@@ -288,7 +288,9 @@ class Face {
     [[nodiscard]] bool can_reach_weight(float w) const noexcept {
         for (const auto& a : axes_)
             if (a.tag == var::tag_wght) return w <= a.max + 1.0f;
-        return false;
+        // A static face reaches its own weight (Menlo Bold IS weight 700):
+        // emboldening a real Bold again is what produced smeared headings.
+        return w <= static_cast<float>(weight()) + 150.0f;
     }
 
     /// Current value of one axis in USER units, or NaN if the tag is unknown.
@@ -464,6 +466,34 @@ class FontStack : public Shaper {
         if (face != nullptr) faces_.push_back(std::move(face));
     }
 
+    /// Register another weight/style of an already-added face (Menlo Bold for
+    /// Menlo Regular). It never takes part in fallback: shaping swaps it in
+    /// for `of` when a run asks for a weight closer to its own, which is what
+    /// a real typesetter does before it ever reaches for synthetic bold.
+    void add_sibling(std::size_t of, std::shared_ptr<Face> face, std::uint16_t weight,
+                     bool italic) {
+        if (face == nullptr || of >= faces_.size()) return;
+        const std::size_t at = faces_.size();
+        faces_.push_back(std::move(face));
+        siblings_.push_back(Sibling{of, at, weight, italic});
+    }
+
+    /// The face (`base` or one of its siblings) to draw `base`'s glyphs at
+    /// `weight`: the nearest real weight with the right slant, if it beats the
+    /// base face. Variable faces reach any weight themselves, so stay put.
+    [[nodiscard]] std::size_t face_for_weight(std::size_t base, float weight, bool italic) const noexcept {
+        if (siblings_.empty() || base >= faces_.size() || faces_[base]->is_variable()) return base;
+        std::size_t best = base;
+        float best_d = num::abs(static_cast<float>(faces_[base]->weight()) - weight) +
+                       (faces_[base]->is_italic() != italic ? 1000.0f : 0.0f);
+        for (const auto& s : siblings_) {
+            if (s.of != base) continue;
+            const float d = num::abs(static_cast<float>(s.weight) - weight) + (s.italic != italic ? 1000.0f : 0.0f);
+            if (d < best_d) { best_d = d; best = s.at; }
+        }
+        return best;
+    }
+
     [[nodiscard]] bool empty() const noexcept { return faces_.empty(); }
     [[nodiscard]] std::size_t face_count() const noexcept { return faces_.size(); }
     [[nodiscard]] const Face* primary() const noexcept {
@@ -486,6 +516,7 @@ class FontStack : public Shaper {
     [[nodiscard]] std::pair<std::size_t, std::uint16_t>
     resolve(std::uint32_t codepoint) const noexcept {
         for (std::size_t i = 0; i < faces_.size(); ++i) {
+            if (!siblings_.empty() && is_sibling(i)) continue;   // siblings stand in for a face, never fall back
             const std::uint16_t g = faces_[i]->glyph_for(codepoint);
             if (g != 0) return {i, g};
         }
@@ -536,6 +567,13 @@ class FontStack : public Shaper {
             }
 
             auto [face_idx, gid] = resolve(cp);
+            if (gid != 0) {
+                // A real Bold beats an emboldened Regular. Same family, so the
+                // codepoint maps through the sibling's own cmap.
+                if (const std::size_t w = face_for_weight(face_idx, params.weight, params.italic); w != face_idx) {
+                    if (const std::uint16_t g2 = faces_[w]->glyph_for(cp); g2 != 0) { face_idx = w; gid = g2; }
+                }
+            }
             const bool missing = (gid == 0);
             const Face& face = *faces_[face_idx];
             pin_variations(faces_[face_idx].get(), params.weight,
@@ -818,6 +856,13 @@ class FontStack : public Shaper {
     FontConfig                          config_;
     Atlas                               atlas_;
     std::vector<std::shared_ptr<Face>>  faces_;
+
+    struct Sibling { std::size_t of, at; std::uint16_t weight; bool italic; };
+    std::vector<Sibling> siblings_;
+    [[nodiscard]] bool is_sibling(std::size_t i) const noexcept {
+        for (const auto& s : siblings_) if (s.at == i) return true;
+        return false;
+    }
 };
 
 // ════════════════════════════════════════════════════════════════════════
