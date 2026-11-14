@@ -119,7 +119,7 @@ struct App {
     struct Ping {}; struct Timer {}; struct Animate {}; struct Frame { double dt; };
     struct Stream {}; struct Quit {};
     using Msg = std::variant<Ping, Timer, Animate, Frame, Stream, Quit>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd update(Model& m, Ping) {
@@ -154,7 +154,7 @@ struct App {
     static Sub subscribe(const Model& m) {
         return Sub::batch(
             when(m.animating, Sub::on_frame([](double dt) { return Frame{dt}; })),
-            when(m.streaming, Sub::stream("ping", [](jaal::Sink<Msg> out, std::stop_token st) {
+            when(m.streaming, Sub::stream("ping", [](mayag::Sink<Msg> out, std::stop_token st) {
                 for (int i = 0; i < 10 && !st.stop_requested(); ++i) std::this_thread::sleep_for(5ms);
                 g_sent = clk::now();
                 (void)out.send(Ping{});
@@ -199,7 +199,7 @@ int main() {
     check(g_fold_ms.load() >= 0 && g_fold_ms.load() < 20,
           "and promptly (" + std::to_string(g_fold_ms.load()) + " ms after the send)");
 
-    section("jaal timers fire through arm()");
+    section("timers fire through arm()");
     press(Key::t);
     check(app.model().timer_armed && !app.model().timer_fired, "the key armed a 40 ms timer");
     const auto td = app.draws();

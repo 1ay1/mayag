@@ -1,9 +1,9 @@
-// live.cpp — a real-time monitor built on a jaal stream
+// live.cpp — a real-time monitor built on a Sub::stream
 //
 // The point of this example is the shape of a LIVE app: data arrives from a
 // source that is not the window — here a background thread sampling the
 // system — and the UI updates as it flows in, while an idle frame still costs
-// nothing. The producer runs on its own thread, each sample wakes jaal's
+// nothing. The producer runs on its own thread, each sample wakes the
 // loop, and between samples the app sleeps at 0% CPU.
 //
 // Everything else is the same pure Model/Msg/update/view mayag always is. The
@@ -80,7 +80,7 @@ struct Live {
     struct Sample { float load; };
     struct Quit {};
     using Msg = std::variant<Sample, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Cmd = mayag::Cmd<Msg, set_title>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model& m) { m.streaming = true; return SetTitle{"mayag — live"}; }
@@ -166,11 +166,11 @@ struct Live {
         // No frame subscription: the app is NOT animating. It renders only when
         // a sample arrives, and blocks at 0% CPU in between.
         //
-        // The producer is a Sub::stream: jaal runs it exactly while this
+        // The producer is a Sub::stream: mayag runs it exactly while this
         // subscription is returned and stops it (via the stop_token) when it
         // vanishes, so "stream while m.streaming" needs no start/stop plumbing.
         return when(m.streaming, Sub::stream("cpu",
-            [](jaal::Sink<Msg> out, std::stop_token st) {
+            [](mayag::Sink<Msg> out, std::stop_token st) {
                 CpuSampler sampler;
                 sampler.sample();   // prime the delta
                 while (!st.stop_requested()) {

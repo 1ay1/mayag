@@ -60,7 +60,7 @@ struct Todo {
 
     using Msg = std::variant<Typed, KeyDown, Add, Toggle, Remove, SetFilter,
                              Scrolled, FocusInput, Tick, OpenMenu, CloseMenu, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title, focus>;
+    using Cmd = mayag::Cmd<Msg, set_title, focus>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model& m) {

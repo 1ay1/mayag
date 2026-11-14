@@ -7,9 +7,9 @@
 //
 // Everything here is the same architecture as a counter:
 //
-//   the decoder        a jaal Sub::stream, so it exists exactly while playing
+//   the decoder        a Sub::stream, so it exists exactly while playing
 //                      and is stopped on pause
-//   a decoded frame    an ordinary Msg carrying jaal::shared<ImageData>, so an
+//   a decoded frame    an ordinary Msg carrying mayag::Shared<ImageData>, so an
 //                      8 MB 1080p frame moves by pointer, not by copy
 //   showing it         the upload_image effect + image(id) in the view
 //   seeking            at most one decode running, the newest request waiting
@@ -128,7 +128,7 @@ class Decoder {
     /// Decode the next frame as RGBA8. Returns null at end of stream.
     ///
     /// The buffer is freshly allocated per frame and moved out, so the caller
-    /// can wrap it in a jaal::shared and send it without a copy.
+    /// can wrap it in a mayag::Shared and send it without a copy.
     /// `pts_out` is the presentation time in seconds, so the caller can
     /// pace playback against a real clock rather than assuming a frame rate.
     /// `max_w` caps the output width, so the decoder produces pixels at the
@@ -403,7 +403,7 @@ struct Video {
     /// overwrite the seek target. The scrub bar moved, the picture did not,
     /// and you had to click again. Measured 4-6 of 12 clicks lost that way.
     struct Frame {
-        jaal::shared<ImageData> pixels;
+        mayag::Shared<ImageData> pixels;
         double pts;
         float  ms;
         int    epoch = 0;
@@ -429,7 +429,7 @@ struct Video {
     using Msg = std::variant<Play, Pause, SeekTo, Frame, Ended, SeekAbandoned,
                              Pointer, Scrub, ScrubEnd, SeekSettled,
                              ToggleFullscreen, Resized, Tick, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title, set_fullscreen, upload_image>;
+    using Cmd = mayag::Cmd<Msg, set_title, set_fullscreen, upload_image>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model& m) {
@@ -466,7 +466,7 @@ struct Video {
     static Cmd start_seek(Model& m, double want, bool preview) {
         m.seek_busy = true;
         return Cmd::task("seek",
-            [](jaal::Sink<Msg> out, double at, int epoch, int max_w, bool pv) {
+            [](mayag::Sink<Msg> out, double at, int epoch, int max_w, bool pv) {
                 Decoder d;                   // owned by this task alone
                 if (!d.open(g_path)) { out.send(Ended{}); out.send(SeekSettled{}); return; }
                 double pts = 0.0;
@@ -476,7 +476,7 @@ struct Video {
                 auto px = d.seek(at, &pts, !pv, max_w);
                 const float ms = std::chrono::duration<float, std::milli>(
                                      std::chrono::steady_clock::now() - t0).count();
-                if (px) out.send(Frame{jaal::shared<ImageData>::make(std::move(*px)), pts, ms, epoch});
+                if (px) out.send(Frame{mayag::Shared<ImageData>::make(std::move(*px)), pts, ms, epoch});
                 else    out.send(Ended{});
                 out.send(SeekSettled{});
             },
@@ -508,7 +508,7 @@ struct Video {
                 // Not defensive coding: the decoder that produced this frame
                 // may already have been stopped, its message queued before it
                 // noticed. Applying it rewinds m.time to wherever playback had
-                // got to. jaal drops most of these already, but a seek task
+                // got to. mayag drops most of these already, but a seek task
                 // that finishes after a newer seek still delivers.
                 if (f.epoch != m.epoch) return {};
                 m.time      = f.pts;
@@ -644,15 +644,15 @@ struct Video {
     static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
     /// The playback decoder: a stream, so it exists exactly while `playing`
-    /// is true and jaal stops it when it is not.
+    /// is true and mayag stops it when it is not.
     ///
     /// The key carries the seek EPOCH. An unchanged key means "same producer,
     /// leave it alone", so with a constant key a seek while playing did
-    /// nothing. With the epoch folded in, a seek is a DIFFERENT stream: jaal
+    /// nothing. With the epoch folded in, a seek is a DIFFERENT stream: mayag
     /// stops the old one and starts one at the new time.
     static Sub decoder(const Model& m) {
         return Sub::stream("playback:" + std::to_string(m.epoch),
-            [](jaal::Sink<Msg> out, std::stop_token st, double from, int epoch, int max_w) {
+            [](mayag::Sink<Msg> out, std::stop_token st, double from, int epoch, int max_w) {
             Decoder d;                       // owned by this thread alone
             if (!d.open(g_path)) { out.send(Ended{}); return; }
             double ignored = 0.0;
@@ -690,7 +690,7 @@ struct Video {
                         std::chrono::duration<double>(target - elapsed));
                 }
                 if (st.stop_requested()) return;
-                out.send(Frame{jaal::shared<ImageData>::make(std::move(*px)), pts, ms, epoch});
+                out.send(Frame{mayag::Shared<ImageData>::make(std::move(*px)), pts, ms, epoch});
             }
         },
             m.time, m.epoch, m.view_w);

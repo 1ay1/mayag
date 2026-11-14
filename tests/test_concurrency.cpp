@@ -66,7 +66,7 @@ struct Fan {
     struct Value { int producer; int n; };
     struct Start {};
     using Msg = std::variant<Value, Start>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
 
     static Cmd update(Model& m, Value v) {
         on_loop();
@@ -78,7 +78,7 @@ struct Fan {
         on_loop();
         std::vector<Cmd> cmds;
         for (int p = 0; p < producers; ++p) {
-            cmds.push_back(Cmd::task([](jaal::Sink<Msg> out, std::stop_token st, int who) {
+            cmds.push_back(Cmd::task([](mayag::Sink<Msg> out, std::stop_token st, int who) {
                 for (int i = 0; i < per_producer && !st.stop_requested(); ++i)
                     (void)out.send(Value{who, i});
             }, p));
@@ -95,7 +95,7 @@ struct Cycle {
     struct Model { bool on = false; int ticks = 0; };
     struct Toggle {}; struct Tick {};
     using Msg = std::variant<Toggle, Tick>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd update(Model& m, Toggle) { on_loop(); m.on = !m.on; return {}; }
@@ -103,7 +103,7 @@ struct Cycle {
     static Node view(const Model&) { return tiny(); }
 
     static Sub subscribe(const Model& m) {
-        return when(m.on, Sub::stream("feed", [](jaal::Sink<Msg> out, std::stop_token st) {
+        return when(m.on, Sub::stream("feed", [](mayag::Sink<Msg> out, std::stop_token st) {
             ++g_live_producers;
             while (!st.stop_requested()) {
                 (void)out.send(Tick{});
@@ -123,7 +123,7 @@ struct Hammer {
     struct Model { int epoch = 0; };
     struct Bump {}; struct Value { int epoch; };
     using Msg = std::variant<Bump, Value>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd update(Model& m, Bump) { on_loop(); ++m.epoch; return {}; }
@@ -138,7 +138,7 @@ struct Hammer {
         // Fast, to keep the window between "stop checked" and "sent" wide, but
         // with a yield every 64 sends so a slow (TSAN) loop isn't buried.
         return Sub::stream("hammer:" + std::to_string(m.epoch),
-                           [](jaal::Sink<Msg> out, std::stop_token st, int e) {
+                           [](mayag::Sink<Msg> out, std::stop_token st, int e) {
             for (int i = 0; !st.stop_requested(); ++i) {
                 (void)out.send(Value{e});
                 if ((i & 63) == 63) std::this_thread::yield();
@@ -155,7 +155,7 @@ struct EpochSrc {
     struct Model { int epoch = 0; };
     struct Bump {}; struct Ping { int epoch; };
     using Msg = std::variant<Bump, Ping>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd update(Model& m, Bump) { on_loop(); ++m.epoch; return {}; }
@@ -164,7 +164,7 @@ struct EpochSrc {
 
     static Sub subscribe(const Model& m) {
         return Sub::stream("gen:" + std::to_string(m.epoch),
-                           [](jaal::Sink<Msg> out, std::stop_token st, int e) {
+                           [](mayag::Sink<Msg> out, std::stop_token st, int e) {
             { std::lock_guard lk{g_epoch_mutex}; g_epoch_starts.push_back(e); }
             while (!st.stop_requested()) {
                 std::this_thread::sleep_for(5ms);
@@ -181,7 +181,7 @@ struct Scrub {
     struct Model { int epoch = 0; };
     struct Seek {}; struct Frame {};
     using Msg = std::variant<Seek, Frame>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd update(Model& m, Seek)  { on_loop(); ++m.epoch; return {}; }
@@ -191,7 +191,7 @@ struct Scrub {
     static Sub subscribe(const Model& m) {
         // Slow to notice it was stopped, like a decoder that checks between frames.
         return Sub::stream("scrub:" + std::to_string(m.epoch),
-                           [](jaal::Sink<Msg> out, std::stop_token st) {
+                           [](mayag::Sink<Msg> out, std::stop_token st) {
             ++g_scrub_live;
             while (!st.stop_requested()) {
                 std::this_thread::sleep_for(300ms);
@@ -210,13 +210,13 @@ struct Drag {
     struct Request { int v; int delay_ms; };
     struct Done { int v; };
     using Msg = std::variant<Request, Done>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
 
     static Cmd update(Model&, Request r) {
         on_loop();
         // Inverted delays: the first request is slowest, so a naive runtime
         // delivers it last and it wins.
-        return Cmd::perform<Done>(jaal::task_key{"scrub"}, [](int v, int delay_ms) {
+        return Cmd::perform<Done>(mayag::TaskKey{"scrub"}, [](int v, int delay_ms) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
             ++g_finished;
             return v;
@@ -231,7 +231,7 @@ struct Search {
     struct Model { std::string query; std::vector<std::string> fired; };
     struct Typed { char c; }; struct Fire { std::string q; };
     using Msg = std::variant<Typed, Fire>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
 
     static Cmd update(Model& m, Typed t) {
         on_loop();
@@ -249,7 +249,7 @@ struct Twin {
     struct Model { int a = 0, b = 0; };
     struct FromA {}; struct FromB {};
     using Msg = std::variant<FromA, FromB>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd update(Model& m, FromA) { on_loop(); ++m.a; return {}; }
@@ -260,11 +260,11 @@ struct Twin {
         // Two different producers that happen to share a key: two instances
         // of a component, or two modules that both picked "feed".
         return Sub::batch(
-            Sub::stream("feed", [](jaal::Sink<Msg> out, std::stop_token st) {
+            Sub::stream("feed", [](mayag::Sink<Msg> out, std::stop_token st) {
                 ++g_a;
                 while (!st.stop_requested()) { (void)out.send(FromA{}); std::this_thread::sleep_for(2ms); }
             }),
-            Sub::stream("feed", [](jaal::Sink<Msg> out, std::stop_token st) {
+            Sub::stream("feed", [](mayag::Sink<Msg> out, std::stop_token st) {
                 ++g_b;
                 while (!st.stop_requested()) { (void)out.send(FromB{}); std::this_thread::sleep_for(2ms); }
             }));
@@ -282,7 +282,7 @@ struct Coalesce {
     struct Model { bool busy = false; std::optional<int> pending; int done = 0; int last = -1; };
     struct Ask { int v; }; struct Done { int v; };
     using Msg = std::variant<Ask, Done>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
 
     static Cmd start(Model& m, int v) {
         m.busy = true;

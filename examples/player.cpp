@@ -53,12 +53,12 @@ struct Player {
     struct Pause {};
     struct Seek { int frame; };
     /// A decoded frame, arriving from the worker. The pixels travel by
-    /// jaal::shared -- 8 MB per message would otherwise be copied twice.
-    struct Frame { jaal::shared<ImageData> pixels; int index; float ms; };
+    /// mayag::Shared -- 8 MB per message would otherwise be copied twice.
+    struct Frame { mayag::Shared<ImageData> pixels; int index; float ms; };
     struct Tick { float dt; };
     struct Quit {};
     using Msg = std::variant<Play, Pause, Seek, Frame, Tick, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title, upload_image>;
+    using Cmd = mayag::Cmd<Msg, set_title, upload_image>;
     using Sub = mayag::Sub<Msg>;
 
     // ── the "decoder" ───────────────────────────────────────────────────
@@ -66,7 +66,7 @@ struct Player {
     // Stands in for libav. Produces a recognisable moving picture so a
     // screenshot can be checked by eye and by test: a colour field that
     // sweeps with time, plus a bar that marches across the frame.
-    static jaal::shared<ImageData> decode(int index) {
+    static mayag::Shared<ImageData> decode(int index) {
         ImageData img;
         img.width = kFrameW;
         img.height = kFrameH;
@@ -93,7 +93,7 @@ struct Player {
                 img.rgba[i + 3] = 255;
             }
         }
-        return jaal::shared<ImageData>::make(std::move(img));
+        return mayag::Shared<ImageData>::make(std::move(img));
     }
 
     // ── init ────────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ struct Player {
         // frame). The "seek" key makes it latest-wins: a newer seek replaces
         // the running one, so an old frame can never land after a newer one.
         return Cmd::task("seek",
-            [](jaal::Sink<Msg> out, int want) {
+            [](mayag::Sink<Msg> out, int want) {
                 const auto t0 = std::chrono::steady_clock::now();
                 auto pixels = decode(want);
                 const float ms = std::chrono::duration<float, std::milli>(
@@ -129,7 +129,7 @@ struct Player {
 
     static Cmd update(Model& m, Frame f) {
         // A frame from a worker -- the decoder stream or a seek task. No
-        // staleness check: jaal drops messages from a replaced task or a
+        // staleness check: mayag drops messages from a replaced task or a
         // stopped stream.
         m.frame   = f.index;
         m.decoded = f.index + 1;
@@ -144,12 +144,12 @@ struct Player {
     static Cmd update(Model&, Quit)     { return Cmd::quit(); }
 
     /// The decoder, as a SUBSCRIPTION rather than a command. A Sub exists
-    /// exactly while the model says so: pausing removes it and jaal stops it,
+    /// exactly while the model says so: pausing removes it and mayag stops it,
     /// so no frames keep arriving after pause. The start frame is read only
     /// when the stream starts (the key stays "decoder" while playing).
     static Sub decoder(const Model& m) {
         return Sub::stream("decoder",
-            [](jaal::Sink<Msg> out, std::stop_token st, int from) {
+            [](mayag::Sink<Msg> out, std::stop_token st, int from) {
                 using clk = std::chrono::steady_clock;
                 for (int i = from; i < kTotalFrames && !st.stop_requested(); ++i) {
                     const auto t0 = clk::now();
@@ -266,7 +266,7 @@ int main(int argc, char** argv) {
         ok(rt.model().frame >= 5, "frames arrive from the worker thread");
         ok(rt.model().last_ms > 0.0f, "and carry their decode cost");
 
-        // Pause: the stream disappears and jaal stops it.
+        // Pause: the stream disappears and mayag stops it.
         rt.click("pause");
         rt.tick();
         ok(!rt.model().playing, "pause stops playback");

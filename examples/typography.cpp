@@ -20,7 +20,7 @@ struct Typography {
     struct Model { int theme_index = 0; };
     struct NextTheme {}; struct Quit {};
     using Msg = std::variant<NextTheme, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Cmd = mayag::Cmd<Msg, set_title>;
 
     static constexpr std::array<Theme, 4> palette{
         themes::midnight, themes::ember, themes::daylight, themes::paper};

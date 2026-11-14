@@ -62,7 +62,7 @@ struct Reactive {
     struct Quit {};
 
     using Msg = std::variant<Tick, Moved, Toggle, Stats, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Cmd = mayag::Cmd<Msg, set_title>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model&) { return SetTitle{"mayag — reactive"}; }
@@ -252,7 +252,7 @@ struct Reactive {
                     Sub::on_frame([](double dt) -> Msg { return Tick{dt}; }));
     }
 
-    // The old frame check, phrased for jaal: is any subscription live?
+    // Is any subscription live (the frame clock)?
     static bool wants_frames(const Model& m) { return !subscribe(m).is_none(); }
 
     /// Copy the runtime's measurements into the model so `view()` can render

@@ -45,7 +45,7 @@ struct Counter {
     struct Quit      {};
 
     using Msg = std::variant<Increment, Decrement, Reset, BumpStep, Tick, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title, write_clipboard>;
+    using Cmd = mayag::Cmd<Msg, set_title, write_clipboard>;
     using Sub = mayag::Sub<Msg>;
 
     // ── init ────────────────────────────────────────────────────────────

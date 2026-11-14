@@ -428,7 +428,7 @@ usually wants the hard stop; it is one flag for a touch surface.
 mayag runs on [jaal](https://github.com/1ay1/jaal) (`third_party/jaal`, a git
 submodule). jaal is the runtime: the loop, `update`, `Cmd`, `Sub`, timers,
 background tasks, streams, faults and the OS waiting. mayag is a jaal host
-that owns the window and draws. An app is an ordinary jaal program with a
+that owns the window and draws. Apps only ever see mayag. An app is a struct with a
 `view()`:
 
 ```cpp
@@ -436,7 +436,7 @@ struct Counter {
     struct Model { int count = 0; Animated<float> pulse{0.0f}; };
     struct Inc {}; struct Tick { float dt; }; struct Quit {};
     using Msg = std::variant<Inc, Tick, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title>;     // the window effects it uses
+    using Cmd = mayag::Cmd<Msg, set_title>;    // the window effects it uses
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model&) { return SetTitle{"counter"}; }
@@ -461,7 +461,7 @@ struct Counter {
 int main() { return mayag::run<Counter>(); }
 ```
 
-One `update` overload per message; jaal names the case you forgot to handle.
+One `update` overload per message; the compiler names the case you forgot to handle.
 Input is one `on()` per event kind: raw events (`KeyEvent`, `TextEvent`,
 `MouseMove`, `ResizeEvent`, `CloseRequest`, ...) and gestures the host has
 already hit-tested against the laid-out tree (`Clicked`, `Activated`,
@@ -481,7 +481,7 @@ return v_list(std::move(rows), 8.0f);
 
 `Sub::on_frame` is the frame clock: one tick per refresh while `subscribe()`
 returns it, none otherwise, so a settled app sleeps in the OS at 0% CPU.
-Background work is jaal's `Cmd::task`, `Cmd::perform` and `Sub::stream`. The
+Background work is `Cmd::task`, `Cmd::perform` and `Sub::stream`. The
 whole thing is testable without a window: `run_headless` drives clicks and
 asserts on the model. See [`examples/hello.cpp`](examples/hello.cpp) for the
 smallest complete app.
@@ -648,7 +648,7 @@ fd — so the frame sits unrendered until the user happens to move the mouse,
 and the app looks frozen. The usual escape is a polling timer, which trades
 the freeze for a permanently-awake core.
 
-mayag does neither. A producer is a jaal `Sub::stream`, returned from
+mayag does neither. A producer is a `Sub::stream`, returned from
 `subscribe()`, so it runs exactly as long as the model says it should.
 "Connect the socket while logged in, close it on logout" is one line, with no
 `connect()`/`disconnect()` in `update` and no thread leaked when the flag
@@ -656,7 +656,7 @@ flips:
 
 ```cpp
 static Sub subscribe(const Model& m) {
-    return when(m.streaming, Sub::stream("cpu", [](jaal::Sink<Msg> out, std::stop_token st) {
+    return when(m.streaming, Sub::stream("cpu", [](mayag::Sink<Msg> out, std::stop_token st) {
         CpuSampler s;
         while (!st.stop_requested()) {
             std::this_thread::sleep_for(100ms);
@@ -667,7 +667,7 @@ static Sub subscribe(const Model& m) {
 ```
 
 The body captures nothing; anything it needs is passed as an argument after
-it, so it can't hold a reference into the model. Each send wakes jaal's
+it, so it can't hold a reference into the model. Each send wakes the
 reactor, which is the same epoll/kqueue wait that watches the window, so the
 message is folded and drawn at once. When the stream is stopped, anything it
 had already queued is dropped before it reaches `update()`.
@@ -765,7 +765,7 @@ that no longer follows from the present is incoherent.
 ## Error boundary
 
 One bad frame should not end a session. With `AppConfig::catch_exceptions`
-(the default) jaal runs with `fault_policy::skip`:
+(the default) a fault is skipped, not fatal:
 
 - a throwing `update` is rolled back to the model before the message, and the
   app loses one message rather than all its state.

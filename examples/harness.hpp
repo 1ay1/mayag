@@ -192,7 +192,7 @@ inline void apply_still_effects(const C& cmd, F&& upload) {
         } else if constexpr (std::is_same_v<T, UploadImage>) {
             if (a.image->valid())
                 upload(a.id, std::shared_ptr<const ImageData>(
-                                 std::make_shared<jaal::shared<ImageData>>(a.image),
+                                 std::make_shared<mayag::Shared<ImageData>>(a.image),
                                  &a.image.get()));
         }
     }, cmd.inner);
@@ -201,7 +201,7 @@ inline void apply_still_effects(const C& cmd, F&& upload) {
 /// Frame zero of the program: init() run by hand, its Cmd returned.
 template <Program P>
 [[nodiscard]] std::pair<typename P::Model, typename P::Cmd> first_model() {
-    return jaal::prog::init<P>();
+    return mayag::init_of<P>();
 }
 
 /// Run a Program in whichever mode the flags asked for.

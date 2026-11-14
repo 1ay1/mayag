@@ -39,7 +39,7 @@ struct Gallery {
 
     using Msg = std::variant<PickTheme, ToggleAnimation, Tick, Bump,
                              FlipA, FlipB, DragSlider, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Cmd = mayag::Cmd<Msg, set_title>;
     using Sub = mayag::Sub<Msg>;
 
     static constexpr std::array<Theme, 6> palette{

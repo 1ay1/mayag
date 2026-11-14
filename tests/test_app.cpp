@@ -53,7 +53,7 @@ struct TestApp {
     struct Hovered {}; struct Quit {};
 
     using Msg = std::variant<Inc, Dec, Animate, Tick, Typed, Slide, Load, Loaded, Hovered, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title, write_clipboard>;
+    using Cmd = mayag::Cmd<Msg, set_title, write_clipboard>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model&) { return SetTitle{"test-app"}; }
@@ -121,7 +121,7 @@ struct Spinner {
     struct Model { double t = 0.0; };
     struct Tick { double dt; };
     using Msg = std::variant<Tick>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
     static Cmd update(Model& m, Tick t) { m.t += t.dt; return {}; }
     static Node view(const Model& m) {
@@ -137,7 +137,7 @@ struct Follower {
     struct Moved { Vec2 p; };
     struct Tick { double dt; };
     using Msg = std::variant<Moved, Tick>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
     static Cmd update(Model& m, Moved mv) { m.p = mv.p; m.settle = 45; return {}; }
     static Cmd update(Model& m, Tick) { if (m.settle > 0) --m.settle; return {}; }
@@ -159,16 +159,16 @@ void test_update_purity() {
 
     TestApp::Model a{};
     TestApp::Model b{};
-    (void)jaal::prog::update<TestApp>(a, TestApp::Msg{TestApp::Inc{}});
-    (void)jaal::prog::update<TestApp>(b, TestApp::Msg{TestApp::Inc{}});
+    (void)mayag::update_of<TestApp>(a, TestApp::Msg{TestApp::Inc{}});
+    (void)mayag::update_of<TestApp>(b, TestApp::Msg{TestApp::Inc{}});
     check(a.count == b.count && a.count == 1, "same message, same model");
 
-    const auto cmd = jaal::prog::update<TestApp>(a, TestApp::Msg{TestApp::Dec{}});
+    const auto cmd = mayag::update_of<TestApp>(a, TestApp::Msg{TestApp::Dec{}});
     check(cmd.is_none(), "an update with no effect returns an empty Cmd");
 
     TestApp::Model m{};
-    for (int i = 0; i < 10; ++i) (void)jaal::prog::update<TestApp>(m, TestApp::Msg{TestApp::Inc{}});
-    for (int i = 0; i < 3;  ++i) (void)jaal::prog::update<TestApp>(m, TestApp::Msg{TestApp::Dec{}});
+    for (int i = 0; i < 10; ++i) (void)mayag::update_of<TestApp>(m, TestApp::Msg{TestApp::Inc{}});
+    for (int i = 0; i < 3;  ++i) (void)mayag::update_of<TestApp>(m, TestApp::Msg{TestApp::Dec{}});
     check(m.count == 7, "a sequence of updates composes without a window");
 }
 
@@ -176,7 +176,7 @@ void test_update_purity() {
 void test_functor_laws() {
     section("Cmd functor");
 
-    using C = jaal::Cmd<int, set_title>;
+    using C = mayag::Cmd<int, set_title>;
     struct Wrapped { int v; };
 
     C child = C::batch(C::quit(), C(SetTitle{"child"}));
@@ -391,7 +391,7 @@ struct IntervalApp {
     struct Model { int ticks = 0; bool running = true; };
     struct Tick {}; struct Stop {};
     using Msg = std::variant<Tick, Stop>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
     static Cmd update(Model& m, Tick) { ++m.ticks; return {}; }
     static Cmd update(Model& m, Stop) { m.running = false; return {}; }
@@ -598,7 +598,7 @@ struct Fragile {
     struct Model { int count = 0; bool poison = false; };
     struct Inc {}; struct Explode {}; struct Poison {};
     using Msg = std::variant<Inc, Explode, Poison>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
 
     static Cmd update(Model& m, Inc) { ++m.count; return {}; }
     static Cmd update(Model& m, Explode) {
@@ -813,7 +813,7 @@ struct Closable {
     struct Model { bool asked = false; };
     struct Ask {};
     using Msg = std::variant<Ask>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     static Cmd update(Model& m, Ask) { m.asked = true; return {}; }
     static Node view(const Model&) { return dsl::box().build(); }
     static std::optional<Msg> on(const Model&, const CloseRequest&) { return Ask{}; }

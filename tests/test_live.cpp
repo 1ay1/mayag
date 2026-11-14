@@ -54,7 +54,7 @@ struct StreamApp {
     struct Start {};
     struct Value { int n; };
     using Msg = std::variant<Start, Value>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd update(Model& m, Start) { m.started = true; return {}; }
@@ -62,7 +62,7 @@ struct StreamApp {
     static Node view(const Model&) { return dsl::box().build(); }
 
     static Sub subscribe(const Model& m) {
-        return when(m.started, Sub::stream("count", [](jaal::Sink<Msg> out, std::stop_token st) {
+        return when(m.started, Sub::stream("count", [](mayag::Sink<Msg> out, std::stop_token st) {
             for (int i = 1; i <= 5 && !st.stop_requested(); ++i) {
                 std::this_thread::sleep_for(2ms);
                 (void)out.send(Value{i});
@@ -91,7 +91,7 @@ struct SourceApp {
     struct Model { bool connected = false; int received = 0; };
     struct Connect {}; struct Disconnect {}; struct Value { int n; };
     using Msg = std::variant<Connect, Disconnect, Value>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd update(Model& m, Connect)    { m.connected = true;  return {}; }
@@ -101,7 +101,7 @@ struct SourceApp {
 
     static Sub subscribe(const Model& m) {
         // The producer exists ONLY while connected.
-        return when(m.connected, Sub::stream("feed", [](jaal::Sink<Msg> out, std::stop_token st) {
+        return when(m.connected, Sub::stream("feed", [](mayag::Sink<Msg> out, std::stop_token st) {
             g_live_producers.fetch_add(1);
             for (int n = 1; !st.stop_requested(); ++n) {
                 std::this_thread::sleep_for(2ms);
@@ -142,7 +142,7 @@ struct EveryApp {
     struct Model { int ticks = 0; bool running = true; };
     struct Tick {}; struct Stop {};
     using Msg = std::variant<Tick, Stop>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
     static Cmd update(Model& m, Tick) { ++m.ticks; return {}; }
     static Cmd update(Model& m, Stop) { m.running = false; return {}; }
@@ -169,7 +169,7 @@ struct IdleApp {
     struct Model {};
     struct Done {};
     using Msg = std::variant<Done>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     static Cmd init(Model&) { return Cmd::after(300ms, Done{}); }
     static Cmd update(Model&, Done) { return Cmd::quit(); }
     static Node view(const Model&) { return dsl::box().build(); }
@@ -178,13 +178,12 @@ struct IdleApp {
 void test_fdless_window_idles() {
     section("fd-less window");
 
-    // The headless window has no fd(), like Cocoa, so the real jaal loop
-    // polls it every few ms. Those polls must not turn into frames.
+    // The headless window has no fd(), like Cocoa, so the real loop polls it
+    // every few ms. Those polls must not turn into frames.
     AppConfig cfg = quiet();
     auto win = platform::Headless::open(detail::window_config(cfg));
-    window_host<IdleApp, platform::Headless> host{*win, cfg};
     const auto t0 = std::chrono::steady_clock::now();
-    const int rc = jaal::run<IdleApp>(host);
+    const int rc = run_on<IdleApp>(*win, cfg);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     check(rc == 0, "ran for " + std::to_string(ms) + " ms and quit");
@@ -215,7 +214,7 @@ struct WakeApp {
     struct Model {};
     struct Ping {}; struct Timeout {};
     using Msg = std::variant<Ping, Timeout>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     // A backstop so a broken wakeup fails instead of hanging the suite. It
@@ -231,7 +230,7 @@ struct WakeApp {
     static Node view(const Model&) { return dsl::box().build(); }
 
     static Sub subscribe(const Model&) {
-        return Sub::stream("ping", [](jaal::Sink<Msg> out, std::stop_token st) {
+        return Sub::stream("ping", [](mayag::Sink<Msg> out, std::stop_token st) {
             // Long enough for the window to map and the loop to go to sleep.
             for (int i = 0; i < 40 && !st.stop_requested(); ++i) std::this_thread::sleep_for(5ms);
             g_sent_at = clk::now();

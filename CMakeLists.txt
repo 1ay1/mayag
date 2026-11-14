@@ -458,6 +458,12 @@ if(MAYAG_BUILD_TESTS)
     target_compile_definitions(mayag_embedded_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
     add_test(NAME mayag_embedded_tests COMMAND mayag_embedded_tests)
 
+    # Layering: apps talk to mayag only. jaal is mayag's runtime, never an
+    # app's dependency, so no example may name it.
+    add_test(NAME mayag_examples_use_only_mayag
+             COMMAND ${CMAKE_COMMAND} -E env sh -c
+                     "! grep -rnE 'jaal' '${CMAKE_CURRENT_SOURCE_DIR}/examples'")
+
     # The same test under ThreadSanitizer. Not part of the default suite --
     # TSan is ~10x slower and needs a compatible toolchain -- but it is the
     # only thing that finds a race which does not happen to fire today.

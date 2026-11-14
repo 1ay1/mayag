@@ -1,6 +1,6 @@
 // examples/hello.cpp — the smallest complete mayag app.
 //
-// A live, animated counter in one screen. jaal runs it, mayag draws it:
+// A live, animated counter in one screen:
 //
 //   Model      plain struct — all the state, nothing hidden
 //   Msg        a variant of named messages
@@ -33,7 +33,7 @@ struct Hello {
     // ── messages ────────────────────────────────────────────────────────────────
     struct Inc {}; struct Dec {}; struct Tick { double dt; }; struct Quit {};
     using Msg = std::variant<Inc, Dec, Tick, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Cmd = mayag::Cmd<Msg, set_title>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model&) { return SetTitle{"mayag — hello"}; }

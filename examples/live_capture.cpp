@@ -38,7 +38,7 @@ struct Probe {
     struct Tick { double dt; };
     struct Quit {};
     using Msg = std::variant<Tick, Quit>;
-    using Cmd = jaal::Cmd<Msg>;
+    using Cmd = mayag::Cmd<Msg>;
     using Sub = mayag::Sub<Msg>;
 
     // Each frame ticks; after g_frames presented frames the program quits and
@@ -177,20 +177,15 @@ int main(int argc, char** argv) {
 
     // Drive the REAL window, not the headless one. This is the whole point:
     // platform::Native is the path a user runs, and the only one that can
-    // exhibit a presentation bug. This is mayag::run<P>() unrolled, so the
-    // window outlives the loop and can be read back afterwards.
+    // exhibit a presentation bug. run_on keeps the window ours, so it
+    // outlives the program and can be read back afterwards.
     auto opened = platform::Native::open(mayag::detail::window_config(cfg));
     if (!opened) {
         std::printf("could not open a window (no compositor?)\n");
         return 1;
     }
     platform::Native window = std::move(*opened);
-    {
-        jaal::run_options opt;
-        opt.kernel = mayag::detail::kernel_options(cfg);
-        window_host<Probe, platform::Native> host{window, cfg};
-        (void)jaal::run<Probe>(host, std::move(opt));
-    }
+    (void)run_on<Probe>(window, cfg);
 
     live = window.read_pixels();
 

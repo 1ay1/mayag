@@ -131,6 +131,26 @@ using on_frame = fx::on_frame;
 template <class Msg, class... Extra>
 using Sub = jaal::Sub<Msg, on_frame, Extra...>;
 
+// ── the rest of the program vocabulary ──────────────────────────────────
+// Apps spell everything through mayag; jaal stays an implementation detail.
+
+/// A program's effects: jaal's core (quit, after, task, perform, ...) plus the
+/// window effects it lists, e.g. `mayag::Cmd<Msg, set_title, upload_image>`.
+template <class Msg, class... Extra>
+using Cmd = jaal::Cmd<Msg, Extra...>;
+
+/// How a task or stream body talks back to the program (thread safe, weak).
+template <class Msg>
+using Sink = jaal::Sink<Msg>;
+
+/// An immutable value shared across threads without a copy (decoded pixels).
+template <class T>
+using Shared = jaal::shared<T>;
+
+/// A key for Cmd::task / Cmd::perform: the newest task with a key replaces
+/// the running one.
+using TaskKey = jaal::task_key;
+
 /// `when(cond, sub)` keeps subscribe() one expression.
 template <class S>
 [[nodiscard]] S when(bool cond, S s) {

@@ -81,9 +81,25 @@ namespace detail {
 
 }  // namespace detail
 
+/// A fresh model and its first Cmd, as the runtime would start P.
+template <Program P>
+[[nodiscard]] std::pair<typename P::Model, typename P::Cmd> init_of() {
+    return jaal::prog::init<P>();
+}
+
+/// Fold one message into the model, as the runtime would; returns its Cmd.
+template <Program P>
+[[nodiscard]] typename P::Cmd update_of(typename P::Model& m, typename P::Msg msg) {
+    return jaal::prog::update<P>(m, std::move(msg));
+}
+
 /// Run P on the native window. This is main() for a mayag app.
 template <Program P>
 int run(AppConfig cfg = {});
+
+/// Run P on a window the caller opened and keeps.
+template <Program P, class W>
+int run_on(W& window, AppConfig cfg = {});
 
 // ── headless driving ────────────────────────────────────────────────────
 
@@ -388,8 +404,15 @@ int run(AppConfig cfg) {
         return 1;
     }
     platform::Native window = std::move(*opened);
+    return run_on<P>(window, std::move(cfg));
+}
 
+/// Run P on a window the caller opened and keeps (to read it back after,
+/// say). Returns when the program quits.
+template <Program P, class W>
+int run_on(W& window, AppConfig cfg) {
 #if MAYAG_COCOA_LOOP
+    if constexpr (std::same_as<W, platform::MacWindow>) {
     // macOS: AppKit owns the main thread; the run loop drives the program.
     window.set_pull(false);
     platform::cocoa::RunLoop loop{window};
@@ -398,7 +421,7 @@ int run(AppConfig cfg) {
     hooks.arm     = [&loop](std::optional<std::chrono::nanoseconds> d) { loop.arm(d); };
     hooks.frames  = [&loop](bool on) { loop.frames(on); };
     hooks.stopped = [&loop] { loop.stop(); };
-    embedded_app<P, platform::Native> app{window, cfg, std::move(hooks)};
+    embedded_app<P, W> app{window, cfg, std::move(hooks)};
     if (cfg.log_renderer) detail::log_renderer(app.host().renderer_name());
 
     // Declared after `app`, so they are torn down before it: ^C works again
@@ -416,14 +439,16 @@ int run(AppConfig cfg) {
     app.turn();          // first frame, first subscriptions
     if (!app.finished()) loop.run();
     return app.exit_code();
-#else
+    } else
+#endif
+    {
     const bool log = cfg.log_renderer;
     jaal::run_options opt;
     opt.kernel = detail::kernel_options(cfg);
-    window_host<P, platform::Native> host{window, std::move(cfg)};
+    window_host<P, W> host{window, std::move(cfg)};
     if (log) detail::log_renderer(host.renderer_name());
     return jaal::run<P>(host, std::move(opt));
-#endif
+    }
 }
 
 }  // namespace mayag

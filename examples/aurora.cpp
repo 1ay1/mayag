@@ -59,7 +59,7 @@ struct Aurora {
     struct Pick { int index; };
     struct Quit {};
     using Msg = std::variant<Tick, Toggle, More, Less, Pick, Quit>;
-    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Cmd = mayag::Cmd<Msg, set_title>;
     using Sub = mayag::Sub<Msg>;
 
     // The palette swatches are a dynamic list, so their ids are folded from a
