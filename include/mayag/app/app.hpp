@@ -1,2010 +1,239 @@
 #pragma once
-// mayag::run<P>() — the application runtime
+// mayag::run<P>() — run a program in a window.
 //
-// This is the answer to "how do I actually ship a GUI".
-//
-// An application is a `Program`: five pure functions and two types.
+// jaal is the runtime: the loop, update, Cmd, Sub, timers, tasks, streams,
+// faults and the OS waiting. mayag draws. A program is an ordinary jaal
+// program with a view():
 //
 //     struct Counter {
 //         struct Model { int n = 0; };
-//         using Msg = std::variant<Inc, Dec, Quit>;
+//         struct Inc {}; struct Quit {};
+//         using Msg = std::variant<Inc, Quit>;
+//         using Cmd = jaal::Cmd<Msg>;
 //
-//         static Model init();
-//         static std::pair<Model, Cmd<Msg>> update(Model, Msg);
-//         static Node view(const Model&, const Ctx&);
-//         static Sub<Msg> subscribe(const Model&);
+//         static Cmd update(Model& m, Inc)  { ++m.n; return {}; }
+//         static Cmd update(Model&,   Quit) { return Cmd::quit(); }
+//
+//         static Node view(const Model& m, const Ctx& c);
+//         static std::optional<Msg> on(const Model&, const Clicked& c) {
+//             if (is(c, "inc")) return Inc{};
+//             return std::nullopt;
+//         }
+//         static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
 //     };
-//     int main() { return mayag::run<Counter>({.title = "Counter"}); }
+//     int main() { return mayag::run<Counter>({.title = "counter"}); }
 //
-// NONE of those functions touch the window, the GPU, the clock, or the file
-// system. `update` returns a Cmd describing what should happen; `subscribe`
-// returns a Sub describing what to listen for. This runtime is the only code
-// in the entire framework that performs I/O, and it is the only code you do
-// not write.
-//
-// What that buys, concretely:
-//   * `update()` is testable with `==` — no window, no mocks
-//   * the whole app is replayable: same events in, same pixels out
-//   * headless CI runs the REAL loop, not a parallel fake one
-//   * an idle app blocks and uses 0% CPU, because "am I animating" is
-//     derivable from the subscriptions rather than a flag someone forgot
+// The window host (host.hpp) owns the window and the presentation state;
+// jaal owns everything that changes the model. run_headless<P>() drives the
+// same host and the same jaal kernel without a window, for tests.
 
-#include "../layout/flex.hpp"
-#include "../layout/audit.hpp"
-#include "../render/painter.hpp"
-#include "../scene/node.hpp"
-#include "../scene/overlay.hpp"
-#include "../core/motion.hpp"
-#include "../style/theme.hpp"
-#include "../font/font.hpp"
-#include "../font/system.hpp"
-#include "cmd.hpp"
+#include "effects.hpp"
 #include "event.hpp"
+#include "host.hpp"
 #include "interaction.hpp"
 #include "latency.hpp"
 #include "platform.hpp"
-#include "../platform/waker.hpp"
-#include "sub.hpp"
+#include "sources.hpp"
 
-#include <algorithm>
+#include <jaal/jaal.hpp>
+
 #include <atomic>
-#include <cstdio>
-#include <memory>
-#include <stdexcept>
-#include <thread>
 #include <chrono>
-#include <concepts>
-#include <deque>
+#include <cstdio>
 #include <functional>
-#include <future>
-#include <mutex>
+#include <memory>
 #include <optional>
-#include <set>
-#include <string>
+#include <string_view>
+#include <thread>
 #include <type_traits>
 #include <utility>
-#include <variant>
 #include <vector>
 
 namespace mayag {
 
-// ── match: ergonomic message dispatch ───────────────────────────────
-//
-// `update` switches on which Msg alternative arrived. The std::visit +
-// if-constexpr chain is correct but noisy; `match` lets you write one typed
-// lambda per case, exhaustively checked by the compiler:
-//
-//   using R = std::pair<Model, Cmd<Msg>>;
-//   return match(msg,
-//       [&](Increment)     -> R { m.count += m.step; return {m, Cmd<Msg>::none()}; },
-//       [&](Decrement)     -> R { m.count -= m.step; return {m, Cmd<Msg>::none()}; },
-//       [&](const Tick& e) -> R { m.pulse += e.dt;   return {m, Cmd<Msg>::none()}; },
-//       [&](Quit)          -> R { return {m, Cmd<Msg>::quit()}; });
-//
-// Every case returns the same type (the update result). A missing Msg case is
-// a COMPILE error, so the set of handlers stays exhaustive as the app grows.
-
-template <typename... Fs>
-struct overloaded : Fs... { using Fs::operator()...; };
-template <typename... Fs>
-overloaded(Fs...) -> overloaded<Fs...>;
-
-/// Dispatch `v` (a std::variant) to whichever handler matches its active
-/// alternative. A missing case is a COMPILE error, so adding a Msg variant
-/// forces you to handle it — the exhaustiveness Elm gives you, in C++.
-template <typename Variant, typename... Fs>
-[[nodiscard]] constexpr decltype(auto) match(Variant&& v, Fs&&... fs) {
-    return std::visit(overloaded{std::forward<Fs>(fs)...}, std::forward<Variant>(v));
-}
-
-// ── action: one id, wired in both view and subscribe ────────────────────
-//
-// A clickable target lives in two places — the view names a node, subscribe
-// maps that node's clicks to a Msg — and if the two ids drift the button just
-// silently stops working. `Action` binds the id to the message ONCE so both
-// sides come from the same value; a typo is then an undefined-name COMPILE
-// error, not a dead button.
-//
-//   // define the actions once, next to the Msg:
-//   static constexpr auto Inc = action(node_id("inc"), Increment{});
-//
-//   // view: drop its id onto the node
-//   button(t) | Inc.on
-//
-//   // subscribe: wire its clicks
-//   return Sub<Msg>::batch(Inc.click(), Dec.click(), ...);
-//
-// (Use dsl::node_id("...") or node_id_v<"..."> for the id.)
-template <typename Msg>
-struct Action {
-    std::uint64_t id;
-    Msg           msg;
-
-    /// The view-side modifier: `button(t) | act.on` tags the node with this id.
-    dsl::Id on{id};
-
-    /// The subscribe-side wiring: clicks on the node fire `msg`.
-    [[nodiscard]] Sub<Msg> click() const { return Sub<Msg>::on_click_id(id, msg); }
-};
-
-template <typename Msg>
-[[nodiscard]] constexpr Action<Msg> action(std::uint64_t id, Msg msg) {
-    return Action<Msg>{id, std::move(msg), dsl::Id{id}};
-}
-
-// ── the context passed to view() ────────────────────────────────────────
-
-/// Everything `view()` may know about the outside world. Deliberately small
-/// and deliberately a VALUE: a view is a pure function of (Model, Ctx), so
-/// two identical arguments must always produce the same tree.
-struct Ctx {
-    Vec2  size{};            ///< logical window size
-    float dpi_scale = 1.0f;
-    double time = 0.0;       ///< seconds since start, for animation
-    Theme theme = themes::midnight;
-
-    /// Last frame's measured budget.
-    ///
-    /// Available to `view()` so an app can DRAW its own latency — which is
-    /// the only honest way to claim a framework is fast, and the fastest way
-    /// to notice when it stops being.
-    const LatencyStats* latency = nullptr;
-
-    /// The text measurer the frame will be laid out with.
-    ///
-    /// A view needs this whenever it must know a real size before layout runs
-    /// — measured virtualisation, custom truncation, a canvas that positions
-    /// against text. Exposing it removes the temptation to hardcode a
-    /// multiplier, which is the single most common source of "the box is
-    /// slightly too small" bugs.
-    const layout::TextMeasurer* text_measurer = nullptr;
-
-    [[nodiscard]] const layout::TextMeasurer& measurer() const {
-        return text_measurer != nullptr ? *text_measurer : layout::default_measurer();
-    }
-
-    /// Where `view()` registers geometry it wants to follow.
-    ///
-    /// A view calls `c.track(m.underline, node_id("filter-active"))`; after
-    /// layout the runtime records where that node ACTUALLY landed and the
-    /// spring chases it. The app never invents a coordinate, which is the
-    /// whole point — a hardcoded stride is a guess about a layout the app
-    /// cannot see, and it drifts the moment a label or font changes.
-    TrackedSet* tracked = nullptr;
-
-
-    /// Follow a node's measured rect.
-    void track(const Tracked& t, std::uint64_t node) const {
-        t.follow(node);
-        if (tracked != nullptr) tracked->register_tracked(&t);
-        if (t.animating()) request_animation_frame();
-    }
-
-    /// Where `view()` posts menus, modals and tooltips.
-    ///
-    /// Mutable because a view is a pure function of the MODEL — the overlay
-    /// list is an output channel, not state. Two identical models still
-    /// produce identical overlays, which is the property that matters.
-    OverlayList* overlays = nullptr;
-
-    /// Post an overlay from anywhere in the view.
-    void overlay(Overlay o) const {
-        if (overlays != nullptr) overlays->add(std::move(o));
-    }
-
-    /// Live interaction state, so a view can style its own hover/press
-    /// without storing any of it in the Model. This is the GPU-UI equivalent
-    /// of CSS `:hover` — transient presentation state that would be noise in
-    /// application state.
-    const Interaction* input = nullptr;
-
-    [[nodiscard]] bool hovered(std::uint64_t id) const noexcept {
-        return input != nullptr && input->is_hovered(id);
-    }
-    [[nodiscard]] bool pressed(std::uint64_t id) const noexcept {
-        return input != nullptr && input->is_pressed(id);
-    }
-    [[nodiscard]] bool focused(std::uint64_t id) const noexcept {
-        return input != nullptr && input->is_focused(id);
-    }
-    /// By compile-time name, matching `id<"save">` in the DSL.
-    template <dsl::fixed_string Name>
-    [[nodiscard]] bool hovered() const noexcept {
-        return hovered(dsl::node_id(Name.view()));
-    }
-    template <dsl::fixed_string Name>
-    [[nodiscard]] bool pressed() const noexcept {
-        return pressed(dsl::node_id(Name.view()));
-    }
-    template <dsl::fixed_string Name>
-    [[nodiscard]] bool focused() const noexcept {
-        return focused(dsl::node_id(Name.view()));
-    }
-};
-
-// ── the Program concept ─────────────────────────────────────────────────
-
 namespace detail {
 
-template <typename P>
-concept HasEffectfulInit = requires {
-    { P::init() } -> std::same_as<std::pair<typename P::Model, Cmd<typename P::Msg>>>;
-};
+[[nodiscard]] inline platform::WindowConfig window_config(const AppConfig& cfg) {
+    return platform::WindowConfig{
+        .title = cfg.title, .size = cfg.size,
+        .resizable = cfg.resizable, .decorated = true,
+        .transparent = false, .vsync = cfg.vsync,
+        .background = cfg.theme.background,
+    };
+}
 
-template <typename P>
-concept HasPlainInit = requires {
-    { P::init() } -> std::same_as<typename P::Model>;
-};
-
-template <typename P>
-concept HasSubscribe = requires(const typename P::Model& m) {
-    { P::subscribe(m) } -> std::same_as<Sub<typename P::Msg>>;
-};
-
-template <typename P>
-concept ViewWithCtx = requires(const typename P::Model& m, const Ctx& c) {
-    { P::view(m, c) } -> std::convertible_to<Node>;
-};
-
-template <typename P>
-concept ViewModelOnly = requires(const typename P::Model& m) {
-    { P::view(m) } -> std::convertible_to<Node>;
-};
+[[nodiscard]] inline jaal::kernel::options kernel_options(const AppConfig& cfg) {
+    jaal::kernel::options o;
+    o.on_fault = cfg.catch_exceptions ? jaal::fault_policy::skip : jaal::fault_policy::stop;
+    if (cfg.on_error) {
+        o.faults = [f = cfg.on_error](const jaal::fault& e) { f(jaal::to_string(e.site), e.what); };
+    }
+    return o;
+}
 
 }  // namespace detail
 
-/// The contract. Everything else in this header is machinery for honouring it.
-///
-/// It is deliberately spelled as four named pieces so a near-miss points at the
-/// exact requirement that failed — see `static_assert_program` below, which
-/// every entry point runs to turn a concept miss into a plain-English error.
-template <typename P>
-concept HasModelAndMsg = requires { typename P::Model; typename P::Msg; };
-
-template <typename P>
-concept HasInit = detail::HasEffectfulInit<P> || detail::HasPlainInit<P>;
-
-template <typename P>
-concept HasView = detail::ViewWithCtx<P> || detail::ViewModelOnly<P>;
-
-template <typename P>
-concept HasUpdate = HasModelAndMsg<P> &&
-    requires(typename P::Model m, typename P::Msg msg) {
-        { P::update(std::move(m), std::move(msg)) }
-            -> std::same_as<std::pair<typename P::Model, Cmd<typename P::Msg>>>;
-    };
-
-template <typename P>
-concept Program =
-    HasModelAndMsg<P> && HasInit<P> && HasView<P> && HasUpdate<P>;
-
-/// A precise, one-line reason a type isn't a Program — call it in a
-/// `static_assert` and the compiler tells the user which method is wrong
-/// instead of "constraints not satisfied". `run()` runs it for you.
-template <typename P>
-constexpr bool static_assert_program() {
-    static_assert(HasModelAndMsg<P>,
-        "mayag::Program: your app must define `Model` and `Msg` types.");
-    static_assert(HasInit<P>,
-        "mayag::Program: needs `static Model init()` or "
-        "`static std::pair<Model, Cmd<Msg>> init()`.");
-    static_assert(HasView<P>,
-        "mayag::Program: needs `static Node view(const Model&)` or "
-        "`static Node view(const Model&, const Ctx&)`.");
-    static_assert(HasUpdate<P>,
-        "mayag::Program: needs `static std::pair<Model, Cmd<Msg>> "
-        "update(Model, Msg)` — check it returns a {Model, Cmd<Msg>} pair.");
-    return true;
+/// Run P on the native window. This is main() for a mayag app.
+template <Program P>
+int run(AppConfig cfg = {}) {
+    auto opened = platform::Native::open(detail::window_config(cfg));
+    if (!opened) {
+        std::fprintf(stderr, "mayag: could not open a window\n");
+        return 1;
+    }
+    platform::Native window = std::move(*opened);
+    const bool log = cfg.log_renderer;
+    jaal::run_options opt;
+    opt.kernel = detail::kernel_options(cfg);
+    window_host<P, platform::Native> host{window, std::move(cfg)};
+    if (log) {
+        const auto name = host.renderer_name();
+        std::fprintf(stderr, "mayag: renderer %.*s\n", static_cast<int>(name.size()), name.data());
+    }
+    return jaal::run<P>(host, std::move(opt));
 }
 
-// ── configuration ───────────────────────────────────────────────────────
+// ── headless driving ────────────────────────────────────────────────────
 
-/// How the runtime trades latency against CPU.
-enum class LatencyMode : std::uint8_t {
-    /// Render as soon as something changes. Lowest latency, and the right
-    /// default: the CPU cost of a frame is ~1 ms, so there is nothing to
-    /// save by waiting.
-    immediate,
-    /// Coalesce for a whole refresh interval before rendering. Fewer frames
-    /// on a burst of input, at the cost of up to one refresh of latency.
-    /// For battery-sensitive or very heavy views.
-    batched,
-};
-
-struct AppConfig {
-    std::string title = "mayag";
-    Vec2        size{1024, 640};
-    bool        resizable = true;
-    bool        vsync     = true;
-    Theme       theme     = themes::midnight;
-
-    /// The font engine: system typefaces, kerning, and complete per-script
-    /// fallback. When null, the runtime builds one with
-    /// `typo::system::default_stack()` at boot — which discovers the platform
-    /// fonts and, failing that, uses a synthesized last-resort face. So text
-    /// always renders correctly with no configuration, and there is no second
-    /// engine to fall back to.
-    std::shared_ptr<typo::FontStack> fonts = nullptr;
-
-    /// Overlay every node's rect. Bound to a key in your own subscribe() if
-    /// you want to toggle it at runtime.
-    bool debug_bounds = false;
-
-    /// Print the active renderer to stderr at startup.
-    ///
-    /// On by default because the GPU is selected by fallthrough and a
-    /// fallback to software is otherwise silent — the app still works, just
-    /// two orders of magnitude slower, which is precisely the failure worth
-    /// noticing. One line, once, at boot.
-    bool log_renderer = true;
-
-    /// Latency policy. `immediate` by default — see LatencyMode.
-    LatencyMode latency = LatencyMode::immediate;
-
-    /// Keep running when `update()` or `view()` throws.
-    ///
-    /// A UI framework should not turn one bad frame into a lost session. With
-    /// this on, an exception from application code is caught, reported, and
-    /// the runtime falls back to the last good tree — the user sees a stale
-    /// frame instead of a vanished window, and their unsaved work survives.
-    ///
-    /// Off in tests and debug builds, where a crash at the point of failure
-    /// is far more useful than a swallowed one.
-    bool catch_exceptions = true;
-
-    /// Called when application code throws. Defaults to stderr.
-    void (*on_error)(std::string_view where, std::string_view what) = nullptr;
-};
-
-// ── the runtime ─────────────────────────────────────────────────────────
-
-namespace detail {
-
-/// Bundles the three seam adapters a FontStack must supply. Held by value so
-/// the pointers handed to layout and the painter stay valid for the runtime's
-/// whole lifetime.
-struct StackBindings {
-    typo::StackMeasurer      measurer;
-    typo::StackGlyphRenderer glyphs;
-    typo::StackSampler       sampler;
-
-    explicit StackBindings(typo::FontStack& s) : measurer{s}, glyphs{s}, sampler{s} {}
-};
-
-/// Thread-safe inbox for messages produced off the UI thread — `Cmd::task`,
-/// `Cmd::stream`, or a `send()` from a producer the app owns.
+/// A program on the headless window, stepped by hand. The SAME window host
+/// and the same jaal kernel run<P>() uses; only the waiting is replaced by
+/// explicit tick() calls, so a test can assert between frames.
 ///
-/// Posting also WAKES the UI thread. Without that, a message from a background
-/// thread would sit in the queue until the next window event, because an idle
-/// app is blocked in poll() watching only the display fd. The waker's pipe is
-/// in that poll set, so post() interrupts the sleep and the frame renders at
-/// once. This is the single change that makes a streaming app feel live.
-template <typename Msg>
-class Inbox {
+///     run_headless<Counter>(cfg, [](auto& app) {
+///         app.click("inc");
+///         assert(app.model().n == 1);
+///     });
+template <Program P>
+class headless_app {
   public:
-    void set_waker(platform::Waker* w) noexcept {
-        std::lock_guard lock{mutex_};
-        waker_ = w;
+    using host_type   = window_host<P, platform::Headless>;
+    using event_type  = jaal::kernel_event_t<host_type>;
+    using kernel_type = jaal::kernel::kernel<P, event_type, jaal::platform::steady_clock>;
+    using model_type  = typename P::Model;
+    using msg_type    = typename P::Msg;
+
+    explicit headless_app(AppConfig cfg)
+        : host_cfg_(cfg),
+          window_(open_window(cfg)),
+          host_(window_, std::move(cfg)),
+          fwd_{host_},
+          kernel_(kernel_type::start(fwd_, jaal::platform::steady_clock{},
+                                     detail::kernel_options(host_cfg_), wake())) {
+        host_.set_manual_clock(true);
+        cx_.emplace(*this);
+        step();
+        draw();
     }
 
-    /// Stop delivering. Called by ~Runtime BEFORE the waker it points at is
-    /// destroyed.
-    ///
-    /// Cmd::task and Cmd::task_latest run on DETACHED threads -- there is no
-    /// handle to join, by design, because a task must not be able to block
-    /// shutdown. So a worker can finish after the Runtime is gone and call
-    /// post(), which used to dereference a dangling waker: ThreadSanitizer
-    /// caught exactly that, a write in ~Waker racing a read in Waker::wake().
-    ///
-    /// Closing under the lock means a late post either happens entirely
-    /// before the close (and is simply never drained) or sees closed_ and
-    /// does nothing. The inbox is held by shared_ptr so its own storage
-    /// outlives the Runtime regardless.
-    void close() {
-        std::lock_guard lock{mutex_};
-        closed_ = true;
-        waker_ = nullptr;
-        queue_.clear();
+    headless_app(const headless_app&)            = delete;
+    headless_app& operator=(const headless_app&) = delete;
+
+    ~headless_app() {
+        try { host_.release(); } catch (...) {}
     }
 
-    /// Post `m`, admitted only if `gate` is still true WHEN IT IS APPLIED.
-    ///
-    /// A worker that checks a flag and then posts has done two things, not
-    /// one, and the model can change in between:
-    ///
-    ///     T1  worker    alive() -> true
-    ///     T2  UI        model changes, this producer is stopped
-    ///     T3  worker    post(msg)          <-- passed the check, posts anyway
-    ///     T4  UI        applies a message from a producer that no longer exists
-    ///
-    /// Checking harder on the worker cannot fix this; the window is between
-    /// the check and the post, and it is never zero. Measured 2.5 MILLION
-    /// messages applied from already-stopped sources in a 300-iteration test.
-    ///
-    /// So the gate travels WITH the message and is evaluated on the UI thread
-    /// at the moment of delivery, where it is atomic with respect to the
-    /// model. A stale message is then not a race to be narrowed but a value
-    /// that is dropped.
-    void post_gated(Msg m, std::shared_ptr<std::atomic<bool>> gate) {
-        std::lock_guard lock{mutex_};
-        if (closed_) return;
-        queue_.push_back(Entry{std::move(m), std::move(gate)});
-        if (waker_ != nullptr) waker_->wake();
+    // ── driving ─────────────────────────────────────────────────────────
+
+    /// One frame: read scripted input, fold everything waiting (task
+    /// results, timers that are due), advance the frame clock if it is on,
+    /// and draw if anything changed.
+    void tick() {
+        host_.pump(*cx_);
+        if (window_.driving_frames()) host_.tick_frame(1.0 / 60.0);
+        const auto t = step();
+        if (t.model_changed || host_.owes_frame() || window_.driving_frames()) draw();
     }
 
-    void post(Msg m) {
-        // The waker is signalled INSIDE the lock, deliberately.
-        //
-        // Reading the pointer under the lock and then waking outside it looks
-        // like the careful thing to do -- hold locks briefly -- but it leaves
-        // the exact window this guards against: close() can run, ~Waker can
-        // destroy the pipe, and the wake() then writes to a closed fd.
-        // ThreadSanitizer reports it as ~Waker racing Waker::wake(), and it is
-        // a real use-after-free, not a false positive.
-        //
-        // wake() is a single write() to an eventfd/pipe: microseconds, never
-        // blocking. Holding the mutex across it is cheaper than the bug.
-        std::lock_guard lock{mutex_};
-        if (closed_) return;
-        queue_.push_back(Entry{std::move(m), nullptr});
-        if (waker_ != nullptr) waker_->wake();
+    /// Deliver a message, as if from outside, then draw.
+    void send(msg_type m) {
+        kernel_.dispatch(std::move(m));
+        tick();
     }
-    /// Take everything pending, dropping any message whose gate has since
-    /// closed. The drop happens HERE, on the UI thread, which is what makes
-    /// it exact rather than best-effort.
-    [[nodiscard]] std::vector<Msg> drain() {
-        std::lock_guard lock{mutex_};
-        std::vector<Msg> out;
-        out.reserve(queue_.size());
-        while (!queue_.empty()) {
-            Entry e = std::move(queue_.front());
-            queue_.pop_front();
-            if (e.gate && !e.gate->load(std::memory_order_acquire)) continue;
-            out.push_back(std::move(e.msg));
+
+    /// Fold until nothing more arrives within `budget`: for a test that
+    /// waits on a background task or stream. Returns as soon as `done` holds.
+    template <class Pred>
+    bool settle(Pred done, std::chrono::milliseconds budget = std::chrono::milliseconds(2000)) {
+        const auto end = std::chrono::steady_clock::now() + budget;
+        while (!done(kernel_.model())) {
+            if (std::chrono::steady_clock::now() >= end) return false;
+            wait_for_news(std::chrono::milliseconds(5));
+            tick();
+            if (finished()) return done(kernel_.model());
         }
-        return out;
-    }
-    [[nodiscard]] bool empty() {
-        std::lock_guard lock{mutex_};
-        return queue_.empty();
-    }
-  private:
-    /// A queued message plus the gate that must still be open when it is
-    /// applied. Null gate means unconditional.
-    struct Entry {
-        Msg                                msg;
-        std::shared_ptr<std::atomic<bool>> gate;
-    };
-
-    std::mutex          mutex_;
-    std::deque<Entry>   queue_;
-    platform::Waker*    waker_ = nullptr;
-    bool                closed_ = false;
-};
-
-/// Generation counters for `Cmd::task_latest`, keyed by series.
-///
-/// Shared with detached workers, so it must outlive the Runtime AND be safe
-/// to touch from any thread -- a bare map here would be the exact data race
-/// this feature exists to remove.
-class TaskGenerations {
-  public:
-    /// Begin a new task in `key`'s series; returns its generation.
-    [[nodiscard]] std::uint64_t begin(const std::string& key) {
-        std::lock_guard lock{mutex_};
-        return ++current_[key];
-    }
-    /// Is `gen` still the newest task for `key`?
-    [[nodiscard]] bool current(const std::string& key, std::uint64_t gen) {
-        std::lock_guard lock{mutex_};
-        const auto it = current_.find(key);
-        return it != current_.end() && it->second == gen;
-    }
-
-  private:
-    std::mutex mutex_;
-    std::unordered_map<std::string, std::uint64_t> current_;
-};
-
-/// A timer created by `Cmd::after` or `Sub::every`.
-template <typename Msg>
-struct Timer {
-    double deadline = 0.0;
-    double interval = 0.0;   ///< 0 = one-shot
-    Msg    msg;
-    /// Debounce key from `Cmd::after_latest`; empty for a plain timer.
-    /// Scheduling a new timer with the same non-empty key cancels the old one,
-    /// which is what makes "do this once the user stops" actually work.
-    std::string key;
-};
-
-}  // namespace detail
-
-/// The runtime, parameterised on the Program and the platform window. The
-/// window is a TEMPLATE parameter, not a virtual base: `run<P>()` on macOS
-/// compiles direct calls into the Cocoa backend with no indirection, and the
-/// headless test build compiles direct calls into the memory framebuffer.
-template <Program P, platform::Window W>
-class Runtime {
-  public:
-    using Model = typename P::Model;
-    using Msg   = typename P::Msg;
-
-    explicit Runtime(AppConfig cfg) : cfg_{std::move(cfg)} {}
-
-    /// Shut down cleanly: signal every `Cmd::stream` producer to stop and join
-    /// its thread. Streams are the one thing the runtime owns that outlives a
-    /// frame, so leaving them detached would mean a producer thread touching a
-    /// freed inbox after the app returned. `streams_alive_` flips to false,
-    /// well-behaved streams see `keep_running()` become false and return, and
-    /// this waits for them.
-    ~Runtime() {
-        // Close the inbox FIRST. Detached task workers may still be running
-        // and will call post(); after this, those calls are no-ops instead of
-        // touching a waker that is about to be destroyed.
-        inbox_->close();
-        stop_all_sources();
-        streams_alive_->store(false, std::memory_order_release);
-        waker_.wake();   // nudge any stream sleeping on its own condition
-        for (auto& t : stream_threads_) {
-            if (t.joinable()) t.join();
-        }
-    }
-
-    Runtime(const Runtime&) = delete;
-    Runtime& operator=(const Runtime&) = delete;
-
-    /// Open the window and evaluate `init()`. Separated from `run()` so a
-    /// headless driver can boot the runtime and then step it by hand — the
-    /// test drives the SAME code the shipped loop drives.
-    [[nodiscard]] bool boot() {
-        platform::WindowConfig wc{
-            .title = cfg_.title, .size = cfg_.size,
-            .resizable = cfg_.resizable, .decorated = true,
-            .transparent = false, .vsync = cfg_.vsync,
-            .background = cfg_.theme.background,
-        };
-
-        auto opened = W::open(wc);
-        if (!opened) return false;
-        window_ = std::move(*opened);
-
-        // Bind the font engine once, at boot. There is exactly one text path
-        // now: a FontStack. When the caller gave none, discover the system
-        // fonts (with a synthesized last-resort face as the floor), so text
-        // renders correctly on a fresh machine with no configuration.
-        if (cfg_.fonts == nullptr) {
-            cfg_.fonts = typo::system::default_stack();
-        }
-        bindings_.emplace(*cfg_.fonts);
-        measurer_ = &bindings_->measurer;
-        glyphs_   = &bindings_->glyphs;
-        sampler_  = &bindings_->sampler;
-        // The GPU path samples a texture rather than calling back into the
-        // CPU sampler, so it needs the atlas itself to upload.
-        window_.set_atlas_source(&cfg_.fonts->atlas());
-        window_.set_coverage_sampler(sampler_);
-
-        // Wire the cross-thread waker: the Inbox writes to it on post() and the
-        // window watches it in poll(), so a background producer wakes an idle
-        // UI thread instead of leaving its message unrendered. This is what
-        // makes streaming apps live rather than frozen-until-you-move-the-mouse.
-        inbox_->set_waker(&waker_);
-        window_.set_waker(&waker_);
-
-        // Adopt the platform's multi-click interval. Only used when a backend
-        // reports no click count itself, but a wrong fallback is still a bug.
-        input_.set_multi_click_interval(window_.double_click_interval());
-
-        size_ = window_.size();
-        dpi_  = window_.dpi_scale();
-
-        // Say which path we are on, once, at startup.
-        //
-        // GPU selection is a deliberate silent fallthrough — no device, no
-        // backend in the build, or a shader that will not compile all end up
-        // on the software rasteriser rather than failing. That is correct,
-        // and it also means a user cannot tell what they got. One line at
-        // boot makes "is this actually using the GPU" answerable instead of
-        // assumed, and makes a silent fallback visible the day it happens.
-        if (cfg_.log_renderer) {
-            std::fprintf(stderr, "mayag: renderer %.*s\n",
-                         static_cast<int>(window_.renderer_name().size()),
-                         window_.renderer_name().data());
-        }
-
-        // ---- pure: initial state -------------------------------------
-        Cmd<Msg> boot_cmd = Cmd<Msg>::none();
-        if constexpr (detail::HasEffectfulInit<P>) {
-            auto [m, c] = P::init();
-            model_   = std::move(m);
-            boot_cmd = std::move(c);
-        } else {
-            model_ = P::init();
-        }
-        interpret(boot_cmd);
-
-        // Paint frame zero, so a driver can assert on pixels before sending
-        // any input.
-        render();
         return true;
     }
 
-    /// Run to completion. Returns a process exit code.
-    int run() {
-        if (!boot()) return 1;
-        while (window_.is_open() && !quit_) {
-            tick();
-        }
-        return 0;
-    }
+    void click(std::string_view name) { window_.click(host_.center_of(name)); tick(); }
+    void click(std::uint64_t id)      { window_.click(host_.center_of(id)); tick(); }
+    void type(std::string_view s)     { window_.type(s); tick(); }
+    void press_key(Key k, Mods m = {}) { window_.press_key(k, m); tick(); }
 
-    /// One iteration: wait, translate, update, render, present. Public so a
-    /// test can drive it step by step and assert between frames.
-    void tick() {
-        const auto subs = current_subs();
+    // ── state ───────────────────────────────────────────────────────────
 
-        // Start the next unit of coalesced work for any key whose worker has
-        // finished (`Cmd::task_coalesce`). On the UI thread, so the policy
-        // state needs no lock.
-        pump_coalesced_tasks();
-
-        // Reconcile declarative streams (`Sub::source`): start producers that
-        // just appeared, stop and join ones the model dropped. Done every tick
-        // because the subscription set is a pure function of the model, so a
-        // source vanishes the frame its condition goes false — no manual
-        // connect/disconnect in `update`.
-        sync_sources(subs);
-
-        // Reconcile wall-clock interval subscriptions (`Sub::every`) the same
-        // declarative way: the live set is recomputed from the model, so an
-        // interval whose condition went false stops firing. Without this call
-        // `interval_timers_` stayed empty and `Sub::every` never fired at all.
-        sync_interval_timers(subs);
-
-        // How to wait is DERIVED from the subscriptions, not from a flag.
-        // No frame subscription and no timer means block — and a blocked app
-        // costs nothing.
-        auto [wait, timeout] = decide_wait(subs);
-        auto events = window_.poll_events(wait, timeout);
-
-        // Take the clock from the WINDOW, every tick.
-        //
-        // Reading it only from FrameEvent (as an earlier version did) leaves
-        // `time_` pinned at 0 for any app that is not animating — and the
-        // interaction layer uses this timestamp for double-click detection,
-        // so every click looked simultaneous with the previous one and every
-        // second click was silently eaten as the tail of a double. A
-        // stationary clock is never harmless.
-        const double now = window_.now();
-        time_ = now;
-
-        fire_due_timers(now);
-
-        // ── coalesce input ──────────────────────────────────────────────
-        //
-        // Every pending event is processed before ONE render, and redundant
-        // pointer motion is collapsed to the newest position.
-        //
-        // A trackpad delivers ~120 moves/second. Rendering each is 120 frames
-        // of work for 60 frames of visible result — and it makes the app FEEL
-        // slower, because the frame you finally see is several events stale.
-        // The correct behaviour is to render the LATEST state once, which is
-        // both less work and lower latency.
-        frame_.events_coalesced = static_cast<int>(events.size());
-
-        std::size_t last_move = events.size();
-        for (std::size_t i = events.size(); i-- > 0;) {
-            if (std::holds_alternative<MouseMove>(events[i])) { last_move = i; break; }
-        }
-
-        {
-            ScopedTimer t{frame_.input_ms};
-            for (std::size_t i = 0; i < events.size(); ++i) {
-                // Superseded motion changes nothing observable: only the most
-                // recent cursor position can affect hover, and a drag reads
-                // the accumulated delta from the position anyway.
-                if (std::holds_alternative<MouseMove>(events[i]) && i != last_move) {
-                    ++frame_.coalesced_moves;
-                    continue;
-                }
-                handle_event(events[i], subs);
-                if (quit_) return;
-            }
-        }
-
-        // Advance tracked motion. The runtime owns this so an app never has
-        // to remember to step it, and — crucially — never has to remember to
-        // STOP: when every spring settles, the frame request stops with it.
-        if (tracked_.animating()) {
-            const double dt = last_motion_time_ > 0.0
-                ? num::clamp(now - last_motion_time_, 0.0, 0.1) : 1.0 / 60.0;
-            tracked_.step_all(dt);
-            dirty_ = true;
-        }
-        last_motion_time_ = now;
-
-        // Messages that arrived from worker threads.
-        for (auto& m : inbox_->drain()) {
-            step(std::move(m));
-            if (quit_) return;
-        }
-
-        // One message from each coalescing source (`Sub::source_latest`) — the
-        // latest value it produced this frame. Kept separate from the inbox so
-        // a firehose feed contributes exactly one message per frame instead of
-        // a backlog.
-        drain_coalesced_sources();
-        if (quit_) return;
-
-        // Reconcile sources AGAIN, now that this frame's messages have been
-        // applied.
-        //
-        // The set of live producers is a pure function of the model, and the
-        // model just changed. Reconciling only at the top of tick() left a
-        // source the model dropped THIS frame running until the next one --
-        // a whole frame in which it kept posting into the inbox.
-        //
-        // That is not merely late, it corrupts state. In the video example a
-        // seek bumps an epoch folded into the playback source id, so the old
-        // decoder should stop at once; instead it survived the frame and its
-        // in-flight frame landed in update(), overwriting the seek target with
-        // the position playback had reached. The scrub bar moved, the picture
-        // did not, and the next subscribe() captured the STALE time -- so the
-        // seek was lost and you had to click again. Measured: 4 of 12 clicks
-        // lost while playing.
-        //
-        // Skipped entirely when no message was applied, so an idle frame does
-        // not pay for a second subscribe(). The model cannot have changed if
-        // nothing ran update().
-        if (model_touched_) {
-            model_touched_ = false;
-            sync_sources(current_subs());
-        }
-
-        render();
-    }
-
-    // ── test/driver access ──────────────────────────────────────────────
-
-    [[nodiscard]] W& window() noexcept { return window_; }
-    [[nodiscard]] const Model& model() const noexcept { return model_; }
-
-    /// Which backend is actually presenting: "metal" or "software".
-    ///
-    /// Worth surfacing rather than leaving implicit, because GPU selection
-    /// is a silent fallthrough by design — a machine with no device, or a
-    /// build without the backend, degrades to software instead of failing.
-    /// That is the right behaviour and also the reason "it uses the GPU" is
-    /// unverifiable without asking. An app that cares can print this; the
-    /// examples do.
-    [[nodiscard]] std::string_view renderer_name() const noexcept {
-        return window_.renderer_name();
-    }
-    [[nodiscard]] const Node& tree() const noexcept { return tree_; }
-    [[nodiscard]] const Interaction& input() const noexcept { return input_; }
-
-    /// Where this frame's time went. Latency is a number, not a claim — an
-    /// app can print this, draw it, or assert on it in CI.
-    [[nodiscard]] const LatencyStats& latency() const noexcept { return latency_; }
-    /// True once the runtime has flagged a busy loop (frames nobody asked for).
-    [[nodiscard]] bool busy_loop_detected() const noexcept { return busy_warned_; }
-    [[nodiscard]] bool finished() const noexcept { return quit_ || !window_.is_open(); }
-
-    /// Rect of a named node in the CURRENT tree, or nullopt if it is not in
-    /// the view right now.
-    ///
-    /// Always ask through this rather than holding a `const Node*`: every
-    /// render replaces the tree wholesale (that is what makes `view()` pure),
-    /// so a pointer captured before a `tick()` dangles afterwards. Returning
-    /// a Rect by value makes that mistake unrepresentable.
-    [[nodiscard]] std::optional<Rect> node_rect(std::uint64_t id) const {
-        if (const Node* n = tree_.find(id)) return n->frame();
-        return std::nullopt;
-    }
-    [[nodiscard]] std::optional<Rect> node_rect(std::string_view name) const {
-        return node_rect(dsl::node_id(name));
-    }
-
-    /// Centre of a named node — where a test clicks.
-    [[nodiscard]] Vec2 center_of(std::string_view name) const {
-        if (auto r = node_rect(name)) return r->center();
-        return Vec2{-1.0f, -1.0f};   // off-screen: a click there hits nothing
-    }
-
-    /// Centre of a node by raw id — for dynamic rows addressed with
-    /// `node_id(base, index)`, whose id has no single string name.
-    [[nodiscard]] Vec2 center_of(std::uint64_t id) const {
-        if (auto r = node_rect(id)) return r->center();
-        return Vec2{-1.0f, -1.0f};
-    }
-
-    /// Inject a message directly — how a test exercises `update()` through
-    /// the real runtime rather than in isolation.
-    void send(Msg m) { step(std::move(m)); }
-
-    /// Click a named widget: move, press, release, then process. The whole
-    /// interaction in one call, because a test that hand-rolls the three
-    /// events tends to get the ordering subtly wrong.
-    void click(std::string_view name) {
-        window_.click(center_of(name));
-        tick();
-    }
-
-    /// Click a node by raw id (a `node_id(base, index)` list row).
-    void click(std::uint64_t id) {
-        window_.click(center_of(id));
-        tick();
-    }
-
-    /// Type text into the focused field, then process — the input twin of
-    /// click(), so a test reads `rt.type("hi")` instead of the two-step
-    /// `rt.window().type(...); rt.tick();`.
-    void type(std::string_view s) {
-        window_.type(s);
-        tick();
-    }
-
-    /// Press a key (with optional modifiers), then process. For enter, escape,
-    /// backspace, arrows, and shortcuts.
-    void press_key(Key k, Mods mods = {}) {
-        window_.press_key(k, mods);
-        tick();
-    }
+    [[nodiscard]] const model_type& model() const noexcept { return kernel_.model(); }
+    [[nodiscard]] platform::Headless& window() noexcept { return window_; }
+    [[nodiscard]] host_type& host() noexcept { return host_; }
+    [[nodiscard]] kernel_type& kernel() noexcept { return kernel_; }
+    [[nodiscard]] const Interaction& input() const noexcept { return host_.input(); }
+    [[nodiscard]] const Node& tree() const noexcept { return host_.tree(); }
+    [[nodiscard]] const LatencyStats& latency() const noexcept { return host_.latency(); }
+    [[nodiscard]] bool busy_loop_detected() const noexcept { return host_.busy_loop_detected(); }
+    [[nodiscard]] bool finished() const noexcept { return kernel_.quitting() || !window_.is_open(); }
+    [[nodiscard]] std::optional<Rect> node_rect(std::uint64_t id) const { return host_.node_rect(id); }
+    [[nodiscard]] std::optional<Rect> node_rect(std::string_view n) const { return host_.node_rect(n); }
+    [[nodiscard]] Vec2 center_of(std::string_view n) const { return host_.center_of(n); }
+    [[nodiscard]] Vec2 center_of(std::uint64_t id) const { return host_.center_of(id); }
 
   private:
-    // ── the pure step ───────────────────────────────────────────────────
-
-    /// Model' = update(Model, Msg); then interpret the returned effects.
-    /// This function is the ONLY place the model changes.
-    void step(Msg msg) {
-        // Any message means update() ran, so the subscription set may have
-        // changed and sources must be reconciled again this frame.
-        model_touched_ = true;
-        if (!cfg_.catch_exceptions) {
-            auto [next, cmd] = P::update(std::move(model_), std::move(msg));
-            model_ = std::move(next);
-            dirty_ = true;
-            interpret(cmd);
-            return;
+    // The context the host emits into: routes straight into the kernel,
+    // exactly as jaal::run's host_context does.
+    struct context {
+        headless_app& app;
+        std::size_t emit(const window_events& ev) {
+            return app.kernel_.route(jaal::detail::run::to_kernel_event<event_type>(ev), app.fwd_);
         }
-
-        // A throwing update must not take the app down.
-        //
-        // `update` takes the model BY VALUE, so a throw leaves `model_` in a
-        // moved-from state — which is exactly why the copy below exists. The
-        // model is restored and the app carries on with the last good state,
-        // having lost one message rather than the whole session.
-        Model snapshot = model_;
-        try {
-            auto [next, cmd] = P::update(std::move(model_), std::move(msg));
-            model_ = std::move(next);
-            dirty_ = true;
-            interpret(cmd);
-        } catch (const std::exception& e) {
-            model_ = std::move(snapshot);
-            report_error("update", e.what());
-        } catch (...) {
-            model_ = std::move(snapshot);
-            report_error("update", "unknown exception");
-        }
-    }
-
-    void report_error(std::string_view where, std::string_view what) {
-        if (cfg_.on_error != nullptr) {
-            cfg_.on_error(where, what);
-        } else {
-            std::fprintf(stderr, "mayag: %.*s threw: %.*s\n",
-                         static_cast<int>(where.size()), where.data(),
-                         static_cast<int>(what.size()), what.data());
-        }
-    }
-
-    // ── event -> message ────────────────────────────────────────────────
-
-    void handle_event(const Event& ev, const Sub<Msg>& subs) {
-        // The user is driving it, so frames until the next render aren't a
-        // busy loop (dragging or moving the pointer over a live view).
-        if (!std::holds_alternative<ResizeEvent>(ev) && !std::holds_alternative<FocusEvent>(ev) &&
-            !std::holds_alternative<CloseRequest>(ev) && !std::holds_alternative<FrameEvent>(ev)) {
-            input_since_render_ = true;
-        }
-        // Window-level events the runtime owns outright.
-        if (const auto* r = std::get_if<ResizeEvent>(&ev)) {
-            size_ = r->size;
-            dpi_  = r->dpi_scale;
-            dirty_ = true;
-        }
-        if (const auto* f = std::get_if<FrameEvent>(&ev)) {
-            time_ = f->time;
-        }
-
-        // Tab moves focus. Doing this in the runtime means every mayag app
-        // gets keyboard navigation for free instead of each one reinventing it.
-        if (const auto* k = std::get_if<KeyEvent>(&ev)) {
-            if (k->key == Key::tab && !k->mods.ctrl && !k->mods.super) {
-                input_.focus_next(tree_, k->mods.shift);
-                dirty_ = true;
-            }
-
-            // Enter and Space activate the focused control, exactly as a
-            // click would. Every mayag app is keyboard-navigable for free;
-            // without this each author writes a parallel key handler per
-            // button and most simply do not.
-            //
-            // The key is CONSUMED when it actually activated something.
-            // Otherwise Space would both activate the focused button and fall
-            // through to the app's own Space binding — which is how this
-            // broke the typography example the moment it was added.
-            if ((k->key == Key::enter || k->key == Key::space) &&
-                input_.focused() != 0 && k->mods.none()) {
-                const Node* n = tree_.find(input_.focused());
-                std::vector<Gesture> g{Gesture{Gesture::Kind::activate, input_.focused(),
-                                               n ? n->frame().center() : Vec2{}}};
-
-                std::vector<Msg> produced;
-                match(subs, ev, g, produced);
-                if (!produced.empty()) {
-                    for (auto& m : produced) {
-                        step(std::move(m));
-                        if (quit_) return;
-                    }
-                    dirty_ = true;
-                    return;   // consumed: no fall-through to plain key handlers
-                }
-            }
-        }
-
-        // ── overlays get first refusal on pointer input ─────────────────
-        //
-        // A modal must swallow clicks aimed at what is behind it, and a click
-        // outside a menu should DISMISS it rather than activating whatever
-        // happens to be under the cursor. Both are the same rule: the overlay
-        // layer sees the event first and may consume it.
-        if (!overlays_.empty()) {
-            if (const auto pos = event_position(ev)) {
-                const bool is_press = std::holds_alternative<MouseDown>(ev);
-
-                if (const Overlay* over = overlays_.hit(*pos)) {
-                    // Inside an overlay: route the gesture against the OVERLAY
-                    // tree, not the main one.
-                    const auto gestures = input_.handle(ev, over->content, time_);
-                    if (!gestures.empty()) dirty_ = true;
-                    collect_and_step(subs, ev, gestures);
-                    return;
-                }
-
-                if (is_press) {
-                    const auto to_dismiss = overlays_.dismissed_by(*pos);
-                    if (!to_dismiss.empty()) {
-                        for (std::uint64_t id : to_dismiss) {
-                            const auto gestures = std::vector<Gesture>{
-                                Gesture{Gesture::Kind::leave, id, *pos}};
-                            collect_and_step(subs, ev, gestures);
-                        }
-                        dirty_ = true;
-                        return;   // the click is CONSUMED by the dismissal
-                    }
-                    if (overlays_.captures_input()) return;   // modal blocks
-                }
-            }
-        }
-
-        // Update the pointer shape from whatever is under the cursor.
-        //
-        // Walked from the hit node UPWARD, taking the first node that asks
-        // for something specific: a label inside a button must not reset the
-        // cursor the button set.
-        if (std::holds_alternative<MouseMove>(ev)) {
-            const CursorShape want = cursor_at(tree_, input_.cursor());
-            if (want != current_cursor_) {
-                current_cursor_ = want;
-                window_.set_cursor(want);
-            }
-        }
-
-        // Pointer events become semantic gestures against the CURRENT tree.
-        //
-        // Only repaint when the INTERACTION STATE actually changed. macOS
-        // delivers a mouse-moved event for every pixel of cursor travel — 117
-        // of them across 200 polls in a measurement — and treating each as a
-        // reason to redraw turns idle mouse movement into a 650 fps spin that
-        // pins a core. What matters is whether the hovered/pressed/focused
-        // node changed, because that is all a view can observe through Ctx.
-        const std::uint64_t before_hover   = input_.hovered();
-        const std::uint64_t before_pressed = input_.pressed();
-        const std::uint64_t before_focus   = input_.focused();
-
-        const auto gestures = input_.handle(ev, tree_, time_);
-
-        if (input_.hovered() != before_hover ||
-            input_.pressed() != before_pressed ||
-            input_.focused() != before_focus) {
-            dirty_ = true;
-        }
-
-        // Dispatch: raw event subscriptions first, then gesture ones.
-        collect_and_step(subs, ev, gestures);
-    }
-
-    void collect_and_step(const Sub<Msg>& sub, const Event& ev,
-                          const std::vector<Gesture>& gestures) {
-        std::vector<Msg> produced;
-        match(sub, ev, gestures, produced);
-        for (auto& m : produced) {
-            step(std::move(m));
-            if (quit_) return;
-        }
-    }
-
-    /// Walk the subscription tree, emitting a Msg for every match.
-    void match(const Sub<Msg>& sub, const Event& ev,
-               const std::vector<Gesture>& gestures, std::vector<Msg>& out) {
-        using S = Sub<Msg>;
-        std::visit([&](const auto& a) {
-            using T = std::decay_t<decltype(a)>;
-
-            if constexpr (std::is_same_v<T, typename S::Batch>) {
-                for (const auto& s : a.subs) match(s, ev, gestures, out);
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnEvent>) {
-                if (auto m = a.handler(ev)) out.push_back(std::move(*m));
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnKey>) {
-                if (const auto* k = std::get_if<KeyEvent>(&ev)) {
-                    if (k->key == a.key && k->mods == a.mods) out.push_back(a.msg);
-                }
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnAnyKey>) {
-                if (const auto* k = std::get_if<KeyEvent>(&ev)) {
-                    if (auto m = a.handler(*k)) out.push_back(std::move(*m));
-                }
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnText>) {
-                if (const auto* t = std::get_if<TextEvent>(&ev)) {
-                    if (auto m = a.handler(t->text)) out.push_back(std::move(*m));
-                }
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnCompose>) {
-                if (const auto* ce = std::get_if<ComposeEvent>(&ev)) {
-                    if (auto m = a.handler(*ce)) out.push_back(std::move(*m));
-                }
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnComposeEnd>) {
-                if (std::holds_alternative<ComposeEndEvent>(ev)) out.push_back(a.msg);
-            }
-            else if constexpr (std::is_same_v<T, typename S::EveryFrame>) {
-                if (const auto* f = std::get_if<FrameEvent>(&ev)) out.push_back(a.handler(*f));
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnResize>) {
-                if (const auto* r = std::get_if<ResizeEvent>(&ev)) out.push_back(a.handler(r->size));
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnClose>) {
-                if (std::holds_alternative<CloseRequest>(ev)) out.push_back(a.msg);
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnFocusChange>) {
-                if (const auto* f = std::get_if<FocusEvent>(&ev)) out.push_back(a.handler(f->focused));
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnNode>) {
-                for (const auto& g : gestures) {
-                    // The click COUNT is part of the match, so a double click
-                    // does not also fire a single-click handler.
-                    if (g.node_id == a.node_id && matches(g.kind, a.gesture) &&
-                        (g.kind != Gesture::Kind::click || a.accepts(g.click_count))) {
-                        out.push_back(a.msg);
-                    }
-                }
-            }
-            else if constexpr (std::is_same_v<T, typename S::OnNodeMotion>) {
-                for (const auto& g : gestures) {
-                    if (g.node_id != a.node_id || !matches(g.kind, a.gesture)) continue;
-                    // Drags report LOCAL position (what a slider wants);
-                    // scrolls report the delta (what a scroll view wants).
-                    out.push_back(a.handler(g.kind == Gesture::Kind::scroll ? g.delta : g.local));
-                }
-            }
-        }, sub.alternative());
-    }
-
-    [[nodiscard]] static bool matches(Gesture::Kind k, typename Sub<Msg>::Gesture want) {
-        using G = typename Sub<Msg>::Gesture;
-        switch (want) {
-            case G::click:        return k == Gesture::Kind::click;
-            case G::press:        return k == Gesture::Kind::press;
-            case G::release:      return k == Gesture::Kind::release;
-            case G::enter:        return k == Gesture::Kind::enter;
-            case G::leave:        return k == Gesture::Kind::leave;
-            case G::drag:         return k == Gesture::Kind::drag;
-            case G::scroll:       return k == Gesture::Kind::scroll;
-            case G::activate:     return k == Gesture::Kind::activate;
-        }
-        return false;
-    }
-
-    // ── effect interpretation ───────────────────────────────────────────
-
-    /// The one place effects actually happen. Everything above this line is
-    /// pure; everything below is I/O.
-    void interpret(const Cmd<Msg>& cmd) {
-        using C = Cmd<Msg>;
-        std::visit([&](const auto& a) {
-            using T = std::decay_t<decltype(a)>;
-
-            if constexpr (std::is_same_v<T, typename C::None>) {}
-            else if constexpr (std::is_same_v<T, typename C::Quit>) { quit_ = true; }
-            else if constexpr (std::is_same_v<T, typename C::Redraw>) { dirty_ = true; }
-            else if constexpr (std::is_same_v<T, typename C::Batch>) {
-                for (const auto& c : a.cmds) interpret(c);
-            }
-            else if constexpr (std::is_same_v<T, typename C::After>) {
-                const double secs = std::chrono::duration<double>(a.delay).count();
-                timers_.push_back(detail::Timer<Msg>{window_.now() + secs, 0.0, a.msg});
-            }
-            else if constexpr (std::is_same_v<T, typename C::AfterLatest>) {
-                // Replace any pending timer with this key, so only the most
-                // recent request survives. That is the whole of a debounce,
-                // and it belongs here rather than in every app that needs one:
-                // done by hand it means storing a token in the Model and
-                // checking it on arrival, which is the same error-prone shape
-                // as the stale-task problem task_latest solves.
-                std::erase_if(timers_, [&](const detail::Timer<Msg>& t) {
-                    return t.key == a.key;
-                });
-                const double secs = std::chrono::duration<double>(a.delay).count();
-                timers_.push_back(detail::Timer<Msg>{
-                    window_.now() + secs, 0.0, a.msg, a.key});
-            }
-            else if constexpr (std::is_same_v<T, typename C::Task>) {
-                // Detached worker; its result lands in the inbox and is
-                // consumed by the UI thread next tick. The Program never
-                // learns a thread was involved.
-                auto inbox = inbox_;
-                std::thread([work = a.work, inbox] {
-                    inbox->post(work());
-                }).detach();
-            }
-            else if constexpr (std::is_same_v<T, typename C::TaskLatest>) {
-                // Supersedable work. Each key holds a generation counter;
-                // starting a task bumps it, and the worker only posts if its
-                // own generation is still current when it finishes.
-                //
-                // The check happens HERE rather than in update() because the
-                // alternative is every app re-deriving it: a bool, a counter,
-                // a comparison against the model. I wrote that by hand in the
-                // player example and got it wrong three times -- frames kept
-                // arriving after pause, a seek was overwritten by a stale
-                // decode, then the in-flight flag never cleared. If it is that
-                // easy to get wrong while looking straight at it, it belongs
-                // in the runtime.
-                auto gen = task_generations_;   // shared_ptr: outlives teardown
-                const std::uint64_t mine = gen->begin(a.key);
-                auto inbox = inbox_;
-                if (a.cancellable) {
-                    // Hand the work a predicate so it can abandon itself the
-                    // moment a newer task with this key starts, instead of
-                    // running to completion and having its result discarded.
-                    std::thread([work = a.cancellable, inbox, gen,
-                                 key = a.key, mine] {
-                        auto still_wanted = [gen, key, mine] {
-                            return gen->current(key, mine);
-                        };
-                        Msg result = work(still_wanted);
-                        if (gen->current(key, mine)) inbox->post(std::move(result));
-                    }).detach();
-                } else {
-                    std::thread([work = a.work, inbox, gen, key = a.key, mine] {
-                        Msg result = work();
-                        // Deliver only if no newer task with this key started
-                        // while we were working.
-                        if (gen->current(key, mine)) inbox->post(std::move(result));
-                    }).detach();
-                }
-            }
-            else if constexpr (std::is_same_v<T, typename C::TaskCoalesce>) {
-                // At most one worker per key; a newer request replaces the
-                // one WAITING rather than queueing behind it.
-                //
-                // The difference from TaskLatest is what happens to the work
-                // already RUNNING: task_latest supersedes it, this lets it
-                // finish. Under a continuous gesture that is the difference
-                // between never completing a single unit of work and
-                // completing them back to back as fast as the machine allows.
-                auto& slot = coalescing_[a.key];
-                slot.settled = a.settled;   // newest request wins
-                if (slot.running) {
-                    slot.pending = a.work;   // replaces any older pending one
-                    return;
-                }
-                slot.running = true;
-                start_coalesced_task(a.key, a.work);
-            }
-            else if constexpr (std::is_same_v<T, typename C::Stream>) {
-                // A long-lived producer. It runs on its own thread and pushes
-                // messages until the app exits.
-                //
-                // Warn about the LEAK PATTERN, which is starting streams again
-                // and again as the model changes -- each one runs until the
-                // app exits, so a new thread accumulates every time.
-                //
-                // The signal is repetition over TIME, not count: fanning out
-                // several producers once (a test, a multi-source feed) is
-                // legitimate and must not warn, while one stream started on
-                // every toggle is a leak. So this counts distinct frames on
-                // which a stream was started, not streams.
-                ++streams_started_;
-                if (frame_counter_ != last_stream_frame_) {
-                    last_stream_frame_ = frame_counter_;
-                    ++stream_start_frames_;
-                }
-                if (stream_start_frames_ == 4 && !stream_warned_) {
-                    stream_warned_ = true;
-                    std::fprintf(stderr,
-                        "mayag: Cmd::stream started on %d separate frames"
-                        " (%d producers total).\n"
-                        "       A stream runs until the app EXITS -- its"
-                        " keep_running() flag is\n"
-                        "       only cleared at shutdown, so nothing in the"
-                        " model can stop one.\n"
-                        "       Starting them repeatedly leaks a thread each"
-                        " time. For a producer\n"
-                        "       that should come and go with the model, use a"
-                        " subscription:\n"
-                        "         when(m.playing, Sub<Msg>::source(\"id\","
-                        " work))\n"
-                        "       which the runtime starts, stops and JOINS for"
-                        " you.\n",
-                        stream_start_frames_, streams_started_);
-                }
-                // messages through a sink backed by the inbox+waker, so each
-                // one wakes the UI thread and renders at once. The thread
-                // outlives this call by design; the runtime signals it to stop
-                // via `streams_alive_` at shutdown and joins it in the
-                // destructor, so no detached thread survives the app.
-                auto inbox = inbox_;
-                auto  alive = streams_alive_;   // shared_ptr<atomic<bool>>
-                typename C::Sink sink = [inbox](Msg m) { inbox->post(std::move(m)); };
-                stream_threads_.emplace_back(
-                    [work = a.work, sink = std::move(sink), alive] {
-                        work(sink, [alive] { return alive->load(std::memory_order_acquire); });
-                    });
-            }
-            else if constexpr (std::is_same_v<T, typename C::Perform>) { a.action(); }
-            else if constexpr (std::is_same_v<T, typename C::SetTitle>) {
-                window_.set_title(a.title);
-            }
-            else if constexpr (std::is_same_v<T, typename C::Fullscreen>) {
-                // Probed as a CAPABILITY, like image upload: a window that
-                // cannot go fullscreen (headless, an embedded surface) still
-                // satisfies the concept and simply ignores this.
-                //
-                // This branch was missing entirely, so Cmd::fullscreen was a
-                // documented API that silently did nothing -- the worst kind
-                // of gap, because the app looks correct and the compiler is
-                // happy. The size change arrives later as a normal resize
-                // event, so nothing else has to know about it.
-                if constexpr (requires { window_.set_fullscreen(a.on); }) {
-                    window_.set_fullscreen(a.on);
-                }
-            }
-            else if constexpr (std::is_same_v<T, typename C::SetWindowSize>) {
-                if constexpr (requires { window_.set_size(a.size); }) {
-                    window_.set_size(a.size);
-                }
-            }
-            else if constexpr (std::is_same_v<T, typename C::SetCursor>) {
-                window_.set_cursor(static_cast<CursorShape>(a.shape));
-            }
-            else if constexpr (std::is_same_v<T, typename C::SetClipboard>) {
-                window_.set_clipboard(a.text);
-            }
-            else if constexpr (std::is_same_v<T, typename C::ReadClipboard>) {
-                inbox_->post(a.then(window_.get_clipboard()));
-            }
-            else if constexpr (std::is_same_v<T, typename C::Focus>) {
-                input_.set_focus(a.node_id);
-                dirty_ = true;
-            }
-            else if constexpr (std::is_same_v<T, typename C::Screenshot>) {
-                const auto px = window_.read_pixels();
-                (void)imageio::write_png(a.path, px,
-                                       static_cast<int>(size_.x * dpi_),
-                                       static_cast<int>(size_.y * dpi_));
-            }
-            else if constexpr (std::is_same_v<T, typename C::UploadImage>) {
-                // Hand the pixels to whatever is rendering. The window owns
-                // the GPU image (or the CPU sampler), because it owns the
-                // device -- the runtime only routes.
-                //
-                // Probed with `requires` rather than added to the Window
-                // concept: image support is a CAPABILITY, and a window that
-                // has none should still satisfy the concept and compile. An
-                // app that uploads to such a window simply draws nothing,
-                // which is the same contract the backend registry uses for
-                // optional device features.
-                if (a.image && a.image->valid()) {
-                    if constexpr (requires { window_.upload_image(a.id, a.image); }) {
-                        // Hand over the POINTER. Dereferencing here would bind
-                        // to a const& parameter and copy the whole buffer --
-                        // 8 MB per frame at 1080p, ~500 MB/s at 60fps.
-                        window_.upload_image(a.id, a.image);
-                        dirty_ = true;   // new pixels mean the frame changed
-                    }
-                }
-            }
-            else if constexpr (std::is_same_v<T, typename C::ReleaseImage>) {
-                if constexpr (requires { window_.release_image(a.id); }) {
-                    window_.release_image(a.id);
-                    dirty_ = true;
-                }
-            }
-        }, cmd.alternative());
-    }
-
-    // ── timers ──────────────────────────────────────────────────────────
-
-    void fire_due_timers(double now) {
-        // Re-arm interval timers by ADVANCING the deadline rather than
-        // resetting it to now+interval, so a slow frame does not make a
-        // 60 Hz timer drift into a 55 Hz one.
-        std::vector<Msg> due;
-        for (auto it = timers_.begin(); it != timers_.end();) {
-            if (now >= it->deadline) {
-                due.push_back(it->msg);
-                if (it->interval > 0.0) {
-                    it->deadline += it->interval;
-                    ++it;
-                } else {
-                    it = timers_.erase(it);
-                }
-            } else {
-                ++it;
-            }
-        }
-
-        // Interval subscriptions (`Sub::every`) live in a separate list because
-        // they are reconciled against the model each tick rather than created
-        // once. They always re-arm (interval > 0), never erase. A timer that
-        // fell many intervals behind (the app was blocked on another event)
-        // fires ONCE and catches its deadline up, rather than delivering a
-        // burst — a periodic poll wants "it is time again", not a backlog.
-        for (auto& t : interval_timers_) {
-            if (now >= t.deadline) {
-                due.push_back(t.msg);
-                if (t.interval > 0.0) {
-                    t.deadline += t.interval;
-                    if (t.deadline < now) t.deadline = now + t.interval;
-                }
-            }
-        }
-
-        for (auto& m : due) {
-            step(std::move(m));
-            if (quit_) return;
-        }
-    }
-
-    // ── declarative streams (Sub::source) ───────────────────────────────
-
-    /// A producer thread started by a `Sub::source`, keyed by its id.
-    struct RunningSource {
-        std::string                        id;
-        std::shared_ptr<std::atomic<bool>> alive;
-        std::thread                        thread;
-        /// For a coalescing source, the single-slot latest message. The
-        /// producer writes it (replacing any unread value) and the UI thread
-        /// takes it at most once per frame, so a firehose feed delivers one
-        /// message per frame regardless of its rate. Null for a normal source,
-        /// which posts straight to the inbox.
-        std::shared_ptr<std::mutex>        slot_mutex;
-        std::shared_ptr<std::optional<Msg>> slot;
-        /// Set by the thread itself as its last act. Lets the UI thread tell
-        /// "finished, join() will return immediately" from "still winding
-        /// down" WITHOUT blocking to find out -- the difference between
-        /// reaping a retired source and stalling a frame on it.
-        std::shared_ptr<std::atomic<bool>> done;
+        void stop(int code) { app.kernel_.stop(code); }
     };
 
-    /// Diff the model's sources against the running ones. New ids start a
-    /// producer; ids that vanished are signalled to stop and joined. This is
-    /// the same declarative contract as interval timers, but for threads: the
-    /// live set is a pure function of the model, so there is no stop() to
-    /// forget and no thread leaked when a condition goes false.
-    void sync_sources(const Sub<Msg>& subs) {
-        using S = Sub<Msg>;
+    static platform::Headless open_window(AppConfig& cfg) {
+        auto w = platform::Headless::open(detail::window_config(cfg));
+        return std::move(*w);   // headless always opens
+    }
 
-        // Gather (id, work) pairs the model wants this frame.
-        std::vector<const typename S::Source*> wanted;
-        collect_sources(subs, wanted);
+    jaal::kernel::turn step() { return kernel_.step(fwd_); }
 
-        // Report duplicate ids.
-        //
-        // Reconciliation is BY id, so a collision means the second producer is
-        // never started -- it does not crash, it does not warn, the feed is
-        // simply dead while the app looks fine. That is the worst failure mode
-        // available: silent, and indistinguishable from a producer that has
-        // nothing to say. Two instances of one component, or two modules that
-        // both picked "feed", is all it takes.
-        //
-        // Reported once per offending id rather than every frame, since
-        // subscribe() runs continuously and a per-frame message would bury the
-        // first one.
-        for (std::size_t i = 0; i < wanted.size(); ++i) {
-            for (std::size_t j = i + 1; j < wanted.size(); ++j) {
-                if (wanted[i]->id != wanted[j]->id) continue;
-                const std::string id{wanted[i]->id};
-                if (!reported_dup_ids_.insert(id).second) continue;
-                std::fprintf(stderr,
-                    "mayag: two Sub::source subscriptions share the id \"%s\".\n"
-                    "       Sources are reconciled by id, so only the FIRST is"
-                    " started -- the\n"
-                    "       other never runs and its feed is silently dead."
-                    " Give each one a\n"
-                    "       distinct id; a component that can appear twice"
-                    " should fold its\n"
-                    "       identity in, e.g. source(\"chat:\" + room_id,"
-                    " ...).\n",
-                    id.c_str());
-            }
-        }
+    void draw() {
+        host_.draw(kernel_.model(), [&](std::exception_ptr e) { kernel_.view_faulted(std::move(e)); });
+    }
 
-        // Stop any running source whose id is no longer wanted.
-        //
-        // Signal it and set it aside; do NOT join here. A join on the UI
-        // thread is a join on the frame: the producer only notices at its
-        // next `alive()` poll, and a decoder in the middle of a frame can
-        // take hundreds of milliseconds to get there. Measured at 370 ms of
-        // frozen UI per stop with a 400 ms producer -- and an app that folds
-        // a seek position into its source id (the video example does exactly
-        // that, so a seek restarts the decoder) hits this on every drag move.
-        //
-        // Retired threads are reaped in reap_retired_sources() once they have
-        // actually finished, so nothing leaks and nothing blocks.
-        bool retired_any = false;
-        for (auto it = sources_.begin(); it != sources_.end();) {
-            const bool still = std::any_of(wanted.begin(), wanted.end(),
-                [&](const typename S::Source* w) { return w->id == it->id; });
-            if (still) { ++it; continue; }
-            it->alive->store(false, std::memory_order_release);
-            retiring_.push_back(std::move(*it));
-            it = sources_.erase(it);
-            retired_any = true;
-        }
-        // Only when something was stopped. An unconditional wake here runs on
-        // every tick and keeps poll() from ever blocking (100% CPU at idle).
-        if (retired_any) waker_.wake();
-        reap_retired_sources();
-
-        // Start any wanted source not already running.
-        for (const typename S::Source* w : wanted) {
-            const bool running = std::any_of(sources_.begin(), sources_.end(),
-                [&](const RunningSource& r) { return r.id == w->id; });
-            if (running || w->work == nullptr) continue;
-
-            auto alive = std::make_shared<std::atomic<bool>>(true);
-            auto done  = std::make_shared<std::atomic<bool>>(false);
-            auto inbox = inbox_;
-            auto  work  = w->work;   // shared_ptr keeps the callable alive
-
-            RunningSource rs;
-            rs.id = std::string{w->id};
-            rs.alive = alive;
-            rs.done  = done;
-
-            if (w->coalesce) {
-                // Coalescing: the sink replaces a single slot instead of
-                // appending to the inbox, and still wakes the UI thread so the
-                // latest value renders promptly. The slot is drained once per
-                // frame in tick().
-                auto slot_mutex = std::make_shared<std::mutex>();
-                auto slot = std::make_shared<std::optional<Msg>>();
-                auto* waker = &waker_;
-                rs.slot_mutex = slot_mutex;
-                rs.slot = slot;
-                rs.thread = std::thread([work, alive, done, slot_mutex, slot, waker] {
-                    (*work)([alive, slot_mutex, slot, waker](Msg m) {
-                                // Same gate as the plain sink, but the slot is
-                                // read on the UI thread under its own mutex, so
-                                // the check here is only an optimisation --
-                                // drain_coalesced_sources() re-checks `alive`
-                                // before applying, which is what makes it
-                                // exact.
-                                if (!alive->load(std::memory_order_acquire)) return;
-                                { std::lock_guard lk{*slot_mutex}; *slot = std::move(m); }
-                                waker->wake();
-                            },
-                            [alive] { return alive->load(std::memory_order_acquire); });
-                    done->store(true, std::memory_order_release);
-                    waker->wake();          // let a waiting reaper notice
-                });
-            } else {
-                auto* waker = &waker_;
-                rs.thread = std::thread([work, inbox, alive, done, waker] {
-                    // Deliver through the source's own alive flag as a GATE.
-                    //
-                    // The flag is checked on the UI thread when the message is
-                    // applied, not here when it is posted. Checking here is
-                    // check-then-act: the model can stop this source in the
-                    // window between the check and the post, and no amount of
-                    // checking closes that window -- measured 2.5 million
-                    // messages applied from already-stopped sources.
-                    //
-                    // Gating at apply time makes it exact: a message from a
-                    // producer the model has dropped is never applied, whatever
-                    // the interleaving.
-                    (*work)([inbox, alive](Msg m) {
-                                inbox->post_gated(std::move(m), alive);
-                            },
-                            [alive] { return alive->load(std::memory_order_acquire); });
-                    done->store(true, std::memory_order_release);
-                    waker->wake();
-                });
-            }
-            sources_.push_back(std::move(rs));
+    std::function<void()> wake() {
+        return [w = woken_] { w->store(true, std::memory_order_release); };
+    }
+    void wait_for_news(std::chrono::milliseconds most) {
+        const auto end = std::chrono::steady_clock::now() + most;
+        while (!woken_->exchange(false, std::memory_order_acq_rel) &&
+               std::chrono::steady_clock::now() < end) {
+            std::this_thread::yield();
         }
     }
 
-    /// Take one message from each coalescing source's slot. Called each tick
-    /// so a firehose feed contributes exactly one message per frame — the
-    /// latest — and never grows a backlog.
-    void drain_coalesced_sources() {
-        for (auto& s : sources_) {
-            if (s.slot == nullptr) continue;
-            std::optional<Msg> m;
-            { std::lock_guard lk{*s.slot_mutex}; m.swap(*s.slot); }
-            if (m) { step(std::move(*m)); if (quit_) return; }
-        }
-    }
-
-    void collect_sources(const Sub<Msg>& sub,
-                         std::vector<const typename Sub<Msg>::Source*>& out) {
-        using S = Sub<Msg>;
-        std::visit([&](const auto& a) {
-            using T = std::decay_t<decltype(a)>;
-            if constexpr (std::is_same_v<T, typename S::Batch>) {
-                for (const auto& s : a.subs) collect_sources(s, out);
-            } else if constexpr (std::is_same_v<T, typename S::Source>) {
-                out.push_back(&a);
-            }
-        }, sub.alternative());
-    }
-
-    /// Run one unit of coalesced work for `key` on a worker thread.
-    ///
-    /// The continuation is the interesting part: when the worker finishes it
-    /// posts its result AND a nudge that runs on the UI thread, which starts
-    /// whatever request arrived meanwhile. Chaining there rather than on the
-    /// worker keeps the whole policy single-threaded -- `coalescing_` is only
-    /// ever touched from the UI thread, so the map needs no lock and the
-    /// "is one running" decision can never race a completion.
-    void start_coalesced_task(const std::string& key,
-                              std::function<Msg()> work) {
-        auto inbox = inbox_;
-        auto chain = coalesce_chain_;   // shared_ptr: outlives teardown
-        std::thread([work = std::move(work), inbox, chain, key] {
-            Msg result = work();
-            {
-                std::lock_guard lk{chain->mutex};
-                chain->finished.push_back(key);
-            }
-            inbox->post(std::move(result));
-        }).detach();
-    }
-
-    /// Start the next coalesced request for any key whose worker just
-    /// finished. Called once per tick on the UI thread.
-    void pump_coalesced_tasks() {
-        std::vector<std::string> done;
-        {
-            std::lock_guard lk{coalesce_chain_->mutex};
-            done.swap(coalesce_chain_->finished);
-        }
-        for (const auto& key : done) {
-            const auto it = coalescing_.find(key);
-            if (it == coalescing_.end()) continue;
-            if (it->second.pending) {
-                auto next = std::move(*it->second.pending);
-                it->second.pending.reset();
-                start_coalesced_task(key, std::move(next));
-            } else {
-                // Nothing running and nothing waiting: this key has settled,
-                // so the result just delivered is the final one.
-                it->second.running = false;
-                if (it->second.settled) {
-                    Msg m = std::move(*it->second.settled);
-                    it->second.settled.reset();
-                    step(std::move(m));
-                }
-            }
-        }
-    }
-
-    /// Join retired source threads that have already finished.
-    ///
-    /// Never blocks: a thread is only joined once it has set `done`, at which
-    /// point join() returns at once. A producer that is slow to notice it was
-    /// stopped simply stays on the list and is collected a frame or two later
-    /// -- late, but off the UI thread, which is the whole point.
-    void reap_retired_sources() {
-        for (auto it = retiring_.begin(); it != retiring_.end();) {
-            if (!it->done->load(std::memory_order_acquire)) { ++it; continue; }
-            if (it->thread.joinable()) it->thread.join();
-            it = retiring_.erase(it);
-        }
-    }
-
-    /// Stop and join every running source. Called from the destructor so no
-    /// producer thread outlives the runtime and touches a freed inbox.
-    void stop_all_sources() {
-        for (auto& s : sources_) {
-            s.alive->store(false, std::memory_order_release);
-        }
-        for (auto& s : retiring_) {
-            s.alive->store(false, std::memory_order_release);
-        }
-        waker_.wake();
-        // Teardown is the one place a blocking join is correct: the runtime is
-        // going away and its inbox with it, so every producer must be finished
-        // before we return. Retirees included -- they hold the same inbox.
-        for (auto& s : sources_) {
-            if (s.thread.joinable()) s.thread.join();
-        }
-        for (auto& s : retiring_) {
-            if (s.thread.joinable()) s.thread.join();
-        }
-        sources_.clear();
-        retiring_.clear();
-    }
-
-    void sync_interval_timers(const Sub<Msg>& subs) {
-        // Interval subscriptions are declarative: the set of live timers is
-        // recomputed from the model each frame, so a timer whose condition
-        // went false simply stops existing. No stop_timer() to forget.
-        std::vector<detail::Timer<Msg>> wanted;
-        collect_intervals(subs, wanted);
-
-        // Preserve the phase of timers that already existed.
-        for (auto& w : wanted) {
-            for (const auto& old : interval_timers_) {
-                if (old.interval == w.interval) { w.deadline = old.deadline; break; }
-            }
-        }
-        interval_timers_ = std::move(wanted);
-    }
-
-    void collect_intervals(const Sub<Msg>& sub, std::vector<detail::Timer<Msg>>& out) {
-        using S = Sub<Msg>;
-        std::visit([&](const auto& a) {
-            using T = std::decay_t<decltype(a)>;
-            if constexpr (std::is_same_v<T, typename S::Batch>) {
-                for (const auto& s : a.subs) collect_intervals(s, out);
-            } else if constexpr (std::is_same_v<T, typename S::Every>) {
-                const double secs = std::chrono::duration<double>(a.interval).count();
-                out.push_back(detail::Timer<Msg>{window_.now() + secs, secs, a.msg});
-            }
-        }, sub.alternative());
-    }
-
-    // ── waiting ─────────────────────────────────────────────────────────
-
-    [[nodiscard]] std::pair<platform::Wait, double> decide_wait(const Sub<Msg>& subs) const {
-        // NEVER block while a repaint is owed.
-        //
-        // The loop is wait -> handle events -> update -> render. If a message
-        // arrives from anywhere other than the window (a worker thread's
-        // Cmd::task result, a timer, a `send()` from application code) the
-        // model changes and `dirty_` is set — but the NEXT thing the loop does
-        // is block for a window event that may never come. The new frame sits
-        // unrendered and the app looks frozen until the user happens to move
-        // the mouse.
-        //
-        // That is exactly the "pressed a theme chip and it hung" report: the
-        // click was handled, the model updated, and then the loop went to
-        // sleep still owing the screen a paint.
-        if (dirty_) return {platform::Wait::immediate, 0.0};
-
-        // Motion in progress needs frames, exactly like an `every_frame`
-        // subscription. Folding it into the SAME decision is what keeps
-        // animation from needing a second clock — and what guarantees the app
-        // goes back to sleep the moment the last spring settles.
-        if (tracked_.animating() || motion_pending_) return {platform::Wait::poll, 0.0};
-
-        if (subs.wants_frames()) return {platform::Wait::poll, 0.0};
-        if (auto i = subs.min_interval()) {
-            return {platform::Wait::timeout, std::chrono::duration<double>(*i).count()};
-        }
-        if (!timers_.empty()) {
-            double soonest = timers_.front().deadline;
-            for (const auto& t : timers_) soonest = std::min(soonest, t.deadline);
-            return {platform::Wait::timeout, std::max(soonest - time_, 0.0)};
-        }
-        return {platform::Wait::block, 0.0};
-    }
-
-    /// Deepest node under `p` that requests a specific cursor.
-    [[nodiscard]] static CursorShape cursor_at(const Node& n, Vec2 p) {
-        CursorShape found = CursorShape::arrow;
-        walk_cursor(n, p, found);
-        return found;
-    }
-    static void walk_cursor(const Node& n, Vec2 p, CursorShape& found) {
-        if (!n.frame().contains(p)) return;
-        if (n.style().cursor != CursorShape::arrow) found = n.style().cursor;
-        for (const auto& c : n.children()) walk_cursor(c, p, found);
-    }
-
-    [[nodiscard]] Sub<Msg> current_subs() const {
-        if constexpr (detail::HasSubscribe<P>) return P::subscribe(model_);
-        else return Sub<Msg>::none();
-    }
-
-    // ── the frame ───────────────────────────────────────────────────────
-
-    void render() {
-        // view -> layout -> paint -> present. Skipped entirely when nothing
-        // changed, which is what keeps an idle window at zero GPU load.
-        if (!dirty_) { busy_.idle(); return; }
-        dirty_ = false;
-
-        size_ = window_.size();
-        dpi_  = window_.dpi_scale();
-
-        if (cfg_.fonts != nullptr) cfg_.fonts->begin_frame(frame_counter_);
-        ++frame_counter_;
-        frame_.view_ms = frame_.layout_ms = frame_.paint_ms = frame_.render_ms = 0.0;
-
-        // Clear BEFORE the view runs, or we erase the overlays it just
-        // posted. The list then outlives this frame: input arrives between
-        // renders, and an emptied list would mean a menu visible on screen
-        // yet invisible to hit testing.
-        overlays_.clear();
-        tracked_.clear();
-        clear_animation_request();
-
-        Ctx ctx{size_, dpi_, time_, cfg_.theme, &latency_, measurer_, &tracked_, &overlays_, &input_};
-
-        // A throwing view keeps the LAST GOOD TREE on screen. A blank window
-        // tells the user nothing; a stale frame at least shows what was there
-        // and leaves the app usable enough to save.
-        if (cfg_.catch_exceptions) {
-            try {
-                if constexpr (detail::ViewWithCtx<P>) tree_ = P::view(model_, ctx);
-                else                                  tree_ = P::view(model_);
-            } catch (const std::exception& e) {
-                report_error("view", e.what());
-                if (tree_.children().empty()) return;   // nothing good to fall back to
-            } catch (...) {
-                report_error("view", "unknown exception");
-                if (tree_.children().empty()) return;
-            }
-        } else {
-            if constexpr (detail::ViewWithCtx<P>) tree_ = P::view(model_, ctx);
-            else                                  tree_ = P::view(model_);
-        }
-
-        { ScopedTimer t{frame_.layout_ms}; layout::layout_tree(tree_, size_, *measurer_); }
-
-        // Tracked geometry is resolved AFTER layout, for the same reason
-        // overlays are: a node's real rect is not known until the pass ends.
-        // This is what lets an animation follow a LAYOUT rather than a
-        // hardcoded coordinate.
-        tracked_.observe_all(tree_);
-
-        // Overlays are laid out AFTER the main tree, because an overlay
-        // positions itself against an anchor whose final rect is not known
-        // until layout finishes. That ordering is what makes "attach a menu
-        // to this button" work regardless of how deeply the button is nested.
-        for (auto& o : overlays_.items()) {
-            const Rect anchor = o.anchor_id != 0
-                ? (tree_.find(o.anchor_id) ? tree_.find(o.anchor_id)->frame() : Rect{})
-                : Rect{Vec2{}, size_};
-
-            // Measure at natural size against the viewport, then place.
-            const Vec2 natural = layout::measure(
-                o.content, layout::Constraints{size_.x, size_.y}, *measurer_);
-
-            const Rect placed = overlay::resolve(o.placement, anchor, natural, size_,
-                                                 o.offset, input_.cursor());
-            layout::arrange(o.content, placed, *measurer_);
-        }
-
-        // With `--debug`, audit every frame whose tree actually changed and
-        // report new faults once. Layout bugs are cheap to fix and expensive
-        // to notice, so surfacing them during development is worth more than
-        // the microseconds it costs.
-        if (cfg_.debug_bounds) {
-            const auto issues = layout::audit(tree_, measurer_);
-            if (issues.size() != last_issue_count_) {
-                last_issue_count_ = issues.size();
-                std::fputs(layout::format_issues(issues).c_str(), stderr);
-            }
-        }
-
-        draws_.clear();
-        ScopedTimer paint_timer{frame_.paint_ms};
-        render::PaintOptions po{};
-        po.dpi_scale    = dpi_;
-        po.measurer     = measurer_;
-        po.glyphs       = glyphs_;
-        po.debug_bounds = cfg_.debug_bounds;
-        render::paint(tree_, draws_, po);
-
-        // Overlays paint last, outside every clip, in layer order — which is
-        // exactly the three things a menu needs and normal flow cannot give.
-        if (!overlays_.empty()) {
-            auto sorted = overlays_.items();
-            std::stable_sort(sorted.begin(), sorted.end(),
-                             [](const Overlay& a, const Overlay& b) { return a.layer < b.layer; });
-            for (const auto& o : sorted) {
-                if (o.scrim > 0.0f) {
-                    draws_.fill_rect(Rect{Vec2{}, size_ * dpi_},
-                                     colors::black.fade(o.scrim));
-                }
-                render::paint(o.content, draws_, po);
-            }
-        }
-
-        // A widget mid-motion called request_animation_frame() during the
-        // view pass. Collected here and folded into the next wait decision.
-        motion_pending_ = animation_was_requested() || tracked_.animating();
-
-        frame_.instances  = static_cast<std::uint32_t>(draws_.size());
-        frame_.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
-
-        {
-            ScopedTimer t{frame_.render_ms};
-            window_.present(draws_, cfg_.theme.background);
-        }
-
-        latency_.record(frame_);
-        frame_ = FrameTiming{};
-
-        // Warn ONCE about an app that never stops rendering.
-        //
-        // A continuously-rendering app is not technically broken — the window
-        // responds, events flow — but it pins a core and users reasonably
-        // report it as "hung". It is far harder to notice than a deadlock,
-        // because everything keeps working, so it gets a detector rather than
-        // an assertion. mayag's own reactive demo shipped this way.
-        if (input_since_render_) busy_.idle();
-        else busy_.frame_presented(time_);
-        input_since_render_ = false;
-        if (busy_.busy() && !busy_warned_) {
-            busy_warned_ = true;
-            std::fprintf(stderr,
-                "mayag: rendering continuously at %.0f fps for several seconds.\n"
-                "       If this is not a game or a visualiser, something is "
-                "requesting frames that should not be:\n"
-                "         * a Sub::every_frame whose condition is always true\n"
-                "         * an Animated<T> that never settles\n"
-                "         * a view that marks itself dirty every frame\n"
-                "       An idle mayag app should sit at 0%% CPU.\n",
-                busy_.frame_rate());
-        }
-    }
-
-    AppConfig    cfg_;
-    W            window_{};
-    Model        model_{};
-    Node         tree_{};
-    DrawList     draws_{};
-    Interaction  input_{};
-
-    // Font binding, resolved once at boot. `bindings_` owns the seam adapters
-    // that layout and the painter read through; `cfg_.fonts` owns the stack.
-    std::optional<detail::StackBindings> bindings_;
-    const layout::TextMeasurer*          measurer_ = nullptr;
-    const render::GlyphRenderer*         glyphs_   = nullptr;
-    const backend::CoverageSampler*      sampler_  = nullptr;
-    std::uint64_t                        frame_counter_ = 0;
-    OverlayList                          overlays_;
-    TrackedSet                           tracked_;
-    bool                                 motion_pending_ = false;
-    double                               last_motion_time_ = 0.0;
-    CursorShape                          current_cursor_ = CursorShape::arrow;
-    FrameTiming                          frame_{};
-    LatencyStats                         latency_{};
-    BusyLoopDetector                     busy_{};
-    bool                                 busy_warned_ = false;
-    bool                                 input_since_render_ = false;
-    /// Cmd::stream producers started, for the leak diagnostic in interpret().
-    int                                  streams_started_ = 0;
-    int                                  stream_start_frames_ = 0;
-    std::uint64_t                        last_stream_frame_ = ~0ull;
-    bool                                 stream_warned_ = false;
-    /// Source ids already reported as duplicated, so the warning fires once
-    /// per offending id rather than on every frame.
-    std::set<std::string>                reported_dup_ids_;
-    std::size_t                          last_issue_count_ = static_cast<std::size_t>(-1);
-
-    /// shared_ptr, not a member value: detached task workers capture it and
-    /// may outlive the Runtime, so the storage must too.
-    std::shared_ptr<detail::Inbox<Msg>> inbox_ =
-        std::make_shared<detail::Inbox<Msg>>();
-    /// Shared with detached task_latest workers, so it must outlive `this`.
-    std::shared_ptr<detail::TaskGenerations> task_generations_ =
-        std::make_shared<detail::TaskGenerations>();
-    platform::Waker                 waker_;
-    // Streaming producers (`Cmd::stream`). `streams_alive_` is shared with the
-    // worker threads as their shutdown signal; the runtime joins them in its
-    // destructor. A shared_ptr rather than a bare member so a thread that
-    // checks it during teardown never races the Runtime's own destruction.
-    std::shared_ptr<std::atomic<bool>> streams_alive_ =
-        std::make_shared<std::atomic<bool>>(true);
-    std::vector<std::thread>        stream_threads_;
-    /// Per-key state for Cmd::task_coalesce. UI-thread only.
-    struct CoalesceSlot {
-        bool running = false;
-        std::optional<std::function<Msg()>> pending;
-        /// Delivered when this key drains; see Cmd::task_coalesce.
-        std::optional<Msg> settled;
-    };
-    std::unordered_map<std::string, CoalesceSlot> coalescing_;
-
-    /// Keys whose coalesced worker has finished, published by the worker and
-    /// drained on the UI thread. A shared_ptr so a detached worker that
-    /// outlives the runtime writes to a live object rather than a freed one.
-    struct CoalesceChain {
-        std::mutex               mutex;
-        std::vector<std::string> finished;
-    };
-    std::shared_ptr<CoalesceChain> coalesce_chain_ =
-        std::make_shared<CoalesceChain>();
-
-    /// Set whenever update() runs, cleared once sources have been reconciled
-    /// against the resulting model. Lets an idle frame skip a second
-    /// subscribe() entirely.
-    bool model_touched_ = false;
-
-    std::vector<RunningSource>       sources_;
-    /// Sources that have been stopped but whose threads have not finished.
-    /// Reaped without blocking; see reap_retired_sources().
-    std::vector<RunningSource>       retiring_;
-    std::vector<detail::Timer<Msg>> timers_;
-    std::vector<detail::Timer<Msg>> interval_timers_;
-
-    Vec2   size_{1024, 640};
-    float  dpi_  = 1.0f;
-    double time_ = 0.0;
-    bool   dirty_ = true;
-    bool   quit_  = false;
+    AppConfig                                   host_cfg_{};
+    std::shared_ptr<std::atomic<bool>>          woken_ = std::make_shared<std::atomic<bool>>(false);
+    platform::Headless                          window_;
+    host_type                                   host_;
+    jaal::detail::run::forward_host<host_type, event_type> fwd_;
+    kernel_type                                 kernel_;
+    std::optional<context>                      cx_;
 };
 
-// ── entry points ────────────────────────────────────────────────────────
-
-/// Run a Program on the native window. This is `main()` for a mayag app.
-template <Program P>
-int run(AppConfig cfg = {}) {
-    Runtime<P, platform::Native> rt{std::move(cfg)};
-    return rt.run();
-}
-
-/// Fallback for a type that ISN'T quite a Program: instead of the compiler's
-/// generic "constraints not satisfied", static_assert_program names the exact
-/// method that is missing or has the wrong signature.
-template <typename P>
-    requires (!Program<P>)
-int run(AppConfig = {}) {
-    static_assert(static_assert_program<P>(),
-                  "mayag::run: the type passed to run<T>() is not a Program.");
-    return 1;
-}
-
-/// Run a Program headlessly, with a driver that scripts input and inspects
-/// output. The SAME runtime, so a test exercises real code:
-///
-///     run_headless<Counter>({}, [](auto& rt) {
-///         rt.window().click({100, 40});
-///         rt.tick();
-///         assert(rt.model().n == 1);
-///     });
-template <Program P, typename Driver>
+/// Run P headlessly under a driver. The renderer banner is off: headless is
+/// always software and always in CI.
+template <Program P, class Driver>
 int run_headless(AppConfig cfg, Driver&& drive) {
-    // Headless is always software and always in CI, so the renderer banner
-    // would be noise on every test line.
     cfg.log_renderer = false;
-    Runtime<P, platform::Headless> rt{std::move(cfg)};
-    if (!rt.boot()) return 1;
-    drive(rt);
+    headless_app<P> app{std::move(cfg)};
+    drive(app);
     return 0;
 }
 

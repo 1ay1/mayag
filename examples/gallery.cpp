@@ -39,13 +39,8 @@ struct Gallery {
 
     using Msg = std::variant<PickTheme, ToggleAnimation, Tick, Bump,
                              FlipA, FlipB, DragSlider, Quit>;
-
-    // Fixed clickables: id + message declared once, reused in view and
-    // subscribe so they can't drift.
-    static inline const auto bump   = action(node_id("bump"),     Msg{Bump{}});
-    static inline const auto flip_a = action(node_id("toggle-a"), Msg{FlipA{}});
-    static inline const auto flip_b = action(node_id("toggle-b"), Msg{FlipB{}});
-    static inline const auto anim   = action(node_id("anim"),     Msg{ToggleAnimation{}});
+    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Sub = mayag::Sub<Msg>;
 
     static constexpr std::array<Theme, 6> palette{
         themes::midnight, themes::ember, themes::forest,
@@ -55,34 +50,26 @@ struct Gallery {
         "midnight", "ember", "forest", "orchid", "daylight", "paper",
     };
 
-    static std::pair<Model, Cmd<Msg>> init() {
-        return {Model{}, Cmd<Msg>::set_title("mayag — gallery")};
-    }
+    static Cmd init(Model&) { return SetTitle{"mayag — gallery"}; }
 
     // ── update ──────────────────────────────────────────────────────────
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](const PickTheme& e) -> R {
-                m.theme_index = num::clamp(e.index, 0, static_cast<int>(palette.size()) - 1);
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](ToggleAnimation) -> R { m.animating = !m.animating; return {m, Cmd<Msg>::none()}; },
-            [&](const Tick& e) -> R { m.t += e.dt; return {m, Cmd<Msg>::none()}; },
-            [&](Bump) -> R  { m.clicks++;            return {m, Cmd<Msg>::none()}; },
-            [&](FlipA) -> R { m.toggle_a = !m.toggle_a; return {m, Cmd<Msg>::none()}; },
-            [&](FlipB) -> R { m.toggle_b = !m.toggle_b; return {m, Cmd<Msg>::none()}; },
-            [&](const DragSlider& e) -> R {
-                m.slider = num::saturate(e.x / 260.0f);
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
+    static Cmd update(Model& m, PickTheme e) {
+        m.theme_index = num::clamp(e.index, 0, static_cast<int>(palette.size()) - 1);
+        return {};
     }
+    static Cmd update(Model& m, ToggleAnimation) { m.animating = !m.animating; return {}; }
+    static Cmd update(Model& m, Tick e)  { m.t += e.dt; return {}; }
+    static Cmd update(Model& m, Bump)    { m.clicks++; return {}; }
+    static Cmd update(Model& m, FlipA)   { m.toggle_a = !m.toggle_a; return {}; }
+    static Cmd update(Model& m, FlipB)   { m.toggle_b = !m.toggle_b; return {}; }
+    static Cmd update(Model& m, DragSlider e) { m.slider = num::saturate(e.x / 260.0f); return {}; }
+    static Cmd update(Model&, Quit)      { return Cmd::quit(); }
 
     // ── view ────────────────────────────────────────────────────────────
 
-    static Node view(const Model& m, const Ctx& c) {
+    static Node view(const Model& m) {
+        const Ctx& c = ctx();
         const Theme& t = palette[static_cast<std::size_t>(m.theme_index)];
 
         // A uniform cell: fixed column width, fixed swatch row so labels line
@@ -173,7 +160,7 @@ struct Gallery {
                  box() | size(104, 44)
                        | bg(m.animating ? t.success.fade(0.18f) : t.surface_raised)
                        | border(1, m.animating ? t.success : t.border)
-                       | radius(8) | margin(14, 0) | anim.on)
+                       | radius(8) | margin(14, 0) | dsl::id<"anim">)
         ) | gap(6);
 
         // ── interactive controls ────────────────────────────────────────
@@ -186,10 +173,10 @@ struct Gallery {
             h(text_owned("clicked " + std::to_string(m.clicks)) | font(13) | semibold
                 | fg(t.on_accent))
               | center | pad(11, 20) | bg(hot(node_id("bump"), t.accent))
-              | radius(t.radius_small) | elevation(3) | bump.on,
+              | radius(t.radius_small) | elevation(3) | dsl::id<"bump">,
 
-            toggle(t, m.toggle_a) | flip_a.on,
-            toggle(t, m.toggle_b) | flip_b.on,
+            toggle(t, m.toggle_a) | dsl::id<"toggle-a">,
+            toggle(t, m.toggle_b) | dsl::id<"toggle-b">,
 
             // Drag the track: `on_drag` reports node-local coordinates.
             z(box() | size(260.0f * m.slider, 10) | bg(t.accent) | radius(5) | absolute(0, 0))
@@ -246,32 +233,38 @@ struct Gallery {
              | bg(t.background);
     }
 
+    // ── input ───────────────────────────────────────────────────────────
+
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (c.count != 1) return std::nullopt;
+        if (is(c, "bump"))     return Bump{};
+        if (is(c, "toggle-a")) return FlipA{};
+        if (is(c, "toggle-b")) return FlipB{};
+        if (is(c, "anim"))     return ToggleAnimation{};
+        for (int i = 0; i < static_cast<int>(palette.size()); ++i)
+            if (c.node == node_id("theme", static_cast<std::size_t>(i))) return PickTheme{i};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const Dragged& d) {
+        if (is(d, "slider")) return DragSlider{d.local.x};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        static const keymap<Msg> keys{{Key::space, ToggleAnimation{}}, {Key::escape, Quit{}}};
+        return keys(k);
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
+
     // ── subscribe ───────────────────────────────────────────────────────
 
-    static Sub<Msg> subscribe(const Model& m) {
-        std::vector<Sub<Msg>> subs{
-            bump.click(),
-            flip_a.click(),
-            flip_b.click(),
-            anim.click(),
-            Sub<Msg>::on_drag<"slider">([](Vec2 local) { return Msg{DragSlider{local.x}}; }),
-            Sub<Msg>::on_key(Key::space, ToggleAnimation{}),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
-            Sub<Msg>::on_close(Quit{}),
-            // The animation subscription only EXISTS while animating, so a
-            // paused gallery drops to 0% CPU with no explicit stop call.
-            when(m.animating,
-                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })),
-        };
-        for (int i = 0; i < static_cast<int>(palette.size()); ++i) {
-            subs.push_back(Sub<Msg>::on_click_id(
-                node_id("theme", static_cast<std::size_t>(i)), PickTheme{i}));
-        }
-        return Sub<Msg>::batch(std::move(subs));
+    // The frame clock only EXISTS while animating, so a paused gallery
+    // drops to 0% CPU with no explicit stop call.
+    static Sub subscribe(const Model& m) {
+        return when(m.animating, Sub::on_frame([](double dt) -> Msg { return Tick{dt}; }));
     }
 };
 
-static_assert(Program<Gallery>);
+static_assert(mayag::Program<Gallery>);
 
 int main(int argc, char** argv) {
     const auto opts = demo::parse_args(argc, argv, Vec2{1020, 880});
@@ -323,12 +316,12 @@ int main(int argc, char** argv) {
         rt.window().press_key(Key::space);
         rt.tick();
         ok(rt.model().animating, "space starts the animation");
-        ok(Gallery::subscribe(rt.model()).wants_frames(),
+        ok(!Gallery::subscribe(rt.model()).is_none(),
            "and the frame subscription now exists");
         rt.window().press_key(Key::space);
         rt.tick();
         ok(!rt.model().animating, "space stops it again");
-        ok(!Gallery::subscribe(rt.model()).wants_frames(),
+        ok(Gallery::subscribe(rt.model()).is_none(),
            "and the subscription disappears, so the app idles");
 
         ok(rt.window().frames_presented() > 1, "frames were presented");

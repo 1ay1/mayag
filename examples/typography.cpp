@@ -9,6 +9,8 @@
 
 #include "harness.hpp"
 
+#include <optional>
+
 using namespace mayag;
 using namespace mayag::dsl;
 
@@ -18,29 +20,30 @@ struct Typography {
     struct Model { int theme_index = 0; };
     struct NextTheme {}; struct Quit {};
     using Msg = std::variant<NextTheme, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title>;
 
     static constexpr std::array<Theme, 4> palette{
         themes::midnight, themes::ember, themes::daylight, themes::paper};
 
-    static std::pair<Model, Cmd<Msg>> init() {
-        return {Model{}, Cmd<Msg>::set_title("mayag — typography")};
-    }
+    static Cmd init(Model&) { return SetTitle{"mayag — typography"}; }
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::holds_alternative<Quit>(msg)) return {m, Cmd<Msg>::quit()};
+    static Cmd update(Model& m, NextTheme) {
         m.theme_index = (m.theme_index + 1) % static_cast<int>(palette.size());
-        return {m, Cmd<Msg>::none()};
+        return {};
     }
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
-    static Sub<Msg> subscribe(const Model&) {
-        return Sub<Msg>::batch(
-            Sub<Msg>::on_key(Key::space, NextTheme{}),
-            Sub<Msg>::on_click<"cycle">(NextTheme{}),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
-            Sub<Msg>::on_close(Quit{}));
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (is(c, "cycle") && c.count == 1) return NextTheme{};
+        return std::nullopt;
     }
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        static const keymap<Msg> keys{{Key::space, NextTheme{}}, {Key::escape, Quit{}}};
+        return keys(k);
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
 
-    static Node view(const Model& model, const Ctx& ctx) {
+    static Node view(const Model& model) {
     const Theme& t = palette[static_cast<std::size_t>(model.theme_index)];
 
     // ── specimen rows ───────────────────────────────────────────────────
@@ -134,7 +137,7 @@ struct Typography {
     }
 };
 
-static_assert(Program<Typography>);
+static_assert(mayag::Program<Typography>);
 
 int main(int argc, char** argv) {
     const auto opts = demo::parse_args(argc, argv, Vec2{980, 900});

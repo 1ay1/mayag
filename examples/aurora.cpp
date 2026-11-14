@@ -24,6 +24,7 @@
 #include "harness.hpp"
 
 #include <cmath>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -58,58 +59,52 @@ struct Aurora {
     struct Pick { int index; };
     struct Quit {};
     using Msg = std::variant<Tick, Toggle, More, Less, Pick, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Sub = mayag::Sub<Msg>;
 
     // The palette swatches are a dynamic list, so their ids are folded from a
-    // base id + index. Declaring them here keeps the view, the subscription
+    // base id + index. Declaring them here keeps the view, the input
     // and the handler reading from ONE source.
     static constexpr std::uint64_t swatch_base = node_id("swatch");
-    static Action<Msg> swatch(int i) {
-        return action(node_id("swatch", static_cast<std::size_t>(i)), Msg{Pick{i}});
-    }
-    static inline const auto play = action(node_id("play"), Msg{Toggle{}});
+    static std::uint64_t swatch(int i) { return node_id("swatch", static_cast<std::size_t>(i)); }
 
     // Base hues the swatches select between.
     static constexpr float hues[5] = {212.0f, 286.0f, 336.0f, 28.0f, 158.0f};
 
     // ── init ────────────────────────────────────────────────────────────
-    static std::pair<Model, Cmd<Msg>> init() {
-        return {Model{}, Cmd<Msg>::set_title("mayag — aurora")};
-    }
+    static Cmd init(Model&) { return SetTitle{"mayag — aurora"}; }
 
     // ── update ──────────────────────────────────────────────────────────
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Tick t) -> R {
-                if (m.running) m.time += t.dt;
-                m.hue.step(t.dt);
-                m.bloom.step(t.dt);
-                m.density.step(t.dt);
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Toggle) -> R { m.running = !m.running; return {m, Cmd<Msg>::none()}; },
-            [&](More) -> R {
-                m.orbs = m.orbs < max_orbs ? m.orbs + 1 : m.orbs;
-                m.density.to(static_cast<float>(m.orbs));
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Less) -> R {
-                m.orbs = m.orbs > 1 ? m.orbs - 1 : m.orbs;
-                m.density.to(static_cast<float>(m.orbs));
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Pick p) -> R {
-                m.palette = p.index;
-                m.hue.to(hues[p.index % 5]);
-                m.bloom.snap(1.0f);          // flash, then settle back
-                m.bloom.to(0.0f);
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
+    static Cmd update(Model& m, Tick t) {
+        if (m.running) m.time += t.dt;
+        m.hue.step(t.dt);
+        m.bloom.step(t.dt);
+        m.density.step(t.dt);
+        return {};
     }
+    static Cmd update(Model& m, Toggle) { m.running = !m.running; return {}; }
+    static Cmd update(Model& m, More) {
+        m.orbs = m.orbs < max_orbs ? m.orbs + 1 : m.orbs;
+        m.density.to(static_cast<float>(m.orbs));
+        return {};
+    }
+    static Cmd update(Model& m, Less) {
+        m.orbs = m.orbs > 1 ? m.orbs - 1 : m.orbs;
+        m.density.to(static_cast<float>(m.orbs));
+        return {};
+    }
+    static Cmd update(Model& m, Pick p) {
+        m.palette = p.index;
+        m.hue.to(hues[p.index % 5]);
+        m.bloom.snap(1.0f);          // flash, then settle back
+        m.bloom.to(0.0f);
+        return {};
+    }
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
     // ── view ────────────────────────────────────────────────────────────
-    static Node view(const Model& m, const Ctx& c) {
+    static Node view(const Model& m) {
+        const Ctx&   c = ctx();
         const Theme& t = c.theme;
         const float  h = static_cast<float>(m.hue);
         const float  bloom = static_cast<float>(m.bloom);
@@ -237,7 +232,7 @@ struct Aurora {
             spacer(6),
             text_owned(m.running ? "running" : "paused") | font(11) | semibold
                 | fg(m.running ? accent : t.text_secondary)
-                | play.on)
+                | id<"play">)
             | gap(4) | center
             | pad(22, 26)
             | backdrop_blur(18.0f, 1.06f)
@@ -262,7 +257,7 @@ struct Aurora {
                        | radius(d * 0.5f)
                        | border(on ? 2.0f : 0.0f, colors::white.fade(0.85f))
                        | elevation(on ? 10.0f : 4.0f)
-                       | swatch(i).on).build());
+                       | dsl::Id{swatch(i)}).build());
         }
 
         return (v(h_list(std::move(chips), 12.0f) | center,
@@ -273,28 +268,35 @@ struct Aurora {
              | absolute(0.0f, vp.y - 108.0f)).build();
     }
 
-    // ── subscribe ───────────────────────────────────────────────────────
-    static Sub<Msg> subscribe(const Model& m) {
-        std::vector<Sub<Msg>> subs;
-        subs.push_back(play.click());
-        for (int i = 0; i < 5; ++i) subs.push_back(swatch(i).click());
-        subs.push_back(Sub<Msg>::on_key(Key::space, Toggle{}));
-        subs.push_back(Sub<Msg>::on_key(Key::equal, More{}));
-        subs.push_back(Sub<Msg>::on_key(Key::minus, Less{}));
-        subs.push_back(Sub<Msg>::on_key(Key::escape, Quit{}));
-        subs.push_back(Sub<Msg>::on_close(Quit{}));
+    // ── input ───────────────────────────────────────────────────────────
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (c.count != 1) return std::nullopt;
+        if (is(c, "play")) return Toggle{};
+        for (int i = 0; i < 5; ++i)
+            if (c.node == swatch(i)) return Pick{i};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        static const keymap<Msg> keys{{Key::space,  Toggle{}},
+                                      {Key::equal,  More{}},
+                                      {Key::minus,  Less{}},
+                                      {Key::escape, Quit{}}};
+        return keys(k);
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
 
+    // ── subscribe ───────────────────────────────────────────────────────
+    static Sub subscribe(const Model& m) {
         // Frames are requested while anything is moving. When the scene is
         // paused AND every spring has settled, this yields nothing and the
-        // app idles at 0% CPU — the property the whole runtime is built on.
+        // app idles at 0% CPU.
         const bool moving = m.running || m.hue.animating() ||
                             m.bloom.animating() || m.density.animating();
-        subs.push_back(when(moving,
-            Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
-
-        return Sub<Msg>::batch(std::move(subs));
+        return when(moving, Sub::on_frame([](float dt) -> Msg { return Tick{dt}; }));
     }
 };
+
+static_assert(mayag::Program<Aurora>);
 
 int main(int argc, char** argv) {
     const auto opts = demo::parse_args(argc, argv, {820, 620});

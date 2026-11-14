@@ -5,9 +5,10 @@
 //
 //   Model   your state, a plain value
 //   Msg     every event that can happen, as a closed sum
-//   init    initial state
-//   update  (Model, Msg) -> (Model, Cmd)     — pure
-//   view    (Model, Ctx) -> Node             — pure
+//   init    startup effects
+//   update  one overload per Msg, returns a Cmd
+//   view    Model -> Node                    — pure
+//   on      window input -> Msg
 //   subscribe (Model) -> Sub                 — pure
 //
 // Run it windowed:   ./mayag_counter
@@ -18,6 +19,7 @@
 #include "harness.hpp"
 
 #include <cstdio>
+#include <optional>
 #include <variant>
 
 using namespace mayag;
@@ -43,61 +45,53 @@ struct Counter {
     struct Quit      {};
 
     using Msg = std::variant<Increment, Decrement, Reset, BumpStep, Tick, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title, write_clipboard>;
+    using Sub = mayag::Sub<Msg>;
 
     // ── init ────────────────────────────────────────────────────────────
 
-    static std::pair<Model, Cmd<Msg>> init() {
-        return {Model{}, Cmd<Msg>::set_title("mayag — counter")};
-    }
+    static Cmd init(Model&) { return SetTitle{"mayag — counter"}; }
 
-    // ── update: the only place state changes, and it is PURE ────────────
+    // ── update: the only place state changes ────────────────────────────
     //
     // Note there is no `if (window)` here, no rendering, no I/O. Effects are
-    // returned as data. That is what makes this testable with `==`.
+    // returned as data.
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Increment) -> R {
-                m.count += m.step;
-                // Crossing a multiple of 10 starts a celebration animation.
-                // The animation is state, so it is replayable and testable.
-                if (m.count % 10 == 0 && m.count != 0) {
-                    m.celebrating = true;
-                    m.pulse = 0.0;
-                }
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Decrement) -> R {
-                m.count -= m.step;
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Reset) -> R {
-                m.count = 0;
-                m.celebrating = false;
-                return {m, Cmd<Msg>::write_clipboard("0")};
-            },
-            [&](BumpStep) -> R {
-                m.step = (m.step == 1) ? 5 : (m.step == 5 ? 10 : 1);
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](const Tick& e) -> R {
-                m.pulse += e.dt;
-                if (m.pulse > 0.8) { m.celebrating = false; m.pulse = 0.0; }
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Quit) -> R {
-                return {m, Cmd<Msg>::quit()};
-            });
+    static Cmd update(Model& m, Increment) {
+        m.count += m.step;
+        // Crossing a multiple of 10 starts a celebration animation.
+        // The animation is state, so it is replayable and testable.
+        if (m.count % 10 == 0 && m.count != 0) {
+            m.celebrating = true;
+            m.pulse = 0.0;
+        }
+        return {};
     }
+    static Cmd update(Model& m, Decrement) { m.count -= m.step; return {}; }
+    static Cmd update(Model& m, Reset) {
+        m.count = 0;
+        m.celebrating = false;
+        return WriteClipboard{"0"};
+    }
+    static Cmd update(Model& m, BumpStep) {
+        m.step = (m.step == 1) ? 5 : (m.step == 5 ? 10 : 1);
+        return {};
+    }
+    static Cmd update(Model& m, Tick e) {
+        m.pulse += e.dt;
+        if (m.pulse > 0.8) { m.celebrating = false; m.pulse = 0.0; }
+        return {};
+    }
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
-    // ── view: pure function of (Model, Ctx) -> Node ─────────────────────
+    // ── view: pure function of the model (plus ctx()) ───────────────────
     //
     // Hover and press styling read from `ctx`, NOT from the Model. Transient
     // presentation state does not belong in application state — this is the
     // GPU-UI equivalent of CSS `:hover`.
 
-    static Node view(const Model& m, const Ctx& c) {
+    static Node view(const Model& m) {
+        const Ctx&   c = ctx();
         const Theme& t = c.theme;
 
         auto action = [&]<fixed_string Name>(auto label, Color<Srgb> tone) {
@@ -152,30 +146,36 @@ struct Counter {
              | bg(t.background);
     }
 
+    // ── input ───────────────────────────────────────────────────────────
+
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (c.count != 1) return std::nullopt;
+        if (is(c, "inc"))  return Increment{};
+        if (is(c, "dec"))  return Decrement{};
+        if (is(c, "step")) return BumpStep{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        static const keymap<Msg> keys{{Key::up,     Increment{}},
+                                      {Key::down,   Decrement{}},
+                                      {Key::r,      Reset{}},
+                                      {Key::escape, Quit{}}};
+        return keys(k);
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
+
     // ── subscribe: what to listen for, as a function of state ───────────
     //
     // The frame subscription only EXISTS while celebrating. When the flag
     // clears, the runtime stops the display link and the app goes back to
     // blocking at 0% CPU. There is no `stop_animation()` to forget to call.
 
-    static Sub<Msg> subscribe(const Model& m) {
-        return Sub<Msg>::batch(
-            Sub<Msg>::on_click<"inc">(Increment{}),
-            Sub<Msg>::on_click<"dec">(Decrement{}),
-            Sub<Msg>::on_click<"step">(BumpStep{}),
-
-            Sub<Msg>::on_key(Key::up,    Increment{}),
-            Sub<Msg>::on_key(Key::down,  Decrement{}),
-            Sub<Msg>::on_key(Key::r,     Reset{}),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
-            Sub<Msg>::on_close(Quit{}),
-
-            when(m.celebrating,
-                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
+    static Sub subscribe(const Model& m) {
+        return when(m.celebrating, Sub::on_frame([](double dt) -> Msg { return Tick{dt}; }));
     }
 };
 
-static_assert(Program<Counter>, "Counter must satisfy the Program concept");
+static_assert(mayag::Program<Counter>, "Counter must satisfy the Program concept");
 
 // ────────────────────────────────────────────────────────────────────────
 
@@ -188,8 +188,7 @@ int main(int argc, char** argv) {
     AppConfig cfg{.title = "mayag — counter", .size = opts.size};
 
     // Headless: script the input, assert the behaviour, and prove the app
-    // works end to end without a display. This is the SAME runtime the
-    // windowed path uses — not a parallel fake.
+    // works end to end without a display.
     int failures = 0;
     auto check = [&](bool ok, const char* what) {
         std::printf("  %s  %s\n", ok ? "ok  " : "FAIL", what);

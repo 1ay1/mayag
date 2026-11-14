@@ -1,22 +1,21 @@
-// tests/test_app.cpp — the application runtime
+// tests/test_app.cpp — the window host on jaal
 //
-// The layer that makes mayag a GUI framework rather than an image generator.
-// These tests drive the REAL runtime (`Runtime<P, Headless>`) — the same code
-// path `run<P>()` uses on a real window — so a pass here is evidence about
-// shipped behaviour, not about a parallel test harness.
-//
-// What is asserted, in order of how badly it breaks an app if wrong:
-//   1. update() is pure          — same inputs, same outputs, no I/O
-//   2. clicks hit the right node — including the cases everyone gets wrong
-//   3. effects are interpreted   — Cmd actually reaches the platform
-//   4. subscriptions are dynamic — timers/animations start and STOP by state
-//   5. the whole thing is deterministic and replayable
+// jaal runs the program (update, Cmd, Sub, timers, tasks); jaal's own suite
+// tests that. These tests drive mayag's window host through headless_app<P>,
+// the same host and the same jaal kernel run<P>() uses on a real window, and
+// check what mayag adds: input becomes gestures on the right node, window
+// effects reach the window, frames are only drawn when something changed,
+// and the busy-loop warning fires only for real runaways.
 
 #include <mayag/mayag.hpp>
 
+#include <chrono>
 #include <cstdio>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <variant>
+#include <vector>
 
 using namespace mayag;
 using namespace mayag::dsl;
@@ -34,7 +33,7 @@ void section(const char* n) { std::printf("\n%s\n", n); }
 
 // ════════════════════════════════════════════════════════════════════════
 // A representative app: buttons, keyboard, a text field, an animation,
-// async work, and a drag. Enough surface to exercise every runtime path.
+// async work, and a drag.
 // ════════════════════════════════════════════════════════════════════════
 
 struct TestApp {
@@ -51,78 +50,69 @@ struct TestApp {
     struct Inc {}; struct Dec {}; struct Animate {}; struct Tick { double dt; };
     struct Typed { std::string s; }; struct Slide { float v; };
     struct Load {}; struct Loaded { int value; };
-    struct Entered {}; struct Quit {};
+    struct Hovered {}; struct Quit {};
 
-    using Msg = std::variant<Inc, Dec, Animate, Tick, Typed, Slide,
-                             Load, Loaded, Entered, Quit>;
+    using Msg = std::variant<Inc, Dec, Animate, Tick, Typed, Slide, Load, Loaded, Hovered, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title, write_clipboard>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() {
-        return {Model{}, Cmd<Msg>::set_title("test-app")};
+    static Cmd init(Model&) { return SetTitle{"test-app"}; }
+
+    static Cmd update(Model& m, Inc) { ++m.count; return WriteClipboard{std::to_string(m.count)}; }
+    static Cmd update(Model& m, Dec) { --m.count; return {}; }
+    static Cmd update(Model& m, Animate) { m.animating = true; m.phase = 0.0; return {}; }
+    static Cmd update(Model& m, Tick t) {
+        m.phase += t.dt;
+        if (m.phase >= 1.0) m.animating = false;
+        return {};
     }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        return std::visit([&](auto&& e) -> std::pair<Model, Cmd<Msg>> {
-            using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<T, Inc>) {
-                m.count++;
-                return {m, Cmd<Msg>::write_clipboard(std::to_string(m.count))};
-            }
-            else if constexpr (std::is_same_v<T, Dec>) { m.count--; return {m, Cmd<Msg>::none()}; }
-            else if constexpr (std::is_same_v<T, Animate>) {
-                m.animating = true; m.phase = 0.0;
-                return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Tick>) {
-                m.phase += e.dt;
-                if (m.phase >= 0.25) m.animating = false;
-                return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Typed>) { m.text += e.s; return {m, Cmd<Msg>::none()}; }
-            else if constexpr (std::is_same_v<T, Slide>) { m.slider = e.v; return {m, Cmd<Msg>::none()}; }
-            else if constexpr (std::is_same_v<T, Load>) {
-                return {m, Cmd<Msg>::task([] { return Msg{Loaded{42}}; })};
-            }
-            else if constexpr (std::is_same_v<T, Loaded>) {
-                m.loaded = true; m.count = e.value;
-                return {m, Cmd<Msg>::none()};
-            }
-            else if constexpr (std::is_same_v<T, Entered>) { m.hovers++; return {m, Cmd<Msg>::none()}; }
-            else { return {m, Cmd<Msg>::quit()}; }
-        }, msg);
+    static Cmd update(Model& m, const Typed& t) { m.text += t.s; return {}; }
+    static Cmd update(Model& m, Slide s) { m.slider = s.v; return {}; }
+    static Cmd update(Model&, Load) {
+        return Cmd::perform<Loaded>([] { return 42; });
     }
+    static Cmd update(Model& m, Loaded l) { m.loaded = true; m.count = l.value; return {}; }
+    static Cmd update(Model& m, Hovered) { ++m.hovers; return {}; }
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
-    static Node view(const Model& m, const Ctx& c) {
-        const Theme& t = c.theme;
+    static Node view(const Model& m) {
+        const Theme& t = ctx().theme;
         return v(h(box() | size(80, 40) | bg(t.accent)   | id<"inc">,
                    box() | size(80, 40) | bg(t.danger)   | id<"dec">,
                    box() | size(80, 40) | bg(t.warning)  | id<"hoverme">) | gap(10),
                  box() | size(200, 24) | bg(t.surface) | id<"slider">,
-                 text_of(m.text) | font(14) | fg(t.text_primary) | id<"label">,
-                 text_owned(std::to_string(m.count)) | font(20) | fg(t.text_primary))
-             | gap(12) | pad(20)
+                 text_owned(std::to_string(m.count)) | font(16) | fg(t.text_primary))
+             | gap(10) | pad(10)
              | width(pct(100)) | height(pct(100))
              | bg(m.animating ? t.success : t.background);
     }
 
-    static Sub<Msg> subscribe(const Model& m) {
-        return Sub<Msg>::batch(
-            Sub<Msg>::on_click<"inc">(Inc{}),
-            Sub<Msg>::on_click<"dec">(Dec{}),
-            Sub<Msg>::on_enter<"hoverme">(Entered{}),
-            Sub<Msg>::on_drag<"slider">([](Vec2 local) {
-                return Msg{Slide{num::saturate(local.x / 200.0f)}};
-            }),
-            Sub<Msg>::on_key(Key::space, Animate{}),
-            Sub<Msg>::on_key(Key::l, Load{}),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
-            Sub<Msg>::on_text([](std::string_view s) { return Msg{Typed{std::string{s}}}; }),
-            Sub<Msg>::on_close(Quit{}),
-            when(m.animating,
-                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (c.count != 1) return std::nullopt;
+        if (is(c, "inc")) return Inc{};
+        if (is(c, "dec")) return Dec{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const Entered& e) {
+        if (e.node == node_id("hoverme")) return Hovered{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const Dragged& d) {
+        if (d.node != node_id("slider")) return std::nullopt;
+        return Slide{num::clamp(d.local.x / 200.0f, 0.0f, 1.0f)};
+    }
+    static std::optional<Msg> on(const Model&, const TextEvent& t) { return Typed{t.text}; }
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        static const keymap<Msg> keys{{Key::space, Animate{}}, {Key::l, Load{}},
+                                      {Key::escape, Quit{}}};
+        return keys(k);
+    }
+
+    static Sub subscribe(const Model& m) {
+        return when(m.animating, Sub::on_frame([](double dt) { return Tick{dt}; }));
     }
 };
-
-static_assert(Program<TestApp>);
+static_assert(mayag::Program<TestApp>);
 
 const AppConfig kCfg{.title = "test-app", .size = {480, 320}};
 
@@ -131,18 +121,14 @@ struct Spinner {
     struct Model { double t = 0.0; };
     struct Tick { double dt; };
     using Msg = std::variant<Tick>;
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        m.t += std::get<Tick>(msg).dt;
-        return {m, Cmd<Msg>::none()};
-    }
-    static Node view(const Model& m, const Ctx& t) {
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
+    static Cmd update(Model& m, Tick t) { m.t += t.dt; return {}; }
+    static Node view(const Model& m) {
         const float w = 40.0f + static_cast<float>(static_cast<int>(m.t * 60.0) % 40);
-        return v(box() | size(w, 40) | bg(t.theme.accent));
+        return v(box() | size(w, 40) | bg(ctx().theme.accent));
     }
-    static Sub<Msg> subscribe(const Model&) {
-        return Sub<Msg>::on_frame([](float dt) { return Tick{dt}; });
-    }
+    static Sub subscribe(const Model&) { return Sub::on_frame([](double dt) { return Tick{dt}; }); }
 };
 
 /// Like examples/reactive.cpp: pointer motion earns a short burst of frames.
@@ -151,81 +137,62 @@ struct Follower {
     struct Moved { Vec2 p; };
     struct Tick { double dt; };
     using Msg = std::variant<Moved, Tick>;
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (const auto* mv = std::get_if<Moved>(&msg)) { m.p = mv->p; m.settle = 45; }
-        else if (m.settle > 0) { --m.settle; }
-        return {m, Cmd<Msg>::none()};
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
+    static Cmd update(Model& m, Moved mv) { m.p = mv.p; m.settle = 45; return {}; }
+    static Cmd update(Model& m, Tick) { if (m.settle > 0) --m.settle; return {}; }
+    static Node view(const Model& m) {
+        return v(box() | size(m.p.x + 1.0f, 40) | bg(ctx().theme.accent));
     }
-    static Node view(const Model& m, const Ctx& t) {
-        return v(box() | size(m.p.x + 1.0f, 40) | bg(t.theme.accent));
-    }
-    static Sub<Msg> subscribe(const Model& m) {
-        return Sub<Msg>::batch(
-            Sub<Msg>::on_event([](const Event& e) -> std::optional<Msg> {
-                if (const auto* mv = std::get_if<MouseMove>(&e)) return Moved{mv->position};
-                return std::nullopt;
-            }),
-            when(m.settle > 0, Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
+    static std::optional<Msg> on(const Model&, const MouseMove& e) { return Moved{e.position}; }
+    static Sub subscribe(const Model& m) {
+        return when(m.settle > 0, Sub::on_frame([](double dt) { return Tick{dt}; }));
     }
 };
 
 // ════════════════════════════════════════════════════════════════════════
 
-/// update() is a PURE FUNCTION. This is the property everything else rests
-/// on: no window, no GPU, no clock, no mocks — just call it.
+/// update() changes the model and nothing else; a sequence composes with no
+/// window at all.
 void test_update_purity() {
     section("update() purity");
 
-    using M = TestApp::Model;
-    using Msg = TestApp::Msg;
+    TestApp::Model a{};
+    TestApp::Model b{};
+    (void)jaal::prog::update<TestApp>(a, TestApp::Msg{TestApp::Inc{}});
+    (void)jaal::prog::update<TestApp>(b, TestApp::Msg{TestApp::Inc{}});
+    check(a.count == b.count && a.count == 1, "same message, same model");
 
-    const M start{.count = 5};
+    const auto cmd = jaal::prog::update<TestApp>(a, TestApp::Msg{TestApp::Dec{}});
+    check(cmd.is_none(), "an update with no effect returns an empty Cmd");
 
-    auto [a1, c1] = TestApp::update(start, Msg{TestApp::Inc{}});
-    auto [a2, c2] = TestApp::update(start, Msg{TestApp::Inc{}});
-    check(a1.count == a2.count && a1.count == 6, "same input yields same output");
-
-    // The input model is untouched — update takes by value and returns anew.
-    check(start.count == 5, "update does not mutate its argument");
-
-    // Effects are DATA, inspectable without performing them.
-    check(!c1.is_none(), "Inc returns a clipboard effect as data");
-    check(TestApp::update(start, Msg{TestApp::Quit{}}).second.is_quit(),
-          "Quit returns a quit effect as data");
-
-    // A whole interaction sequence is testable with no runtime at all.
-    M m{};
-    for (int i = 0; i < 10; ++i) m = TestApp::update(m, Msg{TestApp::Inc{}}).first;
-    for (int i = 0; i < 3;  ++i) m = TestApp::update(m, Msg{TestApp::Dec{}}).first;
+    TestApp::Model m{};
+    for (int i = 0; i < 10; ++i) (void)jaal::prog::update<TestApp>(m, TestApp::Msg{TestApp::Inc{}});
+    for (int i = 0; i < 3;  ++i) (void)jaal::prog::update<TestApp>(m, TestApp::Msg{TestApp::Dec{}});
     check(m.count == 7, "a sequence of updates composes without a window");
 }
 
-/// Cmd and Sub are functors — `map` is what lets components nest.
+/// A program's Cmd lifts into a parent's Msg type; window effects survive it.
 void test_functor_laws() {
-    section("Cmd/Sub functor");
+    section("Cmd functor");
 
-    using ChildMsg = int;
-    struct Wrapped { int v; bool operator==(const Wrapped&) const = default; };
+    using C = jaal::Cmd<int, set_title>;
+    struct Wrapped { int v; };
 
-    auto child = Cmd<ChildMsg>::batch(Cmd<ChildMsg>::quit(),
-                                      Cmd<ChildMsg>::set_title("child"));
-    auto lifted = child.map([](ChildMsg v) { return Wrapped{v}; });
+    C child = C::batch(C::quit(), C(SetTitle{"child"}));
+    auto lifted = std::move(child).map([](int v) { return Wrapped{v}; });
     check(!lifted.is_none(), "a child Cmd lifts into the parent's Msg type");
 
-    // Identity: mapping with identity changes nothing observable.
-    auto id_mapped = Cmd<ChildMsg>::quit().map([](ChildMsg v) { return v; });
-    check(id_mapped.is_quit(), "map(id) preserves the effect");
+    C title{SetTitle{"t"}};
+    auto same = std::move(title).map([](int v) { return v; });
+    const auto* t = std::get_if<SetTitle>(&same.inner);
+    check(t != nullptr && t->title == "t", "map(id) keeps a window effect intact");
 
-    // Batch flattening keeps the tree from growing without bound across
-    // frames — a real leak in naive implementations.
-    auto nested = Cmd<ChildMsg>::batch(
-        Cmd<ChildMsg>::batch(Cmd<ChildMsg>::none(), Cmd<ChildMsg>::none()),
-        Cmd<ChildMsg>::none());
-    check(nested.is_none(), "batching only `none` collapses to `none`");
+    check(C::batch(C::batch(C::none(), C::none()), C::none()).is_none(),
+          "batching only `none` collapses to `none`");
 }
 
-/// The interaction state machine: the cases every GUI must get right.
+/// The interaction state machine, through the host.
 void test_interaction() {
     section("interaction");
 
@@ -238,12 +205,11 @@ void test_interaction() {
         rt.click("dec");
         check(rt.model().count == 0, "click targets the correct sibling");
 
-        // Clicking empty space must not fire anything.
         rt.window().click({470, 310});
         rt.tick();
         check(rt.model().count == 0, "clicking outside every widget fires nothing");
 
-        // THE cancel affordance: press, drag away, release. Must not click.
+        // Press, drag away, release: must not click.
         const Vec2 c = rt.center_of("inc");
         rt.window().push(MouseMove{c, {}, {}});
         rt.window().push(MouseDown{c, MouseButton::left, {}, 1});
@@ -261,12 +227,12 @@ void test_interaction() {
         rt.tick();
         check(rt.model().count == 1, "dragging back onto the node still clicks");
 
-        // enter/leave fire exactly once per boundary crossing, not per motion.
+        // Entered fires once per boundary crossing, not per motion.
         const int before = rt.model().hovers;
         const Vec2 h = rt.center_of("hoverme");
         rt.window().move_to(h);
         rt.tick();
-        check(rt.model().hovers == before + 1, "entering a node fires `enter` once");
+        check(rt.model().hovers == before + 1, "entering a node fires Entered once");
 
         rt.window().move_to(h + Vec2{2, 2});
         rt.tick();
@@ -278,13 +244,7 @@ void test_interaction() {
         rt.tick();
         check(rt.model().hovers == before + 2, "leaving and re-entering fires again");
 
-        // REGRESSION: consecutive clicks must be SEPARATE clicks.
-        //
-        // The runtime's clock previously only advanced on FrameEvent, so a
-        // non-animating app saw t=0 forever; every click landed inside the
-        // double-click window of the one before it, and every second click
-        // was silently swallowed as the tail of a double. Three clicks in a
-        // row must increment three times.
+        // Consecutive deliberate clicks are separate clicks, not doubles.
         const int base = rt.model().count;
         rt.click("inc");
         rt.click("inc");
@@ -295,117 +255,63 @@ void test_interaction() {
     });
 }
 
-/// The click model: ONE gesture per click, carrying its count.
-///
-/// The earlier design emitted `click` and then `double_click` as separate
-/// gestures, which meant an app handling both fired its single-click action
-/// on every double. It also had no notion of a triple click, and it
-/// recomputed the count from timestamps while THROWING AWAY the authoritative
-/// count the platform had already given it.
+/// ONE click gesture per click, carrying its count.
 void test_click_counts() {
     section("click counts");
 
     run_headless<TestApp>(kCfg, [](auto& rt) {
         const int base = rt.model().count;
-
-        // A double click must fire `on_click` EXACTLY ONCE (for the first
-        // click of the pair), not twice.
         rt.window().double_click(rt.center_of("inc"));
         rt.tick();
         check(rt.model().count == base + 1,
               "a double click fires a single-click handler once, not twice");
 
-        // Separated clicks are independent singles.
         const int b2 = rt.model().count;
         rt.click("inc");
         rt.click("inc");
         check(rt.model().count == b2 + 2, "deliberate clicks are separate");
     });
 
-    // Counts are produced at the interaction layer, so test them directly:
-    // the runtime path above cannot show a triple.
-    {
-        Node root = (v(box() | size(100, 50) | bg(colors::red) | dsl::id<"b">)).build();
-        layout::layout_tree(root, {200, 100}, layout::default_measurer());
-        const Vec2 c = root.children()[0].frame().center();
+    // Counts come from the interaction layer; test the depths directly.
+    Node root = (v(box() | size(100, 50) | bg(colors::red) | dsl::id<"b">)).build();
+    layout::layout_tree(root, {200, 100}, layout::default_measurer());
+    const Vec2 c = root.children()[0].frame().center();
 
-        // ---- the platform reports the count: use it verbatim ----
-        {
-            Interaction in;
-            std::vector<int> counts;
-            for (int n = 1; n <= 4; ++n) {
-                (void)in.handle(MouseDown{c, MouseButton::left, {}, n}, root, n * 0.1);
-                for (const auto& g : in.handle(MouseUp{c, MouseButton::left, {}}, root, n * 0.1)) {
-                    if (g.kind == Gesture::Kind::click) counts.push_back(g.click_count);
-                }
-            }
-            check(counts == std::vector<int>({1, 2, 3, 4}),
-                  "platform-reported click counts pass through unchanged");
+    const auto run = [&](auto pos_of, auto time_of, int reported, int n) {
+        Interaction in;
+        std::vector<int> counts;
+        for (int i = 0; i < n; ++i) {
+            const Vec2 p = pos_of(i);
+            const double t = time_of(i);
+            (void)in.handle(MouseDown{p, MouseButton::left, {}, reported ? i + 1 : 0}, root, t);
+            for (const auto& g : in.handle(MouseUp{p, MouseButton::left, {}}, root, t))
+                if (g.kind == Gesture::Kind::click) counts.push_back(g.click_count);
         }
+        return counts;
+    };
+    const auto here = [&](int) { return c; };
 
-        // ---- no platform count: synthesise, to any depth ----
-        {
-            Interaction in;
-            std::vector<int> counts;
-            for (int n = 0; n < 4; ++n) {
-                (void)in.handle(MouseDown{c, MouseButton::left, {}, 0}, root, n * 0.05);
-                for (const auto& g : in.handle(MouseUp{c, MouseButton::left, {}}, root, n * 0.05)) {
-                    if (g.kind == Gesture::Kind::click) counts.push_back(g.click_count);
-                }
-            }
-            check(counts == std::vector<int>({1, 2, 3, 4}),
-                  "synthesised counts reach triple and beyond, not just double");
-        }
+    check(run(here, [](int i) { return (i + 1) * 0.1; }, 1, 4) == std::vector<int>({1, 2, 3, 4}),
+          "platform-reported click counts pass through unchanged");
+    check(run(here, [](int i) { return i * 0.05; }, 0, 4) == std::vector<int>({1, 2, 3, 4}),
+          "synthesised counts reach triple and beyond, not just double");
+    check(run(here, [](int i) { return i * 2.0; }, 0, 3) == std::vector<int>({1, 1, 1}),
+          "slow clicks each count as 1");
+    const auto moved = run([&](int i) { return c + Vec2{static_cast<float>(i) * 40.0f, 0.0f}; },
+                           [](int i) { return i * 0.05; }, 0, 3);
+    bool all_one = !moved.empty();
+    for (int n : moved) all_one = all_one && n == 1;
+    check(all_one, "rapid clicks at different positions do not chain");
 
-        // ---- too slow: the sequence restarts ----
-        {
-            Interaction in;
-            std::vector<int> counts;
-            for (int n = 0; n < 3; ++n) {
-                (void)in.handle(MouseDown{c, MouseButton::left, {}, 0}, root, n * 2.0);
-                for (const auto& g : in.handle(MouseUp{c, MouseButton::left, {}}, root, n * 2.0)) {
-                    if (g.kind == Gesture::Kind::click) counts.push_back(g.click_count);
-                }
-            }
-            check(counts == std::vector<int>({1, 1, 1}), "slow clicks each count as 1");
-        }
-
-        // ---- fast but moving: also restarts ----
-        //
-        // Distance matters as much as time. Two rapid clicks in different
-        // places are two clicks, not a double — otherwise a fast user
-        // clicking down a list triggers double-click actions.
-        {
-            Interaction in;
-            std::vector<int> counts;
-            for (int n = 0; n < 3; ++n) {
-                const Vec2 p = c + Vec2{static_cast<float>(n) * 40.0f, 0.0f};
-                (void)in.handle(MouseDown{p, MouseButton::left, {}, 0}, root, n * 0.05);
-                for (const auto& g : in.handle(MouseUp{p, MouseButton::left, {}}, root, n * 0.05)) {
-                    if (g.kind == Gesture::Kind::click) counts.push_back(g.click_count);
-                }
-            }
-            check(counts.size() >= 1 && counts[0] == 1,
-                  "rapid clicks at different positions do not chain");
-            for (int n : counts) {
-                check(n == 1, "each moved click counts as 1");
-            }
-        }
-
-        // ---- exactly one gesture per click ----
-        {
-            Interaction in;
-            int clicks = 0;
-            (void)in.handle(MouseDown{c, MouseButton::left, {}, 2}, root, 0.1);
-            for (const auto& g : in.handle(MouseUp{c, MouseButton::left, {}}, root, 0.1)) {
-                if (g.kind == Gesture::Kind::click) ++clicks;
-            }
-            check(clicks == 1, "a double click emits ONE click gesture, not two");
-        }
-    }
+    Interaction in;
+    int clicks = 0;
+    (void)in.handle(MouseDown{c, MouseButton::left, {}, 2}, root, 0.1);
+    for (const auto& g : in.handle(MouseUp{c, MouseButton::left, {}}, root, 0.1))
+        if (g.kind == Gesture::Kind::click) ++clicks;
+    check(clicks == 1, "a double click emits ONE click gesture, not two");
 }
 
-/// Pointer capture: a drag keeps targeting the node it started on.
+/// A drag keeps targeting the node it started on.
 void test_drag_capture() {
     section("drag capture");
 
@@ -419,9 +325,6 @@ void test_drag_capture() {
         rt.window().push(MouseDown{start, MouseButton::left, {}, 1});
         rt.tick();
 
-        // Drag far past the slider's right edge. A naive implementation
-        // re-hit-tests every move and loses the drag the instant the cursor
-        // exits the widget — which is why real sliders feel broken.
         const Vec2 far{slider->right() + 300.0f, slider->center().y + 200.0f};
         rt.window().push(MouseMove{far, far - start, {}});
         rt.tick();
@@ -430,8 +333,6 @@ void test_drag_capture() {
 
         rt.window().push(MouseUp{far, MouseButton::left, {}});
         rt.tick();
-
-        // And after release, motion no longer drives it.
         const float held = rt.model().slider;
         rt.window().move_to({slider->left() + 5.0f, slider->center().y});
         rt.tick();
@@ -439,111 +340,79 @@ void test_drag_capture() {
     });
 }
 
-/// Cmd values must actually reach the platform.
+/// Window effects reach the window; jaal tasks come back to update().
 void test_effects() {
-    section("effect interpretation");
+    section("effects");
 
     run_headless<TestApp>(kCfg, [](auto& rt) {
-        check(rt.window().title() == "test-app", "Cmd::set_title reached the window");
+        check(rt.window().title() == "test-app", "SetTitle from init reached the window");
 
         rt.click("inc");
-        check(rt.window().get_clipboard() == "1", "Cmd::write_clipboard reached the window");
-
+        check(rt.window().get_clipboard() == "1", "WriteClipboard reached the window");
         rt.click("inc");
         check(rt.window().get_clipboard() == "2", "and again with the new value");
 
-        // Cmd::task runs off-thread and delivers back to update().
-        rt.window().press_key(Key::l);
-        rt.tick();
-        for (int i = 0; i < 200 && !rt.model().loaded; ++i) {
-            rt.tick();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        check(rt.model().loaded, "Cmd::task delivered its result back to update()");
+        rt.press_key(Key::l);
+        { const bool settled_ = rt.settle([](const auto& m) { return m.loaded; });
+          check(settled_, "Cmd::perform delivered its result back to update()"); }
         check(rt.model().count == 42, "the async value reached the model");
 
-        rt.window().press_key(Key::escape);
-        rt.tick();
-        check(rt.finished(), "Cmd::quit stops the runtime");
+        rt.press_key(Key::escape);
+        check(rt.finished(), "Cmd::quit stops the program");
     });
 }
 
-/// Subscriptions are a function of state, so they start and STOP by themselves.
+/// The frame clock is a subscription: it starts and stops with the model.
 void test_subscriptions() {
     section("subscriptions");
 
     run_headless<TestApp>(kCfg, [](auto& rt) {
-        // Not animating: no frame subscription, so the runtime should be
-        // willing to block. This is the property that makes an idle mayag app
-        // cost 0% CPU.
-        check(!TestApp::subscribe(rt.model()).wants_frames(),
-              "an idle model requests no frames");
+        check(TestApp::subscribe(rt.model()).is_none(), "an idle model requests no frames");
+        check(!rt.host().frames_on(), "and the host's frame clock is off");
 
-        rt.window().press_key(Key::space);
-        rt.tick();
+        rt.press_key(Key::space);
         check(rt.model().animating, "space starts the animation");
-        check(TestApp::subscribe(rt.model()).wants_frames(),
-              "an animating model requests frames");
+        check(rt.host().frames_on(), "the frame clock starts with it");
 
-        // Drive it to completion.
         rt.window().drive_frames(true);
         for (int i = 0; i < 120 && rt.model().animating; ++i) rt.tick();
         rt.window().drive_frames(false);
 
         check(!rt.model().animating, "the animation ends from its own state");
-        check(!TestApp::subscribe(rt.model()).wants_frames(),
-              "and the frame subscription disappears with it");
+        check(!rt.host().frames_on(), "and the frame clock stops with it");
 
-        // Text input is separate from key events, so a shortcut and the
-        // character it would type never both fire.
         rt.type("hi");
-        check(rt.model().text == "hi", "text events append (via rt.type)");
+        check(rt.model().text == "hi", "text events reach on(TextEvent)");
     });
 }
 
-// A minimal app whose only subscription is a wall-clock interval, gated on a
-// model flag. Exercises `Sub::every` — which fired NEVER before the interval
-// timers were wired into the tick, because `interval_timers_` was populated by
-// a method (`sync_interval_timers`) that nothing called.
+/// Sub::every, gated on the model.
 struct IntervalApp {
     struct Model { int ticks = 0; bool running = true; };
-    struct Tick {};
-    struct Stop {};
+    struct Tick {}; struct Stop {};
     using Msg = std::variant<Tick, Stop>;
-
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::holds_alternative<Stop>(msg)) m.running = false;
-        else                                   m.ticks += 1;
-        return {m, Cmd<Msg>::none()};
-    }
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
+    static Cmd update(Model& m, Tick) { ++m.ticks; return {}; }
+    static Cmd update(Model& m, Stop) { m.running = false; return {}; }
     static Node view(const Model&) { return dsl::box().build(); }
-    static Sub<Msg> subscribe(const Model& m) {
-        return when(m.running,
-                    Sub<Msg>::every(std::chrono::milliseconds(100), Tick{}));
+    static Sub subscribe(const Model& m) {
+        return when(m.running, Sub::every(std::chrono::milliseconds(10), Tick{}));
     }
 };
-static_assert(Program<IntervalApp>);
+static_assert(mayag::Program<IntervalApp>);
 
 void test_interval_timers() {
     section("interval timers");
 
     run_headless<IntervalApp>(kCfg, [](auto& rt) {
-        // Drive the clock in 100 ms steps so each poll crosses one interval.
-        rt.window().set_tick_seconds(0.1);
+        { const bool settled_ = rt.settle([](const auto& m) { return m.ticks >= 5; }, std::chrono::milliseconds(1000));
+          check(settled_, "Sub::every fires (" + std::to_string(rt.model().ticks) + " ticks)"); }
 
-        for (int i = 0; i < 10; ++i) rt.tick();
-        const int fired = rt.model().ticks;
-        check(fired >= 8, std::string{"Sub::every fires on schedule ("} +
-                          std::to_string(fired) + " of ~10)");
-
-        // The subscription is declarative: dropping it from the model must
-        // stop the timer. Send Stop, then pump more ticks and confirm the
-        // count is frozen.
         rt.send(IntervalApp::Stop{});
-        rt.tick();                              // sync_interval_timers drops it
         const int after_stop = rt.model().ticks;
-        for (int i = 0; i < 5; ++i) rt.tick();
+        // Give a stray timer every chance to fire: 5 intervals.
+        (void)rt.settle([](const auto&) { return false; }, std::chrono::milliseconds(50));
         check(rt.model().ticks == after_stop,
               "an interval whose condition went false stops firing");
     });
@@ -560,10 +429,8 @@ void test_determinism() {
             rt.click("inc");
             rt.click("inc");
             rt.click("dec");
-            rt.window().type("abc");
-            rt.tick();
-            rt.window().press_key(Key::space);
-            rt.tick();
+            rt.type("abc");
+            rt.press_key(Key::space);
             rt.window().drive_frames(true);
             for (int i = 0; i < 30; ++i) rt.tick();
             pixels = rt.window().read_pixels();
@@ -574,119 +441,92 @@ void test_determinism() {
 
     const auto [px1, n1] = run_script();
     const auto [px2, n2] = run_script();
-
     check(n1 == n2 && n1 == 1, "the same script yields the same model");
     check(px1 == px2, "the same script yields byte-identical pixels");
     check(!px1.empty(), "and those pixels exist");
 }
 
-/// The view is a pure function of (Model, Ctx) — including hover state, which
-/// lives in Ctx rather than the Model.
+/// Hover lives in the host (Ctx), not the model.
 void test_view_purity() {
     section("view purity");
 
     run_headless<TestApp>(kCfg, [](auto& rt) {
         const auto before = rt.model();
-
-        // Hovering changes what is DRAWN without touching application state
-        // (beyond the counter this app deliberately keeps, to prove the
-        // distinction is a choice rather than an accident).
         rt.window().move_to(rt.center_of("inc"));
         rt.tick();
-        check(rt.input().is_hovered(node_id("inc")), "runtime tracks hover");
+        check(rt.input().is_hovered(node_id("inc")), "the host tracks hover");
         check(rt.model().count == before.count, "hovering did not change the count");
 
-        // Two identical renders of the same model produce identical trees.
-        Ctx c1{{480, 320}, 1.0f, 0.0, themes::midnight, nullptr};
-        const Node a = TestApp::view(before, c1);
-        const Node b = TestApp::view(before, c1);
+        const Ctx c1{{480, 320}, 1.0f, 0.0, themes::midnight};
+        const Node a = view_of<TestApp>(before, c1);
+        const Node b = view_of<TestApp>(before, c1);
         check(a.count() == b.count(), "view is deterministic");
     });
 }
 
-/// Keyboard navigation comes from the runtime, not from each app.
+/// Keyboard navigation comes from the host, not from each app.
 void test_focus() {
     section("focus");
 
     run_headless<TestApp>(kCfg, [](auto& rt) {
-        rt.window().press_key(Key::tab);
-        rt.tick();
+        rt.press_key(Key::tab);
         const auto first = rt.input().focused();
         check(first != 0, "tab moves focus to a named node");
 
-        rt.window().press_key(Key::tab);
-        rt.tick();
+        rt.press_key(Key::tab);
         check(rt.input().focused() != first, "tab advances");
 
-        rt.window().press_key(Key::tab, Mods{.shift = true});
-        rt.tick();
+        rt.press_key(Key::tab, Mods{.shift = true});
         check(rt.input().focused() == first, "shift-tab goes back");
 
-        // Clicking moves focus too — including onto nothing, which is how a
-        // text field is dismissed.
         rt.click("inc");
         check(rt.input().focused() == node_id("inc"), "clicking focuses the target");
 
         rt.window().click({470, 310});
         rt.tick();
         check(rt.input().focused() == 0, "clicking empty space clears focus");
+
+        // Space on a focused button: TestApp doesn't handle Activated, so the
+        // key falls through to its own Space binding.
+        rt.click("inc");
+        rt.press_key(Key::space);
+        check(rt.model().animating, "an unhandled activation falls through to on(KeyEvent)");
     });
 }
 
-/// The runtime only repaints when something changed.
-/// The runtime must never go to sleep owing the screen a frame.
-///
-/// This is the "pressed a theme chip and it hung" bug. The loop is
-/// wait -> events -> update -> render, so a message from ANYWHERE other than
-/// the window (a worker thread, a timer, application code calling send())
-/// leaves the model changed and dirty_ set — and then the loop blocks for a
-/// window event that may never arrive. The frame sits unrendered and the app
-/// looks frozen until the user happens to jiggle the mouse.
+/// A change from outside the window is drawn on the next tick, and an idle
+/// app draws nothing.
 void test_never_sleeps_dirty() {
     section("responsiveness");
 
     run_headless<TestApp>(kCfg, [](auto& rt) {
         const auto before = rt.window().frames_presented();
-
-        // A state change that did NOT come from a window event.
         rt.send(TestApp::Msg{TestApp::Inc{}});
         check(rt.model().count == 1, "send() updated the model");
-
-        // One tick must be enough to get it on screen. If the runtime chose
-        // to block here, this frame would never be presented.
-        rt.tick();
         check(rt.window().frames_presented() > before,
-              "a repaint owed after send() is presented on the very next tick");
+              "the change is presented without waiting for window input");
     });
 
-    // And once the screen is caught up, the runtime must go back to sleep
-    // rather than spinning — the opposite failure, equally bad.
     run_headless<TestApp>(kCfg, [](auto& rt) {
-        for (int i = 0; i < 5; ++i) rt.tick();      // settle
+        for (int i = 0; i < 5; ++i) rt.tick();
         const auto settled = rt.window().frames_presented();
         for (int i = 0; i < 20; ++i) rt.tick();
         check(rt.window().frames_presented() == settled,
-              "an idle runtime presents nothing (" +
+              "an idle app presents nothing (" +
               std::to_string(rt.window().frames_presented() - settled) + " extra frames)");
     });
 }
 
-/// Hover motion that changes nothing must not force a repaint.
-///
-/// macOS delivers a mouse-moved event per pixel of cursor travel — 117 across
-/// 200 polls in a measurement. Repainting on each turned idle mouse movement
-/// into a 650 fps spin that pinned a core.
+/// Pointer motion that changes no hover state draws nothing.
 void test_motion_does_not_spin() {
     section("motion economy");
 
     run_headless<TestApp>(kCfg, [](auto& rt) {
-        // Park the cursor over empty space and settle.
         rt.window().move_to({460, 300});
         rt.tick();
         for (int i = 0; i < 3; ++i) rt.tick();
         const auto settled = rt.window().frames_presented();
 
-        // Wiggle WITHIN the same empty region: hover state never changes.
         for (int i = 0; i < 30; ++i) {
             rt.window().move_to({460.0f + static_cast<float>(i % 3), 300.0f});
             rt.tick();
@@ -695,7 +535,6 @@ void test_motion_does_not_spin() {
               "motion that does not change hover state does not repaint (" +
               std::to_string(rt.window().frames_presented() - settled) + " frames)");
 
-        // Moving ONTO a widget must repaint, or hover styling would not work.
         rt.window().move_to(rt.center_of("hoverme"));
         rt.tick();
         check(rt.window().frames_presented() > settled,
@@ -703,29 +542,16 @@ void test_motion_does_not_spin() {
     });
 }
 
-/// Every UI must expose what it MEANS, not just what it looks like.
-///
-/// Without this a screen reader user cannot use the app at all, and a test
-/// cannot ask "is there a Save button" without comparing pixels.
 void test_accessibility() {
     section("accessibility");
 
     run_headless<TestApp>(kCfg, [](auto& rt) {
         const auto tree = a11y::snapshot(rt.tree(), rt.input().focused());
-
-        // Text is announced automatically — no annotation needed for the
-        // common case, or nobody would annotate anything.
         check(tree.find_by_role(a11y::Role::text) != nullptr,
               "text nodes appear in the semantic tree automatically");
-
-        // Named interactive nodes are reachable.
         check(!tree.interactive().empty(),
               "interactive elements are enumerable (" +
               std::to_string(tree.interactive().size()) + ")");
-
-        // The tree must be SHALLOW: layout nesting is an implementation
-        // detail, and walking six anonymous boxes to reach a label makes an
-        // app unusable with a screen reader.
         const auto depth = [](auto&& self, const a11y::Element& e) -> int {
             int d = 0;
             for (const auto& c : e.children) d = num::max(d, self(self, c));
@@ -736,118 +562,98 @@ void test_accessibility() {
               std::to_string(depth(depth, tree.root)) + ")");
     });
 
-    // Explicit annotation, and the redundancy rules around it.
-    {
-        constexpr Theme th = themes::midnight;
-        auto ui = v(text<"Settings"> | font(20) | role(a11y::Role::heading),
-                    h(text<"Save"> | font(12)) | pad(6, 12) | bg(th.accent)
-                      | role(a11y::Role::button) | label("Save document")
-                      | dsl::id<"save">,
-                    box() | size(16, 16) | role(a11y::Role::checkbox)
-                          | checked(true) | label("Enable sync") | dsl::id<"sync">,
-                    box() | size(80, 6) | role(a11y::Role::progress)
-                          | a11y_value(0.4f) | label("Upload"))
-                | gap(6) | pad(8);
+    constexpr Theme th = themes::midnight;
+    auto ui = v(text<"Settings"> | font(20) | role(a11y::Role::heading),
+                h(text<"Save"> | font(12)) | pad(6, 12) | bg(th.accent)
+                  | role(a11y::Role::button) | label("Save document")
+                  | dsl::id<"save">,
+                box() | size(16, 16) | role(a11y::Role::checkbox)
+                      | checked(true) | label("Enable sync") | dsl::id<"sync">,
+                box() | size(80, 6) | role(a11y::Role::progress)
+                      | a11y_value(0.4f) | label("Upload"))
+            | gap(6) | pad(8);
 
-        Node n = ui.build();
-        layout::layout_tree(n, {200, 200}, layout::default_measurer());
-        const auto tree = a11y::snapshot(n);
+    Node n = ui.build();
+    layout::layout_tree(n, {200, 200}, layout::default_measurer());
+    const auto tree = a11y::snapshot(n);
 
-        const auto* save = tree.find_by_label("Save document");
-        check(save != nullptr && save->role == a11y::Role::button,
-              "an explicit label wins over the node's own text");
-
-        const auto* sync = tree.find_by_label("Enable sync");
-        check(sync != nullptr && sync->state.checked,
-              "semantic state is carried (checked)");
-
-        const auto* prog = tree.find_by_role(a11y::Role::progress);
-        check(prog != nullptr && num::abs(prog->state.value - 0.4f) < 0.01f,
-              "a value-bearing role reports its value");
-
-        check(tree.find_by_role(a11y::Role::heading) != nullptr, "headings are found");
-
-        // A button whose label is its own text must not announce it twice.
-        int save_text_children = 0;
-        if (save != nullptr) {
-            for (const auto& c : save->children) {
-                if (c.label == save->label) ++save_text_children;
-            }
-        }
-        check(save_text_children == 0,
-              "a control does not repeat its own label as a child");
-    }
+    const auto* save = tree.find_by_label("Save document");
+    check(save != nullptr && save->role == a11y::Role::button,
+          "an explicit label wins over the node's own text");
+    const auto* sync = tree.find_by_label("Enable sync");
+    check(sync != nullptr && sync->state.checked, "semantic state is carried (checked)");
+    const auto* prog = tree.find_by_role(a11y::Role::progress);
+    check(prog != nullptr && num::abs(prog->state.value - 0.4f) < 0.01f,
+          "a value-bearing role reports its value");
+    check(tree.find_by_role(a11y::Role::heading) != nullptr, "headings are found");
+    int save_text_children = 0;
+    if (save != nullptr)
+        for (const auto& c : save->children)
+            if (c.label == save->label) ++save_text_children;
+    check(save_text_children == 0, "a control does not repeat its own label as a child");
 }
 
-/// One bad frame must not end the session.
+/// One bad message or frame must not end the session (fault_policy::skip).
+struct Fragile {
+    struct Model { int count = 0; bool poison = false; };
+    struct Inc {}; struct Explode {}; struct Poison {};
+    using Msg = std::variant<Inc, Explode, Poison>;
+    using Cmd = jaal::Cmd<Msg>;
+
+    static Cmd update(Model& m, Inc) { ++m.count; return {}; }
+    static Cmd update(Model& m, Explode) {
+        m.count = -100;   // half-done work the kernel must roll back
+        throw std::runtime_error("update failed");
+    }
+    static Cmd update(Model& m, Poison) { m.poison = true; return {}; }
+
+    static Node view(const Model& m) {
+        if (m.poison) throw std::runtime_error("view failed");
+        return (v(text_owned(std::to_string(m.count)) | font(14)
+                    | fg(ctx().theme.text_primary)) | pad(8)).build();
+    }
+};
+static_assert(mayag::Program<Fragile>);
+
 void test_error_boundary() {
     section("error boundary");
 
-    struct Fragile {
-        struct Model { int count = 0; bool poison = false; };
-        struct Inc {}; struct Explode {}; struct Poison {};
-        using Msg = std::variant<Inc, Explode, Poison>;
-
-        static Model init() { return {}; }
-
-        static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-            if (std::holds_alternative<Explode>(msg)) {
-                throw std::runtime_error("update failed");
-            }
-            if (std::holds_alternative<Poison>(msg)) { m.poison = true; return {m, {}}; }
-            m.count++;
-            return {m, Cmd<Msg>::none()};
-        }
-
-        static Node view(const Model& m, const Ctx& c) {
-            if (m.poison) throw std::runtime_error("view failed");
-            return (v(text_owned(std::to_string(m.count)) | font(14)
-                        | fg(c.theme.text_primary)) | pad(8)).build();
-        }
-        static Sub<Msg> subscribe(const Model&) { return Sub<Msg>::none(); }
-    };
-    static_assert(Program<Fragile>);
-
     AppConfig cfg{.size = {200, 120}};
-    cfg.on_error = [](std::string_view, std::string_view) {};   // silence in tests
+    int reported = 0;
+    cfg.on_error = [&](std::string_view, std::string_view) { ++reported; };
 
-    run_headless<Fragile>(cfg, [](auto& rt) {
+    run_headless<Fragile>(cfg, [&](auto& rt) {
         rt.send(Fragile::Msg{Fragile::Inc{}});
         rt.send(Fragile::Msg{Fragile::Inc{}});
         check(rt.model().count == 2, "normal messages work");
 
-        // A throwing update must not kill the app, and must not corrupt the
-        // model: `update` takes it by value, so a throw leaves it moved-from
-        // unless the runtime restores a snapshot.
         rt.send(Fragile::Msg{Fragile::Explode{}});
         check(!rt.finished(), "a throwing update does not end the app");
-        check(rt.model().count == 2, "and the model survives intact");
+        check(rt.model().count == 2, "and the half-changed model is put back");
+        check(reported == 1, "the fault is reported through on_error");
 
         rt.send(Fragile::Msg{Fragile::Inc{}});
         check(rt.model().count == 3, "the app keeps processing messages");
 
-        // A throwing view keeps the last good tree on screen.
         const std::size_t good_nodes = rt.tree().count();
         rt.send(Fragile::Msg{Fragile::Poison{}});
-        rt.tick();
         check(!rt.finished(), "a throwing view does not end the app either");
-        check(rt.tree().count() == good_nodes,
-              "and the last good frame stays on screen");
+        check(rt.tree().count() == good_nodes, "and the last good frame stays on screen");
+    });
+
+    AppConfig strict{.size = {200, 120}};
+    strict.catch_exceptions = false;
+    strict.on_error = [](std::string_view, std::string_view) {};
+    run_headless<Fragile>(strict, [](auto& rt) {
+        rt.send(Fragile::Msg{Fragile::Explode{}});
+        check(rt.finished(), "with catch_exceptions off, a throw stops the program");
     });
 }
 
-/// Input-method composition — CJK, Korean, and accented Latin.
-///
-/// Without this the framework cannot be used in those languages at all: the
-/// keystrokes for `konnichiwa` arrive as ten Latin letters and the conversion
-/// to こんにちは never happens.
 void test_ime_composition() {
     section("input method");
 
     TextEditState f;
-
-    // Preedit is displayed but NOT committed. That separation is what makes
-    // composition cancellable.
     f.set_preedit("こん");
     check(f.text.empty(), "preedit does not enter the document");
     check(f.display_text() == "こん", "but the user sees it");
@@ -861,72 +667,54 @@ void test_ime_composition() {
     check(f.text == "こんにちは", "commit inserts the composed text");
     check(!f.composing(), "and composition ends");
 
-    // Cancelling must leave committed text untouched.
     f.set_preedit("あ");
     check(f.display_text() == "こんにちはあ", "a new composition appends at the caret");
     f.cancel_preedit();
     check(f.text == "こんにちは", "cancelling leaves the document unchanged");
     check(f.display_text() == "こんにちは", "and the preedit disappears");
 
-    // While composing, keys belong to the INPUT METHOD: arrows pick
-    // candidates and Enter confirms. Letting them reach the editor would
-    // move the caret out from under the preedit.
     f.set_preedit("か");
     check(!f.handle_key(Key::left, Mods{}), "arrows are not consumed while composing");
     check(!f.handle_key(Key::backspace, Mods{}), "nor is backspace");
     f.cancel_preedit();
     check(f.handle_key(Key::left, Mods{}), "but they work again once composition ends");
 
-    // Composition replaces a selection, exactly as typing would.
     TextEditState g;
     g.insert("hello");
     g.select_all();
     g.set_preedit("に");
     check(g.text.empty(), "starting a composition replaces the selection");
 
-    // Driven through the runtime, as a real IME would.
     run_headless<TestApp>(kCfg, [](auto& rt) {
         rt.window().compose("こん");
         rt.tick();
         rt.window().commit("今日は");
         rt.tick();
-        check(true, "a scripted composition flows through the runtime");
+        check(rt.model().text == "今日は", "a committed composition reaches on(TextEvent)");
     });
 }
 
-/// Undo/redo, generic over any Model.
 void test_history() {
     section("undo/redo");
 
     History<std::string> h{""};
-
-    // Typing must coalesce into ONE undo step. Without this, undo is
-    // unusable in a text field — Cmd-Z loses a single letter.
-    for (char c : std::string{"hello"}) {
-        h.edit([&](std::string& s) { s += c; }, "typing");
-    }
+    for (char c : std::string{"hello"}) h.edit([&](std::string& s) { s += c; }, "typing");
     check(*h == "hello", "edits apply");
-    check(h.undo_depth() == 1, "and coalesce into one step (" +
-                               std::to_string(h.undo_depth()) + ")");
+    check(h.undo_depth() == 1, "and coalesce into one step (" + std::to_string(h.undo_depth()) + ")");
 
     h.undo();
     check(*h == "", "one undo reverts the whole run");
-
     h.redo();
     check(*h == "hello", "redo restores it");
 
-    // A different group starts a new step.
     h.edit([](std::string& s) { s += " world"; }, "paste");
     check(h.undo_depth() == 2, "a new group is a new step");
     h.undo();
     check(*h == "hello", "and undoes independently");
 
-    // Editing after an undo must discard the redo branch: redoing into a
-    // future that no longer follows from the present is incoherent.
     h.edit([](std::string& s) { s += "!"; }, "");
     check(!h.can_redo(), "editing after undo clears the redo branch");
 
-    // Bounded, or a long session leaks.
     History<int> b{0};
     b.set_max_depth(5);
     for (int i = 1; i <= 20; ++i) b.set(i);
@@ -936,86 +724,62 @@ void test_history() {
     check(steps == 5 && *b == 15, "and drops the oldest states");
 }
 
-/// Cursor feedback tells a user what is interactive before they click.
 void test_cursor() {
     section("cursor");
 
     constexpr Theme th = themes::midnight;
     TextEditState field;
-
     auto ui = v(box() | size(100, 40) | bg(th.surface),
                 node(text_field(th, field, false, node_id("f")).build()))
             | gap(4) | pad(8);
-
     Node n = ui.build();
     layout::layout_tree(n, {200, 200}, layout::default_measurer());
 
     const Node* f = n.find(node_id("f"));
     check(f != nullptr, "the field is in the tree");
-    if (f != nullptr) {
-        check(f->style().cursor == CursorShape::text,
-              "a text field asks for an I-beam, not an arrow");
-    }
+    if (f != nullptr)
+        check(f->style().cursor == CursorShape::text, "a text field asks for an I-beam, not an arrow");
     check(n.children()[0].style().cursor == CursorShape::arrow,
           "and a plain box inherits rather than overriding");
 }
 
-/// An app that never stops rendering is the commonest way a UI framework
-/// produces something users call "hung": the window responds, events flow,
-/// and a core is pinned. Harder to notice than a deadlock, because
-/// everything keeps working.
+/// The busy-loop warning: real runaways only.
 void test_busy_loop_detection() {
     section("busy loop");
 
     BusyLoopDetector d;
-
-    // A steady 60 fps for several seconds is what a runaway app looks like.
     for (int i = 0; i < 400; ++i) d.frame_presented(i / 60.0);
     check(d.busy(), "sustained rendering is detected");
     check(d.frame_rate() > 50.0 && d.frame_rate() < 70.0,
           "and the rate is reported (" + std::to_string(static_cast<int>(d.frame_rate())) + ")");
-
-    // Going quiet clears it: an app that settles is behaving correctly.
     d.idle();
     check(!d.busy(), "going idle clears the warning");
 
-    // A brief animation must NOT trip it. Every app animates sometimes, and a
-    // detector that fires on normal motion gets ignored.
     BusyLoopDetector b;
     for (int i = 0; i < 30; ++i) b.frame_presented(i / 60.0);
     check(!b.busy(), "a short burst of animation is not flagged");
 
-    // And the real thing: an app whose animation ends must return to idle.
     run_headless<TestApp>(kCfg, [](auto& rt) {
-        rt.window().press_key(Key::space);      // starts TestApp's animation
-        rt.tick();
-        check(TestApp::subscribe(rt.model()).wants_frames(), "animation requests frames");
-
+        rt.press_key(Key::space);
         rt.window().drive_frames(true);
         for (int i = 0; i < 200 && rt.model().animating; ++i) rt.tick();
         rt.window().drive_frames(false);
-
-        check(!TestApp::subscribe(rt.model()).wants_frames(),
-              "and stops requesting them once it settles");
+        check(!rt.host().frames_on(), "an animation that ends stops the frame clock");
 
         const auto settled = rt.window().frames_presented();
         for (int i = 0; i < 30; ++i) rt.tick();
-        check(rt.window().frames_presented() == settled,
-              "so the app presents nothing while idle");
+        check(rt.window().frames_presented() == settled, "so the app presents nothing while idle");
+        check(!rt.busy_loop_detected(), "and is never flagged");
     });
 
-    // The runtime itself must still flag a real runaway...
     run_headless<Spinner>(kCfg, [](auto& rt) {
-        rt.window().set_tick_seconds(1.0 / 60.0);
         rt.window().drive_frames(true);
         for (int i = 0; i < 300; ++i) rt.tick();
         check(rt.busy_loop_detected(), "a view that animates forever is flagged");
     });
 
-    // ...but not frames the user is driving. Moving the pointer over the
-    // reactive demo printed the warning, because every motion earns frames.
+    // Moving the pointer over a live view earns frames; that is not a busy loop.
     run_headless<Follower>(kCfg, [](auto& rt) {
-        rt.window().set_tick_seconds(1.0 / 60.0);
         rt.window().drive_frames(true);
         const auto before = rt.window().frames_presented();
         for (int i = 0; i < 300; ++i) {
@@ -1034,7 +798,6 @@ void test_render_economy() {
         const auto after_boot = rt.window().frames_presented();
         check(after_boot >= 1, "boot paints one frame");
 
-        // Ticks with no events and no animation must not repaint.
         for (int i = 0; i < 10; ++i) rt.tick();
         check(rt.window().frames_presented() == after_boot,
               "idle ticks do not repaint (" +
@@ -1045,91 +808,38 @@ void test_render_economy() {
     });
 }
 
-}  // namespace
-
-/// The `match` helper: dispatch a variant to one typed lambda per case. This
-/// is the ergonomic core of writing update() — it must route to the active
-/// alternative, pass the payload by reference, and return the handler's value.
-void test_match() {
-    section("match dispatch");
-
-    struct Inc {}; struct Add { int by; }; struct Stop {};
-    using M = std::variant<Inc, Add, Stop>;
-
-    const auto step = [](int n, const M& msg) {
-        return match(msg,
-            [&](Inc)            { return n + 1; },
-            [&](const Add& a)   { return n + a.by; },
-            [&](Stop)           { return 0; });
-    };
-
-    check(step(10, M{Inc{}})     == 11, "match routes to the Inc case");
-    check(step(10, M{Add{5}})    == 15, "match passes the payload to the Add case");
-    check(step(10, M{Stop{}})    == 0,  "match routes to the Stop case");
-
-    // match returns whatever the handlers return, including a void effect.
-    int side = 0;
-    match(M{Add{7}},
-          [&](Inc)          { side = -1; },
-          [&](const Add& a) { side = a.by; },
-          [&](Stop)         { side = -2; });
-    check(side == 7, "match works with void-returning handlers too");
-}
-
-/// `action(id, msg)` binds a node id to a message once, so the view modifier
-/// (`.on`) and the subscription (`.click()`) can never drift. This is the
-/// end-to-end guarantee: a node tagged with an action's id, clicked, fires
-/// exactly that action's message.
-struct ActionApp {
-    struct Model { int a = 0; int b = 0; };
-    struct HitA {}; struct HitB {}; struct Quit {};
-    using Msg = std::variant<HitA, HitB, Quit>;
-
-    // The two ids live in ONE place each, next to their message.
-    static constexpr std::uint64_t id_a = dsl::node_id("btn-a");
-    static constexpr std::uint64_t id_b = dsl::node_id("btn-b");
-
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](HitA) -> R { m.a++; return {m, Cmd<Msg>::none()}; },
-            [&](HitB) -> R { m.b++; return {m, Cmd<Msg>::none()}; },
-            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
-    }
-
-    static Node view(const Model&, const Ctx& t) {
-        return v(box() | size(80, 40) | bg(t.theme.accent) | action(id_a, Msg{HitA{}}).on,
-                 box() | size(80, 40) | bg(t.theme.danger) | action(id_b, Msg{HitB{}}).on)
-             | gap(10) | pad(10);
-    }
-
-    static Sub<Msg> subscribe(const Model&) {
-        return Sub<Msg>::batch(action(id_a, Msg{HitA{}}).click(),
-                               action(id_b, Msg{HitB{}}).click());
-    }
+/// An unhandled close still closes; a handled one is up to the program.
+struct Closable {
+    struct Model { bool asked = false; };
+    struct Ask {};
+    using Msg = std::variant<Ask>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd update(Model& m, Ask) { m.asked = true; return {}; }
+    static Node view(const Model&) { return dsl::box().build(); }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Ask{}; }
 };
 
-void test_action() {
-    section("action wiring");
-    static_assert(Program<ActionApp>);
+void test_close() {
+    section("close");
 
-    run_headless<ActionApp>(AppConfig{.title = "act", .size = {200, 120}}, [](auto& rt) {
-        check(rt.node_rect("btn-a").has_value(), "action-tagged node is addressable");
-        rt.click("btn-a");
-        check(rt.model().a == 1 && rt.model().b == 0, "clicking btn-a fires HitA only");
-        rt.click("btn-b");
-        check(rt.model().a == 1 && rt.model().b == 1, "clicking btn-b fires HitB only");
+    run_headless<IntervalApp>(kCfg, [](auto& rt) {
+        rt.window().push(CloseRequest{});
+        rt.tick();
+        check(rt.finished(), "a program with no on(CloseRequest) closes");
+    });
+    run_headless<Closable>(kCfg, [](auto& rt) {
+        rt.window().push(CloseRequest{});
+        rt.tick();
+        check(rt.model().asked && !rt.finished(), "a program that handles it decides itself");
     });
 }
 
+}  // namespace
+
 int main() {
-    std::printf("mayag app runtime\n=================");
+    std::printf("mayag window host\n=================");
 
     test_update_purity();
-    test_match();
-    test_action();
     test_functor_laws();
     test_interaction();
     test_click_counts();
@@ -1149,6 +859,7 @@ int main() {
     test_cursor();
     test_busy_loop_detection();
     test_render_economy();
+    test_close();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);

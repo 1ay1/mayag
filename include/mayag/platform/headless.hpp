@@ -22,7 +22,6 @@
 #include "../image/png.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
-#include "waker.hpp"
 
 #include <chrono>
 #include <deque>
@@ -52,7 +51,7 @@ class Headless {
 
     /// Drain the scripted queue. Headless never blocks — a build server must
     /// not be able to hang on a window that will never receive input.
-    [[nodiscard]] std::vector<Event> poll_events(Wait, double) {
+    [[nodiscard]] std::vector<Event> dispatch() {
         // Advance the synthetic clock every poll. Without this the clock is
         // frozen at 0, so EVERY click looks simultaneous with the previous
         // one and the interaction layer correctly-but-uselessly reports an
@@ -65,13 +64,11 @@ class Headless {
             out.push_back(std::move(queue_.front()));
             queue_.pop_front();
         }
-        // Synthesise frame ticks so animations advance deterministically:
-        // exactly 1/60 s per poll, regardless of how fast the machine is.
-        if (driving_frames_) {
-            out.push_back(FrameEvent{time_, 1.0 / 60.0});
-        }
         return out;
     }
+
+    /// Is a test stepping the frame clock by hand (1/60 s per tick)?
+    [[nodiscard]] bool driving_frames() const noexcept { return driving_frames_; }
 
     void present(const DrawList& dl, Color<Srgb> clear) {
         const int w = static_cast<int>(size_.x * dpi_);
@@ -216,11 +213,6 @@ class Headless {
         images_.upload(id, std::move(img));
     }
     void release_image(std::uint32_t id) { images_.release(id); }
-
-    /// Headless never blocks on a real fd — it runs scripted, deterministic
-    /// frames — so there is nothing for a waker to interrupt. Accepted and
-    /// ignored so the runtime can wire it unconditionally.
-    void set_waker(Waker*) noexcept {}
 
     /// The headless window rasterises on the CPU, which reads the atlas
     /// through the coverage sampler — there is no texture to upload. Present

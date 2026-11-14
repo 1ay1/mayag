@@ -8,6 +8,8 @@
 
 #include "harness.hpp"
 
+#include <optional>
+
 using namespace mayag;
 using namespace mayag::dsl;
 
@@ -28,47 +30,47 @@ struct Dashboard {
     struct Tick { double dt; };
     struct Quit {};
     using Msg = std::variant<Select, NextTheme, ToggleLive, Tick, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Sub = mayag::Sub<Msg>;
 
     static constexpr std::array<Theme, 4> palette{
         themes::midnight, themes::forest, themes::orchid, themes::daylight};
     static constexpr std::array<const char*, 4> nav{
         "Overview", "Pipelines", "Registry", "Settings"};
 
-    static std::pair<Model, Cmd<Msg>> init() {
-        return {Model{}, Cmd<Msg>::set_title("mayag — dashboard")};
+    static Cmd init(Model&) { return SetTitle{"mayag — dashboard"}; }
+
+    static Cmd update(Model& m, Select e) { m.selected = e.index; return {}; }
+    static Cmd update(Model& m, NextTheme) {
+        m.theme_index = (m.theme_index + 1) % static_cast<int>(palette.size());
+        return {};
+    }
+    static Cmd update(Model& m, ToggleLive) { m.live = !m.live; return {}; }
+    static Cmd update(Model& m, Tick e) { m.t += e.dt; return {}; }
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
+
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (c.count != 1) return std::nullopt;
+        if (is(c, "theme")) return NextTheme{};
+        if (is(c, "live"))  return ToggleLive{};
+        for (int i = 0; i < static_cast<int>(nav.size()); ++i)
+            if (c.node == node_id("nav", static_cast<std::size_t>(i))) return Select{i};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        static const keymap<Msg> keys{{Key::space,  ToggleLive{}},
+                                      {Key::t,      NextTheme{}},
+                                      {Key::escape, Quit{}}};
+        return keys(k);
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
+
+    static Sub subscribe(const Model& m) {
+        return when(m.live, Sub::on_frame([](double dt) -> Msg { return Tick{dt}; }));
     }
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](const Select& e) -> R { m.selected = e.index; return {m, Cmd<Msg>::none()}; },
-            [&](NextTheme) -> R {
-                m.theme_index = (m.theme_index + 1) % static_cast<int>(palette.size());
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](ToggleLive) -> R { m.live = !m.live; return {m, Cmd<Msg>::none()}; },
-            [&](const Tick& e) -> R { m.t += e.dt; return {m, Cmd<Msg>::none()}; },
-            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
-    }
-
-    static Sub<Msg> subscribe(const Model& m) {
-        std::vector<Sub<Msg>> subs{
-            Sub<Msg>::on_key(Key::space, ToggleLive{}),
-            Sub<Msg>::on_key(Key::t, NextTheme{}),
-            Sub<Msg>::on_click<"theme">(NextTheme{}),
-            Sub<Msg>::on_click<"live">(ToggleLive{}),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
-            Sub<Msg>::on_close(Quit{}),
-            when(m.live, Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })),
-        };
-        for (int i = 0; i < static_cast<int>(nav.size()); ++i) {
-            subs.push_back(Sub<Msg>::on_click_id(
-                node_id("nav", static_cast<std::size_t>(i)), Select{i}));
-        }
-        return Sub<Msg>::batch(std::move(subs));
-    }
-
-    static Node view(const Model& m, const Ctx& c) {
+    static Node view(const Model& m) {
+        const Ctx& c = ctx();
 
         const Theme& t = palette[static_cast<std::size_t>(m.theme_index)];
 
@@ -201,7 +203,7 @@ struct Dashboard {
     }
 };
 
-static_assert(Program<Dashboard>);
+static_assert(mayag::Program<Dashboard>);
 
 int main(int argc, char** argv) {
     const auto opts = demo::parse_args(argc, argv, Vec2{980, 660});

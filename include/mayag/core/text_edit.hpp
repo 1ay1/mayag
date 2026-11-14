@@ -11,9 +11,9 @@
 //     // view
 //     text_field(m.name, theme) | id<"name">
 //
-//     // subscribe
-//     Sub<Msg>::on_text([](std::string_view s) { return Typed{std::string{s}}; }),
-//     Sub<Msg>::on_any_key([](const KeyEvent& k) { return Pressed{k}; })
+//     // input
+//     static std::optional<Msg> on(const Model&, const TextEvent& t) { return Typed{t.text}; }
+//     static std::optional<Msg> on(const Model&, const KeyEvent& k)  { return Pressed{k}; }
 //
 //     // update
 //     m.name.insert(e.text);        // or .backspace(), .move(...), etc.

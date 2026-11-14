@@ -1,8 +1,8 @@
 // examples/player.cpp — a video player, the Elm way.
 //
 // The point of this example is that playing video needs NO special machinery.
-// A decoder is just a Cmd::stream producing messages; a frame is just pixels
-// handed over with Cmd::upload_image; the picture is just image(id) in the
+// A decoder is just a Sub::stream producing messages; a frame is just pixels
+// handed over with an UploadImage effect; the picture is just image(id) in the
 // view. Play/pause is a bool in the Model. Seeking is an integer assignment.
 // There is no player object, no callback soup, and no mutable state hidden
 // inside a widget -- the same architecture as every other mayag app.
@@ -53,25 +53,24 @@ struct Player {
     struct Pause {};
     struct Seek { int frame; };
     /// A decoded frame, arriving from the worker. The pixels travel by
-    /// shared_ptr -- 8 MB per message would otherwise be copied twice.
-    struct Frame { std::shared_ptr<const ImageData> pixels; int index; float ms; };
+    /// jaal::shared -- 8 MB per message would otherwise be copied twice.
+    struct Frame { jaal::shared<ImageData> pixels; int index; float ms; };
     struct Tick { float dt; };
     struct Quit {};
     using Msg = std::variant<Play, Pause, Seek, Frame, Tick, Quit>;
-
-    static inline const auto play_btn = action(node_id("play"), Msg{Play{}});
-    static inline const auto pause_btn = action(node_id("pause"), Msg{Pause{}});
+    using Cmd = jaal::Cmd<Msg, set_title, upload_image>;
+    using Sub = mayag::Sub<Msg>;
 
     // ── the "decoder" ───────────────────────────────────────────────────
     //
     // Stands in for libav. Produces a recognisable moving picture so a
     // screenshot can be checked by eye and by test: a colour field that
     // sweeps with time, plus a bar that marches across the frame.
-    static std::shared_ptr<const ImageData> decode(int index) {
-        auto img = std::make_shared<ImageData>();
-        img->width = kFrameW;
-        img->height = kFrameH;
-        img->rgba.resize(static_cast<std::size_t>(kFrameW) * kFrameH * 4);
+    static jaal::shared<ImageData> decode(int index) {
+        ImageData img;
+        img.width = kFrameW;
+        img.height = kFrameH;
+        img.rgba.resize(static_cast<std::size_t>(kFrameW) * kFrameH * 4);
 
         const float t = static_cast<float>(index) / static_cast<float>(kTotalFrames);
         const int bar = static_cast<int>(t * static_cast<float>(kFrameW));
@@ -88,119 +87,91 @@ struct Player {
                 if (std::abs(x - bar) < 3) { r = g = b = 1.0f; }   // marching bar
                 const std::size_t i =
                     (static_cast<std::size_t>(y) * kFrameW + x) * 4;
-                img->rgba[i + 0] = static_cast<std::uint8_t>(r * 255.0f);
-                img->rgba[i + 1] = static_cast<std::uint8_t>(g * 255.0f);
-                img->rgba[i + 2] = static_cast<std::uint8_t>(b * 255.0f);
-                img->rgba[i + 3] = 255;
+                img.rgba[i + 0] = static_cast<std::uint8_t>(r * 255.0f);
+                img.rgba[i + 1] = static_cast<std::uint8_t>(g * 255.0f);
+                img.rgba[i + 2] = static_cast<std::uint8_t>(b * 255.0f);
+                img.rgba[i + 3] = 255;
             }
         }
-        return img;
+        return jaal::shared<ImageData>::make(std::move(img));
     }
 
     // ── init ────────────────────────────────────────────────────────────
-    static std::pair<Model, Cmd<Msg>> init() {
+    static Cmd init(Model&) {
         // Show frame 0 immediately, so the window is never blank.
-        Model m;
-        return {m, Cmd<Msg>::batch({
-            Cmd<Msg>::set_title("mayag — player"),
-            Cmd<Msg>::upload_image(kVideoImage, decode(0)),
-        })};
+        return Cmd::batch(SetTitle{"mayag — player"}, upload(kVideoImage, decode(0)));
     }
 
     // ── update ──────────────────────────────────────────────────────────
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Play) -> R {
-                if (m.playing) return {m, Cmd<Msg>::none()};
-                m.playing = true;
-                // No Cmd needed: the decoder is a SUBSCRIPTION, so it starts
-                // simply because `playing` became true. See subscribe().
-                return {m, Cmd<Msg>::none()};
+    // No Cmd needed for Play: the decoder is a SUBSCRIPTION, so it starts
+    // simply because `playing` became true. See subscribe().
+    static Cmd update(Model& m, Play)  { m.playing = true; return {}; }
+    static Cmd update(Model& m, Pause) { m.playing = false; return {}; }
+
+    static Cmd update(Model& m, Seek s) {
+        m.frame = num::clamp(s.frame, 0, kTotalFrames - 1);
+        m.scrub.to(static_cast<float>(m.frame));
+        m.seeking = true;
+
+        // Decode OFF the UI thread (~19 ms at 1080p, more than a 60 Hz
+        // frame). The "seek" key makes it latest-wins: a newer seek replaces
+        // the running one, so an old frame can never land after a newer one.
+        return Cmd::task("seek",
+            [](jaal::Sink<Msg> out, int want) {
+                const auto t0 = std::chrono::steady_clock::now();
+                auto pixels = decode(want);
+                const float ms = std::chrono::duration<float, std::milli>(
+                                     std::chrono::steady_clock::now() - t0).count();
+                out.send(Frame{std::move(pixels), want, ms});
             },
-            [&](Pause) -> R { m.playing = false; return {m, Cmd<Msg>::none()}; },
-
-            [&](Seek s) -> R {
-                m.frame = num::clamp(s.frame, 0, kTotalFrames - 1);
-                m.scrub.to(static_cast<float>(m.frame));
-                m.seeking = true;
-
-                // Decode OFF the UI thread, and let the RUNTIME handle
-                // supersession.
-                //
-                // Measured: this generator costs 0.54 ms for a 320x180 frame,
-                // which scales to ~19 ms at 1080p -- more than a whole 60 Hz
-                // budget, so decoding inline would drop a frame on every
-                // scrub. task_latest additionally guarantees that dragging
-                // the bar cannot deliver an old frame after a newer one: only
-                // the most recent "seek" task can reach update(). Without it
-                // this handler needs a generation counter and a comparison,
-                // which is precisely the code that is easy to get wrong.
-                const int want = m.frame;
-                return {m, Cmd<Msg>::task_latest("seek", [want] {
-                    const auto t0 = std::chrono::steady_clock::now();
-                    auto pixels = decode(want);
-                    const float ms = std::chrono::duration<float, std::milli>(
-                                         std::chrono::steady_clock::now() - t0).count();
-                    return Msg{Frame{std::move(pixels), want, ms}};
-                })};
-            },
-
-            [&](Frame f) -> R {
-                // A frame arrived from a worker -- the decoder subscription,
-                // or a seek task. No staleness check is needed here: a
-                // superseded seek never reaches this point, and the decoder
-                // is stopped by its subscription disappearing.
-                m.frame   = f.index;
-                m.decoded = f.index + 1;
-                m.last_ms = f.ms;
-                m.seeking = false;
-                m.scrub.snap(static_cast<float>(f.index));
-                if (f.index + 1 >= kTotalFrames) m.playing = false;
-                return {m, Cmd<Msg>::upload_image(kVideoImage, f.pixels)};
-            },
-
-            [&](Tick t) -> R { m.scrub.step(t.dt); return {m, Cmd<Msg>::none()}; },
-            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
+            m.frame);
     }
 
-    /// The decoder, as a SUBSCRIPTION rather than a command.
-    ///
-    /// This started as Cmd::stream and that was wrong. A Cmd is fire-and-
-    /// forget: once started, the producer runs to completion, so `pause` set a
-    /// flag the decoder never saw and frames kept arriving -- measured at
-    /// 22 -> 29 -> 36 -> 42 -> 49 long after pausing, and a seek was then
-    /// overwritten by the stream still running underneath it.
-    ///
-    /// A Sub is DECLARATIVE: it exists exactly while the model says it should.
-    /// `when(m.playing, ...)` means pausing removes the subscription, and the
-    /// runtime signals and joins the thread. Nothing has to remember to stop
-    /// it, which is the same reason animation uses on_frame rather than a
-    /// self-perpetuating timer.
-    static Sub<Msg> decoder(const Model& m) {
-        const int from = m.frame;
-        return Sub<Msg>::source("decoder", [from](auto sink, auto alive) {
-            using clk = std::chrono::steady_clock;
-            for (int i = from; i < kTotalFrames && alive(); ++i) {
-                const auto t0 = clk::now();
-                auto pixels = decode(i);
-                const float ms = std::chrono::duration<float, std::milli>(
-                                     clk::now() - t0).count();
-                if (!alive()) return;
-                sink(Msg{Frame{std::move(pixels), i, ms}});
-                std::this_thread::sleep_for(std::chrono::milliseconds(16));
-            }
-        });
+    static Cmd update(Model& m, Frame f) {
+        // A frame from a worker -- the decoder stream or a seek task. No
+        // staleness check: jaal drops messages from a replaced task or a
+        // stopped stream.
+        m.frame   = f.index;
+        m.decoded = f.index + 1;
+        m.last_ms = f.ms;
+        m.seeking = false;
+        m.scrub.snap(static_cast<float>(f.index));
+        if (f.index + 1 >= kTotalFrames) m.playing = false;
+        return upload(kVideoImage, std::move(f.pixels));
+    }
+
+    static Cmd update(Model& m, Tick t) { m.scrub.step(t.dt); return {}; }
+    static Cmd update(Model&, Quit)     { return Cmd::quit(); }
+
+    /// The decoder, as a SUBSCRIPTION rather than a command. A Sub exists
+    /// exactly while the model says so: pausing removes it and jaal stops it,
+    /// so no frames keep arriving after pause. The start frame is read only
+    /// when the stream starts (the key stays "decoder" while playing).
+    static Sub decoder(const Model& m) {
+        return Sub::stream("decoder",
+            [](jaal::Sink<Msg> out, std::stop_token st, int from) {
+                using clk = std::chrono::steady_clock;
+                for (int i = from; i < kTotalFrames && !st.stop_requested(); ++i) {
+                    const auto t0 = clk::now();
+                    auto pixels = decode(i);
+                    const float ms = std::chrono::duration<float, std::milli>(
+                                         clk::now() - t0).count();
+                    if (st.stop_requested()) return;
+                    out.send(Frame{std::move(pixels), i, ms});
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                }
+            },
+            m.frame);
     }
 
     // ── view ────────────────────────────────────────────────────────────
-    static Node view(const Model& m, const Ctx& c) {
-        const Theme& t = c.theme;
+    static Node view(const Model& m) {
+        const Theme& t = ctx().theme;
         const float progress = static_cast<float>(m.frame + 1) /
                                static_cast<float>(kTotalFrames);
 
         return (v(
-            // THE PICTURE. One element; the pixels arrived via Cmd.
+            // THE PICTURE. One element; the pixels arrived via UploadImage.
             image(kVideoImage)
                 | width(px(640)) | height(px(360)) | radius(10),
 
@@ -214,7 +185,7 @@ struct Player {
 
             h(text_owned(m.playing ? "pause" : "play") | font(13) | semibold
                   | fg(t.on_accent)
-                  | (m.playing ? pause_btn.on : play_btn.on),
+                  | id_of(m.playing ? "pause" : "play"),
               box() | grow(),
               text_owned(std::to_string(m.frame + 1) + " / " +
                          std::to_string(kTotalFrames)) | font(12)
@@ -233,22 +204,31 @@ struct Player {
     }
 
     // ── subscribe ───────────────────────────────────────────────────────
-    static Sub<Msg> subscribe(const Model& m) {
-        return Sub<Msg>::batch({
-            play_btn.click(),
-            pause_btn.click(),
-            Sub<Msg>::on_key(Key::space, m.playing ? Msg{Pause{}} : Msg{Play{}}),
-            Sub<Msg>::on_key(Key::escape, Msg{Quit{}}),
-            Sub<Msg>::on_close(Msg{Quit{}}),
-            // The decoder exists exactly while playing. Pausing removes it and
-            // the runtime joins the thread.
+    static Sub subscribe(const Model& m) {
+        return Sub::batch(
+            // The decoder exists exactly while playing.
             when(m.playing, decoder(m)),
             // Only while the scrub spring is settling; a paused player idles.
             when(m.scrub.animating(),
-                 Sub<Msg>::on_frame([](float dt) { return Msg{Tick{dt}}; })),
-        });
+                 Sub::on_frame([](double dt) -> Msg { return Tick{static_cast<float>(dt)}; })));
     }
+
+    // ── input ───────────────────────────────────────────────────────────
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (c.count != 1) return std::nullopt;
+        if (is(c, "play"))  return Play{};
+        if (is(c, "pause")) return Pause{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model& m, const KeyEvent& k) {
+        if (k.key == Key::space)  return m.playing ? Msg{Pause{}} : Msg{Play{}};
+        if (k.key == Key::escape) return Quit{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
 };
+
+static_assert(mayag::Program<Player>);
 
 int main(int argc, char** argv) {
     const auto opts = demo::parse_args(argc, argv, {700, 470});
@@ -286,7 +266,7 @@ int main(int argc, char** argv) {
         ok(rt.model().frame >= 5, "frames arrive from the worker thread");
         ok(rt.model().last_ms > 0.0f, "and carry their decode cost");
 
-        // Pause: the source disappears, the runtime joins the thread.
+        // Pause: the stream disappears and jaal stops it.
         rt.click("pause");
         rt.tick();
         ok(!rt.model().playing, "pause stops playback");

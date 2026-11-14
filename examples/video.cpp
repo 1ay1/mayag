@@ -7,13 +7,13 @@
 //
 // Everything here is the same architecture as a counter:
 //
-//   the decoder        a Sub::source, so it exists exactly while playing and
-//                      the runtime stops and joins the thread on pause
-//   a decoded frame    an ordinary Msg carrying a shared_ptr, so an 8 MB
-//                      1080p frame moves by pointer, not by copy
-//   showing it         Cmd::upload_image + image(id) in the view
-//   seeking            Cmd::task_latest, so dragging the scrub bar cannot
-//                      deliver an old frame after a newer one
+//   the decoder        a jaal Sub::stream, so it exists exactly while playing
+//                      and is stopped on pause
+//   a decoded frame    an ordinary Msg carrying jaal::shared<ImageData>, so an
+//                      8 MB 1080p frame moves by pointer, not by copy
+//   showing it         the upload_image effect + image(id) in the view
+//   seeking            at most one decode running, the newest request waiting
+//                      in the model, so a drag still gets frames
 //
 // There is no player object, no callback soup, and no mutable state hidden in
 // a widget. Play/pause is a bool in the Model.
@@ -127,16 +127,16 @@ class Decoder {
 
     /// Decode the next frame as RGBA8. Returns null at end of stream.
     ///
-    /// The buffer is freshly allocated per frame and handed over as a
-    /// shared_ptr, which is what lets it travel to the renderer without a
-    /// copy. `pts_out` is the presentation time in seconds, so the caller can
+    /// The buffer is freshly allocated per frame and moved out, so the caller
+    /// can wrap it in a jaal::shared and send it without a copy.
+    /// `pts_out` is the presentation time in seconds, so the caller can
     /// pace playback against a real clock rather than assuming a frame rate.
     /// `max_w` caps the output width, so the decoder produces pixels at the
     /// size they will be DRAWN rather than the size they were encoded. Zero
     /// means source resolution. It never upscales.
-    [[nodiscard]] std::shared_ptr<const ImageData> next(double* pts_out,
-                                                        int max_w = 0) {
-        if (ctx_ == nullptr) return nullptr;
+    [[nodiscard]] std::optional<ImageData> next(double* pts_out,
+                                                int max_w = 0) {
+        if (ctx_ == nullptr) return std::nullopt;
 
         for (;;) {
             int rc = avcodec_receive_frame(ctx_, frame_);
@@ -149,14 +149,14 @@ class Decoder {
                 }
                 return to_rgba(max_w);
             }
-            if (rc != AVERROR(EAGAIN)) return nullptr;   // EOF or hard error
+            if (rc != AVERROR(EAGAIN)) return std::nullopt;   // EOF or hard error
 
             // Need more input.
             av_packet_unref(pkt_);
             if (av_read_frame(fmt_, pkt_) < 0) {
                 avcodec_send_packet(ctx_, nullptr);      // flush
                 if (avcodec_receive_frame(ctx_, frame_) == 0) return to_rgba(max_w);
-                return nullptr;
+                return std::nullopt;
             }
             if (pkt_->stream_index == stream_) {
                 avcodec_send_packet(ctx_, pkt_);
@@ -175,20 +175,9 @@ class Decoder {
     ///
     /// So decode forward from the keyframe until reaching the requested time.
     ///
-    /// `still_wanted` lets a caller abandon that walk. It matters more than it
-    /// looks: on a screen recording the keyframe interval is often the whole
-    /// file, so one seek decodes ~180 frames and takes ~660 ms. Dragging a
-    /// scrub bar asks for a new position ~60 times a second. task_latest
-    /// discards the stale RESULTS, but without this every one of those decodes
-    /// still runs to completion, and the machine falls a minute behind in a
-    /// second of dragging.
-    ///
-    /// The polarity matches the runtime's: TRUE means keep going. It is named
-    /// for what it asks rather than for what it stops, because the opposite
-    /// spelling (`cancel`) reads identically at the call site while meaning
-    /// the reverse -- and wiring the runtime's `still_wanted` into a `cancel`
-    /// parameter aborted every seek on its first frame, which surfaced only as
-    /// a video that would not scrub.
+    /// `still_wanted` lets a caller abandon that walk (TRUE means keep going).
+    /// One seek can decode ~180 frames, so a caller that no longer wants the
+    /// result should not pay for it.
     /// `precise` chooses between the two useful answers to "seek here".
     ///
     /// true  -- the EXACT frame at `seconds`. Decodes forward from the
@@ -202,17 +191,17 @@ class Decoder {
     /// and needs a picture NOW to aim with, not the exact frame -- and the
     /// release wants the precise one. Nothing else in the two paths differs,
     /// so it is one flag rather than two functions.
-    [[nodiscard]] std::shared_ptr<const ImageData> seek(
+    [[nodiscard]] std::optional<ImageData> seek(
             double seconds, double* pts_out, bool precise = true,
             int max_w = 0,
             const std::function<bool()>& still_wanted = {}) {
-        if (ctx_ == nullptr) return nullptr;
+        if (ctx_ == nullptr) return std::nullopt;
         const AVStream* st = fmt_->streams[stream_];
         const int64_t ts = static_cast<int64_t>(seconds / av_q2d(st->time_base));
-        if (av_seek_frame(fmt_, stream_, ts, AVSEEK_FLAG_BACKWARD) < 0) return nullptr;
+        if (av_seek_frame(fmt_, stream_, ts, AVSEEK_FLAG_BACKWARD) < 0) return std::nullopt;
         avcodec_flush_buffers(ctx_);
 
-        std::shared_ptr<const ImageData> last;
+        std::optional<ImageData> last;
         double pts = 0.0;
         // A keyframe interval is rarely more than a few hundred frames; the
         // cap is generous enough to cross one and small enough to bound the
@@ -220,7 +209,7 @@ class Decoder {
         for (int guard = 0; guard < 600; ++guard) {
             // Superseded by a newer seek: stop rather than finish work whose
             // result is already destined for the bin.
-            if (still_wanted && !still_wanted()) return nullptr;
+            if (still_wanted && !still_wanted()) return std::nullopt;
             auto frame = next(&pts, max_w);
             if (!frame) break;
             last = std::move(frame);
@@ -239,7 +228,7 @@ class Decoder {
     /// the buffer that crosses to the UI thread smaller. Measured on 1080p:
     /// 3.27 ms / 7.91 MB at source, 1.14 ms / 1.59 MB at 860 wide. The
     /// pixels dropped are ones the sampler would have discarded anyway.
-    [[nodiscard]] std::shared_ptr<const ImageData> to_rgba(int max_w = 0) {
+    [[nodiscard]] std::optional<ImageData> to_rgba(int max_w = 0) {
         const int sw = ctx_->width, sh = ctx_->height;
         // Never scale UP -- that costs time and adds no detail.
         const bool shrink = max_w > 0 && max_w < sw;
@@ -252,7 +241,7 @@ class Decoder {
                                     // quality is not worth its cost here.
                                     shrink ? SWS_FAST_BILINEAR : SWS_BILINEAR,
                                     nullptr, nullptr, nullptr);
-        if (sws_ == nullptr) return nullptr;
+        if (sws_ == nullptr) return std::nullopt;
 
         // Let ffmpeg size and align the destination.
         //
@@ -268,20 +257,20 @@ class Decoder {
         // actually needs, so the scaler cannot write outside it.
         constexpr int kAlign = 32;
         const int need = av_image_get_buffer_size(AV_PIX_FMT_RGBA, w, h, kAlign);
-        if (need <= 0) return nullptr;
+        if (need <= 0) return std::nullopt;
 
-        auto img = std::make_shared<ImageData>();
-        img->width = w;
-        img->height = h;
+        ImageData img;
+        img.width = w;
+        img.height = h;
         // The buffer is at least `need`; the tail beyond w*h*4 is scratch the
         // scaler is allowed to touch.
-        img->rgba.resize(static_cast<std::size_t>(need));
+        img.rgba.resize(static_cast<std::size_t>(need));
 
         std::uint8_t* dst[4]{};
         int stride[4]{};
-        if (av_image_fill_arrays(dst, stride, img->rgba.data(),
+        if (av_image_fill_arrays(dst, stride, img.rgba.data(),
                                  AV_PIX_FMT_RGBA, w, h, kAlign) < 0) {
-            return nullptr;
+            return std::nullopt;
         }
         sws_scale(sws_, frame_->data, frame_->linesize, 0, sh, dst, stride);
 
@@ -290,12 +279,12 @@ class Decoder {
         const std::size_t tight = static_cast<std::size_t>(w) * 4;
         if (static_cast<std::size_t>(stride[0]) != tight) {
             for (int y = 1; y < h; ++y) {
-                std::memmove(img->rgba.data() + y * tight,
-                             img->rgba.data() + static_cast<std::size_t>(y) * stride[0],
+                std::memmove(img.rgba.data() + y * tight,
+                             img.rgba.data() + static_cast<std::size_t>(y) * stride[0],
                              tight);
             }
         }
-        img->rgba.resize(tight * static_cast<std::size_t>(h));
+        img.rgba.resize(tight * static_cast<std::size_t>(h));
         return img;
     }
 
@@ -382,10 +371,15 @@ struct Video {
         /// Last known window size, so the Scrub handler can work out the
         /// track's width. Updated from Ctx on every pointer event.
         Vec2   window{860.0f, 620.0f};
-        /// Bumped by every seek. It is part of the playback source's id, so a
-        /// seek replaces the decoder thread rather than leaving it running
+        /// Bumped by every seek. It is part of the playback stream's key, so a
+        /// seek replaces the decoder rather than leaving it running
         /// from the old position. See decoder().
         int    epoch = 0;
+        /// Seek coalescing: at most one seek decode runs; newer requests
+        /// collapse into one pending slot, started when the running one ends.
+        struct PendingSeek { double seconds; bool preview; int epoch; };
+        bool   seek_busy = false;
+        std::optional<PendingSeek> seek_pending;
     };
 
     /// Inset and track width, shared by view() and the Scrub handler so a
@@ -409,7 +403,7 @@ struct Video {
     /// overwrite the seek target. The scrub bar moved, the picture did not,
     /// and you had to click again. Measured 4-6 of 12 clicks lost that way.
     struct Frame {
-        std::shared_ptr<const ImageData> pixels;
+        jaal::shared<ImageData> pixels;
         double pts;
         float  ms;
         int    epoch = 0;
@@ -425,7 +419,7 @@ struct Video {
     struct Scrub { float local_x; bool dragging = false; };
     /// The scrub button came up. Re-seek precisely to where it landed.
     struct ScrubEnd {};
-    /// No seek is running or pending: the picture is where it was asked to be.
+    /// The running seek decode finished (its frame, if any, came first).
     struct SeekSettled {};
     /// Double-click on the picture: fill the screen, or come back.
     struct ToggleFullscreen {};
@@ -435,12 +429,10 @@ struct Video {
     using Msg = std::variant<Play, Pause, SeekTo, Frame, Ended, SeekAbandoned,
                              Pointer, Scrub, ScrubEnd, SeekSettled,
                              ToggleFullscreen, Resized, Tick, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title, set_fullscreen, upload_image>;
+    using Sub = mayag::Sub<Msg>;
 
-    static inline const auto play_btn  = action(node_id("play"), Msg{Play{}});
-    static inline const auto pause_btn = action(node_id("pause"), Msg{Pause{}});
-
-    static std::pair<Model, Cmd<Msg>> init() {
-        Model m;
+    static Cmd init(Model& m) {
         m.duration = g_info.duration;
         m.status   = g_info.codec + "  " + std::to_string(g_info.width) + "x" +
                      std::to_string(g_info.height);
@@ -456,134 +448,110 @@ struct Video {
         // One decode of one keyframe, once, at startup. Every frame after this
         // is off the UI thread, which is what actually matters for latency.
         Decoder d;
-        std::shared_ptr<const ImageData> first;
+        std::optional<ImageData> first;
         double pts = 0.0;
         if (d.open(g_path)) first = d.seek(0.0, &pts);
 
-        std::vector<Cmd<Msg>> boot;
-        boot.push_back(Cmd<Msg>::set_title("mayag — " + g_path));
-        if (first) {
-            m.frames = 1;
-            m.time   = pts;
-            boot.push_back(Cmd<Msg>::upload_image(kImage, std::move(first)));
-        }
-        return {m, Cmd<Msg>::batch(std::move(boot))};
+        Cmd title = SetTitle{"mayag — " + g_path};
+        if (!first) return title;
+        m.frames = 1;
+        m.time   = pts;
+        return Cmd::batch(std::move(title), upload(kImage, std::move(*first)));
     }
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Play) -> R {
-                m.playing = true;
-                return {m, Cmd<Msg>::none()};   // the Sub starts the decoder
-            },
-            [&](Pause) -> R { m.playing = false; return {m, Cmd<Msg>::none()}; },
+    static Cmd update(Model& m, Play)  { m.playing = true; return {}; }   // the Sub starts the decoder
+    static Cmd update(Model& m, Pause) { m.playing = false; return {}; }
 
-            [&](SeekTo s) -> R {
-                m.time = num::clamp(s.seconds, 0.0, m.duration);
-                m.seeking = true;
-                // New epoch -> new playback source id, so a seek while playing
-                // restarts the decoder at the new position instead of leaving
-                // the old thread running from where it was.
-                //
-                // A PREVIEW does not bump it. Previews come from pointer
-                // moves, and each bump replaces the playback source: a 25-move
-                // drag spawned 25 decoder threads, every one opening a 1080p
-                // file and seeking before being retired a frame later. The
-                // picture during a drag comes from the seek task, not from
-                // playback, so restarting the decoder mid-drag buys nothing --
-                // the release fires a precise SeekTo and that one restarts it
-                // exactly once, at the position the user chose.
-                if (!s.preview) ++m.epoch;
-                const double want = m.time;
-                const int    epoch = m.epoch;
-                const int    max_w = m.view_w;
-                // task_coalesce, NOT task_latest: one decode runs at a time and
-                // the newest pending position replaces the rest.
-                //
-                // task_latest starves under a drag. A seek on a 1080p file
-                // costs ~500 ms (av_seek_frame lands on a keyframe up to ~10 s
-                // back, and the frames between it and the target must all be
-                // decoded), while a dragged scrub bar asks ~60 times a second
-                // -- so every decode was superseded before it could finish and
-                // the picture never moved until the mouse stopped. Measured:
-                // 117 requests over a 2 s drag produced ZERO frames.
-                //
-                // Coalescing shows a frame every ~500 ms during the drag, each
-                // nearer the cursor, and the release position always lands.
-                return {m, Cmd<Msg>::task_coalesce("seek",
-                    [want, epoch, max_w, preview = s.preview] {
-                        Decoder d;               // owned by this task alone
-                        if (!d.open(g_path)) return Msg{Ended{}};
-                        double pts = 0.0;
-                        const auto t0 = std::chrono::steady_clock::now();
-                        // No cancel predicate: under task_coalesce this decode
-                        // is the only one running and its frame is wanted.
-                        // Abandoning it is what made the drag show nothing.
-                        // Decode straight to the size it will be drawn at.
-                        // The scaler is running anyway, so a smaller target
-                        // is cheaper AND the buffer that crosses to the UI
-                        // thread shrinks with it.
-                        auto px = d.seek(want, &pts, !preview, max_w);
-                        const float ms = std::chrono::duration<float, std::milli>(
-                                             std::chrono::steady_clock::now() - t0).count();
-                        if (px) return Msg{Frame{std::move(px), pts, ms, epoch}};
-                        return Msg{Ended{}};
-                    },
-                    // Delivered once no seek is running or pending. A frame
-                    // arriving is NOT proof the seek finished: the decode that
-                    // was already running when a newer position arrived still
-                    // delivers, and treating that as the answer reported the
-                    // player as landed 864 s from where it was sent.
-                    Msg{SeekSettled{}})};
+    /// Start one seek decode. It sends its Frame (or Ended), then SeekSettled.
+    static Cmd start_seek(Model& m, double want, bool preview) {
+        m.seek_busy = true;
+        return Cmd::task("seek",
+            [](jaal::Sink<Msg> out, double at, int epoch, int max_w, bool pv) {
+                Decoder d;                   // owned by this task alone
+                if (!d.open(g_path)) { out.send(Ended{}); out.send(SeekSettled{}); return; }
+                double pts = 0.0;
+                const auto t0 = std::chrono::steady_clock::now();
+                // No cancel predicate: this decode is the only one running and
+                // its frame is wanted. Decode straight to the drawn size.
+                auto px = d.seek(at, &pts, !pv, max_w);
+                const float ms = std::chrono::duration<float, std::milli>(
+                                     std::chrono::steady_clock::now() - t0).count();
+                if (px) out.send(Frame{jaal::shared<ImageData>::make(std::move(*px)), pts, ms, epoch});
+                else    out.send(Ended{});
+                out.send(SeekSettled{});
             },
+            want, m.epoch, m.view_w, preview);
+    }
 
-            [&](Frame f) -> R {
+    static Cmd update(Model& m, SeekTo s) {
+        m.time = num::clamp(s.seconds, 0.0, m.duration);
+        m.seeking = true;
+        // New epoch -> new playback stream key, so a seek while playing
+        // restarts the decoder at the new position. A PREVIEW (pointer drag)
+        // does not bump it: restarting the decoder on every move buys nothing,
+        // the release fires a precise SeekTo that restarts it once.
+        if (!s.preview) ++m.epoch;
+        // Coalesce, not latest-wins: one decode runs at a time and finishes;
+        // newer requests collapse into one pending slot. A 1080p seek costs
+        // ~500 ms and a drag asks ~60x/s, so latest-wins never finished one
+        // and the picture froze until the mouse stopped.
+        if (m.seek_busy) {
+            m.seek_pending = Model::PendingSeek{m.time, s.preview, m.epoch};
+            return {};
+        }
+        return start_seek(m, m.time, s.preview);
+    }
+
+    static Cmd update(Model& m, Frame f) {
                 // Drop frames produced for a superseded seek.
                 //
                 // Not defensive coding: the decoder that produced this frame
                 // may already have been stopped, its message queued before it
                 // noticed. Applying it rewinds m.time to wherever playback had
-                // got to, which is exactly the "the bar moves but it doesn't
-                // seek" bug. The runtime cannot filter these -- only the app
-                // knows what makes one frame current and another obsolete.
-                if (f.epoch != m.epoch) return {m, Cmd<Msg>::none()};
+                // got to. jaal drops most of these already, but a seek task
+                // that finishes after a newer seek still delivers.
+                if (f.epoch != m.epoch) return {};
                 m.time      = f.pts;
                 m.decode_ms = f.ms;
                 ++m.frames;
                 // NOT `m.seeking = false`: this frame may belong to a
                 // superseded request. SeekSettled owns that flag.
-                return {m, Cmd<Msg>::upload_image(kImage, f.pixels)};
-            },
+                return upload(kImage, std::move(f.pixels));
+    }
 
-            [&](SeekSettled) -> R {
-                // Every seek for this key has finished and none is waiting, so
-                // the frame on screen is the one that was asked for.
-                m.seeking = false;
-                return {m, Cmd<Msg>::none()};
-            },
+    static Cmd update(Model& m, SeekSettled) {
+        // The running decode finished. Start the pending one, if any;
+        // otherwise the frame on screen is the one that was asked for.
+        m.seek_busy = false;
+        if (m.seek_pending) {
+            const auto p = *m.seek_pending;
+            m.seek_pending.reset();
+            return start_seek(m, p.seconds, p.preview);
+        }
+        m.seeking = false;
+        return {};
+    }
 
-            [&](Ended) -> R {
+    static Cmd update(Model& m, Ended) {
                 m.playing = false;
                 m.status  = "end of stream";
                 m.chrome.to(1.0f);          // always show controls when stopped
-                return {m, Cmd<Msg>::none()};
-            },
+                return {};
+    }
 
-            [&](SeekAbandoned) -> R {
-                // A newer scrub superseded this decode. Leave `seeking` set:
-                // the task that replaced it is still running and will clear it.
-                return {m, Cmd<Msg>::none()};
-            },
+    static Cmd update(Model&, SeekAbandoned) {
+        // A newer scrub superseded this decode. Leave `seeking` set.
+        return {};
+    }
 
-            [&](Pointer p) -> R {
+    static Cmd update(Model& m, Pointer p) {
                 m.pointer = p.at;
                 m.idle    = 0.0;
                 m.chrome.to(1.0f);
-                return {m, Cmd<Msg>::none()};
-            },
+                return {};
+    }
 
-            [&](Scrub s) -> R {
+    static Cmd update(Model& m, Scrub s) {
                 // Local x inside the track -> a time.
                 //
                 // The track's width is derived from the last known window
@@ -592,10 +560,10 @@ struct Video {
                 // duplicating one expression is better than a mutable field
                 // that can silently go stale for a frame after a resize.
                 const float w = track_width(m.window);
-                if (w <= 1.0f || m.duration <= 0.0) return {m, Cmd<Msg>::none()};
+                if (w <= 1.0f || m.duration <= 0.0) return {};
 
                 const double frac =
-                    num::clamp(static_cast<double>(s.local_x) / w, 0.0, 1.0);
+                    num::clamp(static_cast<double>(s.local_x) / static_cast<double>(w), 0.0, 1.0);
                 m.idle = 0.0;
                 m.chrome.to(1.0f);
                 // Reuse the seek path, which is already coalescing. While the
@@ -603,23 +571,22 @@ struct Video {
                 // 10x faster decode the user can aim with. ScrubEnd re-seeks
                 // precisely once they let go.
                 if (s.dragging) m.previewing = true;
-                return update(std::move(m),
-                              Msg{SeekTo{frac * m.duration, s.dragging}});
-            },
+                return update(m, SeekTo{frac * m.duration, s.dragging});
+    }
 
-            [&](ScrubEnd) -> R {
+    static Cmd update(Model& m, ScrubEnd) {
                 // Re-seek precisely ONLY if the previews during a drag left the
                 // picture keyframe-accurate. A plain click never previewed --
                 // press seeks precisely and is already correct -- so firing a
                 // seek here anyway made every click decode the same frame
                 // TWICE, doubling the latency of the most common interaction
                 // (measured 92 ms to 172 ms, 228 ms to 412 ms).
-                if (!m.previewing) return {m, Cmd<Msg>::none()};
+                if (!m.previewing) return {};
                 m.previewing = false;
-                return update(std::move(m), Msg{SeekTo{m.time, false}});
-            },
+                return update(m, SeekTo{m.time, false});
+    }
 
-            [&](ToggleFullscreen) -> R {
+    static Cmd update(Model& m, ToggleFullscreen) {
                 m.fullscreen = !m.fullscreen;
                 // Keep the chrome up for a moment on the way in and out: the
                 // window is about to resize under the pointer, and controls
@@ -629,10 +596,10 @@ struct Video {
                 // The new size arrives as a Resized, which recomputes view_w,
                 // so the decode resolution follows the window without this
                 // handler knowing anything about it.
-                return {m, Cmd<Msg>::fullscreen(m.fullscreen)};
-            },
+                return SetFullscreen{m.fullscreen};
+    }
 
-            [&](Resized r) -> R {
+    static Cmd update(Model& m, Resized r) {
                 m.window = r.size;
                 // The size the picture will be drawn at, derived with the
                 // same letterbox rule the view uses. Decoding to this instead
@@ -657,47 +624,37 @@ struct Video {
                 // 1920px file to upscale on every frame.
                 m.view_w = num::min(static_cast<int>(vw), g_info.width);
                 m.view_h = static_cast<int>(static_cast<float>(m.view_w) / src);
-                return {m, Cmd<Msg>::none()};
-            },
+                return {};
+    }
 
-            [&](Tick t) -> R {
+    static Cmd update(Model& m, Tick t) {
                 m.chrome.step(t.dt);
                 // Only playback hides the chrome. A paused player keeps its
                 // controls up, because the user is looking at them.
                 if (m.playing) {
-                    m.idle += t.dt;
+                    m.idle += static_cast<double>(t.dt);
                     if (m.idle > 2.5) m.chrome.to(0.0f);
                 } else {
                     m.idle = 0.0;
                     m.chrome.to(1.0f);
                 }
-                return {m, Cmd<Msg>::none()};
-            },
-
-            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
+                return {};
     }
 
-    /// The playback decoder: a subscription, so it exists exactly while
-    /// `playing` is true and the runtime joins the thread when it is not.
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
+
+    /// The playback decoder: a stream, so it exists exactly while `playing`
+    /// is true and jaal stops it when it is not.
     ///
-    /// The id carries the seek EPOCH, not just "playback".
-    ///
-    /// Sources are reconciled by id: an unchanged id means "still the same
-    /// producer, leave it alone". With a constant id the thread started at the
-    /// original position and kept running, so seeking while playing moved the
-    /// scrub bar and the picture carried on from where it was -- the seek
-    /// appeared to do nothing until you paused. Folding the epoch in makes a
-    /// seek a DIFFERENT source, so the runtime stops the old thread, joins it,
-    /// and starts one at the new time. That is the declarative contract doing
-    /// the work; nothing has to remember to restart anything.
-    static Sub<Msg> decoder(const Model& m) {
-        const double from  = m.time;
-        const int    epoch = m.epoch;
-        const int    max_w = m.view_w;
-        return Sub<Msg>::source("playback:" + std::to_string(m.epoch),
-                                [from, epoch, max_w](auto sink, auto alive) {
+    /// The key carries the seek EPOCH. An unchanged key means "same producer,
+    /// leave it alone", so with a constant key a seek while playing did
+    /// nothing. With the epoch folded in, a seek is a DIFFERENT stream: jaal
+    /// stops the old one and starts one at the new time.
+    static Sub decoder(const Model& m) {
+        return Sub::stream("playback:" + std::to_string(m.epoch),
+            [](jaal::Sink<Msg> out, std::stop_token st, double from, int epoch, int max_w) {
             Decoder d;                       // owned by this thread alone
-            if (!d.open(g_path)) { sink(Msg{Ended{}}); return; }
+            if (!d.open(g_path)) { out.send(Ended{}); return; }
             double ignored = 0.0;
             if (from > 0.05) (void)d.seek(from, &ignored);
 
@@ -705,27 +662,17 @@ struct Video {
             const auto started = clk::now();
             double first_pts = -1.0;
 
-            while (alive()) {
+            while (!st.stop_requested()) {
                 double pts = 0.0;
                 const auto t0 = clk::now();
-                std::shared_ptr<const ImageData> px = d.next(&pts, max_w);
+                std::optional<ImageData> px = d.next(&pts, max_w);
 
-                // No frame. Only report end-of-stream if this producer is
-                // still the one the model wants.
-                //
-                // A seek bumps the epoch, which changes this source's id, so
-                // the runtime stops THIS thread and starts a new one at the new
-                // position. On the way out `next()` can legitimately return
-                // null -- and reporting that as Ended set playing=false, so
-                // every seek during playback stopped the video and left the
-                // status reading "end of stream". Measured exactly that way.
-                //
-                // `alive()` is the runtime telling us we have been replaced.
-                // Checking it BEFORE attributing meaning to a null frame is
-                // the difference between "the file ended" and "you were
-                // superseded".
+                // No frame. Report end-of-stream only if we were not stopped:
+                // a stopped (superseded) decoder can see a null frame on the
+                // way out, and reporting that as Ended stopped playback on
+                // every seek.
                 if (!px) {
-                    if (alive()) sink(Msg{Ended{}});
+                    if (!st.stop_requested()) out.send(Ended{});
                     return;
                 }
                 const float ms = std::chrono::duration<float, std::milli>(
@@ -742,10 +689,11 @@ struct Video {
                     std::this_thread::sleep_for(
                         std::chrono::duration<double>(target - elapsed));
                 }
-                if (!alive()) return;
-                sink(Msg{Frame{std::move(px), pts, ms, epoch}});
+                if (st.stop_requested()) return;
+                out.send(Frame{jaal::shared<ImageData>::make(std::move(*px)), pts, ms, epoch});
             }
-        });
+        },
+            m.time, m.epoch, m.view_w);
     }
 
     /// Play / pause, drawn from primitives rather than from a font glyph.
@@ -779,7 +727,8 @@ struct Video {
                 | width(px(12)) | height(px(14))).build();
     }
 
-    static Node view(const Model& m, const Ctx& c) {
+    static Node view(const Model& m) {
+        const Ctx& c = ctx();
         const Theme& t = c.theme;
         const Vec2   vp = c.size;          // the LIVE window size, every frame
         const float  fade = static_cast<float>(m.chrome);
@@ -865,7 +814,7 @@ struct Video {
                   text_owned(fmt_ms(m.decode_ms)) | font(12)
                       | fg(colors::white.fade(0.55f * fade)))
                   | gap(16) | center | width(px(bar_w))
-                  | (m.playing ? pause_btn.on : play_btn.on))
+                  | id_of(m.playing ? "pause" : "play"))
               | gap(10) | width(px(bar_w))
               | absolute(inset, bar_y))
             )
@@ -885,89 +834,61 @@ struct Video {
         return b;
     }
 
-    static Sub<Msg> subscribe(const Model& m) {
-        return Sub<Msg>::batch({
-            play_btn.click(),
-            pause_btn.click(),
-            Sub<Msg>::on_key(Key::space, m.playing ? Msg{Pause{}} : Msg{Play{}}),
-            // Escape leaves fullscreen before it quits. In fullscreen the
-            // window is the whole screen and there is no title bar to aim
-            // at, so a key that quits outright is a trap -- every player
-            // treats Escape as "back out one level".
-            Sub<Msg>::on_key(Key::escape,
-                             m.fullscreen ? Msg{ToggleFullscreen{}} : Msg{Quit{}}),
-            // The usual keyboard shortcut, alongside the double-click.
-            Sub<Msg>::on_key(Key::f, Msg{ToggleFullscreen{}}),
-            Sub<Msg>::on_close(Msg{Quit{}}),
-            // Keep the model's idea of the window current, so a scrub after a
-            // resize maps to the track that is actually on screen.
-            Sub<Msg>::on_resize([](Vec2 sz) { return Msg{Resized{sz}}; }),
+    // ── input ───────────────────────────────────────────────────────────
+    static std::optional<Msg> on(const Model& m, const KeyEvent& k) {
+        if (k.key == Key::space) return m.playing ? Msg{Pause{}} : Msg{Play{}};
+        // Escape leaves fullscreen before it quits: in fullscreen there is no
+        // title bar, so a key that quits outright is a trap.
+        if (k.key == Key::escape) return m.fullscreen ? Msg{ToggleFullscreen{}} : Msg{Quit{}};
+        if (k.key == Key::f) return ToggleFullscreen{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
+    // Keep the model's idea of the window current, so a scrub after a resize
+    // maps to the track that is actually on screen.
+    static std::optional<Msg> on(const Model&, const ResizeEvent& r) { return Resized{r.size}; }
+    // Pointer movement un-hides the controls.
+    static std::optional<Msg> on(const Model&, const MouseMove& mv) { return Pointer{mv.position}; }
 
-            // Pointer movement un-hides the controls. There is no dedicated
-            // on_mouse_move, so this reads the raw event -- which is the
-            // escape hatch working as intended rather than a gap.
-            Sub<Msg>::on_event([](const Event& e) -> std::optional<Msg> {
-                if (const auto* mv = std::get_if<MouseMove>(&e)) {
-                    return Msg{Pointer{mv->position}};
-                }
-                return std::nullopt;
-            }),
+    // The scrub bar, wired for BOTH a tap and a drag. A press is a tap until
+    // proven otherwise, so it seeks precisely; a drag move asks for a PREVIEW
+    // (keyframe-accurate, ~10x faster); the release re-seeks exactly.
+    static std::optional<Msg> on(const Model&, const Pressed& p) {
+        if (is(p, "track")) return Scrub{p.local.x, false};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const Dragged& d) {
+        if (is(d, "track")) return Scrub{d.local.x, true};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const Released& r) {
+        if (is(r, "track")) return ScrubEnd{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (c.count == 1 && is(c, "play"))  return Play{};
+        if (c.count == 1 && is(c, "pause")) return Pause{};
+        // Double-click the picture (not the window) to fill the screen, so a
+        // fast double-click on the bar is not mistaken for a toggle.
+        if (c.count == 2 && is(c, "picture")) return ToggleFullscreen{};
+        return std::nullopt;
+    }
 
-            // The scrub bar, wired for BOTH a tap and a drag.
-            //
-            // `on_node_motion` reports the pointer's LOCAL position inside the
-            // node, which is what a slider needs. But the gesture kinds are
-            // disjoint -- `matches()` maps drag to Kind::drag only -- so a
-            // drag subscription alone never fires on a plain click, and
-            // tapping the bar does nothing. That was the reported bug, and it
-            // survived a first fix because the test sent the message instead
-            // of clicking the widget.
-            //
-            // `press` covers the tap and the start of a drag; `drag` covers
-            // the rest of the movement. Together they give click-to-seek and
-            // scrub from one handler.
-            //
-            // A drag move asks for a PREVIEW (keyframe-accurate, ~10x faster)
-            // because the user is still aiming; the release re-seeks exactly.
-            // A press is a tap until proven otherwise, so it seeks precisely
-            // and a click lands on the right frame immediately.
-            Sub<Msg>::on_node_motion(
-                node_id("track"), Sub<Msg>::Gesture::press,
-                [](Vec2 local) { return Msg{Scrub{local.x, false}}; }),
-            Sub<Msg>::on_node_motion(
-                node_id("track"), Sub<Msg>::Gesture::drag,
-                [](Vec2 local) { return Msg{Scrub{local.x, true}}; }),
-            Sub<Msg>::on_click_id_gesture(node_id("track"),
-                                          Sub<Msg>::Gesture::release,
-                                          Msg{ScrubEnd{}}),
-
-            // Double-click the picture to fill the screen, the way every
-            // video player behaves. Bound to the IMAGE rather than the
-            // window: the controls are above it in the z-stack, so a fast
-            // double-click while scrubbing hits the bar and is not mistaken
-            // for a fullscreen toggle.
-            Sub<Msg>::on_click_id_gesture(node_id("picture"),
-                                          Sub<Msg>::Gesture::click,
-                                          Msg{ToggleFullscreen{}}, 2, false),
-
+    static Sub subscribe(const Model& m) {
+        return Sub::batch(
             // The playback decoder runs while playing AND not mid-drag.
-            //
-            // Suspending it during a scrub is what a real player does, and
-            // here it is also correctness: the picture during a drag comes
-            // from the seek task, and a decoder still running from the old
-            // position would race it, overwriting m.time with frames from
-            // wherever playback had reached.
+            // During a drag the picture comes from the seek task; a decoder
+            // still running would race it and overwrite m.time.
             when(m.playing && !m.previewing, decoder(m)),
-
             // Frames are requested only while something is moving: the chrome
             // spring settling, or playback counting down to auto-hide. A
-            // paused player with its controls up asks for nothing and idles at
-            // 0% CPU, which is the property the whole runtime is built on.
+            // paused player with its controls up idles at 0% CPU.
             when(m.chrome.animating() || (m.playing && m.idle <= 2.5),
-                 Sub<Msg>::on_frame([](float dt) { return Msg{Tick{dt}}; })),
-        });
+                 Sub::on_frame([](double dt) -> Msg { return Tick{static_cast<float>(dt)}; })));
     }
 };
+
+static_assert(mayag::Program<Video>);
 
 int main(int argc, char** argv) {
     // Find the file argument: anything that is not a harness flag.

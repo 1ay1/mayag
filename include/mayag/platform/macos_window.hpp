@@ -322,7 +322,9 @@ class MacWindow {
 
     // ── events ──────────────────────────────────────────────────────────
 
-    [[nodiscard]] std::vector<Event> poll_events(Wait wait, double timeout) {
+    /// Drain NSApp without waiting. Cocoa has no fd for jaal's reactor, so
+    /// the host polls this at `kPollPeriod` (wait_hint) while idle.
+    [[nodiscard]] std::vector<Event> dispatch() {
         using namespace objc;
         std::vector<Event> out;
 
@@ -335,55 +337,15 @@ class MacWindow {
             out.push_back(ResizeEvent{size_, dpi_});
         }
 
-        // The deadline encodes the runtime's Wait decision.
-        //
-        // `poll` means "an animation is running", NOT "burn a core". Cocoa
-        // has no vsync primitive we can block on here, so we wait until the
-        // next frame boundary.
-        //
-        // CPU use: a busy 2x Retina frame costs ~7.8 ms across 8 cores with
-        // the tiled renderer, so 60 Hz animation is comfortable. An idle app
-        // blocks here and measures ~1%. `MAYAG_FPS` trades smoothness for
-        // battery if an app wants it.
-        id until = block_deadline();
-        if (wait == Wait::immediate) {
-            // No sleeping: the runtime owes the screen a frame.
-            until = msg_cls<id>(objc_getClass("NSDate"), sel("distantPast"));
-        } else if (wait == Wait::poll) {
-            const double now_s = now();
-            const double next  = last_frame_ + frame_interval_;
-            const double sleep = next - now_s;
-            last_frame_ = sleep > 0.0 ? next : now_s;
-            until = (sleep > 0.0005)
-                ? msg_cls<id>(objc_getClass("NSDate"),
-                              sel("dateWithTimeIntervalSinceNow:"), sleep)
-                : msg_cls<id>(objc_getClass("NSDate"), sel("distantPast"));
-        } else if (wait == Wait::timeout) {
-            until = msg_cls<id>(objc_getClass("NSDate"),
-                                sel("dateWithTimeIntervalSinceNow:"), timeout);
-        }
-
+        id until = msg_cls<id>(objc_getClass("NSDate"), sel("distantPast"));
         id mode = nsstring("kCFRunLoopDefaultMode");
 
         for (;;) {
             id ev = msg<id>(app_, sel("nextEventMatchingMask:untilDate:inMode:dequeue:"),
                             any_event_mask, until, mode, static_cast<BOOL>(YES));
             if (ev == nullptr) break;
-
             translate(ev, out);
             msg<void>(app_, sel("sendEvent:"), ev);
-
-            // After the first (possibly blocking) wait, drain without waiting.
-            until = msg_cls<id>(objc_getClass("NSDate"), sel("distantPast"));
-        }
-
-        // Emit a frame tick so animations advance. The runtime only asks for
-        // `Wait::poll` when something is animating, so this is not generated
-        // for an idle app.
-        if (wait == Wait::poll) {
-            const double t = now();
-            out.push_back(FrameEvent{t, t - last_tick_ > 0.0 ? num::min(t - last_tick_, 0.1) : 1.0 / 60.0});
-            last_tick_ = t;
         }
 
         if (!msg<BOOL>(window_, sel("isVisible"))) {

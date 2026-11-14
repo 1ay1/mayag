@@ -132,6 +132,14 @@ target_include_directories(mayag INTERFACE
 target_compile_features(mayag INTERFACE
     $<IF:$<CXX_COMPILER_ID:MSVC>,cxx_std_23,cxx_std_26>)
 
+# jaal (third_party/jaal) is the runtime: the loop, timers, tasks, streams
+# and the OS waiting. mayag is a jaal host that draws.
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/CMakeLists.txt")
+    message(FATAL_ERROR "mayag: third_party/jaal is missing. Run: git submodule update --init")
+endif()
+add_subdirectory(third_party/jaal EXCLUDE_FROM_ALL)
+target_link_libraries(mayag INTERFACE jaal::jaal)
+
 # ── backend feature macros ───────────────────────────────────────────────
 foreach(backend VULKAN METAL D3D12 WEBGPU OPENGL COCOA WAYLAND)
     if(MAYAG_WITH_${backend})
@@ -327,9 +335,8 @@ if(MAYAG_BUILD_TESTS)
     add_test(NAME mayag_tests COMMAND mayag_tests)
     set_tests_properties(mayag_tests PROPERTIES TIMEOUT 120)
 
-    # The application runtime, driven through the headless platform. This is
-    # the SAME Runtime<P, W> that run<P>() instantiates on a real window, so
-    # these tests are evidence about shipped behaviour.
+    # The window host on jaal, driven through the headless platform. It is the
+    # same host run<P>() uses on a real window.
     add_executable(mayag_app_tests tests/test_app.cpp)
     target_link_libraries(mayag_app_tests PRIVATE mayag)
     target_compile_options(mayag_app_tests PRIVATE ${MAYAG_WARNINGS})
@@ -355,9 +362,9 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_discovery_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_discovery_tests COMMAND mayag_discovery_tests)
 
-    # Live / streaming: the cross-thread waker and Cmd::stream. The waker and
-    # the stream lifecycle are pure logic and run everywhere; the end-to-end
-    # "a blocked window wakes" check needs a compositor and skips without one.
+    # Live / streaming on jaal: streams, timers, and a real Wayland window
+    # that wakes when a background thread posts. The window half skips
+    # without a compositor.
     if(MAYAG_WITH_WAYLAND)
         add_executable(mayag_live_tests tests/test_live.cpp)
         target_link_libraries(mayag_live_tests PRIVATE mayag)
@@ -532,7 +539,7 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-install(TARGETS mayag EXPORT mayagTargets)
+install(TARGETS mayag jaal EXPORT mayagTargets FILE_SET HEADERS)
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT mayagTargets
         FILE mayagTargets.cmake

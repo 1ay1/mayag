@@ -51,7 +51,7 @@ struct Todo {
     struct Toggle  { int index; };
     struct Remove  { int index; };
     struct SetFilter { Filter f; };
-    struct Scrolled  { Vec2 delta; };
+    struct Scrolled  { float dx, dy; };   // plain floats: Vec2 isn't Sendable
     struct FocusInput {};
     struct Tick      { double dt; };
     struct OpenMenu  { int index; };
@@ -60,9 +60,10 @@ struct Todo {
 
     using Msg = std::variant<Typed, KeyDown, Add, Toggle, Remove, SetFilter,
                              Scrolled, FocusInput, Tick, OpenMenu, CloseMenu, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title, focus>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() {
-        Model m;
+    static Cmd init(Model& m) {
         m.items = {
             {"Ship the tiled rasteriser", true},
             {"Fix Retina contentsScale", true},
@@ -77,7 +78,7 @@ struct Todo {
             {"Accessibility tree", false},
             {"WebGPU backend for the browser", false},
         };
-        return {std::move(m), Cmd<Msg>::set_title("mayag — todo")};
+        return SetTitle{"mayag — todo"};
     }
 
     /// Indices of the items the current filter shows.
@@ -94,22 +95,15 @@ struct Todo {
 
     // ── update: pure ────────────────────────────────────────────────────
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](const Typed& e) -> R {
-                m.input.insert(e.s);
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](const KeyDown& e) -> R {
+    static Cmd update(Model& m, const Typed& e) {
+        m.input.insert(e.s);
+        return {};
+    }
+    static Cmd update(Model& m, const KeyDown& e) {
                 // The text field's own key map handles motion, selection and
                 // editing. Only what it declines reaches the app.
-                if (m.input.handle_key(e.k.key, e.k.mods)) {
-                    return {std::move(m), Cmd<Msg>::none()};
-                }
-                if (e.k.key == Key::enter) {
-                    return update(std::move(m), Add{});
-                }
+                if (m.input.handle_key(e.k.key, e.k.mods)) return {};
+                if (e.k.key == Key::enter) return update(m, Add{});
                 // Arrow keys move the list cursor when the field is empty.
                 const auto vis = visible(m);
                 if (e.k.key == Key::down && !vis.empty()) {
@@ -118,66 +112,58 @@ struct Todo {
                     m.selected = num::max(m.selected - 1, 0);
                 } else if (e.k.key == Key::space && m.selected >= 0 &&
                            m.selected < static_cast<int>(vis.size())) {
-                    return update(std::move(m), Toggle{vis[static_cast<std::size_t>(m.selected)]});
+                    return update(m, Toggle{vis[static_cast<std::size_t>(m.selected)]});
                 }
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](Add) -> R {
+                return {};
+    }
+    static Cmd update(Model& m, Add) {
                 if (!m.input.text.empty()) {
                     m.items.push_back(Item{m.input.text, false});
                     m.input.clear();
                     m.list.scroll_to_bottom();
                 }
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](const Toggle& e) -> R {
+                return {};
+    }
+    static Cmd update(Model& m, Toggle e) {
                 if (e.index >= 0 && e.index < static_cast<int>(m.items.size())) {
                     m.items[static_cast<std::size_t>(e.index)].done ^= true;
                 }
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](const Remove& e) -> R {
+                return {};
+    }
+    static Cmd update(Model& m, Remove e) {
                 if (e.index >= 0 && e.index < static_cast<int>(m.items.size())) {
                     m.items.erase(m.items.begin() + e.index);
                 }
                 m.menu_for = 0;
                 m.menu_index = -1;
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](const SetFilter& e) -> R {
-                m.filter = e.f;
-                m.selected = -1;
-                m.list.scroll_to_top();
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](const Scrolled& e) -> R {
-                m.list.scroll_by(e.delta);
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](FocusInput) -> R {
-                return {std::move(m), Cmd<Msg>::focus(node_id("input"))};
-            },
-            [&](Tick) -> R {
-                // The runtime steps tracked motion itself; this arm remains
-                // only for app-owned animations.
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](const OpenMenu& e) -> R {
-                m.menu_for = node_id("row", static_cast<std::size_t>(e.index));
-                m.menu_index = e.index;
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](CloseMenu) -> R {
-                m.menu_for = 0;
-                m.menu_index = -1;
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](Quit) -> R { return {std::move(m), Cmd<Msg>::quit()}; });
+                return {};
     }
+    static Cmd update(Model& m, SetFilter e) {
+        m.filter = e.f;
+        m.selected = -1;
+        m.list.scroll_to_top();
+        return {};
+    }
+    static Cmd update(Model& m, const Scrolled& e) { m.list.scroll_by(Vec2{e.dx, e.dy}); return {}; }
+    static Cmd update(Model&, FocusInput) { return FocusNode{node_id("input")}; }
+    // The host steps tracked motion itself; Tick only keeps frames coming.
+    static Cmd update(Model&, Tick) { return {}; }
+    static Cmd update(Model& m, OpenMenu e) {
+        m.menu_for = node_id("row", static_cast<std::size_t>(e.index));
+        m.menu_index = e.index;
+        return {};
+    }
+    static Cmd update(Model& m, CloseMenu) {
+        m.menu_for = 0;
+        m.menu_index = -1;
+        return {};
+    }
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
     // ── view: pure ──────────────────────────────────────────────────────
 
-    static Node view(const Model& m, const Ctx& c) {
+    static Node view(const Model& m) {
+        const Ctx& c = ctx();
         const Theme& t = c.theme;
         const auto vis = visible(m);
 
@@ -327,50 +313,55 @@ struct Todo {
              | bg(t.background);
     }
 
+    // ── input: pure ─────────────────────────────────────────────────────
+
+    static std::optional<Msg> on(const Model&, const TextEvent& e) { return Typed{e.text}; }
+    static std::optional<Msg> on(const Model& m, const KeyEvent& k) {
+        if (k.key == Key::escape && k.mods == Mods{})
+            return m.menu_for != 0 ? Msg{CloseMenu{}} : Msg{Quit{}};
+        return KeyDown{k};
+    }
+    static std::optional<Msg> on(const Model&, const mayag::Scrolled& s) {
+        if (is(s, "list")) return Scrolled{s.delta.x, s.delta.y};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model& m, const Clicked& c) {
+        if (is(c, "input") && c.count == 1) return FocusInput{};
+        // Menu entries, live only while the menu is open.
+        if (m.menu_index >= 0 && c.count == 1) {
+            if (is(c, "menu-toggle")) return Toggle{m.menu_index};
+            if (is(c, "menu-delete")) return Remove{m.menu_index};
+        }
+        if (is(c, "filter-all"))    return SetFilter{Filter::all};
+        if (is(c, "filter-active")) return SetFilter{Filter::active};
+        if (is(c, "filter-done"))   return SetFilter{Filter::done};
+        // A click toggles; a DOUBLE click opens the row's context menu.
+        for (int i = 0; i < static_cast<int>(m.items.size()); ++i) {
+            if (c.node != node_id("row", static_cast<std::size_t>(i))) continue;
+            if (c.count == 1) return Toggle{i};
+            if (c.count == 2) return OpenMenu{i};
+            return std::nullopt;
+        }
+        return std::nullopt;
+    }
+    // Clicking outside sends Left for the dismissed overlay.
+    static std::optional<Msg> on(const Model& m, const Left& l) {
+        if (m.menu_index >= 0 && is(l, "row-menu")) return CloseMenu{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
+
     // ── subscribe: pure ─────────────────────────────────────────────────
 
-    static Sub<Msg> subscribe(const Model& m) {
-        std::vector<Sub<Msg>> subs{
-            Sub<Msg>::on_text([](std::string_view s) { return Msg{Typed{std::string{s}}}; }),
-            Sub<Msg>::on_any_key([](const KeyEvent& k) { return Msg{KeyDown{k}}; }),
-            Sub<Msg>::on_scroll<"list">([](Vec2 d) { return Msg{Scrolled{d}}; }),
-            Sub<Msg>::on_click<"input">(FocusInput{}),
-            Sub<Msg>::on_key(Key::escape, m.menu_for != 0 ? Msg{CloseMenu{}} : Msg{Quit{}}),
-            Sub<Msg>::on_close(Quit{}),
-            // The indicator only requests frames while it is actually moving,
-            // so a settled UI goes back to 0% CPU with no explicit stop.
-            when(m.indicator.animating(),
-                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })),
-        };
-
-        // Menu entries, live only while the menu is open.
-        if (m.menu_index >= 0) {
-            subs.push_back(Sub<Msg>::on_click_id(node_id("menu-toggle"), Toggle{m.menu_index}));
-            subs.push_back(Sub<Msg>::on_click_id(node_id("menu-delete"), Remove{m.menu_index}));
-            // Clicking outside sends `leave` for the dismissed overlay.
-            subs.push_back(Sub<Msg>::on_click_id_gesture(
-                node_id("row-menu"), Sub<Msg>::Gesture::leave, Msg{CloseMenu{}}, 0, true));
-        }
-
-        // A click toggles; a DOUBLE click deletes. The count model makes that
-        // two lines instead of a state machine.
-        for (int i = 0; i < static_cast<int>(m.items.size()); ++i) {
-            const auto nid = node_id("row", static_cast<std::size_t>(i));
-            subs.push_back(Sub<Msg>::on_click_id(nid, Toggle{i}));
-            // Double click opens the row's context menu.
-            subs.push_back(Sub<Msg>::on_click_id_gesture(
-                nid, Sub<Msg>::Gesture::click, Msg{OpenMenu{i}}, 2, false));
-        }
-
-        subs.push_back(Sub<Msg>::on_click_id(node_id("filter-all"),    SetFilter{Filter::all}));
-        subs.push_back(Sub<Msg>::on_click_id(node_id("filter-active"), SetFilter{Filter::active}));
-        subs.push_back(Sub<Msg>::on_click_id(node_id("filter-done"),   SetFilter{Filter::done}));
-
-        return Sub<Msg>::batch(std::move(subs));
+    // The indicator only requests frames while it is actually moving, so a
+    // settled UI goes back to 0% CPU with no explicit stop.
+    static Sub subscribe(const Model& m) {
+        return when(m.indicator.animating(),
+                    Sub::on_frame([](double dt) -> Msg { return Tick{dt}; }));
     }
 };
 
-static_assert(Program<Todo>);
+static_assert(mayag::Program<Todo>);
 
 int main(int argc, char** argv) {
     const auto opts = demo::parse_args(argc, argv, Vec2{460, 620});

@@ -21,7 +21,7 @@
 - **One shape kernel.** Buttons, cards, dividers, circles, rings, arcs, capsules, shadows, glyphs — every one is a signed distance field on the same instanced quad. A whole app frame is **1–3 draw calls**, text included.
 - **Analytic antialiasing.** No MSAA, no supersampling. The SDF has unit gradient, so coverage is exact at any zoom on any backend.
 - **Runs everywhere, immediately.** A pure-CPU reference rasteriser ships in the box, font discovery finds the platform's typefaces with no configuration, and a synthesized last-resort face keeps text legible even on a machine with no fonts at all. `git clone && cmake --build` renders a PNG.
-- **Header-only.** `#include <mayag/mayag.hpp>`. No library to link, no ABI to match.
+- **Header-only.** `#include <mayag/mayag.hpp>`. The only compiled piece is the [jaal](https://github.com/1ay1/jaal) runtime, a git submodule built with mayag.
 
 ## Quickstart
 
@@ -54,7 +54,10 @@ int main() {
 
 ### Use it in your project
 
-mayag is header-only. Point CMake at an installed copy and link the interface target:
+mayag is header-only on top of jaal, its runtime (`third_party/jaal`, a git
+submodule; clone with `--recursive` or run `git submodule update --init`).
+Point CMake at an installed copy and link the interface target, which brings
+jaal with it:
 
 ```cmake
 find_package(mayag REQUIRED)
@@ -200,7 +203,7 @@ animate, <kbd>tab</kbd> to move focus, <kbd>esc</kbd> to quit.
 
 | Example | What it shows |
 |---------|---------------|
-| `hello` | ~110 lines: the smallest live animated app — match(), action(), on_frame(), a spring |
+| `hello` | ~110 lines: the smallest live animated app — update overloads, on(Clicked), on_frame(), a spring |
 | `counter` | the smallest complete Program — Model/Msg/init/update/view/subscribe |
 | `gallery` | every visual feature, 6 live themes, drag + hover + animation |
 | `dashboard` | a realistic app layout with a clickable sidebar |
@@ -422,61 +425,66 @@ usually wants the hard stop; it is one flag for a touch surface.
 
 ## Writing a live app
 
-An app is five static functions on a struct — `init`, `update`, `view`,
-`subscribe`, plus a `Model` and a `Msg` variant. Three helpers keep the wiring
-short *and* impossible to desync:
-
-**`match(msg, …)`** — one typed lambda per message, checked for exhaustiveness by
-the compiler. Add a `Msg` alternative and forget to handle it, and the build
-fails:
+mayag runs on [jaal](https://github.com/1ay1/jaal) (`third_party/jaal`, a git
+submodule). jaal is the runtime: the loop, `update`, `Cmd`, `Sub`, timers,
+background tasks, streams, faults and the OS waiting. mayag is a jaal host
+that owns the window and draws. An app is an ordinary jaal program with a
+`view()`:
 
 ```cpp
-using R = std::pair<Model, Cmd<Msg>>;
-return match(msg,
-    [&](Inc)     -> R { m.count++;         return {m, Cmd<Msg>::none()}; },
-    [&](Tick t)  -> R { m.pulse.step(t.dt); return {m, Cmd<Msg>::none()}; },
-    [&](Quit)    -> R { return {m, Cmd<Msg>::quit()}; });
+struct Counter {
+    struct Model { int count = 0; Animated<float> pulse{0.0f}; };
+    struct Inc {}; struct Tick { float dt; }; struct Quit {};
+    using Msg = std::variant<Inc, Tick, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title>;     // the window effects it uses
+    using Sub = mayag::Sub<Msg>;
+
+    static Cmd init(Model&) { return SetTitle{"counter"}; }
+    static Cmd update(Model& m, Inc)    { ++m.count; m.pulse.snap(1); m.pulse.to(0); return {}; }
+    static Cmd update(Model& m, Tick t) { m.pulse.step(t.dt); return {}; }
+    static Cmd update(Model&,   Quit)   { return Cmd::quit(); }
+
+    static Node view(const Model& m) { const Theme& t = ctx().theme; /* ... */ }
+
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (is(c, "inc")) return Inc{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        static const keymap<Msg> keys{{Key::escape, Quit{}}};
+        return keys(k);
+    }
+    static Sub subscribe(const Model& m) {
+        return when(m.pulse.animating(), Sub::on_frame([](float dt) { return Tick{dt}; }));
+    }
+};
+int main() { return mayag::run<Counter>(); }
 ```
 
-**`action(id, msg)`** — a clickable's id and its message declared once, so the
-view tag and the subscription can't drift. A typo becomes a compile error, not
-a dead button:
+One `update` overload per message; jaal names the case you forgot to handle.
+Input is one `on()` per event kind: raw events (`KeyEvent`, `TextEvent`,
+`MouseMove`, `ResizeEvent`, `CloseRequest`, ...) and gestures the host has
+already hit-tested against the laid-out tree (`Clicked`, `Activated`,
+`Pressed`, `Released`, `Entered`, `Left`, `Dragged`, `Scrolled`), each naming
+its node. `view()` reads the window (size, theme, hover, focus) through
+`ctx()`.
+
+For a dynamic list, `id_of(base, index)` folds the row index into the id with
+no string building, and `node_id(base, index)` gives the same id in `on()`:
 
 ```cpp
-static inline const auto inc = action(node_id("inc"), Msg{Inc{}});
-// view:      button(t) | inc.on
-// subscribe: inc.click()
-```
-
-For a dynamic list, `node_id(base, index)` folds the row index into the id with
-no string building, so the same call names the row in the view loop and the
-subscribe loop:
-
-```cpp
-// view: build the rows in a loop, then v_list() lays them out like v() does
 std::vector<Node> rows;
 for (int i = 0; i < (int)m.items.size(); ++i)
     rows.push_back((row(m.items[i]) | id_of("row", i)).build());
 return v_list(std::move(rows), 8.0f);
-
-// subscribe: same id, one Sub per row
-for (int i = 0; i < (int)m.items.size(); ++i)
-    subs.push_back(Sub<Msg>::on_click_id(node_id("row", i), Toggle{i}));
 ```
 
-**`on_frame(fn)`** — per-frame animation ticks without unpacking a FrameEvent,
-gated so a settled app is 0% CPU:
-
-```cpp
-when(m.pulse.animating(),
-     Sub<Msg>::on_frame([](float dt) { return Tick{dt}; }))
-```
-
-Get a signature slightly wrong and the error names the exact method to fix
-("needs `static std::pair<Model, Cmd<Msg>> update(Model, Msg)`") rather than
-"constraints not satisfied". The whole thing is testable without a window:
-`run_headless` drives clicks and asserts on the model. See
-[`examples/hello.cpp`](examples/hello.cpp) for the smallest complete app.
+`Sub::on_frame` is the frame clock: one tick per refresh while `subscribe()`
+returns it, none otherwise, so a settled app sleeps in the OS at 0% CPU.
+Background work is jaal's `Cmd::task`, `Cmd::perform` and `Sub::stream`. The
+whole thing is testable without a window: `run_headless` drives clicks and
+asserts on the model. See [`examples/hello.cpp`](examples/hello.cpp) for the
+smallest complete app.
 
 ## Overlays, virtualisation, animation
 
@@ -640,63 +648,35 @@ fd — so the frame sits unrendered until the user happens to move the mouse,
 and the app looks frozen. The usual escape is a polling timer, which trades
 the freeze for a permanently-awake core.
 
-mayag does neither. Three pieces:
+mayag does neither. A producer is a jaal `Sub::stream`, returned from
+`subscribe()`, so it runs exactly as long as the model says it should.
+"Connect the socket while logged in, close it on logout" is one line, with no
+`connect()`/`disconnect()` in `update` and no thread leaked when the flag
+flips:
 
-- **`Cmd::stream`** is a long-lived producer, fired imperatively from `update`.
-  Where `Cmd::task` runs once and returns a single message, a stream gets a
-  thread-safe `sink` and emits an open-ended sequence over its lifetime. The
-  runtime owns the thread and joins it on shutdown; a well-behaved stream
-  returns when `keep_running()` goes false.
+```cpp
+static Sub subscribe(const Model& m) {
+    return when(m.streaming, Sub::stream("cpu", [](jaal::Sink<Msg> out, std::stop_token st) {
+        CpuSampler s;
+        while (!st.stop_requested()) {
+            std::this_thread::sleep_for(100ms);
+            out.send(Sample{s.read()});
+        }
+    }));
+}
+```
 
-  ```cpp
-  // A metrics poller. Each sample flows into update() as a message.
-  Cmd<Msg>::stream([](auto sink, auto alive) {
-      CpuSampler s;
-      while (alive()) {
-          std::this_thread::sleep_for(100ms);
-          if (alive()) sink(Sample{s.read()});
-      }
-  });
-  ```
+The body captures nothing; anything it needs is passed as an argument after
+it, so it can't hold a reference into the model. Each send wakes jaal's
+reactor, which is the same epoll/kqueue wait that watches the window, so the
+message is folded and drawn at once. When the stream is stopped, anything it
+had already queued is dropped before it reaches `update()`.
 
-- **`Sub::source`** is the *declarative* form — the one you usually want. It is
-  a stream keyed by an id and returned from `subscribe()`, so it runs exactly
-  as long as the model says it should. "Connect the socket while logged in,
-  close it on logout" is one line, with no `connect()`/`disconnect()`
-  bookkeeping in `update` and no thread leaked when the flag flips — the
-  runtime diffs the ids each frame, starts a producer that appeared, and stops
-  and joins one that vanished.
-
-  ```cpp
-  Sub<Msg> subscribe(const Model& m) {
-      return Sub<Msg>::batch(
-          m.streaming ? Sub<Msg>::source("cpu", cpu_feed) : Sub<Msg>::none(),
-          Sub<Msg>::on_close(Quit{}));
-  }
-  ```
-
-  A firehose feed — a socket or sensor faster than the UI renders — would grow
-  the inbox without bound if every message were queued. `Sub::source_latest`
-  is the backpressure answer: it keeps only the newest message between frames,
-  so the app sees one value per frame regardless of rate. In a test, a
-  producer emitting 20,000 values delivers **1** — the most recent — rather
-  than a 20,000-deep backlog. Use it for a state feed (a price, a metric, a
-  position); use plain `source` when every message matters (a chat, a log).
-
-- **A cross-thread waker** (a self-pipe the window's `poll()` also watches) is
-  what makes that message *render now*. Posting to the runtime's inbox writes
-  one byte to the pipe, which interrupts the blocked UI thread the instant the
-  producer fires — no polling timer, no missed update. Wakes coalesce, so a
-  burst of a thousand streamed messages between two frames costs one syscall.
-
-The result is an app that is genuinely live and still cheap. `mayag_live` is a
-real-time CPU monitor whose sampler is a `Sub::source` emitting ten readings a
-second; measured while running, it sits at **0.0% CPU** between samples,
-because the UI thread is asleep in the kernel until the next reading arrives.
-The whole path — waker, inbox, `Cmd::stream` and `Sub::source` lifecycle — is
-verified race-free under ThreadSanitizer, and a test asserts a blocked window
-is woken by a background thread in ~80 ms rather than sleeping through it, and
-that a source stops and joins its thread the frame the model drops it.
+`mayag_live` is a real-time CPU monitor built this way; between samples it
+sits at 0% CPU, asleep in `epoll_wait`. `tests/test_live.cpp` runs a real
+window whose only wake source is a background thread and checks the message
+is folded within a few ms and that the loop used almost no CPU while it
+waited. `tests/test_concurrency.cpp` runs under ThreadSanitizer.
 
 ## Accessibility
 
@@ -746,8 +726,8 @@ framework is simply unusable in those languages.
 mayag models composition as state separate from the document:
 
 ```cpp
-Sub<Msg>::on_compose([](const ComposeEvent& e) { return Composing{e}; }),
-Sub<Msg>::on_text([](std::string_view s)       { return Typed{s}; }),
+static std::optional<Msg> on(const Model&, const ComposeEvent& e) { return Composing{e}; }
+static std::optional<Msg> on(const Model&, const TextEvent& t)    { return Typed{t.text}; }
 
 m.field.set_preedit(e.text);   // shown, not committed
 m.field.commit_preedit();      // now it is in the document
@@ -784,28 +764,33 @@ that no longer follows from the present is incoherent.
 
 ## Error boundary
 
-One bad frame should not end a session. When `update()` or `view()` throws,
-the runtime reports it and carries on:
+One bad frame should not end a session. With `AppConfig::catch_exceptions`
+(the default) jaal runs with `fault_policy::skip`:
 
-- `update` takes the model **by value**, so a throw leaves it moved-from — the
-  runtime restores a snapshot, and the app loses one message rather than all
-  its state.
+- a throwing `update` is rolled back to the model before the message, and the
+  app loses one message rather than all its state.
 - a throwing `view` keeps the **last good tree** on screen. A blank window
   tells the user nothing; a stale frame at least stays usable enough to save.
 
-Off by default in tests, where a crash at the point of failure is more useful
-than a swallowed one.
+Faults go to `AppConfig::on_error`. Turn `catch_exceptions` off and a throw
+stops the program with exit code 70.
 
 ## Clicks
 
 A click carries a **count**; there is no separate `double_click` gesture.
 
 ```cpp
-Sub<Msg>::on_click<"word">(SelectChar{}),        // single ONLY
-Sub<Msg>::on_double_click<"word">(SelectWord{}),
-Sub<Msg>::on_triple_click<"word">(SelectLine{}),
-Sub<Msg>::on_any_click<"btn">(Activate{}),       // fires regardless of count
+static std::optional<Msg> on(const Model&, const Clicked& c) {
+    if (!is(c, "word")) return std::nullopt;
+    if (c.count == 1) return SelectChar{};
+    if (c.count == 2) return SelectWord{};
+    return SelectLine{};          // 3 and beyond
+}
 ```
+
+Enter or Space on a focused control is `Activated`, not a click; handle it to
+make a control keyboard-activatable, or leave it and the key reaches
+`on(KeyEvent)`.
 
 Three things this gets right that the obvious design does not:
 
@@ -1063,9 +1048,10 @@ Built by default on Linux and BSD; `-DMAYAG_WITH_WAYLAND=OFF` opts out.
 
 ## Building
 
-Header-only, so you can just add `include/` to your path. With CMake:
+Header-only, plus the jaal runtime (a submodule, built automatically). With CMake:
 
 ```bash
+git submodule update --init
 cmake -B build -G Ninja
 cmake --build build -j
 ctest --test-dir build

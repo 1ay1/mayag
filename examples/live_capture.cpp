@@ -28,25 +28,30 @@
 using namespace mayag;
 using namespace mayag::dsl;
 
+// How many frames to present before quitting. Set from --frames in main().
+inline int g_frames = 30;
+
 // A scene with the features most likely to differ between paths: a gradient
 // wash, translucency, a blurred glow, text, and hard-edged shapes.
 struct Probe {
-    struct Model { float t = 0.0f; };
-    struct Tick { float dt; };
+    struct Model { float t = 0.0f; int frames = 0; };
+    struct Tick { double dt; };
     struct Quit {};
     using Msg = std::variant<Tick, Quit>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Tick t) -> R { m.t += t.dt; return {m, Cmd<Msg>::none()}; },
-            [&](Quit)   -> R { return {m, Cmd<Msg>::quit()}; });
+    // Each frame ticks; after g_frames presented frames the program quits and
+    // main() reads back what the window last showed.
+    static Cmd update(Model& m, Tick t) {
+        m.t += static_cast<float>(t.dt);
+        if (++m.frames >= g_frames) return Cmd::quit();
+        return {};
     }
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
-    static Node view(const Model& m, const Ctx& c) {
-        const Theme& t = c.theme;
+    static Node view(const Model& m) {
+        const Theme& t = ctx().theme;
         const auto teal = rgb<0x17A2A2>;
         const auto warm = rgb<0xE0653C>;
 
@@ -77,13 +82,18 @@ struct Probe {
             | bg(t.background)).build();
     }
 
-    static Sub<Msg> subscribe(const Model&) {
-        return Sub<Msg>::batch({
-            Sub<Msg>::on_frame([](float dt) { return Tick{dt}; }),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
-            Sub<Msg>::on_close(Quit{})});
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        if (k.key == Key::escape) return Quit{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
+
+    static Sub subscribe(const Model&) {
+        return Sub::on_frame([](double dt) -> Msg { return Tick{dt}; });
     }
 };
+
+static_assert(mayag::Program<Probe>);
 
 namespace {
 
@@ -153,6 +163,8 @@ int main(int argc, char** argv) {
         else if (a == "--ref" && i + 1 < argc) ref = argv[++i];
         else if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
     }
+    if (frames < 1) frames = 1;
+    g_frames = frames;
 
     AppConfig cfg;
     cfg.title = "mayag — live capture";
@@ -165,22 +177,29 @@ int main(int argc, char** argv) {
 
     // Drive the REAL window, not the headless one. This is the whole point:
     // platform::Native is the path a user runs, and the only one that can
-    // exhibit a presentation bug.
-    Runtime<Probe, platform::Native> rt{cfg};
-    if (!rt.boot()) {
+    // exhibit a presentation bug. This is mayag::run<P>() unrolled, so the
+    // window outlives the loop and can be read back afterwards.
+    auto opened = platform::Native::open(mayag::detail::window_config(cfg));
+    if (!opened) {
         std::printf("could not open a window (no compositor?)\n");
         return 1;
     }
-    for (int i = 0; i < frames && !rt.finished(); ++i) rt.tick();
+    platform::Native window = std::move(*opened);
+    {
+        jaal::run_options opt;
+        opt.kernel = mayag::detail::kernel_options(cfg);
+        window_host<Probe, platform::Native> host{window, cfg};
+        (void)jaal::run<Probe>(host, std::move(opt));
+    }
 
-    live = rt.window().read_pixels();
+    live = window.read_pixels();
 
     // Ask the WINDOW for the shape of what it gave us, rather than computing
     // logical*dpi and hoping. The compositor owns the surface size.
-    const Vec2 pix = rt.window().pixel_size();
+    const Vec2 pix = window.pixel_size();
     captured_w = static_cast<int>(pix.x + 0.5f);
     captured_h = static_cast<int>(pix.y + 0.5f);
-    const float dpi = rt.window().dpi_scale();
+    const float dpi = window.dpi_scale();
 
     if (live.size() != static_cast<std::size_t>(captured_w) * captured_h * 4) {
         std::printf("capture is %zu bytes, which is not %dx%d RGBA -- "
@@ -204,13 +223,13 @@ int main(int argc, char** argv) {
     // reference laid out at the REQUESTED size against a live frame laid out
     // at the GRANTED size compares two different scenes and blames the
     // renderer for the difference.
-    const Vec2 logical = rt.window().size();
+    const Vec2 logical = window.size();
     Probe::Model m{};
     Ctx c;
     c.size = logical;
     c.dpi_scale = dpi;
     c.theme = cfg.theme;
-    Node n = Probe::view(m, c);
+    Node n = view_of<Probe>(m, c);
 
     RenderOptions ro;
     ro.background = cfg.theme.background;

@@ -207,7 +207,7 @@ int main(int argc, char** argv) {
             // Drain events so the window stays responsive and the run loop
             // does not back up — a benchmark that starves the window server
             // measures its own starvation.
-            (void)win.poll_events(platform::Wait::immediate, 0.0);
+            (void)win.dispatch();
 
             const auto   t0 = std::chrono::steady_clock::now();
             const double c0 = thread_cpu_ms();

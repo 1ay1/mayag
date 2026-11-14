@@ -1,442 +1,248 @@
-// tests/test_live.cpp — the streaming / live-app path
+// tests/test_live.cpp — streams and the live window, on jaal
 //
-// A live app receives data from somewhere other than the window: a socket, a
-// subprocess, a metrics poller, a worker thread. mayag's answer is `Cmd::stream`
-// (a long-lived producer) plus a cross-thread waker (so a message posted from a
-// producer thread interrupts an idle UI thread instead of sitting unrendered
-// until the user moves the mouse).
+// A live app gets data from somewhere other than the window: a socket, a
+// worker thread, a poller. In mayag that is a jaal Sub::stream. jaal's own
+// suite covers the stream machinery; these tests check the mayag side:
 //
-// Two kinds of check, split so CI is meaningful without a compositor:
-//
-//   * The Waker itself is pure logic (a self-pipe): its wake/drain/coalesce
-//     behaviour runs everywhere and is exact.
-//   * The end-to-end "a blocked app wakes and renders" check needs a real
-//     blocking window, so it runs only under a Wayland compositor and skips
-//     cleanly otherwise.
+//   * stream messages reach update() through the headless host, in order
+//   * a stream runs exactly while subscribe() returns it
+//   * Sub::every starts and stops with the model
+//   * a REAL window, blocked with no window activity, is woken by a stream
+//     thread and folds its message promptly. This is the one that matters:
+//     the old runtime had its own waker for it; now jaal's reactor does it.
+//     Needs a Wayland compositor and skips cleanly without one.
 
 #include <mayag/mayag.hpp>
-#include <mayag/platform/waker.hpp>
-#include <mayag/platform/wayland.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <poll.h>
+#include <cstdlib>
+#include <optional>
+#include <stop_token>
 #include <string>
-#include <string_view>
+#include <sys/resource.h>
 #include <thread>
+#include <variant>
 
 using namespace mayag;
-using namespace mayag::platform;
 using namespace std::chrono_literals;
 
 namespace {
 
-int failures = 0, checks = 0;
-void check(bool ok, std::string_view what) {
+int failures = 0;
+int checks = 0;
+
+void check(bool ok, const std::string& what) {
     ++checks;
-    if (!ok) { ++failures; std::printf("  FAIL  %.*s\n",
-                                       static_cast<int>(what.size()), what.data()); }
+    if (!ok) ++failures;
+    std::printf("  %s  %s\n", ok ? "ok  " : "FAIL", what.c_str());
 }
-void section(std::string_view s) { std::printf("\n%.*s\n",
-                                               static_cast<int>(s.size()), s.data()); }
+void section(const char* name) { std::printf("\n%s\n", name); }
 
-// ── the waker ────────────────────────────────────────────────────────────
-
-void test_waker_basics() {
-    section("waker");
-
-    Waker w;
-    check(w.usable(), "the self-pipe was created");
-    check(w.fd() >= 0, "it exposes a pollable fd");
-
-    // A wake makes the fd readable.
-    w.wake();
-    pollfd pfd{w.fd(), POLLIN, 0};
-    check(::poll(&pfd, 1, 100) == 1, "wake() makes the fd readable within 100ms");
-    check((pfd.revents & POLLIN) != 0, "it is readable for READ specifically");
-
-    // Drain clears it.
-    w.drain();
-    pollfd pfd2{w.fd(), POLLIN, 0};
-    check(::poll(&pfd2, 1, 0) == 0, "drain() clears the readable state");
-
-    // Coalescing: many wakes between drains cost one readable event, and one
-    // drain clears them all.
-    for (int i = 0; i < 1000; ++i) w.wake();
-    w.drain();
-    pollfd pfd3{w.fd(), POLLIN, 0};
-    check(::poll(&pfd3, 1, 0) == 0, "1000 wakes coalesce and one drain clears them");
+AppConfig quiet() {
+    AppConfig cfg;
+    cfg.log_renderer = false;
+    cfg.size = {200, 120};
+    return cfg;
 }
 
-void test_waker_cross_thread() {
-    section("waker across threads");
-
-    Waker w;
-
-    // A UI thread blocked in poll() must be woken by a producer thread. This
-    // is the exact scenario an idle streaming app is in.
-    std::atomic<bool> producer_ran{false};
-    std::thread producer([&] {
-        std::this_thread::sleep_for(50ms);
-        producer_ran.store(true);
-        w.wake();
-    });
-
-    const auto t0 = std::chrono::steady_clock::now();
-    pollfd pfd{w.fd(), POLLIN, 0};
-    const int r = ::poll(&pfd, 1, 2000);   // would block 2s without the wake
-    const auto elapsed = std::chrono::steady_clock::now() - t0;
-    producer.join();
-
-    check(r == 1, "a blocked poll() is woken by another thread");
-    check(producer_ran.load(), "the producer actually ran");
-    check(elapsed < 500ms, "the wake was prompt, not a timeout");
-    w.drain();
-}
-
-// ── Cmd::stream lifecycle, through the headless runtime ─────────────────
-//
-// A stream posts messages that update() folds into the model; the runtime
-// joins the producer thread on shutdown. Headless does not block, but the
-// inbox + Cmd::stream plumbing is platform-independent, so this exercises the
-// real interpret/step path.
+// ── a finite stream ─────────────────────────────────────────────────────
 
 struct StreamApp {
     struct Model { int received = 0; int last = 0; bool started = false; };
-    struct Started {};
+    struct Start {};
     struct Value { int n; };
-    using Msg = std::variant<Started, Value>;
+    using Msg = std::variant<Start, Value>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
 
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::holds_alternative<Value>(msg)) {
-            m.received += 1;
-            m.last = std::get<Value>(msg).n;
-            return {m, Cmd<Msg>::none()};
-        }
-        // Started: launch a producer that emits 1..5 quickly then stops.
-        m.started = true;
-        auto cmd = Cmd<Msg>::stream([](Cmd<Msg>::Sink sink, std::function<bool()> alive) {
-            for (int i = 1; i <= 5 && alive(); ++i) {
-                std::this_thread::sleep_for(5ms);
-                sink(Value{i});
-            }
-        });
-        return {m, cmd};
-    }
-
+    static Cmd update(Model& m, Start) { m.started = true; return {}; }
+    static Cmd update(Model& m, Value v) { ++m.received; m.last = v.n; return {}; }
     static Node view(const Model&) { return dsl::box().build(); }
-    static Sub<Msg> subscribe(const Model&) { return Sub<Msg>::none(); }
+
+    static Sub subscribe(const Model& m) {
+        return when(m.started, Sub::stream("count", [](jaal::Sink<Msg> out, std::stop_token st) {
+            for (int i = 1; i <= 5 && !st.stop_requested(); ++i) {
+                std::this_thread::sleep_for(2ms);
+                (void)out.send(Value{i});
+            }
+        }));
+    }
 };
 
-void test_stream_lifecycle() {
-    section("Cmd::stream lifecycle");
+void test_stream_delivers() {
+    section("Sub::stream delivers");
 
-    AppConfig cfg;
-    cfg.log_renderer = false;
-
-    int seen = 0, last = 0;
-    run_headless<StreamApp>(cfg, [&](auto& rt) {
-        // Kick the stream, then pump the runtime until the producer's five
-        // messages have all been folded into the model.
-        rt.send(StreamApp::Started{});
-        for (int i = 0; i < 200 && rt.model().received < 5; ++i) {
-            std::this_thread::sleep_for(2ms);
-            rt.tick();
-        }
-        seen = rt.model().received;
-        last = rt.model().last;
+    run_headless<StreamApp>(quiet(), [](auto& rt) {
+        rt.send(StreamApp::Start{});
+        { const bool settled_ = rt.settle([](const auto& m) { return m.received == 5; });
+          check(settled_, "all five streamed messages arrived (" + std::to_string(rt.model().received) + ")"); }
+        check(rt.model().last == 5, "in order (last == 5)");
     });
-
-    check(seen == 5, std::string{"all five streamed messages arrived ("} +
-                     std::to_string(seen) + ")");
-    check(last == 5, "messages arrived in order (last == 5)");
-    // The runtime's destructor ran here without hanging, which is the join
-    // working: a stream that ignored keep_running() would deadlock the test.
-    check(true, "the runtime shut the stream down and joined cleanly");
+    check(true, "the program shut the stream down without hanging");
 }
 
-// ── Sub::source: a declarative stream tied to the model ─────────────────
-//
-// Where Cmd::stream is fired imperatively and runs to completion, Sub::source
-// runs exactly as long as subscribe() returns it. Toggling the model's
-// `connected` flag must start the producer, and clearing it must stop and join
-// the thread — with no connect()/disconnect() plumbing in update().
+// ── a stream tied to the model ──────────────────────────────────────────
+
+std::atomic<int> g_live_producers{0};
 
 struct SourceApp {
     struct Model { bool connected = false; int received = 0; };
-    struct Connect {};
-    struct Disconnect {};
-    struct Value { int n; };
+    struct Connect {}; struct Disconnect {}; struct Value { int n; };
     using Msg = std::variant<Connect, Disconnect, Value>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
 
-    // A process-wide counter so the test can observe the producer thread
-    // actually starting and stopping, independent of message delivery.
-    static inline std::atomic<int> live_producers{0};
-
-    static Model init() { return {}; }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::holds_alternative<Connect>(msg))    m.connected = true;
-        else if (std::holds_alternative<Disconnect>(msg)) m.connected = false;
-        else m.received += 1;
-        return {m, Cmd<Msg>::none()};
-    }
-
+    static Cmd update(Model& m, Connect)    { m.connected = true;  return {}; }
+    static Cmd update(Model& m, Disconnect) { m.connected = false; return {}; }
+    static Cmd update(Model& m, Value)      { ++m.received; return {}; }
     static Node view(const Model&) { return dsl::box().build(); }
 
-    static Sub<Msg> subscribe(const Model& m) {
-        // The source exists ONLY while connected. This is the whole point:
-        // the producer's lifetime is a pure function of the model.
-        if (!m.connected) return Sub<Msg>::none();
-        return Sub<Msg>::source("feed", [](std::function<void(Msg)> sink,
-                                           std::function<bool()> alive) {
-            live_producers.fetch_add(1, std::memory_order_release);
-            int n = 0;
-            while (alive()) {
-                std::this_thread::sleep_for(3ms);
-                if (alive()) sink(Value{++n});
+    static Sub subscribe(const Model& m) {
+        // The producer exists ONLY while connected.
+        return when(m.connected, Sub::stream("feed", [](jaal::Sink<Msg> out, std::stop_token st) {
+            g_live_producers.fetch_add(1);
+            for (int n = 1; !st.stop_requested(); ++n) {
+                std::this_thread::sleep_for(2ms);
+                (void)out.send(Value{n});
             }
-            live_producers.fetch_sub(1, std::memory_order_release);
-        });
+            g_live_producers.fetch_sub(1);
+        }));
     }
 };
 
-void test_source_lifecycle() {
-    section("Sub::source lifecycle");
+void test_stream_lifecycle() {
+    section("Sub::stream lifecycle");
 
-    AppConfig cfg;
-    cfg.log_renderer = false;
-
-    int received_after_connect = 0;
-    int producers_while_connected = 0;
-    int producers_after_disconnect = -1;
-
-    run_headless<SourceApp>(cfg, [&](auto& rt) {
-        // Not connected yet: no producer should be running.
+    run_headless<SourceApp>(quiet(), [](auto& rt) {
         rt.tick();
-        check(SourceApp::live_producers.load() == 0,
-              "no source runs before the model asks for it");
+        check(g_live_producers.load() == 0, "no producer runs before the model asks for it");
 
-        // Connect: the source appears in subscribe(), so the runtime starts it.
         rt.send(SourceApp::Connect{});
-        for (int i = 0; i < 200 && rt.model().received < 3; ++i) {
-            std::this_thread::sleep_for(2ms);
-            rt.tick();
-        }
-        received_after_connect = rt.model().received;
-        producers_while_connected = SourceApp::live_producers.load();
+        { const bool settled_ = rt.settle([](const auto& m) { return m.received >= 3; });
+          check(settled_, "a connected stream delivers (" + std::to_string(rt.model().received) + ")"); }
+        check(g_live_producers.load() == 1, "exactly one producer runs while connected");
 
-        // Disconnect: the source vanishes from subscribe(), so the runtime
-        // stops it.
-        //
-        // The stop is SIGNALLED synchronously but not joined inline: the
-        // runtime sets the producer's alive flag and retires the thread,
-        // reaping it on a later tick once it has actually returned. Joining
-        // inside this tick would mean the UI thread waits for whatever the
-        // producer is in the middle of -- measured at 370 ms of frozen frame
-        // with a slow decoder, which is why it no longer does.
-        //
-        // So the contract under test is "stops promptly and leaks nothing",
-        // not "is joined before tick() returns". Pump until it winds down.
         rt.send(SourceApp::Disconnect{});
-        for (int i = 0; i < 500 && SourceApp::live_producers.load() != 0; ++i) {
-            rt.tick();
-            std::this_thread::sleep_for(2ms);
-        }
-        producers_after_disconnect = SourceApp::live_producers.load();
-    });
+        const auto end = std::chrono::steady_clock::now() + 1s;
+        while (g_live_producers.load() != 0 && std::chrono::steady_clock::now() < end)
+            std::this_thread::yield();
+        check(g_live_producers.load() == 0, "the producer stops when the model disconnects");
 
-    check(received_after_connect >= 3,
-          std::string{"a connected source streams messages ("} +
-          std::to_string(received_after_connect) + ")");
-    check(producers_while_connected == 1, "exactly one producer runs while connected");
-    check(producers_after_disconnect == 0,
-          "the producer stops when the model disconnects");
+        const int frozen = rt.model().received;
+        (void)rt.settle([](const auto&) { return false; }, 30ms);
+        check(rt.model().received == frozen, "and nothing it sent afterwards reaches update()");
+    });
 }
 
-// ── Sub::every reconciliation ────────────────────────────────────
-//
-// Interval subscriptions are declarative too: the live set is recomputed from
-// the model each frame. The runtime must START firing an interval that appears
-// and STOP one whose condition goes false. This was silently broken once (the
-// reconcile call was missing, so `interval_timers_` stayed empty and
-// `Sub::every` never fired at all) — this pins it so it cannot regress.
+// ── Sub::every ──────────────────────────────────────────────────────────
 
 struct EveryApp {
     struct Model { int ticks = 0; bool running = true; };
-    struct Tick {};
-    struct Stop {};
+    struct Tick {}; struct Stop {};
     using Msg = std::variant<Tick, Stop>;
-
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::holds_alternative<Tick>(msg)) m.ticks += 1;
-        else m.running = false;
-        return {m, Cmd<Msg>::none()};
-    }
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
+    static Cmd update(Model& m, Tick) { ++m.ticks; return {}; }
+    static Cmd update(Model& m, Stop) { m.running = false; return {}; }
     static Node view(const Model&) { return dsl::box().build(); }
-    static Sub<Msg> subscribe(const Model& m) {
-        if (!m.running) return Sub<Msg>::none();          // interval disappears
-        return Sub<Msg>::every(10ms, Tick{});
-    }
+    static Sub subscribe(const Model& m) { return when(m.running, Sub::every(10ms, Tick{})); }
 };
 
 void test_every_reconciliation() {
     section("Sub::every reconciliation");
 
-    AppConfig cfg;
-    cfg.log_renderer = false;
-
-    int while_running = 0, after_stop = 0;
-    run_headless<EveryApp>(cfg, [&](auto& rt) {
-        for (int i = 0; i < 80 && rt.model().ticks < 3; ++i) {
-            std::this_thread::sleep_for(4ms);
-            rt.tick();
-        }
-        while_running = rt.model().ticks;
-
-        // Drop the interval; it must stop firing.
+    run_headless<EveryApp>(quiet(), [](auto& rt) {
+        { const bool settled_ = rt.settle([](const auto& m) { return m.ticks >= 3; }, 1s);
+          check(settled_, "an active Sub::every fires (" + std::to_string(rt.model().ticks) + " ticks)"); }
         rt.send(EveryApp::Stop{});
-        rt.tick();
         const int base = rt.model().ticks;
-        for (int i = 0; i < 40; ++i) {
-            std::this_thread::sleep_for(4ms);
-            rt.tick();
-        }
-        after_stop = rt.model().ticks - base;
+        (void)rt.settle([](const auto&) { return false; }, 60ms);
+        check(rt.model().ticks == base, "it stops when its condition goes false");
     });
-
-    check(while_running >= 3,
-          std::string{"an active Sub::every fires ("} +
-          std::to_string(while_running) + " ticks)");
-    check(after_stop == 0,
-          "it stops the frame its condition goes false");
 }
 
-// ── Sub::source_latest: coalescing backpressure ──────────────────────
-//
-// A firehose feed — a socket or sensor faster than the UI renders — must not
-// grow the inbox without bound. source_latest keeps only the newest message
-// between frames, so the app sees one value per frame no matter the rate, and
-// the last value it sees is the most recent one produced.
+// ── end to end: a real, idle window is woken by a stream ────────────────
 
-struct FirehoseApp {
-    struct Model { int received = 0; int last = 0; };
-    struct Start {};
-    struct Value { int n; };
-    using Msg = std::variant<Start, Value>;
+using clk = std::chrono::steady_clock;
+std::atomic<long long> g_wake_ms{-1};
+std::atomic<long long> g_loop_cpu_us{-1};
+std::atomic<bool>      g_timed_out{false};
+clk::time_point        g_sent_at{};
+long long              g_cpu_at_init = 0;
 
-    static inline std::atomic<int> emitted{0};
+// CPU time of the calling thread. update() and init() run on the loop
+// thread, so the difference is what the loop burned while it waited.
+long long thread_cpu_us() {
+    rusage u{};
+    ::getrusage(RUSAGE_THREAD, &u);
+    return (u.ru_utime.tv_sec + u.ru_stime.tv_sec) * 1'000'000LL +
+           u.ru_utime.tv_usec + u.ru_stime.tv_usec;
+}
 
-    static Model init() { return {}; }
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::holds_alternative<Value>(msg)) {
-            m.received += 1;
-            m.last = std::get<Value>(msg).n;
-        }
-        return {m, Cmd<Msg>::none()};
+struct WakeApp {
+    struct Model {};
+    struct Ping {}; struct Timeout {};
+    using Msg = std::variant<Ping, Timeout>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
+
+    // A backstop so a broken wakeup fails instead of hanging the suite. It
+    // is far later than the ping, so it can't be what wakes the loop.
+    static Cmd init(Model&) { g_cpu_at_init = thread_cpu_us(); return Cmd::after(3000ms, Timeout{}); }
+
+    static Cmd update(Model&, Ping) {
+        g_wake_ms = std::chrono::duration_cast<std::chrono::milliseconds>(clk::now() - g_sent_at).count();
+        g_loop_cpu_us = thread_cpu_us() - g_cpu_at_init;
+        return Cmd::quit();
     }
+    static Cmd update(Model&, Timeout) { g_timed_out = true; return Cmd::quit(); }
     static Node view(const Model&) { return dsl::box().build(); }
-    static Sub<Msg> subscribe(const Model&) {
-        // Emit as fast as possible for a short burst.
-        return Sub<Msg>::source_latest("firehose",
-            [](std::function<void(Msg)> sink, std::function<bool()> alive) {
-                for (int i = 1; i <= 5000 && alive(); ++i) {
-                    emitted.fetch_add(1, std::memory_order_relaxed);
-                    sink(Value{i});
-                }
-            });
+
+    static Sub subscribe(const Model&) {
+        return Sub::stream("ping", [](jaal::Sink<Msg> out, std::stop_token st) {
+            // Long enough for the window to map and the loop to go to sleep.
+            for (int i = 0; i < 40 && !st.stop_requested(); ++i) std::this_thread::sleep_for(5ms);
+            g_sent_at = clk::now();
+            (void)out.send(Ping{});
+        });
     }
 };
 
-void test_source_latest_coalesces() {
-    section("Sub::source_latest coalescing");
-
-    AppConfig cfg;
-    cfg.log_renderer = false;
-
-    int received = 0, last = 0, emitted = 0;
-    run_headless<FirehoseApp>(cfg, [&](auto& rt) {
-        // Let the producer run and pump a handful of frames.
-        for (int i = 0; i < 30; ++i) {
-            std::this_thread::sleep_for(3ms);
-            rt.tick();
-        }
-        received = rt.model().received;
-        last     = rt.model().last;
-        emitted  = FirehoseApp::emitted.load();
-    });
-
-    check(emitted > 100,
-          std::string{"the producer emitted a firehose ("} +
-          std::to_string(emitted) + ")");
-    // The whole point: the app processed FAR fewer messages than were emitted
-    // — at most about one per frame — rather than a message per emission.
-    check(received > 0 && received < emitted / 4,
-          std::string{"coalescing collapses the firehose ("} +
-          std::to_string(received) + " processed of " + std::to_string(emitted) + ")");
-    // And what it did see is a recent value, not a stale early one.
-    check(last > received,
-          "the value delivered is the latest, not a backlog head");
-}
-
-// ── end to end: a blocked window wakes and renders ──────────────────────
-
-void test_blocked_window_wakes() {
+void test_idle_window_wakes() {
     section("live window wakeup");
 
-    const char* disp = ::getenv("WAYLAND_DISPLAY");
-    if (disp == nullptr || *disp == '\0' || !wl::lib().ok) {
+    const char* disp = std::getenv("WAYLAND_DISPLAY");
+    if (disp == nullptr || *disp == '\0') {
         std::printf("  (no compositor — skipped)\n");
         return;
     }
 
-    WindowConfig cfg;
+    AppConfig cfg = quiet();
     cfg.title = "mayag live test";
-    cfg.size = {320, 200};
-    auto win = WaylandWindow::open(cfg);
-    check(win.has_value(), "the window opens");
-    if (!win) return;
-
-    Waker waker;
-    win->set_waker(&waker);
-    check(waker.usable(), "the waker is usable");
-
-    // Block the UI thread with NO window activity; a producer wakes it.
-    std::thread producer([&] {
-        std::this_thread::sleep_for(80ms);
-        waker.wake();
-    });
-
-    const auto t0 = std::chrono::steady_clock::now();
-    // Wait::block would sleep indefinitely with no window events; the waker is
-    // the only thing that can return it promptly.
-    auto events = win->poll_events(Wait::block, 0.0);
-    const auto elapsed = std::chrono::steady_clock::now() - t0;
-    producer.join();
-    (void)events;
-
-    check(elapsed < 1500ms,
-          "a blocked window is woken by a background thread, not left asleep");
-    std::printf("  (woke after %lld ms)\n",
-                static_cast<long long>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()));
+    const int rc = mayag::run<WakeApp>(cfg);
+    check(rc == 0, "the program ran and quit cleanly (exit " + std::to_string(rc) + ")");
+    check(!g_timed_out.load(), "the stream's message arrived before the backstop");
+    const long long ms = g_wake_ms.load();
+    std::printf("  (folded %lld ms after the send)\n", ms);
+    check(ms >= 0 && ms < 100,
+          "an idle window is woken by a background thread, not left asleep");
+    // ~200 ms passed between init and the ping. A loop that spun instead of
+    // sleeping would have burned most of it.
+    const long long cpu = g_loop_cpu_us.load();
+    std::printf("  (loop thread used %lld us of CPU over ~200 ms)\n", cpu);
+    check(cpu >= 0 && cpu < 60'000, "and the loop was asleep while it waited");
 }
 
 }  // namespace
 
 int main() {
     std::printf("mayag live / streaming\n======================\n");
-    test_waker_basics();
-    test_waker_cross_thread();
+    test_stream_delivers();
     test_stream_lifecycle();
-    test_source_lifecycle();
-    test_source_latest_coalesces();
     test_every_reconciliation();
-    test_blocked_window_wakes();
+    test_idle_window_wakes();
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;

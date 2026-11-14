@@ -1,14 +1,13 @@
-// live.cpp — a real-time monitor built on Cmd::stream
+// live.cpp — a real-time monitor built on a jaal stream
 //
 // The point of this example is the shape of a LIVE app: data arrives from a
 // source that is not the window — here a background thread sampling the
 // system — and the UI updates as it flows in, while an idle frame still costs
-// nothing. That is what `Cmd::stream` plus the cross-thread waker buy you: the
-// producer runs on its own thread, each sample wakes the UI thread, and
-// between samples the app blocks at 0% CPU.
+// nothing. The producer runs on its own thread, each sample wakes jaal's
+// loop, and between samples the app sleeps at 0% CPU.
 //
 // Everything else is the same pure Model/Msg/update/view mayag always is. The
-// only new idea is one Cmd.
+// only new idea is one Sub::stream.
 //
 //   window:   ./mayag_live
 //   headless: ./mayag_live --headless    (streams a few samples, asserts, exits)
@@ -22,6 +21,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <variant>
@@ -80,27 +80,24 @@ struct Live {
     struct Sample { float load; };
     struct Quit {};
     using Msg = std::variant<Sample, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() {
-        return {Model{.streaming = true}, Cmd<Msg>::set_title("mayag — live")};
+    static Cmd init(Model& m) { m.streaming = true; return SetTitle{"mayag — live"}; }
+
+    static Cmd update(Model& m, const Sample& e) {
+        m.current = num::clamp(e.load, 0.0f, 1.0f);
+        m.history[m.head] = m.current;
+        m.head = (m.head + 1) % kHistory;
+        if (m.count < kHistory) ++m.count;
+        m.peak = num::max(m.peak, m.current);
+        ++m.samples;
+        return {};
     }
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](const Sample& e) -> R {
-                m.current = num::clamp(e.load, 0.0f, 1.0f);
-                m.history[m.head] = m.current;
-                m.head = (m.head + 1) % kHistory;
-                if (m.count < kHistory) ++m.count;
-                m.peak = num::max(m.peak, m.current);
-                ++m.samples;
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
-    }
-
-    static Node view(const Model& m, const Ctx& c) {
+    static Node view(const Model& m) {
+        const Ctx& c = ctx();
         const Theme& t = c.theme;
 
         // A live bar chart of the sample history, oldest to newest. Each bar's
@@ -159,34 +156,33 @@ struct Live {
              | width(pct(100)) | height(pct(100)) | bg(t.background);
     }
 
-    static Sub<Msg> subscribe(const Model& m) {
-        // No frame subscription: the app is NOT animating. It renders only when
-        // a sample arrives, and blocks at 0% CPU in between — which is exactly
-        // the property that makes a streaming app cheap.
-        //
-        // The producer is a DECLARATIVE Sub::source: it runs precisely while
-        // this subscription is returned, so "stream while m.streaming" needs no
-        // start/stop plumbing in update() and leaks no thread when the flag
-        // flips. The runtime starts it on first appearance and joins it when it
-        // vanishes (here, at shutdown).
-        auto feed = Sub<Msg>::source("cpu", [](std::function<void(Msg)> sink,
-                                               std::function<bool()> alive) {
-            CpuSampler sampler;
-            sampler.sample();   // prime the delta
-            while (alive()) {
-                std::this_thread::sleep_for(100ms);
-                if (alive()) sink(Sample{static_cast<float>(sampler.sample())});
-            }
-        });
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        if (k.key == Key::escape) return Quit{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
 
-        return Sub<Msg>::batch(
-            m.streaming ? std::move(feed) : Sub<Msg>::none(),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
-            Sub<Msg>::on_close(Quit{}));
+    static Sub subscribe(const Model& m) {
+        // No frame subscription: the app is NOT animating. It renders only when
+        // a sample arrives, and blocks at 0% CPU in between.
+        //
+        // The producer is a Sub::stream: jaal runs it exactly while this
+        // subscription is returned and stops it (via the stop_token) when it
+        // vanishes, so "stream while m.streaming" needs no start/stop plumbing.
+        return when(m.streaming, Sub::stream("cpu",
+            [](jaal::Sink<Msg> out, std::stop_token st) {
+                CpuSampler sampler;
+                sampler.sample();   // prime the delta
+                while (!st.stop_requested()) {
+                    std::this_thread::sleep_for(100ms);
+                    if (!st.stop_requested())
+                        out.send(Sample{static_cast<float>(sampler.sample())});
+                }
+            }));
     }
 };
 
-static_assert(Program<Live>, "Live must satisfy the Program concept");
+static_assert(mayag::Program<Live>, "Live must satisfy the Program concept");
 
 int main(int argc, char** argv) {
     const auto opts = demo::parse_args(argc, argv, Vec2{520, 300});
@@ -219,11 +215,11 @@ int main(int argc, char** argv) {
         }
 
         ok(rt.model().streaming, "the stream started");
-        ok(rt.model().samples >= 3, "background samples arrived via Sub::source ("
+        ok(rt.model().samples >= 3, "background samples arrived via Sub::stream ("
                                     + std::to_string(rt.model().samples) + ")");
         ok(rt.model().count > 0, "the history filled from streamed data");
-        // Runtime destructor joins the producer; if it hung, this line never
-        // prints.
+        // Destroying the app stops and joins the producer; if it hung, this
+        // line never prints.
         std::printf("live: %d failure(s)\n", fails);
         (void)ok;
     });

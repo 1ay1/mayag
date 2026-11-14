@@ -179,34 +179,29 @@ inline void report(const Ui& ui, Vec2 viewport, const RenderOptions& opts,
     }
 }
 
-/// Interpret the effects a Program's init() returns that a STILL frame can
-/// honour.
-///
-/// The png/gpu paths render one frame without a runtime, so they used to drop
-/// init()'s Cmd entirely -- `init().first` took the Model and threw the
-/// effects away. That is harmless for set_title, which a screenshot has no
-/// use for, and wrong for anything supplying CONTENT: an app whose first
-/// frame shows a decoded image rendered blank, which looks like a renderer
-/// bug rather than a missing upload.
-///
-/// Only image uploads are interpreted. Timers, tasks and streams need a
-/// running runtime by definition, and half-running them would be worse than
-/// not running them at all.
-template <typename Msg>
-inline void apply_still_effects(
-        const Cmd<Msg>& cmd,
-        const std::function<void(std::uint32_t,
-                                 std::shared_ptr<const ImageData>)>& upload) {
-    using C = Cmd<Msg>;
+/// The init()'s image uploads, for a still frame. The png/gpu paths render
+/// one frame with no runtime, so an app whose first frame IS an image would
+/// otherwise screenshot blank. Timers and tasks need a running runtime and
+/// are not run here.
+template <class C, class F>
+inline void apply_still_effects(const C& cmd, F&& upload) {
     std::visit([&](const auto& a) {
         using T = std::decay_t<decltype(a)>;
         if constexpr (std::is_same_v<T, typename C::Batch>) {
             for (const auto& c : a.cmds) apply_still_effects(c, upload);
+        } else if constexpr (std::is_same_v<T, UploadImage>) {
+            if (a.image->valid())
+                upload(a.id, std::shared_ptr<const ImageData>(
+                                 std::make_shared<jaal::shared<ImageData>>(a.image),
+                                 &a.image.get()));
         }
-        else if constexpr (std::is_same_v<T, typename C::UploadImage>) {
-            if (a.image && a.image->valid()) upload(a.id, a.image);
-        }
-    }, cmd.alternative());
+    }, cmd.inner);
+}
+
+/// Frame zero of the program: init() run by hand, its Cmd returned.
+template <Program P>
+[[nodiscard]] std::pair<typename P::Model, typename P::Cmd> first_model() {
+    return jaal::prog::init<P>();
 }
 
 /// Run a Program in whichever mode the flags asked for.
@@ -232,16 +227,10 @@ template <Program P, typename Driver>
             // Build the initial view and render one frame. Uses the Program's
             // own init() and view(), so the screenshot is exactly frame zero
             // of the live app rather than a separate code path.
-            typename P::Model model = [] {
-                if constexpr (detail::HasEffectfulInit<P>) return P::init().first;
-                else return P::init();
-            }();
+            typename P::Model model = first_model<P>().first;
 
             Ctx ctx{o.size, o.dpi, 0.0, cfg.theme, nullptr};
-            Node root = [&] {
-                if constexpr (detail::ViewWithCtx<P>) return P::view(model, ctx);
-                else return P::view(model);
-            }();
+            Node root = view_of<P>(model, ctx);
 
             RenderOptions ro;
             ro.background   = cfg.theme.background;
@@ -268,26 +257,14 @@ template <Program P, typename Driver>
                 return 1;
             }
 
-            typename P::Model model = [&] {
-                if constexpr (detail::HasEffectfulInit<P>) {
-                    auto [m, cmd] = P::init();
-                    // Honour init()'s image uploads, so an app whose first
-                    // frame IS an image does not screenshot blank.
-                    apply_still_effects(cmd, [&](std::uint32_t id,
-                                                 std::shared_ptr<const ImageData> img) {
-                        device->upload_image(id, std::move(img));
-                    });
-                    return m;
-                } else {
-                    return P::init();
-                }
-            }();
+            auto [model, init_cmd] = first_model<P>();
+            apply_still_effects(init_cmd, [&](std::uint32_t id,
+                                              std::shared_ptr<const ImageData> img) {
+                device->upload_image(id, std::move(img));
+            });
 
             Ctx ctx{o.size, o.dpi, 0.0, cfg.theme, nullptr};
-            Node root = [&] {
-                if constexpr (detail::ViewWithCtx<P>) return P::view(model, ctx);
-                else return P::view(model);
-            }();
+            Node root = view_of<P>(model, ctx);
 
             const int W = static_cast<int>(o.size.x * o.dpi);
             const int H = static_cast<int>(o.size.y * o.dpi);
@@ -333,11 +310,11 @@ template <Program P, typename Driver>
 /// Overload for examples with nothing to script headlessly.
 template <Program P>
 [[nodiscard]] int run(const Options& o, AppConfig cfg) {
-    return run<P>(o, std::move(cfg), [](auto& rt) {
+    return run<P>(o, std::move(cfg), [](auto& app) {
         // Default script: boot, pump a few frames, confirm it drew something.
-        for (int i = 0; i < 3; ++i) rt.tick();
+        for (int i = 0; i < 3; ++i) app.tick();
         std::printf("headless: %llu frames presented\n",
-                    static_cast<unsigned long long>(rt.window().frames_presented()));
+                    static_cast<unsigned long long>(app.window().frames_presented()));
     });
 }
 

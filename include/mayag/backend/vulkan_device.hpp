@@ -1646,7 +1646,7 @@ class VulkanDevice {
         // queuing behind the vsync deadline, shaving up to a refresh interval
         // of latency off a bursty update -- but it is NON-BLOCKING by
         // definition, and on this path nothing else blocks either: the
-        // wl_surface.frame callback that is supposed to pace Wait::poll never
+        // wl_surface.frame callback that is supposed to pace animation never
         // fires, because a frame callback is only delivered after a
         // wl_surface.commit and vkQueuePresentKHR owns the commit. Measured
         // consequence: poll() returned immediately 92% of the time and an
@@ -1655,7 +1655,7 @@ class VulkanDevice {
         //
         // FIFO makes vkQueuePresentKHR block on the display's refresh, which
         // is the clock this loop was missing. An idle app still costs nothing
-        // (it never presents at all, and Wait::block parks it on the fd), so
+        // (it never presents at all and sleeps on the fd), so
         // the only thing given up is sub-refresh latency on a bursty update --
         // a fair trade for not spinning a core.
         //

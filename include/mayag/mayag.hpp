@@ -66,12 +66,14 @@
 #include <mayag/backend/software.hpp>
 #include <mayag/backend/tiled.hpp>
 
-// ── app runtime ─────────────────────────────────────────────────────────
+// ── app: mayag as a jaal host ────────────────────────────────────────────
+// jaal runs the program (update, Cmd, Sub, timers, tasks, streams).
 #include <mayag/app/event.hpp>
-#include <mayag/app/cmd.hpp>
-#include <mayag/app/sub.hpp>
 #include <mayag/app/interaction.hpp>
 #include <mayag/app/latency.hpp>
+#include <mayag/app/effects.hpp>
+#include <mayag/app/sources.hpp>
+#include <mayag/app/host.hpp>
 #include <mayag/app/app.hpp>
 
 // ── io ─────────────────────────────────────────────────────────────

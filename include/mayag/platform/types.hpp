@@ -21,24 +21,6 @@ enum class CursorShape : int {
 
 namespace mayag::platform {
 
-/// How the runtime wants to wait for the next event.
-///
-/// This is the single most important knob for an app's power draw: a UI that
-/// is not animating must BLOCK, not spin. mayag derives this from the
-/// subscriptions — no animation subscription means no display link, means an
-/// idle app uses 0% CPU.
-enum class Wait {
-    block,     ///< sleep until something happens
-    /// Return IMMEDIATELY. Used when a repaint is already owed: the loop has
-    /// work to do and must not sleep before doing it.
-    immediate,
-    /// Pace to the display refresh. Used while an animation is running — the
-    /// loop wants the NEXT frame, not this instant, so sleeping until the
-    /// frame boundary is correct and keeps CPU down.
-    poll,
-    timeout,   ///< block, but wake by a deadline (a timer is pending)
-};
-
 struct WindowConfig {
     std::string title = "mayag";
     Vec2        size{1024, 640};

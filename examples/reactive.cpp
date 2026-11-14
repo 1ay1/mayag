@@ -56,31 +56,28 @@ struct Reactive {
     };
 
     struct Tick { double dt; };
-    struct Moved { Vec2 p; };
+    struct Moved { float x, y; };   // plain floats: Vec2 isn't Sendable
     struct Toggle {};
     struct Stats { double cpu; double worst; int coalesced; int missed; };
     struct Quit {};
 
     using Msg = std::variant<Tick, Moved, Toggle, Stats, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() {
-        return {Model{}, Cmd<Msg>::set_title("mayag — reactive")};
-    }
+    static Cmd init(Model&) { return SetTitle{"mayag — reactive"}; }
 
     // ── update ──────────────────────────────────────────────────────────
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](const Moved& e) -> R {
-                m.cursor = e.p;
-                // Pointer motion earns a short burst of frames so the trail
-                // can catch up, then the app goes quiet again. Without a
-                // BUDGET this would animate forever after the first move.
-                m.settle_frames = 45;
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](const Tick& e) -> R {
+    static Cmd update(Model& m, const Moved& e) {
+        m.cursor = Vec2{e.x, e.y};
+        // Pointer motion earns a short burst of frames so the trail
+        // can catch up, then the app goes quiet again. Without a
+        // BUDGET this would animate forever after the first move.
+        m.settle_frames = 45;
+        return {};
+    }
+    static Cmd update(Model& m, const Tick& e) {
                 m.t += e.dt;
                 if (m.settle_frames > 0) --m.settle_frames;
 
@@ -105,20 +102,20 @@ struct Reactive {
                     m.spectrum[static_cast<std::size_t>(i)] =
                         (num::sin(phase) * 0.5f + 0.5f) * env;
                 }
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](Toggle) -> R { m.running = !m.running; return {std::move(m), Cmd<Msg>::none()}; },
-            [&](const Stats& e) -> R {
-                m.cpu_ms = e.cpu; m.worst_ms = e.worst;
-                m.coalesced = e.coalesced; m.missed = e.missed;
-                return {std::move(m), Cmd<Msg>::none()};
-            },
-            [&](Quit) -> R { return {std::move(m), Cmd<Msg>::quit()}; });
+                return {};
     }
+    static Cmd update(Model& m, Toggle) { m.running = !m.running; return {}; }
+    static Cmd update(Model& m, const Stats& e) {
+        m.cpu_ms = e.cpu; m.worst_ms = e.worst;
+        m.coalesced = e.coalesced; m.missed = e.missed;
+        return {};
+    }
+    static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
     // ── view ────────────────────────────────────────────────────────────
 
-    static Node view(const Model& m, const Ctx& c) {
+    static Node view(const Model& m) {
+        const Ctx& c = ctx();
         const Theme& t = c.theme;
 
         // ---- the spectrum ----
@@ -232,26 +229,32 @@ struct Reactive {
              | bg(t.background);
     }
 
+    // ── input ───────────────────────────────────────────────────────────
+
+    static std::optional<Msg> on(const Model&, const MouseMove& mv) { return Moved{mv.position.x, mv.position.y}; }
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (is(c, "toggle") && c.count == 1) return Toggle{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        if (k.key == Key::space) return Toggle{};
+        if (k.key == Key::escape) return Quit{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
+
     // ── subscribe ───────────────────────────────────────────────────────
 
-    static Sub<Msg> subscribe(const Model& m) {
-        return Sub<Msg>::batch(
-            Sub<Msg>::on_event([](const Event& e) -> std::optional<Msg> {
-                if (const auto* mv = std::get_if<MouseMove>(&e)) return Moved{mv->position};
-                return std::nullopt;
-            }),
-            Sub<Msg>::on_click<"toggle">(Toggle{}),
-            Sub<Msg>::on_key(Key::space, Toggle{}),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
-            Sub<Msg>::on_close(Quit{}),
-            // Frames are requested only while running — pause it and the app
-            // drops to 0% CPU with no explicit stop.
-            // Frames are requested while the spectrum is running OR the
-            // trail is still catching up — and NOT otherwise, so an
-            // untouched window sits at 0% CPU instead of looking hung.
-            when(m.running || m.settle_frames > 0,
-                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
+    // Frames are requested while the spectrum is running OR the trail is
+    // still catching up — and NOT otherwise, so an untouched window sits at
+    // 0% CPU instead of looking hung.
+    static Sub subscribe(const Model& m) {
+        return when(m.running || m.settle_frames > 0,
+                    Sub::on_frame([](double dt) -> Msg { return Tick{dt}; }));
     }
+
+    // The old frame check, phrased for jaal: is any subscription live?
+    static bool wants_frames(const Model& m) { return !subscribe(m).is_none(); }
 
     /// Copy the runtime's measurements into the model so `view()` can render
     /// them like any other data. Called from the driver loop; a real app
@@ -264,7 +267,7 @@ struct Reactive {
     }
 };
 
-static_assert(Program<Reactive>);
+static_assert(mayag::Program<Reactive>);
 
 int main(int argc, char** argv) {
     const auto opts = demo::parse_args(argc, argv, Vec2{560, 480});
@@ -339,7 +342,7 @@ int main(int argc, char** argv) {
         rt.window().press_key(Key::space);
         rt.tick();
         ok(rt.model().running, "space starts it");
-        ok(Reactive::subscribe(rt.model()).wants_frames(),
+        ok(Reactive::wants_frames(rt.model()),
            "and a running app requests frames");
 
         rt.window().press_key(Key::space);
@@ -351,19 +354,19 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 120; ++i) rt.tick();
         rt.window().drive_frames(false);
 
-        ok(!Reactive::subscribe(rt.model()).wants_frames(),
+        ok(!Reactive::wants_frames(rt.model()),
            "and a stopped app requests NO frames, so it idles at 0% CPU");
 
         // Pointer motion earns a burst of frames, then quiet again.
         rt.window().push(MouseMove{{300, 300}, {1, 1}, {}});
         rt.tick();
-        ok(Reactive::subscribe(rt.model()).wants_frames(),
+        ok(Reactive::wants_frames(rt.model()),
            "moving the pointer wakes it so the trail can catch up");
 
         rt.window().drive_frames(true);
         for (int i = 0; i < 120; ++i) rt.tick();
         rt.window().drive_frames(false);
-        ok(!Reactive::subscribe(rt.model()).wants_frames(),
+        ok(!Reactive::wants_frames(rt.model()),
            "and it goes back to sleep on its own");
 
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");

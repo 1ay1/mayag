@@ -11,8 +11,11 @@
 //     // view
 //     scroll(m.list, v(rows...)) | size(300, 400) | id<"list">
 //
-//     // subscribe
-//     Sub<Msg>::on_scroll<"list">([](Vec2 d) { return Scrolled{d}; })
+//     // input
+//     static std::optional<Msg> on(const Model&, const Scrolled& s) {
+//         if (is(s, "list")) return Scroll{s.delta};
+//         return std::nullopt;
+//     }
 //
 //     // update
 //     m.list.scroll_by(e.delta);

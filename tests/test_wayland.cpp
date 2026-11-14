@@ -258,7 +258,7 @@ void test_live_window() {
 
     for (int i = 0; i < 3; ++i) {
         win->present(dl, rgb<0x0B0D10>);
-        (void)win->poll_events(Wait::immediate, 0.0);
+        (void)win->dispatch();
     }
     check(win->frames_presented() >= 1, "frames were presented");
 
@@ -283,7 +283,7 @@ void test_live_window() {
     WaylandWindow moved = std::move(*win);
     check(moved.is_open(), "a moved window is still open");
     moved.present(dl, rgb<0x0B0D10>);
-    const auto after = moved.poll_events(Wait::immediate, 0.0);
+    const auto after = moved.dispatch();
     (void)after;
     check(moved.frames_presented() >= 1, "a moved window still presents");
 }

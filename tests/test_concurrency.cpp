@@ -1,37 +1,35 @@
-// tests/test_concurrency.cpp — the async surface under real contention.
+// tests/test_concurrency.cpp — background work under real contention, on jaal
 //
-// mayag's concurrency story is "the UI thread owns the model; everything else
-// posts messages". That is the right design, and it is also the kind of design
-// that looks correct in review while hiding a use-after-free on the shutdown
-// path, or dropping messages under contention, or leaking a thread when a
-// subscription's condition goes false.
-//
-// Cmd::task, Cmd::stream and Sub::source had NO test and NO example. This
-// exercises them with many producers, high rates, and repeated start/stop
-// cycles -- the conditions where those bugs actually appear -- and asserts the
-// properties that must hold:
+// jaal owns the threads: tasks, keyed tasks, streams, timers, shutdown. Its
+// own suite tests that machinery. This file drives it through mayag's
+// headless host with many producers, high rates and repeated start/stop, and
+// checks the properties a mayag app relies on:
 //
 //   * no message is lost, duplicated or reordered per producer;
-//   * a source whose condition goes false is stopped AND joined, not leaked;
-//   * shutdown while producers are mid-send does not crash or hang;
-//   * update() only ever runs on the UI thread, so a Model needs no locking.
+//   * a stream whose condition goes false is stopped, and its in-flight
+//     messages never reach update();
+//   * a keyed task: only the newest request's result lands;
+//   * replacing a slow stream doesn't stall the frame;
+//   * shutdown while producers are mid-send doesn't crash or hang;
+//   * update() only ever runs on the loop thread, so a Model needs no locks.
 //
-// Run it under -fsanitize=thread to make the last one enforceable rather than
-// merely asserted; the CMake target mayag_concurrency_tests_tsan does that
-// when sanitizers are available.
+// Built a second time under -fsanitize=thread (mayag_concurrency_tsan).
 
 #include <mayag/mayag.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <set>
+#include <mutex>
+#include <optional>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
 
 using namespace mayag;
 using namespace mayag::dsl;
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -43,758 +41,475 @@ void check(bool ok, const std::string& what) {
 }
 void section(const std::string& s) { std::printf("\n%s\n", s.c_str()); }
 
-// Which thread ran update()? If this is ever not the UI thread, every app's
-// Model is silently racy and the whole "no locking needed" claim is false.
-std::thread::id g_ui_thread{};
-std::atomic<int> g_update_off_ui{0};
+std::thread::id  g_loop_thread{};
+std::atomic<int> g_update_off_loop{0};
+void on_loop() { if (std::this_thread::get_id() != g_loop_thread) ++g_update_off_loop; }
 
-// ── an app driven entirely by background producers ──────────────────────
+Node tiny() { return (box() | width(px(10)) | height(px(10)) | bg(ctx().theme.surface)).build(); }
+
+AppConfig small() {
+    AppConfig cfg;
+    cfg.size = {80, 40};
+    cfg.log_renderer = false;
+    return cfg;
+}
+
+// ── many producers into one mailbox ─────────────────────────────────────
 struct Fan {
     static constexpr int producers = 4;
     static constexpr int per_producer = 250;
 
     struct Model {
-        // Per-producer receipt log, so we can check ordering per stream rather
-        // than globally (interleaving between producers is expected).
-        std::vector<std::vector<int>> got{producers};
-        int  total = 0;
-        bool started = false;
+        std::vector<std::vector<int>> got = std::vector<std::vector<int>>(producers);
+        int total = 0;
     };
-
     struct Value { int producer; int n; };
     struct Start {};
-    struct Quit {};
-    using Msg = std::variant<Value, Start, Quit>;
+    using Msg = std::variant<Value, Start>;
+    using Cmd = jaal::Cmd<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Value v) -> R {
-                m.got[static_cast<std::size_t>(v.producer)].push_back(v.n);
-                ++m.total;
-                return {m, Cmd<Msg>::none()};
-            },
-            [&](Start) -> R {
-                m.started = true;
-                // Fan out: several streams posting concurrently into one inbox.
-                std::vector<Cmd<Msg>> cmds;
-                for (int p = 0; p < producers; ++p) {
-                    cmds.push_back(Cmd<Msg>::stream([p](auto sink, auto alive) {
-                        for (int i = 0; i < per_producer && alive(); ++i) {
-                            sink(Msg{Value{p, i}});
-                        }
-                    }));
-                }
-                return {m, Cmd<Msg>::batch(std::move(cmds))};
-            },
-            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
+    static Cmd update(Model& m, Value v) {
+        on_loop();
+        m.got[static_cast<std::size_t>(v.producer)].push_back(v.n);
+        ++m.total;
+        return {};
     }
-
-    static Node view(const Model&, const Ctx& c) {
-        return (box() | width(px(80)) | height(px(40))
-                      | bg(c.theme.surface)).build();
+    static Cmd update(Model&, Start) {
+        on_loop();
+        std::vector<Cmd> cmds;
+        for (int p = 0; p < producers; ++p) {
+            cmds.push_back(Cmd::task([](jaal::Sink<Msg> out, std::stop_token st, int who) {
+                for (int i = 0; i < per_producer && !st.stop_requested(); ++i)
+                    (void)out.send(Value{who, i});
+            }, p));
+        }
+        return Cmd::batch(std::move(cmds));
     }
-    static Sub<Msg> subscribe(const Model&) { return Sub<Msg>::none(); }
+    static Node view(const Model&) { return tiny(); }
 };
 
-// ── a source that starts and stops with the model ───────────────────────
+// ── a stream that starts and stops with the model ───────────────────────
 std::atomic<int> g_live_producers{0};
 
 struct Cycle {
     struct Model { bool on = false; int ticks = 0; };
-    struct Toggle {};
-    struct Tick {};
+    struct Toggle {}; struct Tick {};
     using Msg = std::variant<Toggle, Tick>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+    static Cmd update(Model& m, Toggle) { on_loop(); m.on = !m.on; return {}; }
+    static Cmd update(Model& m, Tick)   { on_loop(); ++m.ticks; return {}; }
+    static Node view(const Model&) { return tiny(); }
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Toggle) -> R { m.on = !m.on; return {m, Cmd<Msg>::none()}; },
-            [&](Tick)   -> R { ++m.ticks;    return {m, Cmd<Msg>::none()}; });
-    }
-
-    static Node view(const Model&, const Ctx& c) {
-        return (box() | width(px(80)) | height(px(40))
-                      | bg(c.theme.surface)).build();
-    }
-
-    static Sub<Msg> subscribe(const Model& m) {
-        // The producer exists exactly while m.on is true. Nothing calls stop().
-        return when(m.on, Sub<Msg>::source("feed", [](auto sink, auto alive) {
+    static Sub subscribe(const Model& m) {
+        return when(m.on, Sub::stream("feed", [](jaal::Sink<Msg> out, std::stop_token st) {
             ++g_live_producers;
-            while (alive()) {
-                sink(Msg{Tick{}});
-                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            while (!st.stop_requested()) {
+                (void)out.send(Tick{});
+                std::this_thread::sleep_for(200us);
             }
             --g_live_producers;
         }));
     }
 };
 
-// ── task_coalesce: keep the pipe full under a continuous gesture ───────
-//
-// task_latest starves here. It supersedes the RUNNING task, so when requests
-// arrive faster than the work completes, nothing ever finishes -- the video
-// scrub bar showed zero frames across a 2 s drag. task_coalesce lets the
-// running task complete and collapses the waiting ones, so results keep
-// landing and the last request is never dropped.
-std::atomic<int> g_coalesce_ran{0};
-
-struct Coalesce {
-    struct Model { int done = 0; int last = -1; bool settled = false; };
-    struct Ask { int v; };
-    struct Done { int v; };
-    struct Settled {};
-    using Msg = std::variant<Ask, Done, Settled>;
-
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Ask a) -> R {
-                m.settled = false;
-                return {m, Cmd<Msg>::task_coalesce("work",
-                    [v = a.v] {
-                        ++g_coalesce_ran;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(40));
-                        return Msg{Done{v}};
-                    },
-                    Msg{Settled{}})};
-            },
-            [&](Done d) -> R { ++m.done; m.last = d.v; return {m, Cmd<Msg>::none()}; },
-            [&](Settled) -> R { m.settled = true; return {m, Cmd<Msg>::none()}; });
-    }
-
-    static Node view(const Model&, const Ctx& c) {
-        return (box() | width(px(80)) | height(px(40))
-                      | bg(c.theme.surface)).build();
-    }
-};
-
-std::atomic<int> g_finished{0};
-
-// ── a stopped source's IN-FLIGHT messages must never be applied ───────
-//
-// A producer that checks a liveness flag and then posts has done TWO things,
-// and the model can change in between:
-//
-//   T1  worker    alive() -> true
-//   T2  UI        model changes, this producer is stopped
-//   T3  worker    post(msg)      <-- passed the check, posts anyway
-//   T4  UI        applies a message from a producer that no longer exists
-//
-// No amount of checking on the worker closes that window. The runtime gates
-// at APPLY time instead, on the UI thread, where the check is atomic with
-// respect to the model. Before that fix this test counted ~2.5 MILLION
-// applied messages from dead sources; it must now be exactly zero.
-std::atomic<int> g_from_dead_source{0};
+// ── a stopped stream's in-flight messages ───────────────────────────────
+// A producer that checks its stop token and then sends has done two things,
+// and the model can change in between. The gate has to be at fold time.
+std::atomic<int> g_from_dead_stream{0};
 
 struct Hammer {
     struct Model { int epoch = 0; };
-    struct Bump {};
-    struct Value { int epoch; };
+    struct Bump {}; struct Value { int epoch; };
     using Msg = std::variant<Bump, Value>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Bump) -> R { ++m.epoch; return {m, Cmd<Msg>::none()}; },
-            [&](Value v) -> R {
-                // The source id carries the epoch, so a message whose epoch is
-                // not current came from a source the model already dropped.
-                if (v.epoch != m.epoch) ++g_from_dead_source;
-                return {m, Cmd<Msg>::none()};
-            });
+    static Cmd update(Model& m, Bump) { on_loop(); ++m.epoch; return {}; }
+    static Cmd update(Model& m, Value v) {
+        on_loop();
+        if (v.epoch != m.epoch) ++g_from_dead_stream;
+        return {};
     }
+    static Node view(const Model&) { return tiny(); }
 
-    static Node view(const Model&, const Ctx& c) {
-        return (box() | width(px(80)) | height(px(40))
-                      | bg(c.theme.surface)).build();
-    }
-
-    static Sub<Msg> subscribe(const Model& m) {
-        // Post as fast as possible, to make the window as wide as it can be.
-        return Sub<Msg>::source("hammer:" + std::to_string(m.epoch),
-                                [e = m.epoch](auto sink, auto alive) {
-            while (alive()) sink(Msg{Value{e}});
-        });
+    static Sub subscribe(const Model& m) {
+        // Fast, to keep the window between "stop checked" and "sent" wide, but
+        // with a yield every 64 sends so a slow (TSAN) loop isn't buried.
+        return Sub::stream("hammer:" + std::to_string(m.epoch),
+                           [](jaal::Sink<Msg> out, std::stop_token st, int e) {
+            for (int i = 0; !st.stop_requested(); ++i) {
+                (void)out.send(Value{e});
+                if ((i & 63) == 63) std::this_thread::yield();
+            }
+        }, m.epoch);
     }
 };
 
-// ── a COMPUTED source id must actually distinguish sources ──────────
-//
-// Folding state into the id is the documented way to say "this is a different
-// producer now" -- source("chat:" + room, ...). Every such id is a temporary
-// std::string that dies when subscribe() returns, so while Source::id was a
-// string_view the runtime diffed FREED memory: two epochs compared equal
-// (ASan: stack-use-after-return), the id looked unchanged, and the old
-// producer was left running.
-//
-// The visible symptom was a video that showed the seeked frame and then
-// carried on playing from the position before the seek.
+// ── a key built from model state restarts the producer ──────────────────
 std::vector<int> g_epoch_starts;
 std::mutex       g_epoch_mutex;
 
 struct EpochSrc {
     struct Model { int epoch = 0; };
-    struct Bump {};
-    struct Ping { int epoch; };
+    struct Bump {}; struct Ping { int epoch; };
     using Msg = std::variant<Bump, Ping>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+    static Cmd update(Model& m, Bump) { on_loop(); ++m.epoch; return {}; }
+    static Cmd update(Model&, Ping)   { on_loop(); return {}; }
+    static Node view(const Model&) { return tiny(); }
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Bump) -> R { ++m.epoch; return {m, Cmd<Msg>::none()}; },
-            [&](Ping) -> R { return {m, Cmd<Msg>::none()}; });
-    }
-
-    static Node view(const Model&, const Ctx& c) {
-        return (box() | width(px(80)) | height(px(40))
-                      | bg(c.theme.surface)).build();
-    }
-
-    static Sub<Msg> subscribe(const Model& m) {
-        // The id is a TEMPORARY string, as every real use of this pattern is.
-        return Sub<Msg>::source("gen:" + std::to_string(m.epoch),
-                                [e = m.epoch](auto sink, auto alive) {
-            {
-                std::lock_guard lk{g_epoch_mutex};
-                g_epoch_starts.push_back(e);
+    static Sub subscribe(const Model& m) {
+        return Sub::stream("gen:" + std::to_string(m.epoch),
+                           [](jaal::Sink<Msg> out, std::stop_token st, int e) {
+            { std::lock_guard lk{g_epoch_mutex}; g_epoch_starts.push_back(e); }
+            while (!st.stop_requested()) {
+                std::this_thread::sleep_for(5ms);
+                (void)out.send(Ping{e});
             }
-            while (alive()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                if (alive()) sink(Msg{Ping{e}});
-            }
-        });
+        }, m.epoch);
     }
 };
 
-// ── replacing a slow source must not block the UI thread ────────────────
-//
-// The video example folds a seek position into its playback source id, so
-// every drag move asks for a DIFFERENT source and the runtime stops the old
-// one. If that stop joins inline, the frame waits for a producer that may be
-// mid-decode -- measured at 370 ms of frozen UI per drag move before the
-// runtime learned to retire sources instead of joining them.
+// ── replacing a slow stream must not block the loop ─────────────────────
 std::atomic<int> g_scrub_live{0};
 
 struct Scrub {
     struct Model { int epoch = 0; };
-    struct Seek {};
-    struct Frame {};
+    struct Seek {}; struct Frame {};
     using Msg = std::variant<Seek, Frame>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+    static Cmd update(Model& m, Seek)  { on_loop(); ++m.epoch; return {}; }
+    static Cmd update(Model&,   Frame) { on_loop(); return {}; }
+    static Node view(const Model&) { return tiny(); }
 
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        if (std::this_thread::get_id() != g_ui_thread) ++g_update_off_ui;
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Seek)  -> R { ++m.epoch; return {m, Cmd<Msg>::none()}; },
-            [&](Frame) -> R { return {m, Cmd<Msg>::none()}; });
-    }
-
-    static Node view(const Model&, const Ctx& c) {
-        return (box() | width(px(80)) | height(px(40))
-                      | bg(c.theme.surface)).build();
-    }
-
-    static Sub<Msg> subscribe(const Model& m) {
-        // Slow to notice it has been stopped, like a decoder that only polls
-        // alive() between frames.
-        return Sub<Msg>::source("scrub:" + std::to_string(m.epoch),
-                                [](auto sink, auto alive) {
+    static Sub subscribe(const Model& m) {
+        // Slow to notice it was stopped, like a decoder that checks between frames.
+        return Sub::stream("scrub:" + std::to_string(m.epoch),
+                           [](jaal::Sink<Msg> out, std::stop_token st) {
             ++g_scrub_live;
-            while (alive()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(300));
-                if (alive()) sink(Msg{Frame{}});
+            while (!st.stop_requested()) {
+                std::this_thread::sleep_for(300ms);
+                if (!st.stop_requested()) (void)out.send(Frame{});
             }
             --g_scrub_live;
         });
     }
 };
 
+// ── keyed task: the newest request wins ─────────────────────────────────
+std::atomic<int> g_finished{0};
+
 struct Drag {
     struct Model { int value = 0; std::vector<int> seen; };
     struct Request { int v; int delay_ms; };
     struct Done { int v; };
     using Msg = std::variant<Request, Done>;
+    using Cmd = jaal::Cmd<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Request r) -> R {
-                // Deliberately INVERTED delays: the first request is slowest,
-                // so a naive implementation delivers it last and it wins.
-                return {m, Cmd<Msg>::task_latest("scrub", [r] {
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(r.delay_ms));
-                    ++g_finished;
-                    return Msg{Done{r.v}};
-                })};
-            },
-            [&](Done d) -> R {
-                m.value = d.v;
-                m.seen.push_back(d.v);
-                return {m, Cmd<Msg>::none()};
-            });
+    static Cmd update(Model&, Request r) {
+        on_loop();
+        // Inverted delays: the first request is slowest, so a naive runtime
+        // delivers it last and it wins.
+        return Cmd::perform<Done>(jaal::task_key{"scrub"}, [](int v, int delay_ms) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            ++g_finished;
+            return v;
+        }, r.v, r.delay_ms);
     }
-    static Node view(const Model&, const Ctx& c) {
-        return (box() | width(px(10)) | height(px(10)) | bg(c.theme.surface)).build();
-    }
-    static Sub<Msg> subscribe(const Model&) { return Sub<Msg>::none(); }
+    static Cmd update(Model& m, Done d) { on_loop(); m.value = d.v; m.seen.push_back(d.v); return {}; }
+    static Node view(const Model&) { return tiny(); }
 };
 
-
+// ── keyed Cmd::after: a debounce ─────────────────────────────────────────
 struct Search {
     struct Model { std::string query; std::vector<std::string> fired; };
-    struct Typed { char c; };
-    struct Fire { std::string q; };
+    struct Typed { char c; }; struct Fire { std::string q; };
     using Msg = std::variant<Typed, Fire>;
+    using Cmd = jaal::Cmd<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Typed t) -> R {
-                m.query += t.c;
-                // The classic debounce: "search 80ms after the user stops".
-                return {m, Cmd<Msg>::after_latest("search",
-                                           std::chrono::milliseconds(80),
-                                           Msg{Fire{m.query}})};
-            },
-            [&](Fire f) -> R { m.fired.push_back(f.q); return {m, Cmd<Msg>::none()}; });
+    static Cmd update(Model& m, Typed t) {
+        on_loop();
+        m.query += t.c;
+        return Cmd::after("search", 80ms, Fire{m.query});   // restarts on every key
     }
-    static Node view(const Model&, const Ctx& c) {
-        return (box() | width(px(10)) | height(px(10)) | bg(c.theme.surface)).build();
-    }
-    static Sub<Msg> subscribe(const Model&) { return Sub<Msg>::none(); }
+    static Cmd update(Model& m, const Fire& f) { on_loop(); m.fired.push_back(f.q); return {}; }
+    static Node view(const Model&) { return tiny(); }
 };
 
-
+// ── two streams with the same key ───────────────────────────────────────
 std::atomic<int> g_a{0}, g_b{0};
 
 struct Twin {
     struct Model { int a = 0, b = 0; };
     struct FromA {}; struct FromB {};
     using Msg = std::variant<FromA, FromB>;
+    using Cmd = jaal::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
 
-    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](FromA) -> R { ++m.a; return {m, Cmd<Msg>::none()}; },
-            [&](FromB) -> R { ++m.b; return {m, Cmd<Msg>::none()}; });
-    }
-    static Node view(const Model&, const Ctx& c) {
-        return (box() | width(px(10)) | height(px(10)) | bg(c.theme.surface)).build();
-    }
-    static Sub<Msg> subscribe(const Model&) {
-        // Two DIFFERENT producers that happen to share an id. In a real app
-        // this is two components both naming their feed "feed", or the same
-        // component instantiated twice.
-        return Sub<Msg>::batch({
-            Sub<Msg>::source("feed", [](auto sink, auto alive) {
+    static Cmd update(Model& m, FromA) { on_loop(); ++m.a; return {}; }
+    static Cmd update(Model& m, FromB) { on_loop(); ++m.b; return {}; }
+    static Node view(const Model&) { return tiny(); }
+
+    static Sub subscribe(const Model&) {
+        // Two different producers that happen to share a key: two instances
+        // of a component, or two modules that both picked "feed".
+        return Sub::batch(
+            Sub::stream("feed", [](jaal::Sink<Msg> out, std::stop_token st) {
                 ++g_a;
-                while (alive()) {
-                    sink(Msg{FromA{}});
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                }
+                while (!st.stop_requested()) { (void)out.send(FromA{}); std::this_thread::sleep_for(2ms); }
             }),
-            Sub<Msg>::source("feed", [](auto sink, auto alive) {
+            Sub::stream("feed", [](jaal::Sink<Msg> out, std::stop_token st) {
                 ++g_b;
-                while (alive()) {
-                    sink(Msg{FromB{}});
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                }
-            }),
-        });
+                while (!st.stop_requested()) { (void)out.send(FromB{}); std::this_thread::sleep_for(2ms); }
+            }));
     }
 };
 
+// ── at most one running, newest pending: coalescing in the model ───────
+// jaal has no coalescing policy. A continuous gesture (a scrub drag) needs
+// it: a keyed task supersedes the RUNNING work, so with requests faster than
+// the work nothing ever finishes. The model keeps it instead: one in flight,
+// one pending slot the newest request overwrites.
+std::atomic<int> g_coalesce_ran{0};
+
+struct Coalesce {
+    struct Model { bool busy = false; std::optional<int> pending; int done = 0; int last = -1; };
+    struct Ask { int v; }; struct Done { int v; };
+    using Msg = std::variant<Ask, Done>;
+    using Cmd = jaal::Cmd<Msg>;
+
+    static Cmd start(Model& m, int v) {
+        m.busy = true;
+        return Cmd::perform<Done>([](int x) {
+            ++g_coalesce_ran;
+            std::this_thread::sleep_for(40ms);
+            return x;
+        }, v);
+    }
+    static Cmd update(Model& m, Ask a) {
+        on_loop();
+        if (m.busy) { m.pending = a.v; return {}; }
+        return start(m, a.v);
+    }
+    static Cmd update(Model& m, Done d) {
+        on_loop();
+        ++m.done;
+        m.last = d.v;
+        m.busy = false;
+        if (m.pending) { const int next = *m.pending; m.pending.reset(); return start(m, next); }
+        return {};
+    }
+    static Node view(const Model&) { return tiny(); }
+};
 
 }  // namespace
 
 int main() {
-    g_ui_thread = std::this_thread::get_id();
+    g_loop_thread = std::this_thread::get_id();
     std::printf("mayag concurrency\n=================\n");
 
-    // ── many producers into one inbox ────────────────────────────────
-    section("fan-in: 4 streams x 250 messages");
+    section("fan-in: 4 tasks x 250 messages");
     {
-        AppConfig cfg;
-        cfg.size = {80, 40};
         int total = 0;
-        bool ordered = true, complete = true;
-
-        run_headless<Fan>(cfg, [&](auto& rt) {
-            rt.send(Fan::Msg{Fan::Start{}});
-            // Pump until everything arrives. Bounded by TIME, not iteration
-            // count: this test runs alongside 11 others under `ctest -j 12`,
-            // and a fixed loop budget that is generous on an idle machine is
-            // not generous on a loaded one. A test that flakes under load is
-            // worse than no test, because it teaches you to re-run instead of
-            // to look.
-            const auto deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::seconds(20);
-            while (rt.model().total < Fan::producers * Fan::per_producer &&
-                   std::chrono::steady_clock::now() < deadline) {
-                rt.tick();
-            }
-            const auto& m = rt.model();
-            total = m.total;
-            for (int p = 0; p < Fan::producers; ++p) {
-                const auto& v = m.got[static_cast<std::size_t>(p)];
-                if (static_cast<int>(v.size()) != Fan::per_producer) complete = false;
-                for (std::size_t i = 0; i < v.size(); ++i) {
-                    if (v[i] != static_cast<int>(i)) { ordered = false; break; }
-                }
+        bool complete = true, ordered = true;
+        run_headless<Fan>(small(), [&](auto& rt) {
+            rt.send(Fan::Start{});
+            (void)rt.settle([](const auto& m) { return m.total >= Fan::producers * Fan::per_producer; },
+                            10s);
+            total = rt.model().total;
+            for (const auto& seq : rt.model().got) {
+                if (static_cast<int>(seq.size()) != Fan::per_producer) complete = false;
+                for (std::size_t i = 0; i < seq.size(); ++i)
+                    if (seq[i] != static_cast<int>(i)) ordered = false;
             }
         });
-
         check(total == Fan::producers * Fan::per_producer,
-              "every message arrived exactly once (" + std::to_string(total) +
-                  "/" + std::to_string(Fan::producers * Fan::per_producer) + ")");
+              "every message arrived exactly once (" + std::to_string(total) + "/" +
+                  std::to_string(Fan::producers * Fan::per_producer) + ")");
         check(complete, "each producer delivered its full sequence");
         check(ordered, "per-producer order is preserved");
     }
 
-    // ── declarative source lifecycle ─────────────────────────────────
-    section("lifecycle: a source starts and stops with the model");
+    section("lifecycle: a stream starts and stops with the model");
     {
-        AppConfig cfg;
-        cfg.size = {80, 40};
-        bool ran = false, stopped = false, restarted = false;
-
-        run_headless<Cycle>(cfg, [&](auto& rt) {
-            const auto pump = [&](auto predicate) {
-                const auto deadline = std::chrono::steady_clock::now() +
-                                      std::chrono::seconds(10);
-                while (!predicate() &&
-                       std::chrono::steady_clock::now() < deadline) {
-                    rt.tick();
-                    std::this_thread::yield();
-                }
-            };
-
-            // Off by default: nothing running.
-            for (int i = 0; i < 5; ++i) rt.tick();
-            const bool idle_at_start = g_live_producers.load() == 0;
-
-            // Turn it on; the producer should appear and deliver.
-            rt.send(Cycle::Msg{Cycle::Toggle{}});
-            pump([&] { return rt.model().ticks >= 5; });
-            ran = rt.model().ticks > 0;
-
-            // Turn it off; the thread must be signalled AND joined, so the
-            // count returns to zero rather than leaking.
-            rt.send(Cycle::Msg{Cycle::Toggle{}});
-            pump([&] { return g_live_producers.load() == 0; });
+        bool ran = false, stopped = false;
+        run_headless<Cycle>(small(), [&](auto& rt) {
+            for (int cycle = 0; cycle < 10; ++cycle) {
+                rt.send(Cycle::Toggle{});                       // on
+                const int before = rt.model().ticks;
+                if (rt.settle([&](const auto& m) { return m.ticks > before; }, 2s)) ran = true;
+                rt.send(Cycle::Toggle{});                       // off
+            }
+            const auto end = std::chrono::steady_clock::now() + 2s;
+            while (g_live_producers.load() != 0 && std::chrono::steady_clock::now() < end)
+                std::this_thread::yield();
             stopped = g_live_producers.load() == 0;
-
-            // And it must be startable again -- a one-shot stop is a bug that
-            // only shows on the second use.
-            const int before = rt.model().ticks;
-            rt.send(Cycle::Msg{Cycle::Toggle{}});
-            pump([&] { return rt.model().ticks > before + 4; });
-            restarted = rt.model().ticks > before;
-
-            check(idle_at_start, "no producer runs while the condition is false");
         });
-
-        check(ran, "the source runs while its condition holds");
-        check(stopped, "it is stopped and joined when the condition goes false");
-        check(restarted, "and it can be started again");
-        check(g_live_producers.load() == 0,
-              "no producer outlives the runtime (" +
-                  std::to_string(g_live_producers.load()) + " leaked)");
+        check(ran, "an active stream delivers");
+        check(stopped, "10 on/off cycles leave no producer running");
     }
 
-    // ── shutdown while producers are mid-flight ──────────────────────
     section("shutdown: tearing down under load");
     {
-        // The dangerous case: destroy the Runtime while threads are actively
-        // posting. If the inbox is freed before producers stop, this is a
-        // use-after-free -- which is exactly what stop_all_sources + join is
-        // for. Repeat it, because a race that fires 1 time in 20 is still a
-        // crash in production.
         for (int rep = 0; rep < 20; ++rep) {
-            AppConfig cfg;
-            cfg.size = {80, 40};
-            run_headless<Fan>(cfg, [&](auto& rt) {
-                rt.send(Fan::Msg{Fan::Start{}});
+            run_headless<Fan>(small(), [&](auto& rt) {
+                rt.send(Fan::Start{});
                 for (int i = 0; i < 3; ++i) rt.tick();   // leave them running
             });
         }
         check(true, "20 teardowns mid-send completed without crash or hang");
     }
 
-    // ── supersession ─────────────────────────────────────────────────
-    section("task_latest: only the newest request can reach update()");
+    section("keyed task: only the newest request can reach update()");
     {
-        // A scrub drag fires a task per pointer move. They finish OUT OF
-        // ORDER -- here deliberately so, slowest first -- and without
-        // supersession the last one to finish wins, which is not the one the
-        // user asked for last. Every app hits this and re-invents the same
-        // generation-counter defence; task_latest makes it the runtime's job.
-        AppConfig cfg;
-        cfg.size = {10, 10};
         std::size_t delivered = 0;
         int final_value = 0;
-
-        run_headless<Drag>(cfg, [&](auto& rt) {
-            rt.send(Drag::Msg{Drag::Request{1, 220}});
-            rt.send(Drag::Msg{Drag::Request{2, 170}});
-            rt.send(Drag::Msg{Drag::Request{3, 120}});
-            rt.send(Drag::Msg{Drag::Request{4,  70}});
-            rt.send(Drag::Msg{Drag::Request{5,  20}});
-
-            const auto deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::seconds(15);
-            while (g_finished.load() < 5 &&
-                   std::chrono::steady_clock::now() < deadline) {
-                rt.tick();
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            }
-            for (int i = 0; i < 50; ++i) {
-                rt.tick();
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            }
+        run_headless<Drag>(small(), [&](auto& rt) {
+            rt.send(Drag::Request{1, 220});
+            rt.send(Drag::Request{2, 170});
+            rt.send(Drag::Request{3, 120});
+            rt.send(Drag::Request{4,  70});
+            rt.send(Drag::Request{5,  20});
+            const auto end = std::chrono::steady_clock::now() + 5s;
+            while (g_finished.load() < 5 && std::chrono::steady_clock::now() < end)
+                (void)rt.settle([](const auto&) { return false; }, 10ms);
+            (void)rt.settle([](const auto&) { return false; }, 50ms);   // anything late lands now
             delivered = rt.model().seen.size();
             final_value = rt.model().value;
         });
-
         check(g_finished.load() == 5, "every worker ran (nothing is killed)");
-        check(delivered == 1, "but only ONE result reached update()");
-        check(final_value == 5,
-              "and it is the newest request, not the last to finish");
+        check(delivered == 1, "but only ONE result reached update() (" + std::to_string(delivered) + ")");
+        check(final_value == 5, "and it is the newest request, not the last to finish");
     }
 
-    // ── debounce ─────────────────────────────────────────────────────
-    section("after_latest: a debounce that actually debounces");
+    section("keyed Cmd::after: a debounce that actually debounces");
     {
-        // Cmd::after schedules a timer with no identity, so the canonical
-        // "search 80ms after the user stops typing" fires once PER KEYSTROKE:
-        // typing "hello" queued five timers and ran five searches, four for
-        // stale queries. In a real app that is five network requests a word.
-        //
-        // Headless runs a VIRTUAL clock advancing per tick, so the test types
-        // at 10ms/char of tick time -- sleeping in wall time would prove
-        // nothing.
-        AppConfig cfg;
-        cfg.size = {10, 10};
         std::vector<std::string> fired;
-
-        run_headless<Search>(cfg, [&](auto& rt) {
-            rt.window().set_tick_seconds(0.010);
-            for (char c : {'h', 'e', 'l', 'l', 'o'}) {
-                rt.send(Search::Msg{Search::Typed{c}});
-                rt.tick();
-            }
-            for (int i = 0; i < 40; ++i) rt.tick();
+        run_headless<Search>(small(), [&](auto& rt) {
+            for (char c : {'h', 'e', 'l', 'l', 'o'}) rt.send(Search::Typed{c});
+            (void)rt.settle([](const auto& m) { return !m.fired.empty(); }, 2s);
+            (void)rt.settle([](const auto&) { return false; }, 150ms);   // a second fire would land here
             fired = rt.model().fired;
         });
-
         check(fired.size() == 1,
-              "five fast keystrokes produce ONE delayed message (" +
-                  std::to_string(fired.size()) + ")");
-        check(!fired.empty() && fired.front() == "hello",
-              "and it carries the newest state, not a stale one");
+              "five fast keystrokes produce ONE delayed message (" + std::to_string(fired.size()) + ")");
+        check(!fired.empty() && fired.front() == "hello", "and it carries the newest state");
     }
 
-    // ── id collisions ────────────────────────────────────────────────
-    section("duplicate Sub::source ids are detected, not silently dropped");
+    section("duplicate stream keys: the first runs, the second doesn't");
     {
-        // Sources are reconciled BY id, so two subscriptions sharing one means
-        // the second never starts: no crash, no warning, just a feed that
-        // never produces while the app looks fine. Two instances of a
-        // component, or two modules that both picked "feed", is all it takes.
-        //
-        // The runtime now reports it. This test pins the BEHAVIOUR that makes
-        // the report necessary -- first wins, second is dropped -- so if the
-        // reconciliation is ever changed to something better (running both
-        // under distinct internal keys), this fails and gets revisited rather
-        // than the warning quietly becoming a lie.
-        AppConfig cfg;
-        cfg.size = {10, 10};
         int a_msgs = 0, b_msgs = 0;
-
-        run_headless<Twin>(cfg, [&](auto& rt) {
-            const auto deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::milliseconds(600);
-            while (std::chrono::steady_clock::now() < deadline) {
-                rt.tick();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
+        run_headless<Twin>(small(), [&](auto& rt) {
+            (void)rt.settle([](const auto& m) { return m.a >= 10; }, 2s);
             a_msgs = rt.model().a;
             b_msgs = rt.model().b;
         });
-
-        check(g_a.load() == 1 && a_msgs > 0,
-              "the first source with a given id runs");
-        check(g_b.load() == 0 && b_msgs == 0,
-              "the second is dropped (which is why the runtime warns)");
+        check(g_a.load() == 1 && a_msgs > 0, "the first stream with a given key runs");
+        check(g_b.load() == 0 && b_msgs == 0, "the second is dropped, not run twice under one key");
     }
 
-    // ── a COMPUTED source id must actually distinguish sources ──────
-    section("a source id built from model state restarts the producer");
+    section("a stream key built from model state restarts the producer");
     {
-        AppConfig cfg;
-        cfg.size = {80, 40};
-
-        run_headless<EpochSrc>(cfg, [&](auto& rt) {
+        run_headless<EpochSrc>(small(), [&](auto& rt) {
             for (int i = 0; i < 3; ++i) {
-                rt.tick();
-                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                rt.send(EpochSrc::Msg{EpochSrc::Bump{}});
+                const std::size_t want = static_cast<std::size_t>(i) + 1;
+                (void)rt.settle([&](const auto&) {
+                    std::lock_guard lk{g_epoch_mutex};
+                    return g_epoch_starts.size() >= want;
+                }, 2s);
+                rt.send(EpochSrc::Bump{});
             }
-            rt.tick();
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-            rt.tick();
+            (void)rt.settle([&](const auto&) {
+                std::lock_guard lk{g_epoch_mutex};
+                return g_epoch_starts.size() >= 4;
+            }, 2s);
         });
-
         std::lock_guard lk{g_epoch_mutex};
-        // Each bump is a new id, so each must have started its OWN producer.
-        check(g_epoch_starts.size() >= 3,
-              "each computed id started a distinct producer (" +
+        check(g_epoch_starts.size() >= 4,
+              "each computed key started a distinct producer (" +
                   std::to_string(g_epoch_starts.size()) + " started)");
         bool ordered = true;
         for (std::size_t i = 1; i < g_epoch_starts.size(); ++i)
             if (g_epoch_starts[i] <= g_epoch_starts[i - 1]) ordered = false;
-        check(ordered, "and each ran with its own captured state, in order");
+        check(ordered, "and each ran with its own arguments, in order");
     }
 
-    // ── in-flight messages from a stopped source ─────────────────
-    section("a stopped source's in-flight messages are never applied");
+    section("a stopped stream's in-flight messages are never applied");
     {
-        AppConfig cfg;
-        cfg.size = {80, 40};
-
-        run_headless<Hammer>(cfg, [&](auto& rt) {
-            // Each bump replaces the source while the old one is mid-post.
-            for (int i = 0; i < 300; ++i) {
-                rt.send(Hammer::Msg{Hammer::Bump{}});
-                rt.tick();
-            }
+#if defined(__SANITIZE_THREAD__)
+        constexpr int bumps = 30;     // TSAN is ~50x slower per send
+#else
+        constexpr int bumps = 300;
+#endif
+        run_headless<Hammer>(small(), [&](auto& rt) {
+            for (int i = 0; i < bumps; ++i) rt.send(Hammer::Bump{});
         });
-
-        // Exactly zero. Not "few" -- the gate is checked on the UI thread at
-        // apply time, so the answer cannot depend on the interleaving.
-        check(g_from_dead_source.load() == 0,
-              "no message from an already-stopped source reaches update() (" +
-                  std::to_string(g_from_dead_source.load()) + ")");
+        check(g_from_dead_stream.load() == 0,
+              "no message from an already-stopped stream reaches update() (" +
+                  std::to_string(g_from_dead_stream.load()) + ")");
     }
 
-    // ── coalescing under a continuous gesture ────────────────────
-    section("task_coalesce: a fast gesture still gets results, and the last one lands");
+    section("coalescing in the model: a fast gesture still gets results");
     {
-        AppConfig cfg;
-        cfg.size = {80, 40};
         int done = 0, last = -1, requests = 0;
-        bool settled = false;
-
-        run_headless<Coalesce>(cfg, [&](auto& rt) {
-            // A "drag": a request every 5 ms against 40 ms of work, for
-            // 400 ms. task_latest would finish none of these.
-            const auto until = std::chrono::steady_clock::now() +
-                               std::chrono::milliseconds(400);
+        bool idle = false;
+        run_headless<Coalesce>(small(), [&](auto& rt) {
+            // A request every 5 ms against 40 ms of work, for 400 ms.
+            const auto until = std::chrono::steady_clock::now() + 400ms;
             while (std::chrono::steady_clock::now() < until) {
-                rt.send(typename Coalesce::Msg{typename Coalesce::Ask{requests++}});
-                rt.tick();
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                rt.send(Coalesce::Ask{requests++});
+                (void)rt.settle([](const auto&) { return false; }, 5ms);
             }
-            const int final_request = requests - 1;
-
-            // Release: let the queue drain.
-            const auto deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::seconds(10);
-            while (!rt.model().settled &&
-                   std::chrono::steady_clock::now() < deadline) {
-                rt.tick();
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            }
+            (void)rt.settle([](const auto& m) { return !m.busy && !m.pending; }, 5s);
             done = rt.model().done;
             last = rt.model().last;
-            settled = rt.model().settled;
-            requests = final_request;
+            idle = !rt.model().busy && !rt.model().pending;
         });
-
-        check(done > 1,
-              "results keep arriving DURING the gesture (" +
-                  std::to_string(done) + " delivered)");
-        // The whole point: intermediate requests are dropped, not queued, so
-        // the worker never builds a backlog.
+        check(done > 1, "results keep arriving DURING the gesture (" + std::to_string(done) + ")");
         check(g_coalesce_ran.load() < 40,
-              "but far fewer tasks ran than were requested (" +
-                  std::to_string(g_coalesce_ran.load()) + " ran)");
-        check(last == requests,
-              "and the FINAL request is the one that lands (" +
-                  std::to_string(last) + " vs " + std::to_string(requests) + ")");
-        check(settled,
-              "`settled` fires once nothing is running or pending");
+              "far fewer tasks ran than were requested (" + std::to_string(g_coalesce_ran.load()) + ")");
+        check(last == requests - 1,
+              "and the FINAL request is the one that lands (" + std::to_string(last) + " vs " +
+                  std::to_string(requests - 1) + ")");
+        check(idle, "nothing is left running or pending");
     }
 
-    // ── replacing a source must not stall the frame ────────────────
-    section("a replaced source is retired off the UI thread, not joined on it");
+    section("replacing a slow stream doesn't stall the loop");
     {
-        AppConfig cfg;
-        cfg.size = {80, 40};
         double worst_ms = 0;
-
-        run_headless<Scrub>(cfg, [&](auto& rt) {
-            rt.tick();
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            // Drag: a new source id per move, each replacing a producer that
-            // takes up to 300 ms to notice.
+        run_headless<Scrub>(small(), [&](auto& rt) {
+            (void)rt.settle([](const auto&) { return g_scrub_live.load() > 0; }, 1s);
             for (int i = 0; i < 6; ++i) {
-                rt.send(Scrub::Msg{Scrub::Seek{}});
                 const auto t0 = std::chrono::steady_clock::now();
-                rt.tick();               // reconciles: stops the old source
+                rt.send(Scrub::Seek{});          // folds, reconciles: stops the old stream
                 const double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
                 worst_ms = ms > worst_ms ? ms : worst_ms;
-                std::this_thread::sleep_for(std::chrono::milliseconds(15));
+                (void)rt.settle([](const auto&) { return false; }, 15ms);
             }
         });
-
-        // The producer sleeps 300 ms between alive() polls. A tick that waits
-        // for it lands near that; a tick that retires it is sub-millisecond.
-        // 100 ms is far below the old 370 ms and far above the new ~0.5 ms.
+        // The producer sleeps 300 ms between checks. A step that waited for it
+        // lands near that; one that just signals it is well under a millisecond.
         check(worst_ms < 100.0,
-              "stopping a slow source does not block the frame (worst tick " +
-                  std::to_string(worst_ms) + " ms)");
-
-        // And nothing leaks: run_headless destroys the runtime, whose
-        // teardown joins retirees as well as running sources.
+              "stopping a slow stream does not block the loop (worst " + std::to_string(worst_ms) + " ms)");
+        const auto end = std::chrono::steady_clock::now() + 2s;
+        while (g_scrub_live.load() != 0 && std::chrono::steady_clock::now() < end)
+            std::this_thread::yield();
         check(g_scrub_live.load() == 0,
-              "every retired producer was still joined by shutdown (" +
-                  std::to_string(g_scrub_live.load()) + " left running)");
+              "and every replaced producer did stop (" + std::to_string(g_scrub_live.load()) + " left)");
     }
 
-    // ── the threading contract ──────────────────────────────────
     section("contract: update() is single-threaded");
-    check(g_update_off_ui.load() == 0,
-          "update() only ever ran on the UI thread (" +
-              std::to_string(g_update_off_ui.load()) + " violations)");
+    check(g_update_off_loop.load() == 0,
+          "update() only ever ran on the loop thread (" +
+              std::to_string(g_update_off_loop.load()) + " violations)");
 
-    std::printf("\n%s  %d checks, %d failures\n",
-                failures == 0 ? "PASS" : "FAIL", checks, failures);
+    std::printf("\n%s  %d checks, %d failures\n", failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;
 }

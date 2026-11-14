@@ -43,6 +43,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install toolchain
         run: ${{ matrix.install }}
@@ -89,6 +91,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install compositor and toolchain
         run: |
           sudo apt-get update
@@ -166,6 +170,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
       - name: Build with -Werror
         run: |
@@ -183,6 +189,8 @@ jobs:
         san: [address, undefined]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
       - name: Build and test with -fsanitize=${{ matrix.san }}
         run: |

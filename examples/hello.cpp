@@ -1,14 +1,13 @@
 // examples/hello.cpp — the smallest complete mayag app.
 //
-// A live, animated counter in one screen. It shows every part of the
-// architecture exactly once, using the ergonomic API:
+// A live, animated counter in one screen. jaal runs it, mayag draws it:
 //
-//   Model     plain struct — all the state, nothing hidden
-//   Msg       a variant of named messages
-//   init      the starting Model (+ optional startup Cmd)
-//   update    pure (Model, Msg) -> (Model, Cmd) via match()
-//   view      pure (Model, Ctx) -> Node, click targets self-wired with action()
-//   subscribe what to listen for, as a function of state; on_frame() animates
+//   Model      plain struct — all the state, nothing hidden
+//   Msg        a variant of named messages
+//   update     one overload per message, changes the model in place
+//   view       pure (Model, Ctx) -> Node
+//   on         window input -> Msg (clicks arrive already resolved to a node)
+//   subscribe  the frame clock, only while the spring is moving
 //
 // Build:  cmake --build build && ./build/examples/mayag_hello
 // (--headless self-checks without a window; --png/--gpu write a screenshot)
@@ -17,6 +16,7 @@
 
 #include "harness.hpp"
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -24,67 +24,60 @@ using namespace mayag;
 using namespace mayag::dsl;
 
 struct Hello {
-    // ── state ───────────────────────────────────────────────────────────
+    // ── state ───────────────────────────────────────────────────────────────────
     struct Model {
         int             count = 0;
         Animated<float> bump{0.0f};   // a spring that pulses on each change
     };
 
-    // ── messages ────────────────────────────────────────────────────────
-    struct Inc {}; struct Dec {}; struct Tick { float dt; }; struct Quit {};
+    // ── messages ────────────────────────────────────────────────────────────────
+    struct Inc {}; struct Dec {}; struct Tick { double dt; }; struct Quit {};
     using Msg = std::variant<Inc, Dec, Tick, Quit>;
+    using Cmd = jaal::Cmd<Msg, set_title>;
+    using Sub = mayag::Sub<Msg>;
 
-    // Each clickable is declared ONCE: the id and the message it sends live
-    // together, so the view tag (.on) and the subscription (.click()) can
-    // never drift out of sync.
-    static inline const auto inc = action(node_id("inc"), Msg{Inc{}});
-    static inline const auto dec = action(node_id("dec"), Msg{Dec{}});
+    static Cmd init(Model&) { return SetTitle{"mayag — hello"}; }
 
-    // ── init ────────────────────────────────────────────────────────────
-    static std::pair<Model, Cmd<Msg>> init() {
-        return {Model{}, Cmd<Msg>::set_title("mayag — hello")};
-    }
-
-    // ── update: pure, returns the next Model + any effect ───────────────
-    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-        using R = std::pair<Model, Cmd<Msg>>;
-        return match(msg,
-            [&](Inc) -> R  { m.count++; m.bump.snap(1.0f); m.bump.to(0.0f); return {m, Cmd<Msg>::none()}; },
-            [&](Dec) -> R  { m.count--; m.bump.snap(1.0f); m.bump.to(0.0f); return {m, Cmd<Msg>::none()}; },
-            [&](Tick t) -> R { m.bump.step(t.dt); return {m, Cmd<Msg>::none()}; },
-            [&](Quit) -> R { return {m, Cmd<Msg>::quit()}; });
-    }
+    // ── update: one overload per message ────────────────────────────────────
+    static Cmd update(Model& m, Inc)    { m.count++; m.bump.snap(1.0f); m.bump.to(0.0f); return {}; }
+    static Cmd update(Model& m, Dec)    { m.count--; m.bump.snap(1.0f); m.bump.to(0.0f); return {}; }
+    static Cmd update(Model& m, Tick t) { m.bump.step(static_cast<float>(t.dt)); return {}; }
+    static Cmd update(Model&,   Quit)   { return Cmd::quit(); }
 
     // ── view: a pure function of the model ──────────────────────────────
-    static Node view(const Model& m, const Ctx& c) {
-        const Theme& t = c.theme;
+    static Node view(const Model& m) {
+        const Theme& t = ctx().theme;
         const float pop = 1.0f + static_cast<float>(m.bump) * 0.25f;   // 1.0 → 1.25
 
-        const auto btn = [&](std::string label, Color<Srgb> tone, Action<Msg> act) {
+        const auto btn = [&](std::string label, Color<Srgb> tone, auto tag) {
             return h(text_owned(std::move(label)) | font(28) | bold | fg(t.on_accent)) | center
-                 | size(64, 64) | bg(tone) | radius(t.radius_large)
-                 | act.on;   // <- makes this box `act`'s click target
+                 | size(64, 64) | bg(tone) | radius(t.radius_large) | tag;
         };
 
         return v(text<"HELLO"> | font(12) | semibold | tracking(3.0f) | fg(t.text_secondary),
                  text_owned(std::to_string(m.count))
                      | font(96.0f * pop) | bold | fg(t.text_primary),
-                 h(btn("-", t.danger, dec),
-                   btn("+", t.success, inc)) | gap(16))
+                 h(btn("-", t.danger, id<"dec">),
+                   btn("+", t.success, id<"inc">)) | gap(16))
              | gap(20) | center
              | width(pct(100)) | height(pct(100)) | bg(t.background);
     }
 
-    // ── subscribe: clicks + animation, as data ──────────────────────────
-    static Sub<Msg> subscribe(const Model& m) {
-        return Sub<Msg>::batch(
-            inc.click(),
-            dec.click(),
-            Sub<Msg>::on_key(Key::escape, Quit{}),
-            Sub<Msg>::on_close(Quit{}),
-            // Frames flow only while the spring is moving; a settled app is 0% CPU.
-            when(m.bump.animating(),
-                 Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
+    // ── input ───────────────────────────────────────────────────────────────────
+    static std::optional<Msg> on(const Model&, const Clicked& c) {
+        if (is(c, "inc")) return Inc{};
+        if (is(c, "dec")) return Dec{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const KeyEvent& k) {
+        if (k.key == Key::escape) return Quit{};
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const CloseRequest&) { return Quit{}; }
+
+    // ── subscribe: frames flow only while the spring is moving ───────────
+    static Sub subscribe(const Model& m) {
+        return when(m.bump.animating(), Sub::on_frame([](double dt) -> Msg { return Tick{dt}; }));
     }
 };
 

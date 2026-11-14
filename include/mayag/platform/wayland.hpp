@@ -41,10 +41,9 @@
 //     that will be discarded. An occluded window gets no callbacks and so
 //     burns no CPU at all.
 //
-//   * EVENT-DRIVEN BLOCKING via prepare_read/poll. `Wait::block` is a real
-//     poll() on the Wayland fd with no timeout, so an idle app is genuinely
-//     asleep in the kernel at 0% CPU — which is the property the runtime's
-//     whole subscription model exists to enable.
+//   * NO WAITING OF ITS OWN. fd() hands the display socket to jaal's reactor,
+//     which sleeps on it; dispatch() reads what arrived without blocking. An
+//     idle app is asleep in epoll at 0% CPU.
 
 #include "../app/event.hpp"
 #include "../backend/software.hpp"
@@ -52,7 +51,6 @@
 #include "../core/geometry.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
-#include "waker.hpp"
 #include "wayland_protocol.hpp"
 
 // The Vulkan backend is the default renderer on Linux; it self-loads at
@@ -462,75 +460,40 @@ class WaylandWindow {
 
     // ── events ──────────────────────────────────────────────────────────
 
-    /// Drain the compositor, translating to mayag events.
+    /// The display fd. jaal's reactor waits on it; dispatch() reads it.
+    [[nodiscard]] int fd() const noexcept {
+        return (open_ && display_ != nullptr) ? wl::lib().display_get_fd(display_) : -1;
+    }
+
+    /// Read whatever the compositor sent, without blocking, and return it as
+    /// mayag events. jaal calls this when fd() is readable; it also runs once
+    /// at attach so events queued while opening aren't stranded.
     ///
-    /// The prepare_read/read_events dance is Wayland's answer to the classic
-    /// "check then block" race: between deciding the queue is empty and
-    /// calling poll(), another thread (or this one, via a flush) could enqueue
-    /// an event, and a naive implementation would sleep through it. Announcing
-    /// the intent to read FIRST makes the wakeup reliable.
-    [[nodiscard]] std::vector<Event> poll_events(Wait wait, double timeout) {
+    /// prepare_read/read_events is libwayland's guard against the "check
+    /// then read" race: announcing the read first means no event slips
+    /// between draining the queue and reading the socket.
+    [[nodiscard]] std::vector<Event> dispatch() {
         const wl::Lib& L = wl::lib();
         pending_.clear();
         if (!open_ || display_ == nullptr) return {};
 
-        // Anything already decoded but not yet dispatched.
-        L.display_dispatch_pending(display_);
-
-        if (!pending_.empty()) wait = Wait::immediate;
-
-        int timeout_ms = 0;
-        switch (wait) {
-            case Wait::immediate: timeout_ms = 0; break;
-            case Wait::block:     timeout_ms = -1; break;
-            case Wait::poll:
-                // Pace to the compositor. If a frame callback is outstanding
-                // the compositor will wake us when it wants the next frame, so
-                // block; otherwise do not sleep at all.
-                timeout_ms = frame_pending_ ? 50 : 0;
-                break;
-            case Wait::timeout:
-                timeout_ms = timeout > 0.0 ? static_cast<int>(timeout * 1000.0) : 0;
-                break;
-        }
-
-        // Announce the read, flush our requests, then sleep.
         while (L.display_prepare_read(display_) != 0) {
             L.display_dispatch_pending(display_);
         }
         L.display_flush(display_);
 
-        // Poll the display fd AND the waker fd together. The waker is how a
-        // background thread (a socket, a subprocess, a Cmd::stream) interrupts
-        // an idle UI thread: without it, an app blocked in poll() with no
-        // window activity would sleep through streamed messages until the user
-        // moved the mouse. A byte on the waker pipe wakes us the instant the
-        // producer posts.
-        pollfd pfds[2];
-        pfds[0] = pollfd{L.display_get_fd(display_), POLLIN, 0};
-        int nfds = 1;
-        const int waker_fd = (waker_ != nullptr) ? waker_->fd() : -1;
-        if (waker_fd >= 0) {
-            pfds[1] = pollfd{waker_fd, POLLIN, 0};
-            nfds = 2;
-        }
-
-        const int r = ::poll(pfds, static_cast<nfds_t>(nfds), timeout_ms);
-        if (r > 0 && (pfds[0].revents & POLLIN) != 0) {
+        // Zero timeout: only read what is already there. jaal did the waiting.
+        pollfd pfd{L.display_get_fd(display_), POLLIN, 0};
+        if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN) != 0) {
             L.display_read_events(display_);
         } else {
-            // Timed out, or woken by the waker rather than the compositor.
-            // Either way there are no display events to read, so cancel the
-            // announced read to keep libwayland's state consistent.
             L.display_cancel_read(display_);
-        }
-        // Clear the waker so the next post() writes a fresh byte. Cheap and
-        // harmless when nothing woke us.
-        if (nfds == 2 && (pfds[1].revents & POLLIN) != 0 && waker_ != nullptr) {
-            waker_->drain();
         }
 
         L.display_dispatch_pending(display_);
+        // Requests the listeners made (acks, cursor) go out now, not at the
+        // next frame.
+        L.display_flush(display_);
 
         // A protocol error is fatal and unrecoverable — the compositor has
         // already dropped the connection. Closing cleanly beats spinning on a
@@ -546,39 +509,6 @@ class WaylandWindow {
 #endif
             resize_needed_ = false;
             pending_.push_back(ResizeEvent{logical_, scale_});
-        }
-
-        // Emit a frame tick so animations advance.
-        //
-        // This was MISSING, and it is why every `Sub::on_frame` /
-        // `every_frame` animation was dead in a real Linux window while
-        // working perfectly headless: `FrameEvent` was only ever produced by
-        // the headless platform and by the macOS backend. An app would update
-        // its model on input, but nothing ever delivered the per-frame tick
-        // that drives springs and time-based views, so the window just sat
-        // there.
-        //
-        // It is appended HERE, after the poll, and deliberately not before it:
-        // the top of this function promotes a non-empty `pending_` to
-        // Wait::immediate, so queueing the tick early would make every frame
-        // skip its own wait and the loop would free-run at thousands of fps.
-        //
-        // The runtime only asks for `Wait::poll` when something is actually
-        // animating (see Runtime::decide_wait), so this costs nothing for an
-        // idle app -- it is not a timer, it is the frame clock for a frame
-        // the runtime already decided it wanted.
-        //
-        // The delta is clamped: a compositor stall, a dragged window or a
-        // laptop resuming from sleep can hand back a huge gap, and feeding
-        // that to a spring integrator makes it explode. Same clamp the macOS
-        // backend uses, for the same reason.
-        if (wait == Wait::poll) {
-            const double t  = now();
-            const double dt = (last_tick_ > 0.0 && t > last_tick_)
-                            ? num::min(t - last_tick_, 0.1)
-                            : 1.0 / 60.0;
-            pending_.push_back(FrameEvent{t, dt});
-            last_tick_ = t;
         }
 
         return std::move(pending_);
@@ -600,8 +530,7 @@ class WaylandWindow {
             if (atlas_ != nullptr) sync_atlas_to_gpu();
             gpu_.submit(dl, clear);
             last_list_ = dl; last_clear_ = clear; last_had_frame_ = true;
-            // Still request a frame callback so Wait::poll paces on the
-            // compositor exactly as the shm path does.
+            // Still ask for a frame callback, same as the shm path.
             if (!frame_pending_) {
                 frame_callback_ = wl::request_new(surface_, wl::surface_frame,
                                                   wl::lib().i_callback,
@@ -810,11 +739,6 @@ class WaylandWindow {
         if (gpu_active_ && images_.empty()) gpu_.release_texture();
 #endif
     }
-
-    /// Give the window the runtime's waker so poll() can be interrupted by a
-    /// background thread. Set once at boot; a null waker just means the app
-    /// has no off-thread producers and poll() watches only the display fd.
-    void set_waker(Waker* w) noexcept { waker_ = w; }
 
 #ifdef MAYAG_WITH_VULKAN
     /// Upload dirty glyph rects to the GPU atlas image before a frame that
@@ -1740,8 +1664,6 @@ class WaylandWindow {
     bool first_frame_      = true;
     bool damage_supported_ = false;
     bool frame_pending_    = false;
-    /// Timestamp of the last emitted FrameEvent, for the frame delta.
-    double last_tick_      = 0.0;
 
     Vec2        pointer_pos_{};
     Vec2        scroll_accum_{};
@@ -1760,7 +1682,6 @@ class WaylandWindow {
 
     const backend::CoverageSampler* sampler_ = nullptr;
     backend::ImageStore images_;
-    Waker* waker_ = nullptr;
 
 #ifdef MAYAG_WITH_VULKAN
     // GPU renderer. `gpu_active_` gates every GPU code path; when false the
@@ -1812,9 +1733,8 @@ class WaylandWindow {
     /// Pixel dimensions of what read_pixels() returns. See Impl::pixel_size.
     [[nodiscard]] Vec2 pixel_size() const noexcept { return p_->pixel_size(); }
 
-    [[nodiscard]] std::vector<Event> poll_events(Wait wait, double timeout) {
-        return p_->poll_events(wait, timeout);
-    }
+    [[nodiscard]] int fd() const noexcept { return p_ ? p_->fd() : -1; }
+    [[nodiscard]] std::vector<Event> dispatch() { return p_->dispatch(); }
 
     void present(const DrawList& dl, Color<Srgb> clear) { p_->present(dl, clear); }
 
@@ -1839,8 +1759,6 @@ class WaylandWindow {
     void set_coverage_sampler(const backend::CoverageSampler* s) {
         p_->set_coverage_sampler(s);
     }
-
-    void set_waker(Waker* w) noexcept { p_->set_waker(w); }
 
     template <typename AtlasT>
     void set_atlas_source(AtlasT* atlas) noexcept { p_->set_atlas_source(atlas); }

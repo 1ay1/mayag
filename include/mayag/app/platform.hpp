@@ -35,8 +35,7 @@ namespace mayag::platform {
 // ── the concept ─────────────────────────────────────────────────────────
 
 template <typename W>
-concept Window = requires(W w, const W cw, const DrawList& dl, Wait wait,
-                          double timeout, std::string_view text) {
+concept Window = requires(W w, const W cw, const DrawList& dl, std::string_view text) {
     // Lifecycle
     { W::open(WindowConfig{}) } -> std::same_as<std::optional<W>>;
     { w.close() }               -> std::same_as<void>;
@@ -46,8 +45,9 @@ concept Window = requires(W w, const W cw, const DrawList& dl, Wait wait,
     { cw.size() }      -> std::same_as<Vec2>;    ///< logical
     { cw.dpi_scale() } -> std::same_as<float>;
 
-    // Events: drain everything queued, translating to mayag::Event.
-    { w.poll_events(wait, timeout) } -> std::same_as<std::vector<Event>>;
+    // Events: everything queued, without blocking. jaal does the waiting;
+    // a window with an fd (Wayland) also exposes `int fd() const`.
+    { w.dispatch() } -> std::same_as<std::vector<Event>>;
 
     // Presentation
     { w.present(dl, Color<Srgb>{}) } -> std::same_as<void>;

@@ -5,6 +5,10 @@ a measurement, and fixed. They are written up together because they look
 identical from the outside — "the UI doesn't update" / "I have to click twice"
 — and have completely different causes.
 
+mayag now runs on jaal, which owns tasks, streams and teardown. Hazards 3 and 4
+are handled by jaal for every app; 1 and 2 are still the app's call, and the
+fix lives in the model.
+
 The framing is deliberately not "concurrency bugs". Locks fix none of these.
 Every one is about a question no lock can answer: **is this result still
 wanted?**
@@ -15,16 +19,17 @@ wanted?**
 
 | # | Hazard | Question it answers wrongly | Fix |
 |---|--------|-----------------------------|-----|
-| 1 | Starvation under a gesture | "should the running task be cancelled?" | `Cmd::task_coalesce` |
-| 2 | Out-of-order results | "does this result belong to my latest request?" | generation stamp + `settled` |
-| 3 | Stale in-flight messages | "was this producer still alive when it posted?" | apply-time gating |
-| 4 | Blocking teardown | "must I wait for the old worker to notice?" | retire + reap |
+| 1 | Starvation under a gesture | "should the running task be cancelled?" | one in flight + a pending slot in the model |
+| 2 | Out-of-order results | "does this result belong to my latest request?" | generation stamp |
+| 3 | Stale in-flight messages | "was this producer still alive when it posted?" | apply-time gating (jaal) |
+| 4 | Blocking teardown | "must I wait for the old worker to notice?" | signal, don't join (jaal) |
 
 ---
 
 ## 1. Starvation: cancelling the *running* task
 
-`task_latest` means "newest wins": a new request supersedes the running one.
+A keyed jaal task means "newest wins": a new request with the same key
+supersedes the running one.
 That is right for a **discrete** request — a search box, a save — where only
 the final answer matters.
 
@@ -41,12 +46,22 @@ The fix is a different policy — at most one in flight, the running one
 **allowed to finish**, newer requests collapsing into a single pending slot:
 
 ```cpp
-Cmd<Msg>::task_coalesce("seek", [t] { return decode_at(t); })
+struct Model { bool busy = false; std::optional<double> pending; ... };
+
+static Cmd update(Model& m, SeekTo s) {
+    if (m.busy) { m.pending = s.t; return {}; }       // newest overwrites
+    m.busy = true;
+    return Cmd::perform<Decoded>(&decode_at, s.t);
+}
+static Cmd update(Model& m, Decoded d) {
+    m.busy = false;  /* show d */
+    if (m.pending) { /* start the next one from *m.pending */ }
+}
 ```
 
 Results then land as fast as the work can sustain, and the last request always
 lands because it is never discarded. Measured: 74 requests, 11 tasks ran, 11
-results delivered, request #73 landed.
+results delivered, request #73 landed. tests/test_concurrency.cpp checks it.
 
 ### This is the RxJS flattening taxonomy
 
@@ -54,21 +69,21 @@ The same four policies appear wherever async work is driven by a stream, most
 explicitly in RxJS's higher-order mapping operators. The names differ; the
 decision is identical:
 
-| Policy | RxJS | mayag | Use for |
+| Policy | RxJS | mayag on jaal | Use for |
 |---|---|---|---|
-| Cancel the running one | `switchMap` | `Cmd::task_latest` | typeahead, discrete requests |
-| Let it finish, queue newest | *(no direct equivalent)* | `Cmd::task_coalesce` | **drags, scrubs, live previews** |
+| Cancel the running one | `switchMap` | keyed `Cmd::task` / `Cmd::perform` | typeahead, discrete requests |
+| Let it finish, queue newest | *(no direct equivalent)* | busy + pending in the model | **drags, scrubs, live previews** |
 | Run everything in parallel | `mergeMap` | `Cmd::task` | independent fire-and-forget |
 | Queue all, preserve order | `concatMap` | — | ordered writes |
 | Ignore new while busy | `exhaustMap` | — | submit-button debounce |
 
 The Angular University guide puts the general rule well: *"choosing the wrong
 operator might accidentally lead to subtle issues in our programs"*. The
-subtle issue here is that `switchMap`/`task_latest` is the usual default and
+subtle issue here is that `switchMap` (a keyed task) is the usual default and
 is exactly wrong for gestures, because a gesture emits faster than the work
 completes **by definition**.
 
-`task_coalesce` is closest to `exhaustMap` + "remember the last one" — the
+The pending slot is closest to `exhaustMap` + "remember the last one" — the
 policy you actually want for a scrub bar and which no mainstream operator
 expresses in one step.
 
@@ -87,28 +102,20 @@ each result as authoritative adopts a stale value:
     -> the middle's frame arrives first
     -> player reports it landed 864 s from where it was sent
 
-Two fixes, both needed:
-
 **Stamp results with the generation they were produced for.** The runtime
 cannot do this for you — only the app knows what makes one result obsolete:
 
 ```cpp
 struct Frame { ...; int epoch; };          // stamped by the producer
 
-[&](Frame f) -> R {
-    if (f.epoch != m.epoch) return {m, Cmd<Msg>::none()};   // drop
+static Cmd update(Model& m, const Frame& f) {
+    if (f.epoch != m.epoch) return {};     // drop
     ...
 }
 ```
 
-**Ask the runtime when a key has actually settled**, rather than inferring it
-from "a result arrived":
-
-```cpp
-Cmd<Msg>::task_coalesce("seek", work, Msg{SeekSettled{}})
-```
-
-`settled` fires when the key has nothing running *and* nothing pending.
+And don't infer "settled" from "a result arrived": it is settled when
+`busy` is false and nothing is pending.
 
 This is the same shape as React's `ignore` flag:
 
@@ -155,12 +162,9 @@ overwrote the seek target. The bar moved, the picture did not.
 The gate travels **with** the message and is evaluated on the UI thread when
 the message is delivered, where it is atomic with respect to the model:
 
-```cpp
-inbox->post_gated(std::move(m), alive);   // worker: no check needed
-
-// drain(), on the UI thread:
-if (e.gate && !e.gate->load()) continue;  // exact, whatever the interleaving
-```
+jaal does this for every stream and keyed task: each run gets its own origin,
+and stopping it retires the origin, so messages it already queued are dropped
+at drain time on the loop thread. Nothing for the app to write.
 
 Result: **2,554,454 -> 0**. A stale message stops being a race to be narrowed
 and becomes a value that is dropped.
@@ -188,31 +192,25 @@ notices at its next poll, and one mid-work can take hundreds of milliseconds.
 
     370 ms of frozen UI per stop, with a 400 ms producer
 
-An app that folds state into a source id — the documented pattern — pays this
-on *every* change. Fix: signal, retire to a list, and reap on a later tick
-once the thread has set a `done` flag, so only already-finished threads are
-ever joined. Measured after: **0.5 ms**.
-
-The contract this establishes is worth stating, because a test asserted the
-old one: a source **stops promptly and leaks nothing**. It is *not* joined
-before `tick()` returns. Teardown still joins everything, where blocking is
-correct because the inbox is about to be freed.
+An app that folds state into a stream key — the documented pattern — would pay
+this on *every* change. jaal signals the stream's stop_token and moves on; it
+never joins on the loop. Shutdown waits a bounded time for workers. The test
+"replacing a slow stream doesn't stall the loop" checks it.
 
 ---
 
 ## Two adjacent traps
 
-**Computed ids must be owned.** `Sub::Source::id` was a `string_view`, but the
+**Computed keys must be owned.** mayag's old source id was a `string_view`, but the
 documented way to give a source identity is to compute it — always a
 temporary. The runtime diffed freed memory, so two different epochs compared
 *equal* (ASan: `stack-use-after-return`), reconciliation saw no change, and
-the old producer was never replaced. An API whose own documented usage dangles
-is the bug.
+the old producer was never replaced. jaal stream keys are `std::string`.
 
 **Reconcile after the model changes, not before.** The live source set is a
-pure function of the model, and `tick()` computed it at the top — before
-draining the messages that change the model. A source dropped *this* frame
-survived a whole extra frame, posting all the while.
+pure function of the model; computing it before folding the messages that
+change the model leaves a dropped source alive a whole extra step. jaal
+reconciles after every fold.
 
 ---
 
@@ -221,7 +219,7 @@ survived a whole extra frame, posting all the while.
 When wiring async work to a UI, answer these four questions explicitly:
 
 1. **Is the trigger discrete or continuous?** Continuous ⇒ never
-   `switchMap`/`task_latest`; you will starve.
+   a keyed task alone; you will starve.
 2. **Can a result outlive its request?** If yes, stamp it and drop
    non-current ones. Do not infer "done" from "a result arrived".
 3. **Where is validity checked?** It must be at the point of use, on the
