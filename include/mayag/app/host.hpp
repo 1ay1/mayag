@@ -158,6 +158,11 @@ template <class G>
 [[nodiscard]] bool is(const G& g, std::string_view name) noexcept {
     return g.node == dsl::node_id(name);
 }
+/// Indexed twin: `is(c, "row", i)` matches `id_of("row", i)` in the view.
+template <class G>
+[[nodiscard]] bool is(const G& g, std::string_view base, std::size_t index) noexcept {
+    return g.node == dsl::node_id(base, index);
+}
 
 // ── configuration ───────────────────────────────────────────────────────
 
@@ -441,6 +446,17 @@ class window_host {
     [[nodiscard]] bool frames_on() const noexcept { return frames_on_; }
 
     [[nodiscard]] std::optional<Rect> node_rect(std::uint64_t id) const {
+        // Overlays first, topmost layer first: a node in an open menu is what
+        // a click at its centre reaches, so that is the rect a test wants.
+        const Overlay* best = nullptr;
+        const Node* hit = nullptr;
+        for (const auto& o : overlays_.items()) {
+            if (const Node* n = o.content.find(id); n && (best == nullptr || o.layer >= best->layer)) {
+                best = &o;
+                hit = n;
+            }
+        }
+        if (hit != nullptr) return hit->frame();
         if (const Node* n = tree_.find(id)) return n->frame();
         return std::nullopt;
     }

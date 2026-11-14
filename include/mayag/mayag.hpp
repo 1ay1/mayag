@@ -48,6 +48,7 @@
 // ── the DSL ─────────────────────────────────────────────────────────────
 #include <mayag/dsl/dsl.hpp>
 #include <mayag/dsl/widgets.hpp>
+#include <mayag/dsl/controls.hpp>
 #include <mayag/dsl/virtual_list.hpp>
 
 // ── layout ──────────────────────────────────────────────────────────────
