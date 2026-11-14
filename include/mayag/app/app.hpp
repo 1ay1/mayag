@@ -50,6 +50,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <type_traits>
@@ -105,11 +106,13 @@ class headless_app {
 
     explicit headless_app(AppConfig cfg)
         : host_cfg_(cfg),
+          reactor_(make_reactor()),
           window_(open_window(cfg)),
           host_(window_, std::move(cfg)),
           fwd_{host_},
           kernel_(kernel_type::start(fwd_, jaal::platform::steady_clock{},
-                                     detail::kernel_options(host_cfg_), wake())) {
+                                     detail::kernel_options(host_cfg_),
+                                     [w = reactor_.waker()] { w.wake(); })) {
         cx_.emplace(*this);
         step();
         draw();
@@ -142,12 +145,19 @@ class headless_app {
 
     /// Fold until nothing more arrives within `budget`: for a test that
     /// waits on a background task or stream. Returns as soon as `done` holds.
+    /// Waits in jaal's reactor exactly as jaal::run does: woken by the
+    /// kernel's mailbox, or by its next timer deadline.
     template <class Pred>
     bool settle(Pred done, std::chrono::milliseconds budget = std::chrono::milliseconds(2000)) {
-        const auto end = std::chrono::steady_clock::now() + budget;
+        using clk = jaal::platform::steady_clock;
+        const auto end = clk{}.now() + budget;
         while (!done(kernel_.model())) {
-            if (std::chrono::steady_clock::now() >= end) return false;
-            wait_for_news(std::chrono::milliseconds(5));
+            const auto now = clk{}.now();
+            if (now >= end) return false;
+            auto timeout = jaal::kernel::timeout_from<clk>(now, kernel_.next_deadline());
+            const auto left = std::chrono::ceil<std::chrono::nanoseconds>(end - now);
+            if (!timeout || *timeout > left) timeout = left;
+            (void)reactor_.wait(timeout);
             tick();
             if (finished()) return done(kernel_.model());
         }
@@ -191,25 +201,20 @@ class headless_app {
         return std::move(*w);   // headless always opens
     }
 
+    static jaal::platform::native_reactor make_reactor() {
+        auto r = jaal::platform::native_reactor::create();
+        if (!r) throw std::runtime_error("mayag: can't create jaal reactor");
+        return std::move(*r);
+    }
+
     jaal::kernel::turn step() { return kernel_.step(fwd_); }
 
     void draw() {
         host_.draw(kernel_.model(), [&](std::exception_ptr e) { kernel_.view_faulted(std::move(e)); });
     }
 
-    std::function<void()> wake() {
-        return [w = woken_] { w->store(true, std::memory_order_release); };
-    }
-    void wait_for_news(std::chrono::milliseconds most) {
-        const auto end = std::chrono::steady_clock::now() + most;
-        while (!woken_->exchange(false, std::memory_order_acq_rel) &&
-               std::chrono::steady_clock::now() < end) {
-            std::this_thread::yield();
-        }
-    }
-
     AppConfig                                   host_cfg_{};
-    std::shared_ptr<std::atomic<bool>>          woken_ = std::make_shared<std::atomic<bool>>(false);
+    jaal::platform::native_reactor              reactor_;   // before kernel_: it holds the waker
     platform::Headless                          window_;
     host_type                                   host_;
     jaal::detail::run::forward_host<host_type, event_type> fwd_;

@@ -176,9 +176,10 @@ class Tiled {
             return;
         }
 
-        // One chunk per worker plus the caller; bigger chunks amortise the
-        // atomic claim, and rows are contiguous so each stays cache-friendly.
-        const std::size_t chunks = pool->worker_count() + 1;
+        // Four chunks per thread: big enough to amortise the claim, small
+        // enough that a helper that wakes late doesn't hold up the call (the
+        // threads already running take its share). Rows stay contiguous.
+        const std::size_t chunks = (pool->worker_count() + 1) * 4;
         const int rows_per = (fb.height() + static_cast<int>(chunks) - 1) /
                              static_cast<int>(chunks);
 
