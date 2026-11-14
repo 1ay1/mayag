@@ -211,14 +211,16 @@ void test_draws_are_paced() {
     section("draw pacing");
 
     // The model changes ~300 times in 300 ms; the screen refreshes ~18 times.
-    // Drawing every change would be ~300 frames of wasted CPU.
+    // The host draws at most twice a refresh (at once, then once more just
+    // before the vblank with the newest state); drawing every change would
+    // be ~300 frames of wasted CPU.
     AppConfig cfg = quiet();
     auto win = platform::Headless::open(detail::window_config(cfg));
     const int rc = run_on<BusyApp>(*win, cfg);
     const auto frames = win->frames_presented();
     check(rc == 0, "ran and quit");
-    check(frames >= 10 && frames <= 25,
-          "300 ms of constant changes draws once a refresh (" + std::to_string(frames) + " frames)");
+    check(frames >= 18 && frames <= 42,
+          "300 ms of constant changes draws at most twice a refresh (" + std::to_string(frames) + " frames)");
 }
 
 // ── end to end: a real, idle window is woken by a stream ────────────────

@@ -172,7 +172,7 @@ struct Reactive {
         auto stat = [&](auto label, std::string value, Color<Srgb> tone) {
             return v(label | font(9) | fg(t.text_secondary) | tracking(1.2f),
                      text_owned(std::move(value)) | font(17) | bold | fg(tone))
-                 | gap(1) | width(96);
+                 | gap(1) | width(118);
         };
 
         // Read the runtime's own measurements. A view is still a pure
@@ -200,7 +200,12 @@ struct Reactive {
                  divider(t),
 
                  // The numbers. This is the point of the example.
-                 h(stat(text<"CPU / FRAME">,
+                 h(stat(text<"INPUT → PHOTON">,
+                        c.photon.samples > 0
+                            ? std::to_string(static_cast<int>(c.photon.mean_ms * 1000)) + " us"
+                            : std::string{"move the pointer"},
+                        c.photon.mean_ms > 16.6 ? t.danger : t.success),
+                   stat(text<"CPU / FRAME">,
                         std::to_string(static_cast<int>(cpu_ms * 1000)) + " us",
                         over_budget ? t.danger : t.success),
                    stat(text<"WORST">,

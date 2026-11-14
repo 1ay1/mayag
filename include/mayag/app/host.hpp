@@ -72,6 +72,10 @@ struct Ctx {
     /// Last frames' measured budget, so an app can draw its own latency.
     const LatencyStats* latency = nullptr;
 
+    /// Measured input to photon (the compositor's presentation feedback),
+    /// when the window can report it.
+    platform::PhotonStats photon{};
+
     const layout::TextMeasurer* text_measurer = nullptr;
     [[nodiscard]] const layout::TextMeasurer& measurer() const {
         return text_measurer != nullptr ? *text_measurer : layout::default_measurer();
@@ -186,6 +190,10 @@ struct AppConfig {
 /// available (headless, or a compositor that doesn't send frame callbacks).
 inline constexpr std::chrono::nanoseconds kFramePeriod{16'666'667};
 
+/// How long before a vblank the late-latch draw starts. Covers view, layout,
+/// paint and the GPU submit (~0.5 ms measured) with room to spare.
+inline constexpr std::chrono::nanoseconds kLatchMargin{2'000'000};
+
 template <Program P, class W>
 class window_host {
   public:
@@ -272,6 +280,7 @@ class window_host {
         // drawn AFTER its tick, not one tick late.
         const auto now = clock::now();
         time_ = std::chrono::duration<double>(now - start_).count();
+        sync_display();
         if (const auto dt = take_frame()) {
             if (tracked_.animating()) { tracked_.step_all(*dt); dirty_ = true; }
             if (frames_on_ && frame_make_) {
@@ -280,29 +289,71 @@ class window_host {
                 return;
             }
         } else if (!external_loop_ && !std::exchange(tick_pending_, false)) {
-            // Not a frame tick. The screen shows one frame per refresh, so
-            // drawing every input batch (a trackpad sends ~250 Hz) only burns
-            // CPU. While the frame clock runs, input waits for the next tick;
-            // otherwise the first change draws at once and later ones at most
-            // once a refresh. The draw is owed, never dropped, so the newest
-            // state always reaches the screen.
-            if (now < next_draw_at()) { draw_owed_ = true; return; }
+            // Not a frame tick: input or a message changed something. The
+            // first change in a refresh slot draws NOW (the swapchain shows
+            // the newest frame at the next vblank, so nothing waits). More
+            // changes in the same slot are held and drawn once, just before
+            // the vblank, so that frame carries the freshest input. The draw
+            // is owed, never dropped.
+            if (now < next_draw_at(now)) {
+                draw_owed_ = true;
+                return;
+            }
         }
+        const auto slot = slot_of(now);
+        latched_ = (slot == drawn_slot_);   // second draw of a slot: the late one
         draw_owed_ = false;
         last_draw_ = now;
+        drawn_slot_ = slot;
         draw(k.model(), [&](std::exception_ptr e) { k.view_faulted(std::move(e)); });
     }
 
-    /// The earliest a non-tick draw may happen.
-    [[nodiscard]] clock::time_point next_draw_at() const noexcept {
-        return (animating() && !external_loop_) ? next_frame_ : last_draw_ + kFramePeriod;
+    /// The earliest a non-tick draw may happen: now in a fresh slot; the
+    /// slot's late-latch point after its first draw; the next slot after its
+    /// late one. So at most two frames per refresh, the second carrying the
+    /// freshest input just before the vblank.
+    [[nodiscard]] clock::time_point next_draw_at(clock::time_point now = clock::now()) const noexcept {
+        if (slot_of(now) != drawn_slot_) return now;
+        if (latched_) return slot_start(drawn_slot_ + 1);
+        return std::max(now, latch_point(drawn_slot_));
+    }
+
+    // ── the display clock ───────────────────────────────────────────────
+    // Refresh slots are counted from a vblank the compositor reported; with
+    // no report yet, from start-up at 60 Hz. Slot n runs [vblank + n*period,
+    // vblank + (n+1)*period).
+
+    [[nodiscard]] std::int64_t slot_of(clock::time_point t) const noexcept {
+        const auto d = t - vblank_;
+        return d >= clock::duration::zero() ? d / period_ : -((-d) / period_) - 1;
+    }
+    [[nodiscard]] clock::time_point slot_start(std::int64_t n) const noexcept {
+        return vblank_ + n * period_;
+    }
+    /// Late enough to carry the newest input, early enough to make the vblank
+    /// that ends slot n.
+    [[nodiscard]] clock::time_point latch_point(std::int64_t n) const noexcept {
+        return slot_start(n + 1) - std::min<clock::duration>(kLatchMargin, period_ / 4);
+    }
+    void sync_display() {
+        if constexpr (requires { window_.display_timing(); }) {
+            const auto t = window_.display_timing();
+            if (!t || t->seq == display_seq_) return;   // nothing new
+            display_seq_ = t->seq;
+            // Re-express the last draw's slot against the new anchor, so a
+            // re-anchor can't make an already-drawn slot look fresh.
+            const auto drawn_at = drawn_slot_ >= 0 ? slot_start(drawn_slot_) : clock::time_point{};
+            vblank_ = t->vblank;
+            if (t->period.count() > 0) period_ = std::chrono::duration_cast<clock::duration>(t->period);
+            if (drawn_slot_ >= 0) drawn_slot_ = slot_of(drawn_at + period_ / 2);
+        }
     }
 
     /// Owed when the frame clock is running and its tick is due, a spring is
     /// moving, or presentation state (hover, focus) changed under the model.
     [[nodiscard]] bool owes_frame() const noexcept {
         const auto now = clock::now();
-        if ((dirty_ || draw_owed_) && (external_loop_ || now >= next_draw_at())) return true;
+        if ((dirty_ || draw_owed_) && (external_loop_ || now >= next_draw_at(now))) return true;
         if (!external_loop_ && animating() && now >= next_frame_) return true;
         // fd-less window: time to look. Remembered so present() can skip the
         // draw when the look finds nothing. (jaal skips this call when the
@@ -311,22 +362,21 @@ class window_host {
         return poll_only_;
     }
 
-    [[nodiscard]] std::optional<std::chrono::milliseconds> wait_hint() const noexcept {
-        using std::chrono::milliseconds;
+    [[nodiscard]] std::optional<std::chrono::nanoseconds> wait_hint() const noexcept {
+        using ns = std::chrono::nanoseconds;
         const auto now = clock::now();
         if (dirty_ || draw_owed_) {
-            if (external_loop_) return milliseconds{0};
-            return std::max(std::chrono::ceil<milliseconds>(next_draw_at() - now), milliseconds{0});
+            if (external_loop_) return ns{0};
+            return std::max(std::chrono::duration_cast<ns>(next_draw_at(now) - now), ns{0});
         }
         if (!animating()) {
             // Wayland wakes us through its fd. A window with none (Cocoa)
             // has to be asked: poll it often enough that input feels instant.
             if (!poll_window_) return std::nullopt;
-            return std::chrono::ceil<milliseconds>(kPollPeriod);
+            return kPollPeriod;
         }
-        // Rounded UP so the loop never wakes before the frame is due.
-        const auto left = std::chrono::ceil<milliseconds>(next_frame_ - clock::now());
-        return std::max(left, milliseconds{0});
+        // Nanoseconds, so a late-latch wake lands on time, not up to 1 ms late.
+        return std::max(std::chrono::duration_cast<ns>(next_frame_ - now), ns{0});
     }
 
     // The frame clock. One per program; jaal starts it when subscribe()
@@ -337,7 +387,8 @@ class window_host {
         frame_make_ = p.make;
         frames_on_ = true;
         last_tick_.reset();
-        next_frame_ = clock::now();
+        sync_display();
+        next_frame_ = clock::now();   // the first tick at once, then on vblank
     }
     void stop_source(std::type_identity<fx::on_frame>, const fx::on_frame::key_type&) {
         frames_on_ = false;
@@ -432,11 +483,13 @@ class window_host {
         if (!animating() || now < next_frame_) return std::nullopt;
         const double dt = last_tick_
             ? std::min(std::chrono::duration<double>(now - *last_tick_).count(), 0.1)
-            : 1.0 / 60.0;
+            : std::chrono::duration<double>(period_).count();
         last_tick_ = now;
-        // Keep phase: whole periods, resync after a stall.
-        next_frame_ += kFramePeriod;
-        if (next_frame_ <= now) next_frame_ = now + kFramePeriod;
+        // The next tick at the next late-latch point (just before a vblank):
+        // locked to the display, at its real rate (60, 120, 144 Hz ...).
+        // drawn_slot_ is only set by an actual draw.
+        const auto slot = slot_of(now);
+        next_frame_ = now < latch_point(slot) ? latch_point(slot) : latch_point(slot + 1);
         return dt;
     }
 
@@ -616,8 +669,9 @@ class window_host {
         tracked_.clear();
         clear_animation_request();
 
-        Ctx ctx{size_, dpi_, time_, cfg_.theme, &latency_, &bindings_->measurer,
+        Ctx ctx{size_, dpi_, time_, cfg_.theme, &latency_, {}, &bindings_->measurer,
                 &tracked_, &overlays_, &input_};
+        if constexpr (requires { window_.photon_stats(); }) ctx.photon = window_.photon_stats();
         {
             ScopedTimer t{frame.view_ms};
             try {
@@ -721,6 +775,11 @@ class window_host {
     bool                draw_owed_ = false;     // a draw was held back for pacing
     bool                tick_pending_ = false;  // a frame tick was dispatched; draw it next
     clock::time_point   last_draw_{};
+    clock::time_point   vblank_ = clock::now();                 // a refresh boundary
+    clock::duration     period_ = std::chrono::duration_cast<clock::duration>(kFramePeriod);
+    std::int64_t        drawn_slot_ = -1;                       // slot of the last draw
+    bool                latched_ = false;                       // that slot had its late draw
+    std::uint64_t       display_seq_ = 0;
     bool                motion_pending_ = false;
 
     bool                frames_on_ = false;

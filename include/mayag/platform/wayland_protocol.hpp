@@ -173,6 +173,8 @@ enum : std::uint32_t {
     viewport_set_source         = 1,
     viewport_set_destination    = 2,
 
+    presentation_feedback       = 1,
+
     cursor_mgr_destroy          = 0,
     cursor_mgr_get_pointer      = 1,
     cursor_dev_destroy          = 0,
@@ -400,6 +402,8 @@ struct XdgTables {
     const wl_interface* frac_get_t[2]{};
     const wl_interface* viewport_get_t[2]{};
     const wl_interface* cursor_get_t[2]{};
+    const wl_interface* pres_feedback_t[2]{};
+    const wl_interface* pres_sync_t[1]{};
 
     wl_message deco_manager_methods[2]{};
     wl_message deco_methods[3]{};
@@ -411,6 +415,9 @@ struct XdgTables {
     wl_message viewport_methods[3]{};
     wl_message cursor_mgr_methods[3]{};
     wl_message cursor_dev_methods[2]{};
+    wl_message pres_methods[2]{};
+    wl_message pres_events[1]{};
+    wl_message pres_fb_events[3]{};
 
     wl_interface wm_base{};
     wl_interface surface{};
@@ -423,6 +430,8 @@ struct XdgTables {
     wl_interface viewport{};
     wl_interface cursor_mgr{};
     wl_interface cursor_dev{};
+    wl_interface presentation{};
+    wl_interface pres_feedback{};
 
     XdgTables() {
         const Lib& L = lib();
@@ -555,6 +564,25 @@ struct XdgTables {
         cursor_dev_methods[1] = {"set_shape", "uu", null_types};
         cursor_dev = wl_interface{"wp_cursor_shape_device_v1", 1, 2,
                                   cursor_dev_methods, 0, nullptr};
+
+        // ── wp_presentation ───────────────────────────────────────────────
+        //
+        // When each frame actually reached the display, and the refresh
+        // period. That is the clock the host schedules frames against, and
+        // the only honest way to measure input to photon.
+        pres_feedback_t[0] = L.i_surface;
+        pres_feedback_t[1] = &pres_feedback;
+        pres_sync_t[0]     = L.i_output;
+
+        pres_methods[0] = {"destroy",  "",   null_types};
+        pres_methods[1] = {"feedback", "on", pres_feedback_t};
+        pres_events[0]  = {"clock_id", "u",  null_types};
+        presentation = wl_interface{"wp_presentation", 1, 2, pres_methods, 1, pres_events};
+
+        pres_fb_events[0] = {"sync_output", "o",       pres_sync_t};
+        pres_fb_events[1] = {"presented",   "uuuuuuu", null_types};
+        pres_fb_events[2] = {"discarded",   "",        null_types};
+        pres_feedback = wl_interface{"wp_presentation_feedback", 1, 0, nullptr, 3, pres_fb_events};
     }
 };
 
@@ -598,6 +626,13 @@ template <typename... Args>
                                        const wl_interface* iface,
                                        std::uint32_t version, Args... args) noexcept {
     return lib().proxy_marshal_flags(p, opcode, iface, version, 0u, nullptr, args...);
+}
+
+/// Same, for a request whose new_id comes AFTER one object argument
+/// (signature "on", e.g. wp_presentation.feedback(surface, new_id)).
+inline proxy* request_new_after(proxy* p, std::uint32_t opcode, const wl_interface* iface,
+                                std::uint32_t version, proxy* first) noexcept {
+    return lib().proxy_marshal_flags(p, opcode, iface, version, 0u, first, nullptr);
 }
 
 /// A request with no return value.

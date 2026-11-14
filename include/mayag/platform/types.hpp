@@ -6,6 +6,8 @@
 #include "../core/color.hpp"
 #include "../core/geometry.hpp"
 
+#include <chrono>
+#include <cstdint>
 #include <string>
 
 namespace mayag {
@@ -20,6 +22,23 @@ enum class CursorShape : int {
 }  // namespace mayag
 
 namespace mayag::platform {
+
+/// When the display last refreshed and how often it does, as reported by the
+/// compositor (wp_presentation). The host schedules frames against this.
+struct DisplayTiming {
+    std::chrono::steady_clock::time_point vblank{};   ///< a recent refresh
+    std::chrono::nanoseconds              period{};   ///< refresh interval
+    std::uint64_t                         seq = 0;    ///< bumps on each new report
+};
+
+/// Input to photon, measured: from when mayag received an input event to
+/// when the frame showing it was put on the display.
+struct PhotonStats {
+    double last_ms  = 0.0;
+    double mean_ms  = 0.0;
+    double worst_ms = 0.0;   ///< over the recent window
+    int    samples  = 0;
+};
 
 struct WindowConfig {
     std::string title = "mayag";

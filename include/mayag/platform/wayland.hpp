@@ -69,6 +69,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <array>
 #include <optional>
 #include <poll.h>
 #include <string>
@@ -495,6 +496,13 @@ class WaylandWindow {
         // next frame.
         L.display_flush(display_);
 
+        // Start the input-to-photon clock at the first user event not yet on
+        // screen.
+        for (const auto& e : pending_) {
+            if (!std::holds_alternative<ResizeEvent>(e) && !std::holds_alternative<FocusEvent>(e) &&
+                !std::holds_alternative<CloseRequest>(e)) { note_input(); break; }
+        }
+
         // A protocol error is fatal and unrecoverable — the compositor has
         // already dropped the connection. Closing cleanly beats spinning on a
         // dead fd forever.
@@ -528,6 +536,7 @@ class WaylandWindow {
         // case gpu_.valid() is false and control falls through to shm.
         if (gpu_active_) {
             if (atlas_ != nullptr) sync_atlas_to_gpu();
+            request_feedback();   // before the commit vkQueuePresentKHR makes
             gpu_.submit(dl, clear);
             last_list_ = dl; last_clear_ = clear; last_had_frame_ = true;
             // Still ask for a frame callback, same as the shm path.
@@ -623,6 +632,7 @@ class WaylandWindow {
         }
 
         buf->busy = true;
+        request_feedback();
         wl::request(surface_, wl::surface_commit);
         wl::lib().display_flush(display_);
         ++frames_presented_;
@@ -1055,6 +1065,10 @@ class WaylandWindow {
             w->frac_manager_ = bind(&wl::xdg().frac_manager, 1);
         } else if (id == "wp_viewporter") {
             w->viewporter_ = bind(&wl::xdg().viewporter, 1);
+        } else if (id == "wp_presentation") {
+            w->presentation_ = bind(&wl::xdg().presentation, 1);
+            if (w->presentation_ != nullptr)
+                wl::add_listener(w->presentation_, &presentation_listener, w);
         } else if (id == "wp_cursor_shape_manager_v1") {
             w->cursor_manager_ = bind(&wl::xdg().cursor_mgr, 1);
         }
@@ -1197,6 +1211,105 @@ class WaylandWindow {
                       &on_output_scale, &on_output_name, &on_output_description};
 
     // ── frame callback ──────────────────────────────────────────────────
+
+    // ── wp_presentation: when frames really reach the display ───────────
+    //
+    // A feedback object is asked for before each commit. The compositor
+    // answers `presented` with the exact scanout time and the refresh
+    // period, or `discarded` if the frame never made it. That gives the host
+    // a real vsync clock, and turns "input to photon" into a measurement.
+
+    struct Feedback {
+        Impl*      w;
+        wl::proxy* proxy;
+        double     input_at;   // monotonic seconds of the newest input it shows; <0: none
+    };
+
+    void request_feedback() {
+        if (presentation_ == nullptr || surface_ == nullptr) return;
+        wl::proxy* p = wl::request_new_after(presentation_, wl::presentation_feedback,
+                                             &wl::xdg().pres_feedback, wl::version_of(presentation_),
+                                             surface_);
+        if (p == nullptr) return;
+        auto* fb = new Feedback{this, p, std::exchange(unshown_input_, -1.0)};
+        wl::add_listener(p, &feedback_listener, fb);
+    }
+
+    static void on_fb_sync_output(void*, wl::proxy*, wl::proxy*) {}
+    static void on_fb_presented(void* data, wl::proxy*, std::uint32_t tv_sec_hi,
+                                std::uint32_t tv_sec_lo, std::uint32_t tv_nsec,
+                                std::uint32_t refresh_ns, std::uint32_t, std::uint32_t,
+                                std::uint32_t) {
+        auto* fb = static_cast<Feedback*>(data);
+        Impl* w = fb->w;
+        const double secs = static_cast<double>((std::uint64_t{tv_sec_hi} << 32) | tv_sec_lo) +
+                            static_cast<double>(tv_nsec) * 1e-9;
+        // CLOCK_MONOTONIC is the default presentation clock on Linux; a
+        // compositor using another one says so in clock_id, which we read.
+        if (w->pres_clock_monotonic_) {
+            w->vblank_s_ = secs;
+            ++w->vblank_seq_;
+            if (refresh_ns > 0) w->period_ns_ = refresh_ns;
+            if (fb->input_at >= 0.0) w->record_photon((secs - fb->input_at) * 1000.0);
+        }
+        wl::destroy(fb->proxy);
+        delete fb;
+    }
+    static void on_fb_discarded(void* data, wl::proxy*) {
+        auto* fb = static_cast<Feedback*>(data);
+        // The input it carried is still not on screen: the next frame owns it.
+        if (fb->input_at >= 0.0 && fb->w->unshown_input_ < 0.0)
+            fb->w->unshown_input_ = fb->input_at;
+        wl::destroy(fb->proxy);
+        delete fb;
+    }
+    static inline const struct {
+        void (*sync_output)(void*, wl::proxy*, wl::proxy*);
+        void (*presented)(void*, wl::proxy*, std::uint32_t, std::uint32_t, std::uint32_t,
+                          std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+        void (*discarded)(void*, wl::proxy*);
+    } feedback_listener{&on_fb_sync_output, &on_fb_presented, &on_fb_discarded};
+
+    static void on_pres_clock(void* data, wl::proxy*, std::uint32_t clk) {
+        self(data)->pres_clock_monotonic_ = (clk == CLOCK_MONOTONIC);
+    }
+    static inline const struct {
+        void (*clock_id)(void*, wl::proxy*, std::uint32_t);
+    } presentation_listener{&on_pres_clock};
+
+    /// An input event arrived. A frame shows the NEWEST input it was drawn
+    /// with (pointer moves coalesce), so latency is measured from that.
+    void note_input() {
+        unshown_input_ = wldetail::monotonic_now();
+    }
+
+    void record_photon(double ms) {
+        photon_[photon_next_++ % photon_.size()] = ms;
+        photon_count_ = std::min(photon_count_ + 1, photon_.size());
+        photon_last_ = ms;
+    }
+
+    [[nodiscard]] std::optional<DisplayTiming> display_timing() const noexcept {
+        if (vblank_s_ <= 0.0 || period_ns_ == 0) return std::nullopt;
+        using namespace std::chrono;
+        // steady_clock is CLOCK_MONOTONIC on Linux (libstdc++ and libc++),
+        // so the compositor's timestamp maps across exactly.
+        const auto vb = steady_clock::time_point{
+            duration_cast<steady_clock::duration>(duration<double>(vblank_s_))};
+        return DisplayTiming{vb, nanoseconds{period_ns_}, vblank_seq_};
+    }
+    [[nodiscard]] PhotonStats photon_stats() const noexcept {
+        PhotonStats s;
+        s.samples = static_cast<int>(photon_count_);
+        s.last_ms = photon_last_;
+        double sum = 0.0;
+        for (std::size_t i = 0; i < photon_count_; ++i) {
+            sum += photon_[i];
+            s.worst_ms = std::max(s.worst_ms, photon_[i]);
+        }
+        if (photon_count_ > 0) s.mean_ms = sum / static_cast<double>(photon_count_);
+        return s;
+    }
 
     static void on_frame_done(void* data, wl::proxy* cb, std::uint32_t) {
         Impl* w = self(data);
@@ -1638,6 +1751,15 @@ class WaylandWindow {
     wl::proxy* viewport_       = nullptr;
     wl::proxy* cursor_manager_ = nullptr;
     wl::proxy* cursor_device_  = nullptr;
+    wl::proxy* presentation_   = nullptr;
+    bool       pres_clock_monotonic_ = true;
+    double     vblank_s_  = 0.0;          // last presented frame, monotonic s
+    std::uint64_t vblank_seq_ = 0;
+    std::uint32_t period_ns_ = 0;         // refresh period from the compositor
+    double     unshown_input_ = -1.0;     // oldest input not yet on screen (s)
+    std::array<double, 120> photon_{};
+    std::size_t photon_next_ = 0, photon_count_ = 0;
+    double     photon_last_ = 0.0;
     wl::proxy* frame_callback_ = nullptr;
     wl::proxy* pool_           = nullptr;
 
@@ -1737,6 +1859,15 @@ class WaylandWindow {
     [[nodiscard]] std::vector<Event> dispatch() { return p_->dispatch(); }
 
     void present(const DrawList& dl, Color<Srgb> clear) { p_->present(dl, clear); }
+
+    /// The compositor's vsync clock, once a frame has been presented.
+    [[nodiscard]] std::optional<DisplayTiming> display_timing() const noexcept {
+        return p_ ? p_->display_timing() : std::nullopt;
+    }
+    /// Input to photon, measured by wp_presentation.
+    [[nodiscard]] PhotonStats photon_stats() const noexcept {
+        return p_ ? p_->photon_stats() : PhotonStats{};
+    }
 
     [[nodiscard]] double now() const noexcept { return p_->now(); }
     [[nodiscard]] double double_click_interval() const noexcept {
