@@ -22,6 +22,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -63,6 +64,11 @@ class ThreadPool {
     /// counter, so a worker that finishes an empty tile immediately picks up
     /// the next one. With static ranges a single text-heavy tile would stall
     /// the whole frame while seven cores sat idle.
+    ///
+    /// Each call gets its own Job, handed to workers under the lock. A worker
+    /// still finishing the previous call only ever touches that call's Job,
+    /// which is already exhausted, so it can't claim an index of this one
+    /// before seeing its setup (TSAN found exactly that with a shared counter).
     template <typename Fn>
     void parallel_for(std::size_t count, Fn&& fn) {
         if (count == 0) return;
@@ -72,59 +78,65 @@ class ThreadPool {
             return;
         }
 
-        job_ = [&fn](std::size_t i) { fn(i); };
-        total_.store(count, std::memory_order_relaxed);
-        next_.store(0, std::memory_order_relaxed);
-        remaining_.store(count, std::memory_order_release);
-
+        auto job = std::make_shared<Job>();
+        job->fn = [&fn](std::size_t i) { fn(i); };
+        job->total = count;
+        job->remaining.store(count, std::memory_order_relaxed);
         {
             std::lock_guard lock{mutex_};
+            current_ = job;
             ++generation_;
         }
         wake_.notify_all();
 
         // The calling thread is a worker too.
-        drain();
+        drain(*job);
 
         // Spin briefly, then sleep. Tiles are short, so a spin usually wins;
         // the yield keeps a mis-predicted wait from burning a core.
-        while (remaining_.load(std::memory_order_acquire) != 0) {
+        while (job->remaining.load(std::memory_order_acquire) != 0) {
             std::this_thread::yield();
         }
 
-        job_ = nullptr;
+        std::lock_guard lock{mutex_};
+        current_.reset();
     }
 
   private:
+    struct Job {
+        std::function<void(std::size_t)> fn;
+        std::size_t                      total = 0;
+        std::atomic<std::size_t>         next{0};
+        std::atomic<std::size_t>         remaining{0};
+    };
+
     void worker_loop() {
         std::uint64_t seen = 0;
         for (;;) {
+            std::shared_ptr<Job> job;
             {
                 std::unique_lock lock{mutex_};
                 wake_.wait(lock, [&] { return stop_ || generation_ != seen; });
                 if (stop_) return;
                 seen = generation_;
+                job = current_;
             }
-            drain();
+            if (job) drain(*job);
         }
     }
 
     /// Claim and run indices until the job is exhausted.
-    void drain() {
-        const std::size_t total = total_.load(std::memory_order_relaxed);
+    static void drain(Job& job) {
         for (;;) {
-            const std::size_t i = next_.fetch_add(1, std::memory_order_relaxed);
-            if (i >= total) return;
-            if (job_) job_(i);
-            remaining_.fetch_sub(1, std::memory_order_release);
+            const std::size_t i = job.next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= job.total) return;
+            job.fn(i);
+            job.remaining.fetch_sub(1, std::memory_order_release);
         }
     }
 
     std::vector<std::thread>          threads_;
-    std::function<void(std::size_t)>  job_;
-    std::atomic<std::size_t>          next_{0};
-    std::atomic<std::size_t>          total_{0};
-    std::atomic<std::size_t>          remaining_{0};
+    std::shared_ptr<Job>              current_;   ///< guarded by mutex_
 
     std::mutex                mutex_;
     std::condition_variable   wake_;
