@@ -23,13 +23,18 @@ struct Reactive {
     // ── state ───────────────────────────────────────────────────────────
 
     static constexpr int trail_length = 24;
+    /// How many frames of pointer path the trail shows. Short on purpose:
+    /// when the mouse stops, the trail is gone within this many frames.
+    static constexpr int history = 4;
     static constexpr int bars = 48;
 
     struct Model {
         Vec2   cursor{};
-        /// A short history of cursor positions. Each lags the one before it
-        /// by a spring, so the visual gap between the head and the tail is a
-        /// direct picture of the frame pipeline's depth.
+        bool   seen_pointer = false;   ///< no trail until the pointer arrives
+        /// Where the pointer was at each of the last `history` frames,
+        /// newest first. The trail is drawn along this path.
+        std::array<Vec2, history> path{};
+        /// The dots: the path resampled at even steps. trail[0] is the pointer.
         std::array<Vec2, trail_length> trail{};
 
         std::array<float, bars> spectrum{};
@@ -71,29 +76,26 @@ struct Reactive {
 
     static Cmd update(Model& m, const Moved& e) {
         m.cursor = Vec2{e.x, e.y};
-        // The head IS the pointer, set the moment the move arrives, so it
-        // never lags. Only the tail eases behind it.
-        m.trail[0] = m.cursor;
-        // Pointer motion earns a short burst of frames so the tail
-        // can catch up, then the app goes quiet again. Without a
-        // BUDGET this would animate forever after the first move.
-        m.settle_frames = 45;
+        if (!m.seen_pointer) { m.seen_pointer = true; m.path.fill(m.cursor); }
+        // The head IS the pointer, set the moment the move arrives.
+        m.path[0] = m.cursor;
+        resample(m);
+        // Enough frames for the path to collapse onto the pointer once it
+        // stops; then the app goes quiet again.
+        m.settle_frames = history;
         return {};
     }
     static Cmd update(Model& m, const Tick& e) {
                 m.t += e.dt;
                 if (m.settle_frames > 0) --m.settle_frames;
 
-                // The tail: each point chases the one ahead of it. A stiff
-                // follow means the tail is only a few frames behind, which is
-                // exactly what the eye reads as "responsive".
-                const float k = num::saturate(static_cast<float>(e.dt) * 26.0f);
-                m.trail[0] = m.cursor;
-                for (int i = 1; i < trail_length; ++i) {
-                    m.trail[static_cast<std::size_t>(i)] =
-                        lerp(m.trail[static_cast<std::size_t>(i)],
-                             m.trail[static_cast<std::size_t>(i - 1)], k);
-                }
+                // One frame older: shift the path. When the pointer has
+                // stopped, every entry becomes the pointer and the trail is
+                // gone, with nothing easing afterwards.
+                for (int i = history - 1; i > 0; --i)
+                    m.path[static_cast<std::size_t>(i)] = m.path[static_cast<std::size_t>(i - 1)];
+                m.path[0] = m.cursor;
+                resample(m);
 
                 // A cheap synthetic spectrum, so the scene has real per-frame
                 // work rather than being trivially fast.
@@ -115,6 +117,18 @@ struct Reactive {
     }
     static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
+    /// Spread the dots evenly along the path.
+    static void resample(Model& m) {
+        for (int i = 0; i < trail_length; ++i) {
+            const float u = static_cast<float>(i) / static_cast<float>(trail_length - 1)
+                          * static_cast<float>(history - 1);
+            const int   s = num::min(static_cast<int>(u), history - 2);
+            m.trail[static_cast<std::size_t>(i)] =
+                lerp(m.path[static_cast<std::size_t>(s)],
+                     m.path[static_cast<std::size_t>(s + 1)], u - static_cast<float>(s));
+        }
+    }
+
     // ── view ────────────────────────────────────────────────────────────
 
     static Node view(const Model& m) {
@@ -134,11 +148,12 @@ struct Reactive {
 
         // ---- the cursor trail ----
         //
-        // Drawn as an overlay so it escapes every clip and always sits on
-        // top: a latency indicator that can be occluded is useless.
-        for (int i = trail_length - 1; i >= 0; --i) {
+        // Drawn as overlays so it escapes every clip and always sits on top,
+        // each dot centred on its point of the path.
+        for (int i = trail_length - 1; i >= 0 && m.seen_pointer; --i) {
             const float f = static_cast<float>(i) / trail_length;
             const float r = 3.0f + (1.0f - f) * 9.0f;
+            const Vec2  p = m.trail[static_cast<std::size_t>(i)];
             c.overlay(Overlay{
                 .content = (box() | size(r * 2.0f, r * 2.0f)
                                   | bg(mix_perceptual(t.accent, t.danger, f)
@@ -150,6 +165,7 @@ struct Reactive {
                 .dismiss = Dismiss::never,
                 .offset = 0.0f,
                 .layer = trail_length - i,
+                .at = Vec2{p.x - r, p.y - r},
             });
         }
 

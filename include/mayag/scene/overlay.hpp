@@ -23,6 +23,7 @@
 #include "../core/geometry.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace mayag {
@@ -70,6 +71,10 @@ struct Overlay {
 
     /// Dim everything behind. Modal dialogs want this; menus do not.
     float scrim = 0.0f;
+
+    /// For Placement::cursor: the point to place at instead of the pointer
+    /// (a marker, a point on a chart). Window coordinates.
+    std::optional<Vec2> at = std::nullopt;
 };
 
 /// The overlay layer for one frame.

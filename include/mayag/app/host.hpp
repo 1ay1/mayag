@@ -637,7 +637,7 @@ class window_host {
             const Rect anchor = o.anchor_id != 0 ? (a ? a->frame() : Rect{}) : Rect{Vec2{}, size_};
             const Vec2 natural = layout::measure(o.content, layout::Constraints{size_.x, size_.y}, measurer);
             const Rect placed = overlay::resolve(o.placement, anchor, natural, size_,
-                                                 o.offset, input_.cursor());
+                                                 o.offset, o.at.value_or(input_.cursor()));
             layout::arrange(o.content, placed, measurer);
         }
 
