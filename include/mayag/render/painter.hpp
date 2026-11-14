@@ -118,6 +118,7 @@ inline void paint_node(const Node& node, DrawList& dl, const PaintOptions& opts,
     // ── text ────────────────────────────────────────────────────────────
     if (node.kind() == NodeKind::text && opts.glyphs != nullptr && !node.text().empty()) {
         TextStyle ts = st.text;
+        ts.variations.auto_optical_size(st.text.size);   // logical, before DPI scaling
         ts.size  = st.text.size * opts.dpi_scale;
         ts.color = apply_opacity(st.text.color, alpha);
         opts.glyphs->draw_text(dl, node.text(), deflate(frame, st.layout.padding), ts);

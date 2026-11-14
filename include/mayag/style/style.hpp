@@ -189,6 +189,31 @@ struct FontVariations {
             if (axes[i].tag == tag) { axes[i].value = value; return; }
         if (count < max_axes) axes[count++] = Axis{tag, value};
     }
+
+    [[nodiscard]] constexpr bool has(std::uint32_t tag) const noexcept {
+        for (std::uint8_t i = 0; i < count; ++i)
+            if (axes[i].tag == tag) return true;
+        return false;
+    }
+
+    /// 'opsz', the optical-size axis.
+    static constexpr std::uint32_t tag_opsz = 0x6F70737A;
+
+    /// Pin opsz to `logical_size` unless the style already chose one.
+    ///
+    /// This is what CoreText and every browser do (`font-optical-sizing:
+    /// auto`): a variable font with an optical-size axis is drawn with the
+    /// design meant for the size it is shown at. Without it, SF and its kin
+    /// render every UI size with their DEFAULT instance -- for SF that is the
+    /// opsz-28 "Display" cut, whose narrow letterforms and tight spacing are
+    /// drawn for headlines, so 12 px body text came out cramped and thin.
+    /// LOGICAL size, never device pixels: 13 pt on a 2x display is still
+    /// 13 pt type, and must not switch to the 26 pt design. Rounded to whole
+    /// points: the design does not visibly change within one, and every
+    /// distinct value is its own instance (and its own glyph-cache entries).
+    constexpr void auto_optical_size(float logical_size) noexcept {
+        if (!has(tag_opsz)) set(tag_opsz, static_cast<float>(static_cast<int>(logical_size + 0.5f)));
+    }
 };
 
 struct TextStyle {

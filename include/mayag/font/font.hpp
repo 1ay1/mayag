@@ -839,8 +839,13 @@ namespace detail {
     p.ligatures      = st.ligatures;
     p.weight         = st.effective_weight();
     p.italic         = st.italic;
-    for (std::uint8_t i = 0; i < st.variations.count && p.axis_count < ShapeParams::max_axes; ++i) {
-        const auto& a = st.variations.axes[i];
+    // Layout measures in logical units, so st.size IS the logical size here;
+    // the painter pinned opsz to the same value before scaling to device px,
+    // so measure and draw select the same design.
+    FontVariations vars = st.variations;
+    vars.auto_optical_size(st.size);
+    for (std::uint8_t i = 0; i < vars.count && p.axis_count < ShapeParams::max_axes; ++i) {
+        const auto& a = vars.axes[i];
         p.axes[p.axis_count++] = ShapeParams::Axis{a.tag, a.value};
     }
     return p;

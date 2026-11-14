@@ -1206,6 +1206,59 @@ void test_color_glyphs() {
 /// optical size, ...). We must parse fvar, apply gvar deltas via IUP, and
 /// re-interpolate outlines as the axes move. The bar: heavier weight lays
 /// down strictly more ink, and the motion is smooth and reversible.
+/// Optical sizing (font-optical-sizing: auto). A variable font with an opsz
+/// axis must be drawn with the design for the LOGICAL size. Before this, SF
+/// rendered every UI size with its opsz-28 default, the narrow Display cut:
+/// 13 px body text was 11% narrower than CoreText's and visibly cramped.
+void test_optical_size() {
+    section("optical size");
+
+    FontVariations v;
+    v.auto_optical_size(13.4f);
+    check(v.has(FontVariations::tag_opsz), "auto optical size pins opsz");
+    check(v.count == 1 && v.axes[0].value == 13.0f, "to the logical size, rounded to whole points");
+    FontVariations chosen;
+    chosen.set(FontVariations::tag_opsz, 40.0f);
+    chosen.auto_optical_size(12.0f);
+    check(chosen.axes[0].value == 40.0f, "an explicit optical_size() is never overridden");
+
+    const auto params = typo::detail::shape_params_of([] { TextStyle t; t.size = 12.0f; return t; }());
+    bool found = false;
+    for (std::uint8_t i = 0; i < params.axis_count; ++i)
+        if (params.axes[i].tag == FontVariations::tag_opsz) found = params.axes[i].value == 12.0f;
+    check(found, "measuring a 12 px run selects opsz 12");
+
+    // On a real opsz font, small text measured with auto optical size is
+    // WIDER than the default (display) instance, as the design intends.
+    std::shared_ptr<typo::Face> sf;
+    float def_opsz = 0.0f;
+    const auto try_face = [&](std::shared_ptr<typo::Face> f) {
+        if (!f || !f->is_variable() || !f->has_glyph(U'n')) return false;
+        for (const auto& a : f->axes())
+            if (a.tag == typo::var::tag_opsz && a.min <= 13.0f && a.def >= 20.0f) {
+                sf = std::move(f); def_opsz = a.def; return true;
+            }
+        return false;
+    };
+    // SF (macOS) first: its default is the Display cut, the case that bit.
+    for (const auto& e : typo::system::Database::instance().entries())
+        if (e.family == "System Font" && try_face(typo::Face::from_file(e.path, e.face_index))) break;
+    if (!sf)
+        for (const auto& e : typo::system::Database::instance().entries())
+            if (try_face(typo::Face::from_file(e.path, e.face_index))) break;
+    if (!sf) { check(true, "no font with a small-size opsz axis installed - skipping"); return; }
+    typo::FontStack stack;
+    stack.add(sf);
+    typo::StackMeasurer m{stack};
+    TextStyle auto_opsz; auto_opsz.size = 13.0f;
+    TextStyle display = auto_opsz;
+    display.variations.set(FontVariations::tag_opsz, def_opsz);   // the old behaviour: default instance
+    const float w_auto = m.measure("Login shell to run in new tabs", auto_opsz, 1e9f).x;
+    const float w_disp = m.measure("Login shell to run in new tabs", display, 1e9f).x;
+    check(w_auto > w_disp, sf->family() + ": 13 px text uses its text design, not the default (" +
+                           std::to_string(w_auto) + " vs " + std::to_string(w_disp) + " px wide)");
+}
+
 void test_variations() {
     section("variable fonts");
 
@@ -1361,6 +1414,7 @@ int main() {
     test_metrics();
     test_rendering();
     test_variations();
+    test_optical_size();
     test_caret();
     test_italic();
     test_synthetic_italic();
