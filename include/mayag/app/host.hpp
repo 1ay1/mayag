@@ -153,6 +153,26 @@ template <Program P>
     return P::view(m);
 }
 
+/// view() run to a fixed point, for one-shot renders (screenshots, tests).
+///
+/// A view reads what LAST frame's layout measured (scrollbar extents live in
+/// the model's ScrollState). The live host gets there by drawing one more
+/// frame; a single offscreen render has no next frame, so it re-runs view
+/// after layout until those measurements stop changing (two passes in
+/// practice). The returned tree is laid out against `size`.
+template <Program P>
+[[nodiscard]] Node settled_view(const typename P::Model& m, const Ctx& c, Vec2 size,
+                                const layout::TextMeasurer& measurer) {
+    (void)take_scroll_geometry_changed();
+    Node root = view_of<P>(m, c);
+    for (int pass = 0; pass < 4; ++pass) {
+        layout::layout_tree(root, size, measurer);
+        if (!take_scroll_geometry_changed()) break;
+        root = view_of<P>(m, c);
+    }
+    return root;
+}
+
 /// Which node id is a click on? `is(c, "save")` reads like the button name.
 template <class G>
 [[nodiscard]] bool is(const G& g, std::string_view name) noexcept {
@@ -752,8 +772,11 @@ class window_host {
             }
         }
 
-        // A widget mid-motion asked for another frame during the view.
-        motion_pending_ = animation_was_requested() || tracked_.animating();
+        // A widget mid-motion asked for another frame during the view, or
+        // layout changed a scroll region's size (a scrollbar drawn from last
+        // frame's numbers is now stale and needs one more pass).
+        motion_pending_ = animation_was_requested() || tracked_.animating() ||
+                          take_scroll_geometry_changed();
 
         frame.instances  = static_cast<std::uint32_t>(draws_.size());
         frame.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());

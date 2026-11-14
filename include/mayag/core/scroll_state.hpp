@@ -27,6 +27,20 @@
 #include "../core/geometry.hpp"
 
 #include <cstdint>
+#include <utility>
+
+namespace mayag::detail {
+inline thread_local bool scroll_geometry_changed = false;
+}  // namespace mayag::detail
+
+namespace mayag {
+/// Set by layout when a scroll viewport's size or its content's size changed.
+/// The host draws again so scrollbars built from the old numbers catch up.
+inline void note_scroll_geometry_changed() noexcept { detail::scroll_geometry_changed = true; }
+[[nodiscard]] inline bool take_scroll_geometry_changed() noexcept {
+    return std::exchange(detail::scroll_geometry_changed, false);
+}
+}  // namespace mayag
 
 namespace mayag {
 
@@ -245,6 +259,11 @@ struct ScrollState {
     /// content (deleting rows, collapsing a section) can never leave the view
     /// scrolled past the end showing blank space.
     constexpr void measured(Vec2 viewport_size, Vec2 content_size) const noexcept {
+        // A view draws its scrollbar from LAST frame's measurements (layout
+        // runs after view). When they change, the bar just drawn is stale, so
+        // say so: the host draws one more frame, which converges because the
+        // second layout measures the same thing.
+        if (viewport_size != viewport || content_size != content) note_scroll_geometry_changed();
         viewport = viewport_size;
         content  = content_size;
         max_offset = {num::max(content_size.x - viewport_size.x, 0.0f),

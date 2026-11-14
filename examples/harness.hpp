@@ -230,7 +230,10 @@ template <Program P, typename Driver>
             typename P::Model model = first_model<P>().first;
 
             Ctx ctx{o.size, o.dpi, 0.0, cfg.theme, nullptr};
-            Node root = view_of<P>(model, ctx);
+            Node root = [&] {
+                typo::StackMeasurer sm{*cfg.fonts};
+                return settled_view<P>(model, ctx, o.size, sm);
+            }();
 
             RenderOptions ro;
             ro.background   = cfg.theme.background;
@@ -264,7 +267,10 @@ template <Program P, typename Driver>
             });
 
             Ctx ctx{o.size, o.dpi, 0.0, cfg.theme, nullptr};
-            Node root = view_of<P>(model, ctx);
+            Node root = [&] {
+                typo::StackMeasurer sm{*cfg.fonts};
+                return settled_view<P>(model, ctx, o.size, sm);
+            }();
 
             const int W = static_cast<int>(o.size.x * o.dpi);
             const int H = static_cast<int>(o.size.y * o.dpi);

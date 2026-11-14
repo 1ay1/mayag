@@ -194,12 +194,14 @@ struct TerminalSettings {
     struct Typed    { std::string s; };
     struct Undo {}; struct Redo {}; struct Save {}; struct Revert {}; struct Reset {};
     struct ScrollBy { float dy; };
+    struct BarPress { float y; };
+    struct BarDrag  { float dy; };
     struct Tick     { double dt; };
     struct Quit     {};
 
     using Msg = std::variant<Go, Flip, Choose, Step, SetFrac, Nudge, EndDrag, OpenDrop, CloseDrop,
                              StartRecord, Record, ResetKey, StartEdit, EditKey, Typed, Undo, Redo,
-                             Save, Revert, Reset, ScrollBy, Tick, Quit>;
+                             Save, Revert, Reset, ScrollBy, BarPress, BarDrag, Tick, Quit>;
     using Cmd = mayag::Cmd<Msg, set_title, focus>;
     using Sub = mayag::Sub<Msg>;
 
@@ -391,6 +393,8 @@ struct TerminalSettings {
         return {};
     }
     static Cmd update(Model& m, ScrollBy e) { m.scroll.scroll_by(Vec2{0.0f, e.dy}); return {}; }
+    static Cmd update(Model& m, BarPress e) { scrollbar_press(m.scroll, e.y); return {}; }
+    static Cmd update(Model& m, BarDrag e) { scrollbar_drag(m.scroll, e.dy); return {}; }
     static Cmd update(Model&, Tick) { return {}; }   // the host steps Tracked itself
     static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
@@ -747,8 +751,9 @@ struct TerminalSettings {
             | gap(8) | align(Align::center) | pad(22, 32, 16, 32) | width(pct(100));
 
         auto content = v(header,
-                         v(node(page_body(L, m))) | pad(4, 32, 40, 32) | width(pct(100))
-                             | scroll(m.scroll) | grow() | dsl::id<"content">)
+                         scroll_view(L, "content", m.scroll,
+                                     v(node(page_body(L, m))) | pad(4, 22, 40, 32) | width(pct(100)))
+                             | pad(0, 6, 6, 0))
                      | grow() | height(pct(100));
 
         // The sliding nav marker lives in the root z-stack, whose origin is
@@ -824,11 +829,13 @@ struct TerminalSettings {
     }
 
     static std::optional<Msg> on(const Model&, const Pressed& p) {
+        if (is(p, "content", part_bar)) return BarPress{p.local.y};
         if (is(p, "opacity")) return SetFrac{Slide::opacity, p.local.x / kTrack};
         if (is(p, "lineheight")) return SetFrac{Slide::line_height, p.local.x / kTrack};
         return std::nullopt;
     }
     static std::optional<Msg> on(const Model&, const Dragged& d) {
+        if (is(d, "content", part_bar)) return BarDrag{d.delta.y};
         if (is(d, "opacity")) return SetFrac{Slide::opacity, d.local.x / kTrack};
         if (is(d, "lineheight")) return SetFrac{Slide::line_height, d.local.x / kTrack};
         return std::nullopt;
@@ -907,6 +914,26 @@ int main(int argc, char** argv) {
         rt.tick();
         rt.tick();
 
+        // ── scrollbar ───────────────────────────────────────────────────
+        if (auto bar = rt.node_rect(part_id("content", part_bar))) {
+            ok(rt.model().scroll.scrollable_y(), "the appearance page is taller than the window");
+            ok(bar->height() > 300.0f, "the scrollbar spans the content area");
+            rt.window().click(Vec2{bar->center().x, bar->bottom() - 4});
+            rt.tick();
+            ok(rt.model().scroll.offset.y > 0.0f, "clicking the track below the thumb scrolls down");
+            rt.window().push(MouseDown{Vec2{bar->center().x, bar->bottom() - 20}, MouseButton::left, {}, 1});
+            rt.tick();
+            for (int i = 0; i < 10; ++i) {
+                rt.window().push(MouseMove{Vec2{bar->center().x, bar->bottom() - 20 - 30.0f * static_cast<float>(i + 1)},
+                                           Vec2{0, -30}, {}});
+                rt.tick();
+            }
+            rt.window().push(MouseUp{Vec2{bar->center().x, bar->top() + 10}, MouseButton::left, {}});
+            rt.tick();
+            ok(rt.model().scroll.offset.y == 0.0f, "dragging the thumb up scrolls back to the top");
+        } else {
+            ok(false, "the scrollbar is laid out");
+        }
         // ── appearance ──────────────────────────────────────────────────
         ok(rt.node_rect("blur").has_value(), "the appearance page lays out its switch");
         reveal(part_id("scheme", 1));
