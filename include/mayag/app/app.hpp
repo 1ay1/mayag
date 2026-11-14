@@ -119,7 +119,6 @@ class headless_app {
           fwd_{host_},
           kernel_(kernel_type::start(fwd_, jaal::platform::steady_clock{},
                                      detail::kernel_options(host_cfg_), wake())) {
-        host_.set_manual_clock(true);
         cx_.emplace(*this);
         step();
         draw();
@@ -139,7 +138,7 @@ class headless_app {
     /// and draw if anything changed.
     void tick() {
         host_.pump(*cx_);
-        if (window_.driving_frames()) host_.tick_frame(1.0 / 60.0);
+        if (window_.driving_frames()) host_.tick_frame(kernel_, 1.0 / 60.0);
         const auto t = step();
         if (t.model_changed || host_.owes_frame() || window_.driving_frames()) draw();
     }

@@ -254,11 +254,29 @@ class window_host {
 
     template <class K>
     void present(K& k) {
-        // A window with no fd is read here, on a short poll; one with an fd
-        // was already read in on_ready.
-        if (poll_window_ && cx_) {
+        const bool poll_only = std::exchange(poll_only_, false);
+
+        // A window with no fd (Cocoa) is read here on a short poll. When the
+        // poll was the only reason we were called, draw only if it brought
+        // something; the messages it routed are already folded.
+        if (poll_window_ && cx_ && clock::now() >= next_poll_) {
             next_poll_ = clock::now() + kPollPeriod;
+            const auto before = emitted_;
             pump_erased();
+            if (poll_only && !dirty_ && emitted_ == before) return;
+        }
+
+        // The frame tick goes straight into the kernel on this thread (no
+        // mailbox, no wake syscall) and is folded on the next turn, which
+        // jaal runs at once because a message is pending. So the frame is
+        // drawn AFTER its tick, not one tick late.
+        time_ = std::chrono::duration<double>(clock::now() - start_).count();
+        if (const auto dt = take_frame()) {
+            if (tracked_.animating()) { tracked_.step_all(*dt); dirty_ = true; }
+            if (frames_on_ && frame_make_) {
+                k.dispatch(frame_make_(*dt));
+                return;
+            }
         }
         draw(k.model(), [&](std::exception_ptr e) { k.view_faulted(std::move(e)); });
     }
@@ -269,7 +287,11 @@ class window_host {
         if (dirty_) return true;
         const auto now = clock::now();
         if (animating() && now >= next_frame_) return true;
-        return poll_window_ && now >= next_poll_;   // fd-less window: time to look
+        // fd-less window: time to look. Remembered so present() can skip the
+        // draw when the look finds nothing. (jaal skips this call when the
+        // model changed, so a stale flag can't suppress a real frame.)
+        poll_only_ = poll_window_ && now >= next_poll_;
+        return poll_only_;
     }
 
     [[nodiscard]] std::optional<std::chrono::milliseconds> wait_hint() const noexcept {
@@ -290,17 +312,15 @@ class window_host {
     // returns on_frame and stops it when it doesn't.
     template <class Msg>
     void start_source(const fx::on_frame::type<Msg>& p, const fx::on_frame::key_type&,
-                      jaal::Sink<Msg> sink) {
-        frame_sink_ = [make = p.make, sink = std::move(sink)](double dt) mutable {
-            (void)sink.send(make(dt));
-        };
+                      jaal::Sink<Msg>) {
+        frame_make_ = p.make;
         frames_on_ = true;
         last_tick_.reset();
         next_frame_ = clock::now();
     }
     void stop_source(std::type_identity<fx::on_frame>, const fx::on_frame::key_type&) {
         frames_on_ = false;
-        frame_sink_ = nullptr;
+        frame_make_ = nullptr;
     }
 
     void handle(const SetTitle& e)       { window_.set_title(e.title); }
@@ -353,25 +373,20 @@ class window_host {
         return Vec2{-1.0f, -1.0f};
     }
 
-    /// Fire the frame clock now with this dt. A headless driver uses it to
-    /// step animations deterministically.
-    void tick_frame(double dt) {
-        if (frames_on_ && frame_sink_) frame_sink_(dt);
+    /// Fire the frame clock now with this dt (headless driver: 1/60 per tick).
+    template <class K>
+    void tick_frame(K& k, double dt) {
+        if (frames_on_ && frame_make_) k.dispatch(frame_make_(dt));
         time_ += dt;
         if (tracked_.animating()) { tracked_.step_all(dt); dirty_ = true; }
     }
 
-    /// Time moves only through tick_frame (tests).
-    void set_manual_clock(bool on) noexcept { manual_clock_ = on; }
-
-    /// Frame bookkeeping for the real loop: called from present() so the
-    /// tick lands right before the frame it animates. A headless driver steps
-    /// the clock itself (tick_frame) and turns this off.
-    void advance_clock() {
-        if (manual_clock_) return;
+  private:
+    /// The dt of a frame that is due now, advancing the frame clock; nullopt
+    /// when nothing is animating or the next frame isn't due yet.
+    std::optional<double> take_frame() {
         const auto now = clock::now();
-        time_ = std::chrono::duration<double>(now - start_).count();
-        if (!animating() || now < next_frame_) return;
+        if (!animating() || now < next_frame_) return std::nullopt;
         const double dt = last_tick_
             ? std::min(std::chrono::duration<double>(now - *last_tick_).count(), 0.1)
             : 1.0 / 60.0;
@@ -379,9 +394,10 @@ class window_host {
         // Keep phase: whole periods, resync after a stall.
         next_frame_ += kFramePeriod;
         if (next_frame_ <= now) next_frame_ = now + kFramePeriod;
-        if (frames_on_ && frame_sink_) frame_sink_(dt);
-        if (tracked_.animating()) { tracked_.step_all(dt); dirty_ = true; }
+        return dt;
     }
+
+  public:
 
     /// Draw the model. `fault` reports a throwing view to the kernel.
     template <class OnFault>
@@ -504,8 +520,13 @@ class window_host {
 
     template <class Cx, class E>
     std::size_t emit(Cx& cx, const E& e) {
-        if constexpr (std::is_constructible_v<window_events, E>) return cx.emit(window_events{e});
-        else return 0;
+        if constexpr (std::is_constructible_v<window_events, E>) {
+            const std::size_t n = cx.emit(window_events{e});
+            emitted_ += n;
+            return n;
+        } else {
+            return 0;
+        }
     }
 
     template <class Cx>
@@ -540,7 +561,6 @@ class window_host {
 
     template <class OnFault>
     void draw_impl(const typename P::Model& model, OnFault&& fault) {
-        advance_clock();
         dirty_ = false;
         size_ = window_.size();
         dpi_  = window_.dpi_scale();
@@ -636,6 +656,8 @@ class window_host {
     AppConfig           cfg_;
     std::optional<jaal::platform::native_reactor::registration> reg_;
     bool                poll_window_ = false;   // attached window has no fd (Cocoa)
+    mutable bool        poll_only_ = false;     // owes_frame() said yes only to poll
+    std::uint64_t       emitted_ = 0;           // input events that produced a Msg
     clock::time_point   next_poll_{};
     std::function<std::size_t(const window_events&)> cx_;
     std::function<void(int)> stop_;
@@ -654,10 +676,9 @@ class window_host {
     clock::time_point   start_{};
     bool                dirty_ = true;
     bool                motion_pending_ = false;
-    bool                manual_clock_ = false;
 
     bool                frames_on_ = false;
-    std::function<void(double)> frame_sink_;
+    std::function<typename P::Msg(double)> frame_make_;
     clock::time_point   next_frame_{};
     std::optional<clock::time_point> last_tick_;
 

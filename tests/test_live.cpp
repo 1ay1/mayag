@@ -163,6 +163,36 @@ void test_every_reconciliation() {
     });
 }
 
+// ── a window with no fd (Cocoa) is polled, but idle still draws nothing ─
+
+struct IdleApp {
+    struct Model {};
+    struct Done {};
+    using Msg = std::variant<Done>;
+    using Cmd = jaal::Cmd<Msg>;
+    static Cmd init(Model&) { return Cmd::after(300ms, Done{}); }
+    static Cmd update(Model&, Done) { return Cmd::quit(); }
+    static Node view(const Model&) { return dsl::box().build(); }
+};
+
+void test_fdless_window_idles() {
+    section("fd-less window");
+
+    // The headless window has no fd(), like Cocoa, so the real jaal loop
+    // polls it every few ms. Those polls must not turn into frames.
+    AppConfig cfg = quiet();
+    auto win = platform::Headless::open(detail::window_config(cfg));
+    window_host<IdleApp, platform::Headless> host{*win, cfg};
+    const auto t0 = std::chrono::steady_clock::now();
+    const int rc = jaal::run<IdleApp>(host);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    check(rc == 0, "ran for " + std::to_string(ms) + " ms and quit");
+    check(win->frames_presented() <= 3,
+          "polling an fd-less window doesn't draw (" +
+              std::to_string(win->frames_presented()) + " frames in 300 ms)");
+}
+
 // ── end to end: a real, idle window is woken by a stream ────────────────
 
 using clk = std::chrono::steady_clock;
@@ -242,6 +272,7 @@ int main() {
     test_stream_delivers();
     test_stream_lifecycle();
     test_every_reconciliation();
+    test_fdless_window_idles();
     test_idle_window_wakes();
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
