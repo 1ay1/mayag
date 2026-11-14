@@ -450,6 +450,14 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_output_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_output_tests COMMAND mayag_output_tests)
 
+    # A program driven by a loop mayag doesn't own: the macOS path
+    # (embedded_app), run against a fake run loop so it's tested everywhere.
+    add_executable(mayag_embedded_tests tests/test_embedded.cpp)
+    target_link_libraries(mayag_embedded_tests PRIVATE mayag)
+    target_compile_options(mayag_embedded_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_embedded_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
+    add_test(NAME mayag_embedded_tests COMMAND mayag_embedded_tests)
+
     # The same test under ThreadSanitizer. Not part of the default suite --
     # TSan is ~10x slower and needs a compatible toolchain -- but it is the
     # only thing that finds a race which does not happen to fire today.

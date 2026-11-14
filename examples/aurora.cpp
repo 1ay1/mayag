@@ -232,7 +232,7 @@ struct Aurora {
             spacer(6),
             text_owned(m.running ? "running" : "paused") | font(11) | semibold
                 | fg(m.running ? accent : t.text_secondary)
-                | id<"play">)
+                | dsl::id<"play">)
             | gap(4) | center
             | pad(22, 26)
             | backdrop_blur(18.0f, 1.06f)

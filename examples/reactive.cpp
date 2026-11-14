@@ -136,7 +136,6 @@ struct Reactive {
         for (int i = trail_length - 1; i >= 0; --i) {
             const float f = static_cast<float>(i) / trail_length;
             const float r = 3.0f + (1.0f - f) * 9.0f;
-            const Vec2 p = m.trail[static_cast<std::size_t>(i)];
             c.overlay(Overlay{
                 .content = (box() | size(r * 2.0f, r * 2.0f)
                                   | bg(mix_perceptual(t.accent, t.danger, f)
@@ -197,7 +196,7 @@ struct Reactive {
                  v(h(text<"60 Hz budget"> | font(9) | fg(t.text_secondary) | tracking(1.2f),
                      spacer(),
                      text_owned(std::to_string(static_cast<int>(
-                         num::saturate(cpu_ms / 16.667) * 100.0)) + "%")
+                         num::saturate(static_cast<float>(cpu_ms / 16.667)) * 100.0f)) + "%")
                        | font(9) | fg(t.text_secondary))
                    | width(pct(100)),
                    // A minimum width so the bar exists at frame zero, before
@@ -298,7 +297,7 @@ int main(int argc, char** argv) {
         // events stale.
         const auto before = rt.window().frames_presented();
         for (int i = 0; i < 60; ++i) {
-            rt.window().push(MouseMove{{100.0f + i, 200.0f}, {1, 0}, {}});
+            rt.window().push(MouseMove{{100.0f + static_cast<float>(i), 200.0f}, {1, 0}, {}});
         }
         rt.tick();
         const auto frames = rt.window().frames_presented() - before;

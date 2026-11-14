@@ -77,10 +77,10 @@ struct TestApp {
 
     static Node view(const Model& m) {
         const Theme& t = ctx().theme;
-        return v(h(box() | size(80, 40) | bg(t.accent)   | id<"inc">,
-                   box() | size(80, 40) | bg(t.danger)   | id<"dec">,
-                   box() | size(80, 40) | bg(t.warning)  | id<"hoverme">) | gap(10),
-                 box() | size(200, 24) | bg(t.surface) | id<"slider">,
+        return v(h(box() | size(80, 40) | bg(t.accent)   | dsl::id<"inc">,
+                   box() | size(80, 40) | bg(t.danger)   | dsl::id<"dec">,
+                   box() | size(80, 40) | bg(t.warning)  | dsl::id<"hoverme">) | gap(10),
+                 box() | size(200, 24) | bg(t.surface) | dsl::id<"slider">,
                  text_owned(std::to_string(m.count)) | font(16) | fg(t.text_primary))
              | gap(10) | pad(10)
              | width(pct(100)) | height(pct(100))

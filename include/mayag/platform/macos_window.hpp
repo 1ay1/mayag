@@ -320,13 +320,15 @@ class MacWindow {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
     }
 
-    // ── events ──────────────────────────────────────────────────────────
+    // ── events ────────────────────────────────────────────────────────────────────
 
-    /// Drain NSApp without waiting. Cocoa has no fd for jaal's reactor, so
-    /// the host polls this at `kPollPeriod` (wait_hint) while idle.
+    /// What arrived since the last call. Under the Cocoa run loop
+    /// (macos_loop.hpp) the loop feeds each NSEvent in with feed(); with
+    /// pulling on (the default), this drains NSApp itself without waiting.
     [[nodiscard]] std::vector<Event> dispatch() {
         using namespace objc;
-        std::vector<Event> out;
+        std::vector<Event> out = std::move(fed_);
+        fed_.clear();
 
         // Track live size, so a resize by the user is reported once.
         const CGRect content = msg<CGRect>(view_, sel("frame"));
@@ -337,15 +339,16 @@ class MacWindow {
             out.push_back(ResizeEvent{size_, dpi_});
         }
 
-        id until = msg_cls<id>(objc_getClass("NSDate"), sel("distantPast"));
-        id mode = nsstring("kCFRunLoopDefaultMode");
-
-        for (;;) {
-            id ev = msg<id>(app_, sel("nextEventMatchingMask:untilDate:inMode:dequeue:"),
-                            any_event_mask, until, mode, static_cast<BOOL>(YES));
-            if (ev == nullptr) break;
-            translate(ev, out);
-            msg<void>(app_, sel("sendEvent:"), ev);
+        if (pull_) {
+            id until = msg_cls<id>(objc_getClass("NSDate"), sel("distantPast"));
+            id mode = nsstring("kCFRunLoopDefaultMode");
+            for (;;) {
+                id ev = msg<id>(app_, sel("nextEventMatchingMask:untilDate:inMode:dequeue:"),
+                                any_event_mask, until, mode, static_cast<BOOL>(YES));
+                if (ev == nullptr) break;
+                translate(ev, out);
+                msg<void>(app_, sel("sendEvent:"), ev);
+            }
         }
 
         if (!msg<BOOL>(window_, sel("isVisible"))) {
@@ -354,6 +357,17 @@ class MacWindow {
         }
         return out;
     }
+
+    /// The run loop hands over each event it dequeued, before sendEvent:.
+    void feed(id ev) { translate(ev, fed_); }
+
+    /// Off under the Cocoa run loop: events come through feed(), and pulling
+    /// from inside a live-resize callback would re-enter AppKit.
+    void set_pull(bool on) noexcept { pull_ = on; }
+
+    [[nodiscard]] id ns_app() const noexcept { return app_; }
+    [[nodiscard]] id ns_window() const noexcept { return window_; }
+    [[nodiscard]] id ns_view() const noexcept { return view_; }
 
     // ── presentation ────────────────────────────────────────────────────
 
@@ -697,6 +711,8 @@ class MacWindow {
     float dpi_ = 1.0f;
     float native_dpi_ = 1.0f;   ///< what the display actually offers
     Vec2  last_mouse_{};
+    bool  pull_ = true;
+    std::vector<Event> fed_;
 
     /// Frame pacing for the animated path.
     double frame_interval_ = 1.0 / 60.0;

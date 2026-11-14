@@ -177,7 +177,7 @@ struct AppConfig {
     bool catch_exceptions = true;
 
     /// Told about every fault (where, what). Empty: one line to stderr.
-    std::function<void(std::string_view where, std::string_view what)> on_error;
+    std::function<void(std::string_view where, std::string_view what)> on_error = {};
 };
 
 // ── the host ────────────────────────────────────────────────────────────
@@ -211,14 +211,14 @@ class window_host {
     template <class Cx>
     void attach(Cx& cx) {
         if constexpr (requires { window_.fd(); }) {
-            const int fd = window_.fd();
+            const int fd = external_loop_ ? -1 : window_.fd();
             if (fd >= 0) {
                 auto reg = cx.watch(fd, jaal::interest::read, kWindow);
                 if (!reg) { cx.stop(70); return; }
                 reg_.emplace(std::move(*reg));
             }
         }
-        poll_window_ = !reg_.has_value();
+        poll_window_ = !reg_.has_value() && !external_loop_;
         cx_ = [&cx](const window_events& e) { return cx.emit(e); };
         stop_ = [&cx](int code) { cx.stop(code); };
         // Anything the window queued while opening (a configure, a resize).
@@ -286,7 +286,7 @@ class window_host {
     [[nodiscard]] bool owes_frame() const noexcept {
         if (dirty_) return true;
         const auto now = clock::now();
-        if (animating() && now >= next_frame_) return true;
+        if (!external_loop_ && animating() && now >= next_frame_) return true;
         // fd-less window: time to look. Remembered so present() can skip the
         // draw when the look finds nothing. (jaal skips this call when the
         // model changed, so a stale flag can't suppress a real frame.)
@@ -381,10 +381,32 @@ class window_host {
         if (tracked_.animating()) { tracked_.step_all(dt); dirty_ = true; }
     }
 
+    // ── driven from a foreign loop (Cocoa) ───────────────────────────────
+
+    /// The loop pushes window input and owns frame timing (a display link),
+    /// so the host neither polls the window nor paces frames itself.
+    void set_external_loop(bool on) noexcept { external_loop_ = on; }
+
+    /// Does anything want display refreshes right now? The loop runs its
+    /// display link exactly while this is true.
+    [[nodiscard]] bool wants_frames() const noexcept { return animating(); }
+
+    /// One display refresh. `dt` is the time since the previous one.
+    template <class K>
+    void vsync(K& k, double dt) {
+        if (!animating()) return;
+        dt = std::min(std::max(dt, 0.0), 0.1);
+        time_ = std::chrono::duration<double>(clock::now() - start_).count();
+        if (tracked_.animating()) tracked_.step_all(dt);
+        if (frames_on_ && frame_make_) k.dispatch(frame_make_(dt));
+        dirty_ = true;   // springs and widget motion redraw even without a tick
+    }
+
   private:
     /// The dt of a frame that is due now, advancing the frame clock; nullopt
     /// when nothing is animating or the next frame isn't due yet.
     std::optional<double> take_frame() {
+        if (external_loop_) return std::nullopt;   // vsync() does this
         const auto now = clock::now();
         if (!animating() || now < next_frame_) return std::nullopt;
         const double dt = last_tick_
@@ -656,6 +678,7 @@ class window_host {
     AppConfig           cfg_;
     std::optional<jaal::platform::native_reactor::registration> reg_;
     bool                poll_window_ = false;   // attached window has no fd (Cocoa)
+    bool                external_loop_ = false; // a foreign loop drives input and frames
     mutable bool        poll_only_ = false;     // owes_frame() said yes only to poll
     std::uint64_t       emitted_ = 0;           // input events that produced a Msg
     clock::time_point   next_poll_{};

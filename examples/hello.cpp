@@ -57,8 +57,8 @@ struct Hello {
         return v(text<"HELLO"> | font(12) | semibold | tracking(3.0f) | fg(t.text_secondary),
                  text_owned(std::to_string(m.count))
                      | font(96.0f * pop) | bold | fg(t.text_primary),
-                 h(btn("-", t.danger, id<"dec">),
-                   btn("+", t.success, id<"inc">)) | gap(16))
+                 h(btn("-", t.danger, dsl::id<"dec">),
+                   btn("+", t.success, dsl::id<"inc">)) | gap(16))
              | gap(20) | center
              | width(pct(100)) | height(pct(100)) | bg(t.background);
     }
