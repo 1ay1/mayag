@@ -126,6 +126,50 @@ static_assert(Program<TestApp>);
 
 const AppConfig kCfg{.title = "test-app", .size = {480, 320}};
 
+/// Animates forever: the thing the busy-loop detector exists to catch.
+struct Spinner {
+    struct Model { double t = 0.0; };
+    struct Tick { double dt; };
+    using Msg = std::variant<Tick>;
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        m.t += std::get<Tick>(msg).dt;
+        return {m, Cmd<Msg>::none()};
+    }
+    static Node view(const Model& m, const Ctx& t) {
+        const float w = 40.0f + static_cast<float>(static_cast<int>(m.t * 60.0) % 40);
+        return v(box() | size(w, 40) | bg(t.theme.accent));
+    }
+    static Sub<Msg> subscribe(const Model&) {
+        return Sub<Msg>::on_frame([](float dt) { return Tick{dt}; });
+    }
+};
+
+/// Like examples/reactive.cpp: pointer motion earns a short burst of frames.
+struct Follower {
+    struct Model { Vec2 p{}; int settle = 0; };
+    struct Moved { Vec2 p; };
+    struct Tick { double dt; };
+    using Msg = std::variant<Moved, Tick>;
+    static std::pair<Model, Cmd<Msg>> init() { return {Model{}, Cmd<Msg>::none()}; }
+    static std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+        if (const auto* mv = std::get_if<Moved>(&msg)) { m.p = mv->p; m.settle = 45; }
+        else if (m.settle > 0) { --m.settle; }
+        return {m, Cmd<Msg>::none()};
+    }
+    static Node view(const Model& m, const Ctx& t) {
+        return v(box() | size(m.p.x + 1.0f, 40) | bg(t.theme.accent));
+    }
+    static Sub<Msg> subscribe(const Model& m) {
+        return Sub<Msg>::batch(
+            Sub<Msg>::on_event([](const Event& e) -> std::optional<Msg> {
+                if (const auto* mv = std::get_if<MouseMove>(&e)) return Moved{mv->position};
+                return std::nullopt;
+            }),
+            when(m.settle > 0, Sub<Msg>::on_frame([](float dt) { return Tick{dt}; })));
+    }
+};
+
 // ════════════════════════════════════════════════════════════════════════
 
 /// update() is a PURE FUNCTION. This is the property everything else rests
@@ -958,6 +1002,28 @@ void test_busy_loop_detection() {
         for (int i = 0; i < 30; ++i) rt.tick();
         check(rt.window().frames_presented() == settled,
               "so the app presents nothing while idle");
+    });
+
+    // The runtime itself must still flag a real runaway...
+    run_headless<Spinner>(kCfg, [](auto& rt) {
+        rt.window().set_tick_seconds(1.0 / 60.0);
+        rt.window().drive_frames(true);
+        for (int i = 0; i < 300; ++i) rt.tick();
+        check(rt.busy_loop_detected(), "a view that animates forever is flagged");
+    });
+
+    // ...but not frames the user is driving. Moving the pointer over the
+    // reactive demo printed the warning, because every motion earns frames.
+    run_headless<Follower>(kCfg, [](auto& rt) {
+        rt.window().set_tick_seconds(1.0 / 60.0);
+        rt.window().drive_frames(true);
+        const auto before = rt.window().frames_presented();
+        for (int i = 0; i < 300; ++i) {
+            rt.window().move_to(Vec2{10.0f + static_cast<float>(i % 200), 50.0f});
+            rt.tick();
+        }
+        check(rt.window().frames_presented() - before > 250, "pointer motion keeps it rendering");
+        check(!rt.busy_loop_detected(), "and that is not reported as a busy loop");
     });
 }
 

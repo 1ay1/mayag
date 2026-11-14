@@ -787,6 +787,8 @@ class Runtime {
     /// Where this frame's time went. Latency is a number, not a claim — an
     /// app can print this, draw it, or assert on it in CI.
     [[nodiscard]] const LatencyStats& latency() const noexcept { return latency_; }
+    /// True once the runtime has flagged a busy loop (frames nobody asked for).
+    [[nodiscard]] bool busy_loop_detected() const noexcept { return busy_warned_; }
     [[nodiscard]] bool finished() const noexcept { return quit_ || !window_.is_open(); }
 
     /// Rect of a named node in the CURRENT tree, or nullopt if it is not in
@@ -901,6 +903,12 @@ class Runtime {
     // ── event -> message ────────────────────────────────────────────────
 
     void handle_event(const Event& ev, const Sub<Msg>& subs) {
+        // The user is driving it, so frames until the next render aren't a
+        // busy loop (dragging or moving the pointer over a live view).
+        if (!std::holds_alternative<ResizeEvent>(ev) && !std::holds_alternative<FocusEvent>(ev) &&
+            !std::holds_alternative<CloseRequest>(ev) && !std::holds_alternative<FrameEvent>(ev)) {
+            input_since_render_ = true;
+        }
         // Window-level events the runtime owns outright.
         if (const auto* r = std::get_if<ResizeEvent>(&ev)) {
             size_ = r->size;
@@ -1451,6 +1459,7 @@ class Runtime {
         //
         // Retired threads are reaped in reap_retired_sources() once they have
         // actually finished, so nothing leaks and nothing blocks.
+        bool retired_any = false;
         for (auto it = sources_.begin(); it != sources_.end();) {
             const bool still = std::any_of(wanted.begin(), wanted.end(),
                 [&](const typename S::Source* w) { return w->id == it->id; });
@@ -1458,8 +1467,11 @@ class Runtime {
             it->alive->store(false, std::memory_order_release);
             retiring_.push_back(std::move(*it));
             it = sources_.erase(it);
+            retired_any = true;
         }
-        waker_.wake();                      // in case they sleep on nothing
+        // Only when something was stopped. An unconditional wake here runs on
+        // every tick and keeps poll() from ever blocking (100% CPU at idle).
+        if (retired_any) waker_.wake();
         reap_retired_sources();
 
         // Start any wanted source not already running.
@@ -1853,7 +1865,9 @@ class Runtime {
         // report it as "hung". It is far harder to notice than a deadlock,
         // because everything keeps working, so it gets a detector rather than
         // an assertion. mayag's own reactive demo shipped this way.
-        busy_.frame_presented(time_);
+        if (input_since_render_) busy_.idle();
+        else busy_.frame_presented(time_);
+        input_since_render_ = false;
         if (busy_.busy() && !busy_warned_) {
             busy_warned_ = true;
             std::fprintf(stderr,
@@ -1891,6 +1905,7 @@ class Runtime {
     LatencyStats                         latency_{};
     BusyLoopDetector                     busy_{};
     bool                                 busy_warned_ = false;
+    bool                                 input_since_render_ = false;
     /// Cmd::stream producers started, for the leak diagnostic in interpret().
     int                                  streams_started_ = 0;
     int                                  stream_start_frames_ = 0;
