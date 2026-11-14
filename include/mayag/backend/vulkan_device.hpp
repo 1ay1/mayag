@@ -31,8 +31,10 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(_WIN32)
@@ -1639,30 +1641,33 @@ class VulkanDevice {
         std::uint32_t images = caps.minImageCount + 1;
         if (caps.maxImageCount > 0 && images > caps.maxImageCount) images = caps.maxImageCount;
 
-        // Present mode. FIFO (vsync) is always supported and is what mayag
-        // uses on the Wayland path.
+        // Present mode: MAILBOX when the driver has it, FIFO otherwise.
         //
-        // MAILBOX looks attractive -- it presents the newest frame instead of
-        // queuing behind the vsync deadline, shaving up to a refresh interval
-        // of latency off a bursty update -- but it is NON-BLOCKING by
-        // definition, and on this path nothing else blocks either: the
-        // wl_surface.frame callback that is supposed to pace animation never
-        // fires, because a frame callback is only delivered after a
-        // wl_surface.commit and vkQueuePresentKHR owns the commit. Measured
-        // consequence: poll() returned immediately 92% of the time and an
-        // animating window free-ran at ~11k fps, burning a core to render
-        // thousands of frames per second that no one will ever see.
+        // FIFO blocks vkQueuePresentKHR on vsync and queues frames behind it,
+        // so with 3 images a frame reaches the screen 2-3 refreshes after it
+        // was drawn, and the loop sits in present instead of reading input.
+        // Measured on reactive: present took ~16 ms of every frame and the
+        // trail visibly lagged the pointer.
         //
-        // FIFO makes vkQueuePresentKHR block on the display's refresh, which
-        // is the clock this loop was missing. An idle app still costs nothing
-        // (it never presents at all and sleeps on the fd), so
-        // the only thing given up is sub-refresh latency on a bursty update --
-        // a fair trade for not spinning a core.
+        // MAILBOX never blocks and shows the newest frame at the next vsync.
+        // It needs a pacing source or an animating app free-runs (that once
+        // ran at ~11k fps); the window host is that source now: it draws
+        // animation on its own frame clock and sleeps in jaal's reactor in
+        // between, and draws input-driven frames only when input arrives.
         //
-        // If MAILBOX is ever restored here, it MUST come with a real pacing
-        // source, or this regresses silently: everything still looks correct,
-        // it just costs 100% of a CPU.
-        const int present_mode = vk::VK_PRESENT_MODE_FIFO_KHR;
+        // MAYAG_PRESENT=fifo forces FIFO, for comparing the two.
+        int present_mode = vk::VK_PRESENT_MODE_FIFO_KHR;
+        {
+            const char* force = std::getenv("MAYAG_PRESENT");
+            const bool want_fifo = force != nullptr && std::string_view{force} == "fifo";
+            std::uint32_t n = 0;
+            api_->GetPhysicalDeviceSurfacePresentModesKHR(phys_, surface_, &n, nullptr);
+            std::vector<int> modes(n);
+            if (n > 0) api_->GetPhysicalDeviceSurfacePresentModesKHR(phys_, surface_, &n, modes.data());
+            for (int m : modes)
+                if (m == vk::VK_PRESENT_MODE_MAILBOX_KHR && !want_fifo) present_mode = m;
+        }
+        present_mode_ = present_mode;
 
         vk::VkSwapchainCreateInfoKHR ci{};
         ci.sType = vk::VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -2068,6 +2073,7 @@ class VulkanDevice {
     std::uint32_t queue_family_ = 0;
     vk::VkPhysicalDeviceMemoryProperties mem_props_{};
     char device_name_[256] = "vulkan";
+    int  present_mode_ = 2;   // VK_PRESENT_MODE_FIFO_KHR until a swapchain exists
 
     vk::VkCommandPool cmd_pool_ = nullptr;
     vk::VkCommandBuffer frame_cb_ = nullptr, oneshot_cb_ = nullptr;

@@ -71,7 +71,10 @@ struct Reactive {
 
     static Cmd update(Model& m, const Moved& e) {
         m.cursor = Vec2{e.x, e.y};
-        // Pointer motion earns a short burst of frames so the trail
+        // The head IS the pointer, set the moment the move arrives, so it
+        // never lags. Only the tail eases behind it.
+        m.trail[0] = m.cursor;
+        // Pointer motion earns a short burst of frames so the tail
         // can catch up, then the app goes quiet again. Without a
         // BUDGET this would animate forever after the first move.
         m.settle_frames = 45;
@@ -81,11 +84,11 @@ struct Reactive {
                 m.t += e.dt;
                 if (m.settle_frames > 0) --m.settle_frames;
 
-                // The trail: each point chases the one ahead of it. A stiff
+                // The tail: each point chases the one ahead of it. A stiff
                 // follow means the tail is only a few frames behind, which is
                 // exactly what the eye reads as "responsive".
                 const float k = num::saturate(static_cast<float>(e.dt) * 26.0f);
-                m.trail[0] = lerp(m.trail[0], m.cursor, num::min(k * 2.0f, 1.0f));
+                m.trail[0] = m.cursor;
                 for (int i = 1; i < trail_length; ++i) {
                     m.trail[static_cast<std::size_t>(i)] =
                         lerp(m.trail[static_cast<std::size_t>(i)],

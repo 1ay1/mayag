@@ -270,22 +270,39 @@ class window_host {
         // mailbox, no wake syscall) and is folded on the next turn, which
         // jaal runs at once because a message is pending. So the frame is
         // drawn AFTER its tick, not one tick late.
-        time_ = std::chrono::duration<double>(clock::now() - start_).count();
+        const auto now = clock::now();
+        time_ = std::chrono::duration<double>(now - start_).count();
         if (const auto dt = take_frame()) {
             if (tracked_.animating()) { tracked_.step_all(*dt); dirty_ = true; }
             if (frames_on_ && frame_make_) {
                 k.dispatch(frame_make_(*dt));
+                tick_pending_ = true;    // the next present draws it
                 return;
             }
+        } else if (!external_loop_ && !std::exchange(tick_pending_, false)) {
+            // Not a frame tick. The screen shows one frame per refresh, so
+            // drawing every input batch (a trackpad sends ~250 Hz) only burns
+            // CPU. While the frame clock runs, input waits for the next tick;
+            // otherwise the first change draws at once and later ones at most
+            // once a refresh. The draw is owed, never dropped, so the newest
+            // state always reaches the screen.
+            if (now < next_draw_at()) { draw_owed_ = true; return; }
         }
+        draw_owed_ = false;
+        last_draw_ = now;
         draw(k.model(), [&](std::exception_ptr e) { k.view_faulted(std::move(e)); });
+    }
+
+    /// The earliest a non-tick draw may happen.
+    [[nodiscard]] clock::time_point next_draw_at() const noexcept {
+        return (animating() && !external_loop_) ? next_frame_ : last_draw_ + kFramePeriod;
     }
 
     /// Owed when the frame clock is running and its tick is due, a spring is
     /// moving, or presentation state (hover, focus) changed under the model.
     [[nodiscard]] bool owes_frame() const noexcept {
-        if (dirty_) return true;
         const auto now = clock::now();
+        if ((dirty_ || draw_owed_) && (external_loop_ || now >= next_draw_at())) return true;
         if (!external_loop_ && animating() && now >= next_frame_) return true;
         // fd-less window: time to look. Remembered so present() can skip the
         // draw when the look finds nothing. (jaal skips this call when the
@@ -296,7 +313,11 @@ class window_host {
 
     [[nodiscard]] std::optional<std::chrono::milliseconds> wait_hint() const noexcept {
         using std::chrono::milliseconds;
-        if (dirty_) return milliseconds{0};
+        const auto now = clock::now();
+        if (dirty_ || draw_owed_) {
+            if (external_loop_) return milliseconds{0};
+            return std::max(std::chrono::ceil<milliseconds>(next_draw_at() - now), milliseconds{0});
+        }
         if (!animating()) {
             // Wayland wakes us through its fd. A window with none (Cocoa)
             // has to be asked: poll it often enough that input feels instant.
@@ -656,7 +677,6 @@ class window_host {
         frame.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
         { ScopedTimer t{frame.render_ms}; window_.present(draws_, cfg_.theme.background); }
         latency_.record(frame);
-
         // Frames nobody asked for. Frames the user is driving (moving the
         // pointer over a live view) don't count.
         if (input_since_render_) busy_.idle();
@@ -698,6 +718,9 @@ class window_host {
     double              time_ = 0.0;
     clock::time_point   start_{};
     bool                dirty_ = true;
+    bool                draw_owed_ = false;     // a draw was held back for pacing
+    bool                tick_pending_ = false;  // a frame tick was dispatched; draw it next
+    clock::time_point   last_draw_{};
     bool                motion_pending_ = false;
 
     bool                frames_on_ = false;

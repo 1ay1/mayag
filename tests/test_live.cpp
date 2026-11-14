@@ -192,6 +192,35 @@ void test_fdless_window_idles() {
               std::to_string(win->frames_presented()) + " frames in 300 ms)");
 }
 
+// ── a program that changes every millisecond still draws once a refresh ─
+
+struct BusyApp {
+    struct Model { int pokes = 0; };
+    struct Poke {}; struct Done {};
+    using Msg = std::variant<Poke, Done>;
+    using Cmd = mayag::Cmd<Msg>;
+    using Sub = mayag::Sub<Msg>;
+    static Cmd init(Model&) { return Cmd::after(300ms, Done{}); }
+    static Cmd update(Model& m, Poke) { ++m.pokes; return {}; }
+    static Cmd update(Model&, Done) { return Cmd::quit(); }
+    static Node view(const Model&) { return dsl::box().build(); }
+    static Sub subscribe(const Model&) { return Sub::every(1ms, Poke{}); }
+};
+
+void test_draws_are_paced() {
+    section("draw pacing");
+
+    // The model changes ~300 times in 300 ms; the screen refreshes ~18 times.
+    // Drawing every change would be ~300 frames of wasted CPU.
+    AppConfig cfg = quiet();
+    auto win = platform::Headless::open(detail::window_config(cfg));
+    const int rc = run_on<BusyApp>(*win, cfg);
+    const auto frames = win->frames_presented();
+    check(rc == 0, "ran and quit");
+    check(frames >= 10 && frames <= 25,
+          "300 ms of constant changes draws once a refresh (" + std::to_string(frames) + " frames)");
+}
+
 // ── end to end: a real, idle window is woken by a stream ────────────────
 
 using clk = std::chrono::steady_clock;
@@ -272,6 +301,7 @@ int main() {
     test_stream_lifecycle();
     test_every_reconciliation();
     test_fdless_window_idles();
+    test_draws_are_paced();
     test_idle_window_wakes();
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
