@@ -288,7 +288,7 @@ class window_host {
                 tick_pending_ = true;    // the next present draws it
                 return;
             }
-        } else if (!external_loop_ && !std::exchange(tick_pending_, false)) {
+        } else if (!std::exchange(tick_pending_, false)) {
             // Not a frame tick: input or a message changed something. The
             // first change in a refresh slot draws NOW (the swapchain shows
             // the newest frame at the next vblank, so nothing waits). More
@@ -333,7 +333,16 @@ class window_host {
     /// Late enough to carry the newest input, early enough to make the vblank
     /// that ends slot n.
     [[nodiscard]] clock::time_point latch_point(std::int64_t n) const noexcept {
-        return slot_start(n + 1) - std::min<clock::duration>(kLatchMargin, period_ / 4);
+        return slot_start(n + 1) - latch_margin();
+    }
+    /// The window's learned margin when it measures one (macOS, capped there
+    /// at half a refresh), else the fixed default capped at a quarter.
+    [[nodiscard]] clock::duration latch_margin() const noexcept {
+        if constexpr (requires { window_.latch_margin(); })
+            return std::min<clock::duration>(
+                std::chrono::duration_cast<clock::duration>(window_.latch_margin()), period_ / 2);
+        return std::min<clock::duration>(std::chrono::duration_cast<clock::duration>(kLatchMargin),
+                                         period_ / 4);
     }
     void sync_display() {
         if constexpr (requires { window_.display_timing(); }) {
@@ -353,7 +362,8 @@ class window_host {
     /// moving, or presentation state (hover, focus) changed under the model.
     [[nodiscard]] bool owes_frame() const noexcept {
         const auto now = clock::now();
-        if ((dirty_ || draw_owed_) && (external_loop_ || now >= next_draw_at(now))) return true;
+        if (external_loop_ && tick_pending_) return true;   // a display-link frame draws now
+        if ((dirty_ || draw_owed_) && now >= next_draw_at(now)) return true;
         if (!external_loop_ && animating() && now >= next_frame_) return true;
         // fd-less window: time to look. Remembered so present() can skip the
         // draw when the look finds nothing. (jaal skips this call when the
@@ -366,9 +376,10 @@ class window_host {
         using ns = std::chrono::nanoseconds;
         const auto now = clock::now();
         if (dirty_ || draw_owed_) {
-            if (external_loop_) return ns{0};
             return std::max(std::chrono::duration_cast<ns>(next_draw_at(now) - now), ns{0});
         }
+        // A foreign loop's display link drives animation frames.
+        if (external_loop_) return std::nullopt;
         if (!animating()) {
             // Wayland wakes us through its fd. A window with none (Cocoa)
             // has to be asked: poll it often enough that input feels instant.
@@ -471,7 +482,8 @@ class window_host {
         time_ = std::chrono::duration<double>(clock::now() - start_).count();
         if (tracked_.animating()) tracked_.step_all(dt);
         if (frames_on_ && frame_make_) k.dispatch(frame_make_(dt));
-        dirty_ = true;   // springs and widget motion redraw even without a tick
+        dirty_ = true;          // springs and widget motion redraw even without a tick
+        tick_pending_ = true;   // a display-link frame draws at once, unpaced
     }
 
   private:

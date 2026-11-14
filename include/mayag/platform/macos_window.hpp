@@ -28,7 +28,10 @@
 #include "../backend/metal.hpp"
 #endif
 
+#include <array>
 #include <chrono>
+#include <cmath>
+#include <time.h>
 #include <objc/message.h>
 #include <objc/objc.h>
 #include <objc/runtime.h>
@@ -387,7 +390,7 @@ class MacWindow {
                 gpu_size_ = Vec2{static_cast<float>(w), static_cast<float>(h)};
             }
             if (atlas_sync_) atlas_sync_(gpu_);
-            gpu_.submit(dl, clear);
+            gpu_.submit(dl, clear, next_tag());
             return;
         }
 #endif
@@ -407,6 +410,67 @@ class MacWindow {
     }
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() { return fb_.to_rgba8(); }
+
+    /// The size, IN PIXELS, of the buffer `read_pixels()` returns. Reported
+    /// from the framebuffer itself rather than `size() * dpi_scale()`, so a
+    /// caller can never mis-shape the capture (same contract as Wayland).
+    [[nodiscard]] Vec2 pixel_size() const noexcept {
+        return Vec2{static_cast<float>(fb_.width()), static_cast<float>(fb_.height())};
+    }
+
+    // ── presentation timing (GPU path) ───────────────────────────────────────
+    //
+    // The macOS twin of Wayland's wp_presentation. Every drawable carries a
+    // presented handler (MetalDevice), which reports the exact time the
+    // frame reached the glass. From that the host gets a real vsync clock,
+    // and "input to photon" becomes a measurement from the HARDWARE event
+    // timestamp (NSEvent.timestamp, stamped by the HID stack) to scanout --
+    // not from when our process happened to read the event.
+
+    /// The display's vsync clock, once a frame has been presented.
+    [[nodiscard]] std::optional<DisplayTiming> display_timing() {
+        drain_feedback();
+        if (vblank_host_s_ <= 0.0 || period_s_ <= 0.0) return std::nullopt;
+        using namespace std::chrono;
+        // Host time (mach_absolute_time) does not advance in sleep; steady_clock
+        // (CLOCK_MONOTONIC on Darwin) does. Map through "now" on both clocks
+        // rather than assume they share an epoch.
+        const auto steady_now = steady_clock::now();
+        const double ago = host_now() - vblank_host_s_;
+        const auto vb = steady_now - duration_cast<steady_clock::duration>(duration<double>(ago));
+        return DisplayTiming{vb, duration_cast<nanoseconds>(duration<double>(period_s_)), vblank_seq_};
+    }
+
+    /// Input to photon, measured by the drawables' presented handlers.
+    [[nodiscard]] PhotonStats photon_stats() {
+        drain_feedback();
+        PhotonStats s;
+        s.samples = static_cast<int>(photon_count_);
+        if (photon_count_ == 0) return s;
+        double sum = 0.0;
+        for (std::size_t i = 0; i < photon_count_; ++i) {
+            sum += photon_[i];
+            s.worst_ms = std::max(s.worst_ms, photon_[i]);
+        }
+        s.mean_ms = sum / static_cast<double>(photon_count_);
+        s.last_ms = photon_last_;
+        return s;
+    }
+
+    /// How long before a vblank the late-latch draw must be SUBMITTED to make
+    /// it. Not a constant: WindowServer composites ahead of scanout, and how
+    /// far ahead depends on the machine, the display and the load. Learned
+    /// from feedback (AIMD): a late frame that missed its vblank widens it at
+    /// once; every one that made it shaves a little off.
+    [[nodiscard]] std::chrono::nanoseconds latch_margin() const noexcept {
+        return std::chrono::nanoseconds{static_cast<std::int64_t>(latch_margin_s_ * 1e9)};
+    }
+
+    /// Frames that missed the vblank they were drawn for, out of those that
+    /// were drawn for one. For tests and HUDs.
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> latch_misses() const noexcept {
+        return {latch_missed_, latch_tried_};
+    }
 
     // ── services ────────────────────────────────────────────────────────
 
@@ -565,6 +629,117 @@ class MacWindow {
     }
 
     void translate(id ev, std::vector<Event>& out) {
+        using namespace objc;
+        const std::size_t before = out.size();
+        translate_one(ev, out);
+        // Every event translate_one emits is user input (resize and close are
+        // reported by dispatch()). Stamp it with the time the HID stack saw
+        // it, which is where input-to-photon honestly starts.
+        if (out.size() > before) note_input(msg<double>(ev, sel("timestamp")));
+    }
+
+    static double host_now() noexcept {
+        // mach_absolute_time's clock: NSEvent.timestamp and presentedTime.
+        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) * 1e-9;
+    }
+
+    /// A frame shows the NEWEST input it was drawn with (pointer moves
+    /// coalesce), so latency is measured from that.
+    void note_input(double ts) noexcept {
+        const double now = host_now();
+        // NSEvent.timestamp is seconds since boot on the mach_absolute_time
+        // clock, the same one host_now() reads. Guard anyway: a
+        // synthetic event (timestamp 0) must not record a 40-day latency.
+        unshown_input_ = (ts > now - 1.0 && ts <= now + 0.001) ? ts : now;
+    }
+
+#if defined(MAYAG_WITH_METAL)
+    [[nodiscard]] backend::FrameTag next_tag() noexcept {
+        backend::FrameTag tag;
+        tag.input_s = std::exchange(unshown_input_, -1.0);
+        if (vblank_host_s_ > 0.0 && period_s_ > 0.0) {
+            const double now = host_now();
+            const double n   = std::ceil((now - vblank_host_s_) / period_s_);
+            tag.target_s     = vblank_host_s_ + std::max(n, 1.0) * period_s_;
+        }
+        return tag;
+    }
+#endif
+
+    void drain_feedback() {
+#if defined(MAYAG_WITH_METAL)
+        if (!gpu_enabled_) return;
+        auto frames = gpu_.take_presented();
+        if (frames.empty()) return;
+        refresh_period();
+        for (const auto& f : frames) {
+            if (f.presented_s <= 0.0) {
+                // Replaced by a newer frame before scanout. The input it
+                // carried is still not on screen: the next frame owns it, or
+                // the measurement would quietly skip the worst cases.
+                if (f.tag.input_s >= 0.0)
+                    orphan_input_ = orphan_input_ < 0.0 ? f.tag.input_s
+                                                        : std::min(orphan_input_, f.tag.input_s);
+                continue;
+            }
+            if (f.presented_s > vblank_host_s_) {
+                vblank_host_s_ = f.presented_s;
+                ++vblank_seq_;
+            }
+            double input = f.tag.input_s;
+            if (orphan_input_ >= 0.0) {
+                input = input < 0.0 ? orphan_input_ : std::min(input, orphan_input_);
+                orphan_input_ = -1.0;
+            }
+            if (input >= 0.0) record_photon((f.presented_s - input) * 1e3);
+            if (trace_) {
+                std::fprintf(stderr, "photon-trace lead %.3f slip %.3f lat %.3f\n",
+                             f.tag.target_s > 0.0 ? (f.tag.target_s - f.submit_s) * 1e3 : -1.0,
+                             f.tag.target_s > 0.0 ? (f.presented_s - f.tag.target_s) * 1e3 : -1.0,
+                             input >= 0.0 ? (f.presented_s - input) * 1e3 : -1.0);
+            }
+            learn_latch(f);
+        }
+#endif
+    }
+
+#if defined(MAYAG_WITH_METAL)
+    void learn_latch(const backend::Presented& f) noexcept {
+        if (f.tag.target_s <= 0.0 || period_s_ <= 0.0) return;
+        const double lead = f.tag.target_s - f.submit_s;    // how early it was handed over
+        if (lead <= 0.0 || lead > period_s_ * 0.5) return;  // an early-slot draw says nothing
+        ++latch_tried_;
+        const double cap   = period_s_ * 0.5;
+        const bool  missed = f.presented_s > f.tag.target_s + period_s_ * 0.5;
+        if (missed) {
+            ++latch_missed_;
+            latch_margin_s_ = std::min(std::max(latch_margin_s_ + 0.5e-3, lead + 0.5e-3), cap);
+        } else {
+            latch_margin_s_ = std::max(latch_margin_s_ - 10e-6, kMinLatchMargin);
+        }
+    }
+#endif
+
+    /// The panel's refresh period. maximumFramesPerSecond is 60 on a fixed
+    /// panel and 120 on ProMotion, which runs at its maximum while frames are
+    /// arriving -- exactly when the latch schedule matters.
+    void refresh_period() {
+        using namespace objc;
+        id screen = window_ != nullptr ? msg<id>(window_, sel("screen")) : nullptr;
+        if (screen == nullptr) return;
+        if (!msg<BOOL>(screen, sel("respondsToSelector:"), sel("maximumFramesPerSecond"))) return;
+        const long fps = msg<long>(screen, sel("maximumFramesPerSecond"));
+        if (fps > 0) period_s_ = 1.0 / static_cast<double>(fps);
+    }
+
+    void record_photon(double ms) {
+        if (ms < 0.0 || ms > 1000.0) return;   // a clock glitch, not a frame
+        photon_[photon_next_++ % photon_.size()] = ms;
+        photon_count_ = std::min(photon_count_ + 1, photon_.size());
+        photon_last_ = ms;
+    }
+
+    void translate_one(id ev, std::vector<Event>& out) {
         using namespace objc;
 
         const auto type  = msg<unsigned long>(ev, sel("type"));
@@ -740,6 +915,23 @@ class MacWindow {
     int             ctx_h_ = 0;
 
     std::chrono::steady_clock::time_point start_{};
+
+    // Presentation timing (host seconds, CACurrentMediaTime's clock).
+    static constexpr double kMinLatchMargin = 0.75e-3;
+    double        unshown_input_  = -1.0;     // newest input not yet on screen
+    double        orphan_input_   = -1.0;     // input from a frame that was replaced
+    double        vblank_host_s_  = 0.0;      // last frame that reached the glass
+    double        period_s_       = 1.0 / 60.0;
+    std::uint64_t vblank_seq_     = 0;
+    double        latch_margin_s_ = 2.0e-3;   // learned; see latch_margin()
+    std::uint64_t latch_tried_ = 0, latch_missed_ = 0;
+    std::array<double, 120> photon_{};
+    std::size_t   photon_next_ = 0, photon_count_ = 0;
+    double        photon_last_ = 0.0;
+    bool          trace_ = [] {
+        const char* v = std::getenv("MAYAG_PHOTON");
+        return v != nullptr && std::string_view{v} == "2";
+    }();
 };
 
 }  // namespace mayag::platform

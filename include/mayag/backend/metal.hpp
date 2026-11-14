@@ -44,9 +44,26 @@ extern "C" void  objc_autoreleasePoolPop(void*);
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
+
+// The Blocks runtime (libSystem). Declared by hand: Apple's headers need the
+// blocks extension, which GCC lacks.
+extern "C" void*  _NSConcreteGlobalBlock[32];
+
+#include <time.h>
+
+namespace mayag::backend {
+/// Host time in seconds: mach_absolute_time's clock, the one NSEvent
+/// timestamps and -[MTLDrawable presentedTime] are expressed in.
+[[nodiscard]] inline double host_seconds() noexcept {
+    return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) * 1e-9;
+}
+}  // namespace mayag::backend
 
 namespace mayag::backend {
 
@@ -135,6 +152,103 @@ struct AutoreleasePool {
 
 }  // namespace mtl
 
+// ── presentation feedback ────────────────────────────────────────────────
+//
+// `-[MTLDrawable addPresentedHandler:]` is the only way to learn when a frame
+// actually reached the glass, and it takes an Objective-C BLOCK. GCC has no
+// blocks, but the Block ABI is public and frozen (it is what clang emits):
+// a header {isa, flags, reserved, invoke, descriptor} followed by captures.
+// We build one by hand as a GLOBAL block (Block_copy returns it unchanged,
+// Block_release is a no-op), and give it one capture: a pointer back to the
+// sink. invoke() receives the block itself, so it can find that pointer.
+//
+// The handler runs on a Metal-owned thread. It only appends to a locked
+// vector; the main thread drains it.
+//
+// A sink is IMMORTAL, deliberately: Metal Block_copy's the handler and
+// Block_release's it after invoking, and _Block_release reads the block's
+// flags word -- so the block's memory must outlive every handler Metal might
+// still hold, including ones for frames queued when the window closed. One
+// small object per window that ever attached Metal is the price; both its
+// queues are capped, so a dead window's sink cannot grow.
+
+/// What the caller wants echoed back for a frame. Host-clock seconds
+/// (host_seconds(), the clock NSEvent timestamps and presentedTime use).
+struct FrameTag {
+    double input_s  = -1.0;   ///< newest input this frame shows; < 0 = none
+    double target_s = 0.0;    ///< the vblank the frame was drawn to make; 0 = unknown
+};
+
+/// One frame's fate.
+struct Presented {
+    FrameTag tag;
+    double   submit_s    = 0.0;   ///< when it was handed to Metal
+    double   presented_s = 0.0;   ///< when it hit the display; 0 = dropped (replaced)
+};
+
+class PresentSink {
+  public:
+    static PresentSink* create() { return new PresentSink(); }   // never deleted, see above
+
+    /// The block to hand to addPresentedHandler:.
+    [[nodiscard]] id block() noexcept { return reinterpret_cast<id>(&block_); }
+
+    void begin(unsigned long drawable_id, FrameTag tag, double submit_s) {
+        std::lock_guard lock{m_};
+        // A handler that never fires (a layer torn down mid-flight) must not
+        // make this grow without bound.
+        if (pending_.size() >= 64) pending_.erase(pending_.begin());
+        pending_.push_back({drawable_id, Presented{tag, submit_s, 0.0}});
+    }
+
+    [[nodiscard]] std::vector<Presented> take() {
+        std::lock_guard lock{m_};
+        return std::exchange(done_, {});
+    }
+
+  private:
+    struct Descriptor {
+        unsigned long reserved;
+        unsigned long size;
+        const char*   signature;
+    };
+    struct Block {
+        void*             isa;
+        int               flags;
+        int               reserved;
+        void            (*invoke)(Block*, id);
+        const Descriptor* descriptor;
+        PresentSink*      sink;        // the one capture
+    };
+    static constexpr int kBlockIsGlobal     = 1 << 28;
+    static constexpr int kBlockHasSignature = 1 << 30;
+    static inline const Descriptor kDescriptor{0, sizeof(Block), "v16@?0@8"};
+
+    PresentSink() {
+        block_ = Block{&_NSConcreteGlobalBlock, kBlockIsGlobal | kBlockHasSignature, 0,
+                       &invoke, &kDescriptor, this};
+    }
+
+    static void invoke(Block* b, id drawable) {
+        PresentSink* s = b->sink;
+        const double t   = mtl::msg<double>(drawable, mtl::sel("presentedTime"));
+        const auto   did = mtl::msg<unsigned long>(drawable, mtl::sel("drawableID"));
+        std::lock_guard lock{s->m_};
+        for (auto it = s->pending_.begin(); it != s->pending_.end(); ++it) {
+            if (it->first != did) continue;
+            it->second.presented_s = t;
+            if (s->done_.size() < 1024) s->done_.push_back(it->second);
+            s->pending_.erase(it);
+            break;
+        }
+    }
+
+    Block                                              block_{};
+    std::mutex                                         m_;
+    std::vector<std::pair<unsigned long, Presented>>   pending_;
+    std::vector<Presented>                             done_;
+};
+
 /// A Metal rendering device bound to a CAMetalLayer.
 ///
 /// Implements the same four-method `Device` interface as the software
@@ -172,6 +286,27 @@ class MetalDevice {
         // transaction — one of the two places a full refresh of latency
         // hides.
         msg<void>(layer_, sel("setPresentsWithTransaction:"), static_cast<BOOL>(NO));
+
+        // The other place: display sync. With it ON, every presented drawable
+        // queues FIFO behind the ones before it, so a frame drawn late in a
+        // refresh to carry the newest input waits behind the early one. OFF,
+        // in a window, WindowServer simply composites whichever drawable is
+        // newest at its next refresh -- mailbox semantics, no tearing (the
+        // compositor owns scanout; only a direct-to-display fullscreen layer
+        // could tear). The host paces draws to at most two per refresh, so
+        // this never turns into an unthrottled render loop.
+        // MAYAG_PRESENT=fifo restores the queued behaviour for comparison.
+        const char* present = std::getenv("MAYAG_PRESENT");
+        fifo_ = present != nullptr && std::string_view{present} == "fifo";
+        msg<void>(layer_, sel("setDisplaySyncEnabled:"), static_cast<BOOL>(fifo_ ? YES : NO));
+
+        // Every pixel is written (the pass clears to an opaque background), so
+        // tell Core Animation: an opaque layer skips the blend in WindowServer's
+        // composite, and is what makes a fullscreen window eligible for direct
+        // scanout.
+        msg<void>(layer_, sel("setOpaque:"), static_cast<BOOL>(YES));
+
+        if (sink_ == nullptr) sink_ = PresentSink::create();
 
         msg<void>(view, sel("setWantsLayer:"), static_cast<BOOL>(YES));
         msg<void>(view, sel("setLayer:"), layer_);
@@ -219,13 +354,14 @@ class MetalDevice {
     /// viewport's clip lives in `Batch::clip`, so ignoring it lets list rows
     /// paint straight over the header and off the window. A typical frame is
     /// still 1-3 batches, so honouring the clip costs a draw call, not a pass.
-    void submit(const DrawList& list, Color<Srgb> clear) {
+    void submit(const DrawList& list, Color<Srgb> clear, FrameTag tag = {}) {
         using namespace mtl;
         AutoreleasePool pool;
-        if (!valid_ || list.empty()) { present_empty(clear); return; }
+        if (!valid_ || list.empty()) { present_empty(clear, tag); return; }
 
         id drawable = msg<id>(layer_, sel("nextDrawable"));
         if (drawable == nullptr) return;   // display disconnected mid-frame
+        track(drawable, tag);
 
         id texture = msg<id>(drawable, sel("texture"));
         encode_pass(texture, list, clear, viewport_.x * dpi_, viewport_.y * dpi_,
@@ -584,11 +720,21 @@ class MetalDevice {
         if (dst != nullptr) std::memcpy(dst, list.instances().data(), bytes);
     }
 
-    void present_empty(Color<Srgb> clear) {
+  public:
+    /// Frames that reached the display (or were replaced) since the last call.
+    [[nodiscard]] std::vector<Presented> take_presented() {
+        return sink_ != nullptr ? sink_->take() : std::vector<Presented>{};
+    }
+
+    [[nodiscard]] bool fifo() const noexcept { return fifo_; }
+
+  private:
+    void present_empty(Color<Srgb> clear, FrameTag tag = {}) {
         using namespace mtl;
         if (!valid_) return;
         id drawable = msg<id>(layer_, sel("nextDrawable"));
         if (drawable == nullptr) return;
+        track(drawable, tag);
 
         id desc = msg_cls<id>(objc_getClass("MTLRenderPassDescriptor"), sel("renderPassDescriptor"));
         id color0 = msg<id>(msg<id>(desc, sel("colorAttachments")),
@@ -623,8 +769,19 @@ class MetalDevice {
     Vec2          viewport_{};
     float         dpi_ = 1.0f;
     bool          valid_ = false;
+    bool          fifo_ = false;
     std::uint32_t last_instances_ = 0;
     std::uint32_t last_draw_calls_ = 0;
+    PresentSink*  sink_ = nullptr;   // immortal; copies of the device share it
+
+    /// Ask to be told when this drawable reaches the display. Must happen
+    /// before presentDrawable:/commit.
+    void track(id drawable, FrameTag tag) {
+        if (sink_ == nullptr) return;
+        const auto did = mtl::msg<unsigned long>(drawable, mtl::sel("drawableID"));
+        sink_->begin(did, tag, host_seconds());
+        mtl::msg<void>(drawable, mtl::sel("addPresentedHandler:"), sink_->block());
+    }
 };
 
 }  // namespace mayag::backend

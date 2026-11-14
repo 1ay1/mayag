@@ -355,8 +355,12 @@ class embedded_app {
             if (hooks_.frames) hooks_.frames(want);
         }
         if (hooks_.arm) {
-            hooks_.arm(jaal::kernel::timeout_from<jaal::platform::steady_clock>(
-                kernel_.clock().now(), kernel_.next_deadline()));
+            auto d = jaal::kernel::timeout_from<jaal::platform::steady_clock>(
+                kernel_.clock().now(), kernel_.next_deadline());
+            // A draw held for the late latch is a deadline like a timer:
+            // without this it would wait for the next input or tick.
+            if (const auto h = host_.wait_hint()) d = d ? std::min(*d, *h) : *h;
+            hooks_.arm(d);
         }
     }
 
@@ -393,6 +397,29 @@ int run_headless(AppConfig cfg, Driver&& drive) {
 namespace detail {
 inline void log_renderer(std::string_view name) {
     std::fprintf(stderr, "mayag: renderer %.*s\n", static_cast<int>(name.size()), name.data());
+}
+}  // namespace detail
+
+namespace detail {
+/// `MAYAG_PHOTON=1`: print the measured input-to-photon distribution when
+/// the window closes, so latency can be checked from a script without a HUD.
+template <class W>
+void log_photon(W& window) {
+    if constexpr (requires { window.photon_stats(); }) {
+        const char* on = std::getenv("MAYAG_PHOTON");
+        if (on == nullptr || *on == '\0' || *on == '0') return;
+        const auto s = window.photon_stats();
+        std::fprintf(stderr, "mayag: input->photon  last %.2f ms  mean %.2f ms  worst %.2f ms  (%d frames)",
+                     s.last_ms, s.mean_ms, s.worst_ms, s.samples);
+        if constexpr (requires { window.latch_misses(); window.latch_margin(); }) {
+            const auto [missed, tried] = window.latch_misses();
+            std::fprintf(stderr, "  latch margin %.2f ms, %llu/%llu late draws missed",
+                         static_cast<double>(window.latch_margin().count()) / 1e6,
+                         static_cast<unsigned long long>(missed),
+                         static_cast<unsigned long long>(tried));
+        }
+        std::fprintf(stderr, "\n");
+    }
 }
 }  // namespace detail
 
@@ -438,6 +465,7 @@ int run_on(W& window, AppConfig cfg) {
 
     app.turn();          // first frame, first subscriptions
     if (!app.finished()) loop.run();
+    detail::log_photon(window);
     return app.exit_code();
     } else
 #endif
@@ -447,7 +475,9 @@ int run_on(W& window, AppConfig cfg) {
     opt.kernel = detail::kernel_options(cfg);
     window_host<P, W> host{window, std::move(cfg)};
     if (log) detail::log_renderer(host.renderer_name());
-    return jaal::run<P>(host, std::move(opt));
+    const int code = jaal::run<P>(host, std::move(opt));
+    detail::log_photon(window);
+    return code;
     }
 }
 
