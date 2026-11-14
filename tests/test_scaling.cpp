@@ -1,7 +1,7 @@
 // tests/test_scaling.cpp — cost must not scale with content you cannot see.
 //
 // "A list of 100,000 rows must cost the same as a list of 20" is the headline
-// claim of dsl/virtual_list.hpp, and nothing checked it. A claim like that
+// claim of widget/virtual_list.hpp, and nothing checked it. A claim like that
 // does not fail loudly when it breaks: virtualisation still LOOKS right --
 // the same rows appear, scrolling still works -- it just quietly starts
 // building every row again, and the app gets slow on big data in a way that
@@ -15,7 +15,7 @@
 
 #include <mayag/mayag.hpp>
 #include <mayag/backend/tiled.hpp>
-#include <mayag/dsl/virtual_list.hpp>
+#include <mayag/widget/virtual_list.hpp>
 
 #include <chrono>
 #include <cstdio>

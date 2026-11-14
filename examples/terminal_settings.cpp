@@ -1,6 +1,6 @@
 // examples/terminal_settings.cpp — the settings window of a terminal emulator
 //
-// Every control a terminal's preferences need, built from dsl/controls.hpp,
+// Every control a terminal's preferences need, built from include/mayag/widget/,
 // wired the way a real mayag app should be:
 //
 //   * ONE source of truth. Every setting is a field of `Settings`, held in a
@@ -482,7 +482,7 @@ struct TerminalSettings {
         std::vector<Node> lines;
         lines.push_back(line({prompt(), seg("git status -sb", fgc)}));
         lines.push_back(line({seg("## main", ansi(2)), seg("...", fgc), seg("origin/main", ansi(1))}));
-        lines.push_back(line({seg(" M ", ansi(1)), seg("include/mayag/dsl/controls.hpp", fgc)}));
+        lines.push_back(line({seg(" M ", ansi(1)), seg("include/mayag/widget/slider.hpp", fgc)}));
         lines.push_back(line({seg("?? ", ansi(1)), seg("examples/terminal_settings.cpp", fgc)}));
         lines.push_back(line({prompt(), seg("ls -la | wc -l", fgc)}));
         lines.push_back(line({seg("      42", ansi(3), true)}));

@@ -47,9 +47,36 @@
 
 // ── the DSL ─────────────────────────────────────────────────────────────
 #include <mayag/dsl/dsl.hpp>
-#include <mayag/dsl/widgets.hpp>
-#include <mayag/dsl/controls.hpp>
-#include <mayag/dsl/virtual_list.hpp>
+
+// ── widgets ─────────────────────────────────────────────────────────────
+// One widget per header under include/mayag/widget/, as in maya. Each is
+// plain DSL composed, so any of them can be included on its own
+// (`#include <mayag/widget/slider.hpp>`); the umbrella pulls them all in.
+#include <mayag/widget/control.hpp>
+#include <mayag/widget/avatar.hpp>
+#include <mayag/widget/badge.hpp>
+#include <mayag/widget/button.hpp>
+#include <mayag/widget/card.hpp>
+#include <mayag/widget/checkbox.hpp>
+#include <mayag/widget/color_swatch.hpp>
+#include <mayag/widget/divider.hpp>
+#include <mayag/widget/dot.hpp>
+#include <mayag/widget/dropdown.hpp>
+#include <mayag/widget/kbd.hpp>
+#include <mayag/widget/keybind.hpp>
+#include <mayag/widget/layout.hpp>
+#include <mayag/widget/nav_item.hpp>
+#include <mayag/widget/progress.hpp>
+#include <mayag/widget/radio_group.hpp>
+#include <mayag/widget/scroll_view.hpp>
+#include <mayag/widget/segmented.hpp>
+#include <mayag/widget/setting_row.hpp>
+#include <mayag/widget/slider.hpp>
+#include <mayag/widget/stepper.hpp>
+#include <mayag/widget/text_field.hpp>
+#include <mayag/widget/toggle.hpp>
+#include <mayag/widget/typography.hpp>
+#include <mayag/widget/virtual_list.hpp>
 
 // ── layout ──────────────────────────────────────────────────────────────
 #include <mayag/layout/text_metrics.hpp>

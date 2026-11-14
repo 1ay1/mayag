@@ -1,5 +1,5 @@
 #pragma once
-// mayag::virtual_list — build only what is visible
+// mayag::widget virtual_list — build only what is visible
 //
 // A list of 100,000 rows must cost the same as a list of 20, because only
 // ~20 are on screen. The naive approach builds every row into the tree and
@@ -19,7 +19,7 @@
 //
 // The callback is invoked only for visible indices.
 
-#include "dsl.hpp"
+#include "../dsl/dsl.hpp"
 #include "../core/scroll_state.hpp"
 #include "../layout/flex.hpp"
 
