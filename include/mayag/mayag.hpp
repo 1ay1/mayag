@@ -54,6 +54,7 @@
 // (`#include <mayag/widget/slider.hpp>`); the umbrella pulls them all in.
 #include <mayag/widget/control.hpp>
 #include <mayag/widget/activity_feed.hpp>
+#include <mayag/widget/project_panel.hpp>
 #include <mayag/widget/agent_state.hpp>
 #include <mayag/widget/agent_toasts.hpp>
 #include <mayag/widget/attention_queue.hpp>

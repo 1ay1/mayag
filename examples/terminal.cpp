@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cmath>
+#include <set>
 
 using namespace mayag;
 using namespace mayag::dsl;
@@ -131,6 +132,94 @@ const std::vector<LaunchProfile> kProfiles{
 };
 const std::vector<std::string> kRecent{"~/src/mayag", "~/src/core", "~/src/api", "~/Downloads"};
 
+// ── a workspace's folder ──────────────────────────────────────────────────
+// Simulated: a file list in tree order (folders end in '/', folders before
+// files), shared by every worktree of the repo, plus git marks.
+struct Wt { std::string branch, path; int ahead = 0, behind = 0; };
+struct Project {
+    std::string name, root;
+    bool        git = true;
+    std::vector<Wt> worktrees;
+    std::vector<std::pair<std::string, char>> files;   ///< path, git mark
+    std::string empty;                                 ///< no folder: why
+    int         shown = 0;
+    std::set<std::string> expanded;
+    int         tree_sel = -1;
+    ScrollState tree_scroll;
+};
+
+[[nodiscard]] Project mayag_project() {
+    Project p{.name = "mayag", .root = "~/src/mayag",
+              .worktrees = {{"main", "~/src/mayag", 10, 0}, {"fix/cell-px", "~/src/mayag-wt/cell-px", 2, 3},
+                            {"agent/metal-text", "~/src/mayag-wt/metal-text", 5, 0}}};
+    p.files = {{"examples/", 0}, {"examples/editor.cpp", 0}, {"examples/harness.hpp", 0}, {"examples/terminal.cpp", 'M'},
+               {"include/", 0}, {"include/mayag/", 0}, {"include/mayag/app/", 0}, {"include/mayag/app/app.hpp", 0},
+               {"include/mayag/app/sources.hpp", 0}, {"include/mayag/render/", 0}, {"include/mayag/render/kernel.hpp", 0},
+               {"include/mayag/widget/", 0}, {"include/mayag/widget/file_tree.hpp", 'M'},
+               {"include/mayag/widget/project_panel.hpp", 'U'}, {"include/mayag/widget/tab_strip.hpp", 0},
+               {"include/mayag/widget/terminal_view.hpp", 0}, {"include/mayag/mayag.hpp", 'M'}, {"tests/", 0},
+               {"tests/test_mayag.cpp", 0}, {"tools/", 0}, {"tools/photon-bench.sh", 0}, {"CMakeLists.txt", 0},
+               {"README.md", 0}};
+    p.expanded = {"examples/"};
+    return p;
+}
+[[nodiscard]] Project core_project() {
+    Project p{.name = "core", .root = "~/src/core", .worktrees = {{"main", "~/src/core", 0, 1}, {"perf/arena", "~/src/core-wt/arena", 4, 0}}};
+    p.files = {{"benches/", 0}, {"benches/cache.rs", 'M'}, {"src/", 0}, {"src/cache.rs", 'M'}, {"src/lib.rs", 0},
+               {"src/arena.rs", 'A'}, {"tests/", 0}, {"tests/cache.rs", 0}, {"Cargo.toml", 0}, {"Cargo.lock", 'M'}};
+    p.expanded = {"src/"};
+    return p;
+}
+[[nodiscard]] Project home_project() {
+    Project p{.name = "ayush", .root = "~", .git = false, .worktrees = {{"", "~"}}};
+    p.files = {{"Desktop/", 0}, {"Downloads/", 0}, {"Downloads/notes.txt", 0}, {"src/", 0}, {".zshrc", 0}, {"todo.md", 0}};
+    return p;
+}
+
+[[nodiscard]] bool is_dir(std::string_view p) { return !p.empty() && p.back() == '/'; }
+[[nodiscard]] int depth_of(std::string_view p) {
+    int d = 0;
+    for (std::size_t i = 0; i + 1 < p.size(); ++i) d += p[i] == '/';
+    return d;
+}
+[[nodiscard]] std::string leaf_of(std::string_view p) {
+    if (is_dir(p)) p.remove_suffix(1);
+    const auto s = p.rfind('/');
+    return std::string(s == std::string_view::npos ? p : p.substr(s + 1));
+}
+/// "a/b/c.txt" -> {"a/", "a/b/"}
+[[nodiscard]] std::vector<std::string> ancestors_of(std::string_view p) {
+    std::vector<std::string> out;
+    for (std::size_t i = 0; i + 1 < p.size(); ++i) if (p[i] == '/') out.emplace_back(p.substr(0, i + 1));
+    return out;
+}
+/// Indices of the files the tree shows (every ancestor folder expanded).
+[[nodiscard]] std::vector<int> visible_rows(const Project& p) {
+    std::vector<int> rows;
+    for (std::size_t i = 0; i < p.files.size(); ++i) {
+        bool ok = true;
+        for (const auto& a : ancestors_of(p.files[i].first)) ok = ok && p.expanded.contains(a);
+        if (ok) rows.push_back(static_cast<int>(i));
+    }
+    return rows;
+}
+/// Which worktree a working directory is in (-1: outside the project), and
+/// the folder inside it ("" = the worktree root, else "src/").
+[[nodiscard]] std::pair<int, std::string> locate(const Project& p, const TermTabInfo& tb) {
+    if (!tb.host.empty() || p.root.empty()) return {-1, {}};
+    int best = -1;
+    std::size_t best_len = 0;
+    for (std::size_t w = 0; w < p.worktrees.size(); ++w) {
+        const std::string& root = p.worktrees[w].path;
+        const bool in = tb.cwd == root || (tb.cwd.starts_with(root) && tb.cwd.size() > root.size() && tb.cwd[root.size()] == '/')
+                        || root == "~";
+        if (in && root.size() >= best_len) { best = static_cast<int>(w); best_len = root.size(); }
+    }
+    if (best < 0) return {-1, {}};
+    if (tb.cwd.size() <= best_len + 1) return {best, {}};
+    return {best, tb.cwd.substr(p.worktrees[static_cast<std::size_t>(best)].path == "~" ? 2 : best_len + 1) + "/"};
+}
+
 }  // namespace
 
 struct Terminal {
@@ -139,6 +228,7 @@ struct Terminal {
         std::uint32_t        hue = 0;
         std::vector<TabData> tabs;     ///< parked here while another workspace is shown
         int                  active = 0;
+        Project              project;  ///< the folder behind it (and its worktrees)
     };
     struct Model {
         std::vector<TabData> tabs;     ///< the shown workspace's tabs
@@ -146,6 +236,7 @@ struct Terminal {
         std::vector<Workspace> workspaces;
         int    ws = 0;
         bool   rail_open = true;
+        bool   panel_open = true;
         std::vector<ActivityEvent> feed;
         TabStripMotion motion;
         int    hovered = -1;
@@ -162,17 +253,19 @@ struct Terminal {
     struct Hover { int i; };     struct Unhover { int i; };
     struct SwitchWs { int i; };  struct ToggleRail {};       struct FeedClick { int i; };  struct FeedDismiss { int i; };
     struct Key_ { KeyEvent k; }; struct Tick { double dt; }; struct Quit {};
+    struct ShowWt { int i; };    struct WtTab { int i; };     struct NewWt {};             struct TogglePanel {};
+    struct TreeClick { int row; }; struct TreeAction { int row; }; struct TreeWheel { Vec2 d; };
 
     using Msg = std::variant<Activate, Close, NewTab, Launcher, LaunchDir, Hover, Unhover, SwitchWs, ToggleRail, FeedClick,
-                             FeedDismiss, Key_, Tick, Quit>;
+                             FeedDismiss, Key_, Tick, Quit, ShowWt, WtTab, NewWt, TogglePanel, TreeClick, TreeAction, TreeWheel>;
     using Cmd = mayag::Cmd<Msg, set_title>;
     using Sub = mayag::Sub<Msg>;
 
     static Cmd init(Model& m) {
         auto shell = make_tab("mayag", "~/src/mayag", "zsh", Screen::shell);
         shell.info.last_exit = 0;
-        auto ed = make_tab("cache.rs", "~/src/mayag", "nvim", Screen::editor);
-        auto build = make_tab("cargo build", "~/src/mayag", "cargo", Screen::build);
+        auto ed = make_tab("file_tree.hpp", "~/src/mayag/include/mayag/widget", "nvim", Screen::editor);
+        auto build = make_tab("cargo build", "~/src/mayag-wt/cell-px", "cargo", Screen::build);
         build.info.running = true; build.info.elapsed = 48; build.info.progress = 74; build.rate = 0.7;
         auto test = make_tab("cargo test", "~/src/core", "cargo", Screen::build);
         test.info.running = false; test.info.last_exit = 101; test.info.finished_ago = 0.9;
@@ -202,8 +295,8 @@ struct Terminal {
         };
         auto jt = make_tab("cargo test", "~/src/core", "cargo", Screen::build);
         jt.info.running = true; jt.info.elapsed = 12; jt.rate = 0.6; jt.finish_at = 2.5; jt.finish_code = 101;
-        auto jsh = make_tab("core", "~/src/core", "zsh", Screen::shell); jsh.info.last_exit = 0;
-        auto bench = make_tab("cargo bench", "~/src/core", "cargo", Screen::build);
+        auto jsh = make_tab("core", "~/src/core/src", "zsh", Screen::shell); jsh.info.last_exit = 0;
+        auto bench = make_tab("cargo bench", "~/src/core-wt/arena", "cargo", Screen::build);
         bench.info.running = true; bench.info.elapsed = 194; bench.info.progress = 38; bench.rate = 0.4;
         auto p1 = make_tab("prod-db-01", "/home/deploy", "ssh", Screen::ssh);
         p1.info.host = "deploy@prod-db-01"; p1.info.host_danger = true; p1.info.hue = 0xF7768E;
@@ -213,18 +306,113 @@ struct Terminal {
         auto deploy = make_tab("deploy.sh", "~/ops", "bash", Screen::build);
         deploy.info.running = true; deploy.info.elapsed = 61; deploy.info.progress = 55; deploy.rate = 0.5; deploy.finish_at = 6.0;
         auto notes = make_tab("scratch", "~", "zsh", Screen::shell);
-        m.workspaces = {{"mayag", 0x8AB4F8, {}, 0}, {"core", 0xBB9AF7, {seeded(jsh), seeded(jt), seeded(bench)}, 1},
-                        {"prod", 0xF7768E, {seeded(p1), seeded(p2), seeded(deploy)}, 0}, {"scratch", 0x9ECE6A, {notes}, 0}};
+        Project prod;
+        prod.empty = "An ssh workspace: its tabs are on 3 remote hosts.";
+        m.workspaces = {{"mayag", 0x8AB4F8, {}, 0, mayag_project()},
+                        {"core", 0xBB9AF7, {seeded(jsh), seeded(jt), seeded(bench)}, 1, core_project()},
+                        {"prod", 0xF7768E, {seeded(p1), seeded(p2), seeded(deploy)}, 0, prod},
+                        {"scratch", 0x9ECE6A, {notes}, 0, home_project()}};
         m.ws = 0;
         if (std::getenv("TM_RAIL_COLLAPSED") != nullptr) m.rail_open = false;
+        if (std::getenv("TM_NO_PANEL") != nullptr) m.panel_open = false;
+        follow(m);
         return SetTitle{"mayag terminal"};
     }
+
+    // ── the project panel ──────────────────────────────────────────────────────────
+    static Project& proj(Model& m) { return m.workspaces[static_cast<std::size_t>(m.ws)].project; }
+    static const Project& proj(const Model& m) { return m.workspaces[static_cast<std::size_t>(m.ws)].project; }
+
+    /// The tree follows the focused tab: show its worktree and reveal its cwd.
+    static void follow(Model& m) {
+        Project& p = proj(m);
+        const auto [w, folder] = locate(p, m.tabs[static_cast<std::size_t>(m.active)].info);
+        if (w < 0) return;
+        p.shown = w;
+        p.tree_sel = -1;
+        if (folder.empty()) return;
+        for (const auto& a : ancestors_of(folder)) p.expanded.insert(a);
+        p.expanded.insert(folder);
+        const auto rows = visible_rows(p);
+        for (std::size_t r = 0; r < rows.size(); ++r)
+            if (p.files[static_cast<std::size_t>(rows[r])].first == folder) {
+                p.tree_sel = static_cast<int>(r);
+                const float y = static_cast<float>(r) * kTreeRowH;   // reveal
+                if (p.tree_scroll.viewport.y > 0 && (y < p.tree_scroll.offset.y || y + kTreeRowH > p.tree_scroll.offset.y + p.tree_scroll.viewport.y))
+                    p.tree_scroll.scroll_to({0, std::max(0.0f, y - p.tree_scroll.viewport.y * 0.4f)});
+            }
+    }
+    /// The visible row a folder shows up as: itself, or its deepest expanded ancestor.
+    static std::string shown_as(const Project& p, const std::string& folder) {
+        std::string at;
+        for (const auto& a : ancestors_of(folder)) { if (!p.expanded.contains(a)) return at; at = a; }
+        return folder;
+    }
+    static void open_tab(Model& m, TabData d) {
+        m.tabs.insert(m.tabs.begin() + m.active + 1, std::move(d));
+        m.active += 1;
+        ++m.opened;
+        follow(m);
+    }
+    static std::string wt_dir(const Project& p, int w, std::string_view folder) {
+        std::string base = p.worktrees[static_cast<std::size_t>(w)].path;
+        if (!folder.empty()) { base += "/"; base += folder.substr(0, folder.size() - 1); }
+        return base;
+    }
+    static Cmd update(Model& m, ShowWt e) {
+        Project& p = proj(m);
+        if (e.i < 0 || e.i >= static_cast<int>(p.worktrees.size())) return {};
+        p.shown = e.i;
+        p.tree_sel = -1;
+        return {};
+    }
+    static Cmd update(Model& m, WtTab e) {
+        const Project& p = proj(m);
+        if (e.i < 0 || e.i >= static_cast<int>(p.worktrees.size())) return {};
+        const auto& w = p.worktrees[static_cast<std::size_t>(e.i)];
+        auto d = make_tab(w.branch.empty() ? p.name : leaf_of(w.branch), w.path, "zsh", Screen::shell);
+        open_tab(m, std::move(d));
+        return {};
+    }
+    static Cmd update(Model& m, NewWt) {
+        Project& p = proj(m);
+        if (!p.git) return {};
+        const std::string name = "agent/task-" + std::to_string(p.worktrees.size());
+        p.worktrees.push_back({name, p.root + "-wt/task-" + std::to_string(p.worktrees.size())});
+        p.shown = static_cast<int>(p.worktrees.size()) - 1;
+        return update(m, WtTab{p.shown});
+    }
+    static Cmd update(Model& m, TogglePanel) { m.panel_open = !m.panel_open; return {}; }
+    static Cmd update(Model& m, TreeClick e) {
+        Project& p = proj(m);
+        const auto rows = visible_rows(p);
+        if (e.row < 0 || e.row >= static_cast<int>(rows.size())) return {};
+        const std::string& path = p.files[static_cast<std::size_t>(rows[static_cast<std::size_t>(e.row)])].first;
+        p.tree_sel = e.row;
+        if (is_dir(path)) { if (!p.expanded.erase(path)) p.expanded.insert(path); }
+        return {};
+    }
+    static Cmd update(Model& m, TreeAction e) {
+        const Project& p = proj(m);
+        const auto rows = visible_rows(p);
+        if (e.row < 0 || e.row >= static_cast<int>(rows.size())) return {};
+        const std::string path = p.files[static_cast<std::size_t>(rows[static_cast<std::size_t>(e.row)])].first;
+        if (is_dir(path)) {   // a shell in that folder
+            open_tab(m, make_tab(leaf_of(path), wt_dir(p, p.shown, path), "zsh", Screen::shell));
+        } else {              // $EDITOR on that file, from its folder
+            const auto anc = ancestors_of(path);
+            open_tab(m, make_tab(leaf_of(path), wt_dir(p, p.shown, anc.empty() ? std::string{} : anc.back()), "nvim", Screen::editor));
+        }
+        return {};
+    }
+    static Cmd update(Model& m, TreeWheel e) { proj(m).tree_scroll.scroll_by(e.d); return {}; }
 
     static Cmd update(Model& m, Activate e) {
         if (e.i < 0 || e.i >= static_cast<int>(m.tabs.size())) return {};
         m.active = e.i;
         m.tabs[static_cast<std::size_t>(e.i)].info.unread = false;
         m.tabs[static_cast<std::size_t>(e.i)].info.bell = false;
+        follow(m);
         return {};
     }
     static Cmd update(Model& m, Close e) {
@@ -232,26 +420,26 @@ struct Terminal {
         m.tabs.erase(m.tabs.begin() + e.i);
         if (m.active >= e.i && m.active > 0) --m.active;
         m.hovered = -1;
+        follow(m);
         return {};
     }
     static Cmd update(Model& m, NewTab e) {
         const auto& p = kProfiles[static_cast<std::size_t>(std::clamp(e.profile, 0, static_cast<int>(kProfiles.size()) - 1))];
-        TabData d = make_tab(p.name, p.process == "ssh" ? "~" : "~/src/mayag", p.process, p.process == "ssh" ? Screen::ssh : Screen::shell);
+        // A new shell opens where you are looking: the worktree the panel shows.
+        const Project& pr = proj(m);
+        const std::string here = pr.root.empty() ? std::string{"~"} : pr.worktrees[static_cast<std::size_t>(pr.shown)].path;
+        TabData d = make_tab(p.name, p.process == "ssh" ? "~" : here, p.process, p.process == "ssh" ? Screen::ssh : Screen::shell);
         if (p.process == "ssh") { d.info.host = p.command.substr(4); d.info.host_danger = p.danger; d.info.hue = p.hue; }
-        m.tabs.insert(m.tabs.begin() + m.active + 1, d);
-        m.active += 1;
         m.launcher = false;
-        ++m.opened;
+        open_tab(m, std::move(d));
         return {};
     }
     static Cmd update(Model& m, Launcher) { m.launcher = !m.launcher; m.launcher_sel = -1; return {}; }
     static Cmd update(Model& m, LaunchDir e) {
         TabData d = make_tab(kRecent[static_cast<std::size_t>(e.j)].substr(kRecent[static_cast<std::size_t>(e.j)].rfind('/') + 1),
                              kRecent[static_cast<std::size_t>(e.j)], "zsh", Screen::shell);
-        m.tabs.insert(m.tabs.begin() + m.active + 1, d);
-        m.active += 1;
         m.launcher = false;
-        ++m.opened;
+        open_tab(m, std::move(d));
         return {};
     }
     static Cmd update(Model& m, SwitchWs e) {
@@ -299,6 +487,7 @@ struct Terminal {
         if (k.mods.ctrl && !cmd && k.key >= Key::n1 && k.key <= Key::n9)
             return update(m, SwitchWs{static_cast<int>(k.key) - static_cast<int>(Key::n1)});
         if (cmd && k.key == Key::b) return update(m, ToggleRail{});
+        if (cmd && k.key == Key::backslash) return update(m, TogglePanel{});
         if (cmd && k.key == Key::t) return update(m, NewTab{0});
         if (cmd && k.key == Key::w) return update(m, Close{m.active});
         if (cmd && k.mods.shift && k.key == Key::bracket_right) return update(m, Activate{(m.active + 1) % static_cast<int>(m.tabs.size())});
@@ -422,9 +611,51 @@ struct Terminal {
         Node rail = workspace_rail(look, "rail", wsi, m.ws, m.time, {.expanded = m.rail_open});
         activity_feed(look, "feed", m.feed, c.size, m.time);
 
+        Node panel = m.panel_open ? project_view(look, m) : Node{};
         return h(node(std::move(rail)),
+                 node(std::move(panel)),
                  v(node(std::move(strip)), node(std::move(body))) | grow() | height(pct(100)) | min_size(0, 0))
              | width(pct(100)) | height(pct(100)) | bg(t.background);
+    }
+
+    /// The project panel's data, read from the folder and from where every tab is.
+    static Node project_view(const Ctx& look, const Model& m) {
+        const Project& p = proj(m);
+        ProjectInfo pi{.name = p.name, .root = p.root, .git = p.git, .shown = p.shown, .empty = p.empty};
+        const TermTabInfo& focus = m.tabs[static_cast<std::size_t>(m.active)].info;
+        const auto [fw, ffolder] = locate(p, focus);
+        for (std::size_t w = 0; w < p.worktrees.size(); ++w) {
+            ProjectWorktree pw{.branch = p.worktrees[w].branch, .path = p.worktrees[w].path,
+                               .ahead = p.worktrees[w].ahead, .behind = p.worktrees[w].behind};
+            for (const auto& [f, g] : p.files) pw.dirty += g != 0 && w == 0;   // the demo's changes live on main
+            if (w == 1) pw.dirty = 2;
+            for (const auto& d : m.tabs) if (locate(p, d.info).first == static_cast<int>(w)) pw.tabs.push_back(tab_hue(d.info));
+            pw.here = fw == static_cast<int>(w);
+            pw.here_hue = tab_hue(focus);
+            pi.worktrees.push_back(std::move(pw));
+        }
+        std::vector<TreeRow> rows;
+        if (!p.root.empty()) {
+            // Each tab's folder, as the row it shows up on (a collapsed
+            // ancestor carries the dots of everything inside it).
+            std::vector<std::pair<std::string, Color<Srgb>>> at;
+            for (const auto& d : m.tabs) {
+                const auto [w, folder] = locate(p, d.info);
+                if (w == p.shown && !folder.empty()) at.emplace_back(shown_as(p, folder), tab_hue(d.info));
+            }
+            const std::string here = fw == p.shown ? shown_as(p, ffolder) : std::string{"\x01"};
+            for (const int i : visible_rows(p)) {
+                const auto& [path, git] = p.files[static_cast<std::size_t>(i)];
+                TreeRow r{.name = leaf_of(path), .depth = depth_of(path), .dir = is_dir(path),
+                          .open = p.expanded.contains(path), .git = git};
+                for (const auto& [f, col] : at) if (f == path) r.tabs.push_back(col);
+                r.here = path == here;
+                r.here_hue = tab_hue(focus);
+                r.action = r.dir ? "+ tab" : "edit";
+                rows.push_back(std::move(r));
+            }
+        }
+        return project_panel(look, "proj", pi, rows, p.tree_sel, p.tree_scroll);
     }
 
     static std::optional<Msg> on(const Model& m, const Clicked& c) {
@@ -442,6 +673,22 @@ struct Terminal {
             if (is(c, "feed", 4096 + i)) return FeedDismiss{static_cast<int>(i)};
             if (is(c, "feed", i)) return FeedClick{static_cast<int>(i)};
         }
+        const Project& p = proj(m);
+        for (std::size_t w = 0; w < p.worktrees.size(); ++w) {
+            if (is(c, "proj", kTreeAction + w)) return WtTab{static_cast<int>(w)};
+            if (is(c, "proj", w)) return ShowWt{static_cast<int>(w)};
+        }
+        if (is(c, "proj", part_inc)) return NewWt{};
+        const std::string tid = tree_id("proj");
+        const std::size_t n = visible_rows(p).size();
+        for (std::size_t r = 0; r < n; ++r) {
+            if (is(c, tid, kTreeAction + r)) return TreeAction{static_cast<int>(r)};
+            if (is(c, tid, r)) return c.count >= 2 ? Msg{TreeAction{static_cast<int>(r)}} : Msg{TreeClick{static_cast<int>(r)}};
+        }
+        return std::nullopt;
+    }
+    static std::optional<Msg> on(const Model&, const mayag::Scrolled& s) {
+        if (is(s, tree_id("proj"))) return TreeWheel{s.delta};
         return std::nullopt;
     }
     static std::optional<Msg> on(const Model& m, const Entered& e) {
@@ -559,6 +806,59 @@ int main(int argc, char** argv) {
         ok(!M().rail_open, "the rail collapses to tiles");
         settle(4);
         shot("collapsed");
+
+        // ── the project panel ──
+        rt.click(part_id("rail", part_menu));
+        ok(rt.node_rect(node_id("proj")).has_value(), "the project panel shows the workspace's folder");
+        ok(rt.node_rect(part_id("proj", 2)).has_value(), "with one row per worktree");
+        rt.press_key(Key::n1, Mods{.super = true});
+        settle(2);
+        {
+            const auto& pr = M().tabs[0].info;
+            ok(locate(mayag_project(), pr).first == 0, "the first tab sits in the main worktree");
+        }
+        // Focus the nvim tab: its cwd (include/mayag/widget) is revealed and marked.
+        for (std::size_t i = 0; i < M().tabs.size(); ++i)
+            if (M().tabs[i].info.process == "nvim") { rt.click(part_id("tabs", i)); break; }
+        settle(2);
+        {
+            const Project& p = M().workspaces[0].project;
+            const auto rows = visible_rows(p);
+            ok(p.expanded.contains("include/mayag/widget/") && p.tree_sel >= 0 &&
+                   p.files[static_cast<std::size_t>(rows[static_cast<std::size_t>(p.tree_sel)])].first == "include/mayag/widget/",
+               "focusing a tab reveals its working directory in the tree");
+        }
+        shot("project");
+        for (std::size_t i = 0; i < M().tabs.size(); ++i)
+            if (M().tabs[i].info.process == "cargo") { rt.click(part_id("tabs", i)); break; }
+        settle(2);
+        ok(M().workspaces[0].project.shown == 1, "focusing the build tab switches the tree to its worktree (fix/cell-px)");
+        rt.click(part_id("proj", 2));
+        ok(M().workspaces[0].project.shown == 2, "clicking a worktree shows it");
+        const std::size_t before = M().tabs.size();
+        rt.press_key(Key::t, Mods{.super = true});
+        ok(M().tabs.size() == before + 1 && M().tabs[static_cast<std::size_t>(M().active)].info.cwd == "~/src/mayag-wt/metal-text",
+           "\u2318T opens the new shell in the worktree the panel shows");
+        {
+            const auto rows = visible_rows(M().workspaces[0].project);
+            int ex = -1;
+            for (std::size_t r = 0; r < rows.size(); ++r)
+                if (M().workspaces[0].project.files[static_cast<std::size_t>(rows[r])].first == "examples/") ex = static_cast<int>(r);
+            const std::size_t n0 = M().tabs.size();
+            rt.window().move_to(rt.node_rect(part_id(tree_id("proj"), static_cast<std::size_t>(ex)))->center());
+            rt.tick();
+            const auto act = rt.node_rect(part_id(tree_id("proj"), kTreeAction + static_cast<std::size_t>(ex)));
+            ok(act.has_value(), "hovering a folder row offers \"+ tab\"");
+            if (act) { rt.window().click(act->center()); rt.tick(); }
+            ok(M().tabs.size() == n0 + 1 && M().tabs[static_cast<std::size_t>(M().active)].info.cwd == "~/src/mayag-wt/metal-text/examples",
+               "which opens a tab in that folder");
+        }
+        rt.press_key(Key::backslash, Mods{.super = true});
+        ok(!M().panel_open && !rt.node_rect(node_id("proj")).has_value(), "\u2318\\ hides the panel");
+        rt.press_key(Key::backslash, Mods{.super = true});
+        rt.press_key(Key::n3, Mods{.ctrl = true});
+        settle(2);
+        shot("no-folder");
 
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
         if (fails > 0) std::exit(1);
