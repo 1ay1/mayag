@@ -1,0 +1,54 @@
+#pragma once
+// mayag::widget status_bar — the editor's bottom strip
+//
+//   status_bar(c, "status", left_items, right_items)
+//
+// Clickable segments, each an icon/label pair with an optional tone:
+// left for panel toggles, diagnostics counts and the branch; right for
+// cursor position, selection size, indentation, encoding, line endings and
+// language — the conventional order, so users find things where they expect.
+//
+// Interaction: Clicked on part_id(id, i) for left items, part_id(id, 100+i)
+// for right items.
+
+#include "control.hpp"
+
+#include <string>
+#include <vector>
+
+namespace mayag::dsl {
+
+struct StatusItem {
+    std::string text;
+    std::string icon;
+    enum class Tone : std::uint8_t { normal, dim, accent, error, warning, success } tone = Tone::normal;
+    bool active = false;   ///< a toggled panel
+};
+
+template <ControlContext C>
+[[nodiscard]] inline Node status_bar(const C& c, std::string_view id, const std::vector<StatusItem>& left,
+                                     const std::vector<StatusItem>& right) {
+    const Theme& t = c.theme;
+    const auto seg = [&](const StatusItem& it, std::size_t part) {
+        const auto pid = part_id(id, part);
+        const bool hov = c.hovered(pid);
+        using T = StatusItem::Tone;
+        const Color<Srgb> col = it.tone == T::error ? t.danger : it.tone == T::warning ? t.warning
+                              : it.tone == T::success ? t.success : it.tone == T::accent ? t.accent
+                              : it.tone == T::dim ? t.text_disabled : t.text_secondary;
+        return (h(text_owned(it.icon) | font(t.font_size * 0.9f) | fg(it.active ? t.accent : col),
+                  text_owned(it.text) | font(t.font_size * 0.88f) | fg(hov ? t.text_primary : col))
+                | gap(5) | align(Align::center) | pad(0, 7) | height(pct(100))
+                | bg(hov ? t.surface_raised : it.active ? t.surface_raised.fade(0.6f) : t.surface.fade(0.0f))
+                | pointer_cursor | role(a11y::Role::button) | label(it.text.empty() ? it.icon : it.text)
+                | id_of(id, part)).build();
+    };
+    std::vector<Node> l, r;
+    for (std::size_t i = 0; i < left.size(); ++i) l.push_back(seg(left[i], i));
+    for (std::size_t i = 0; i < right.size(); ++i) r.push_back(seg(right[i], 100 + i));
+    return (h(h(h_list(std::move(l))) | height(pct(100)), spacer(), h(h_list(std::move(r))) | height(pct(100)))
+            | align(Align::center) | pad(0, 4) | height(26) | width(pct(100))
+            | bg(t.surface) | border(1, t.border)).build();
+}
+
+}  // namespace mayag::dsl

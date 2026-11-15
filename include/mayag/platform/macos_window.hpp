@@ -824,8 +824,13 @@ class MacWindow {
                 // bridge is a contained piece of work rather than a redesign.
                 if (!mods.super && !mods.ctrl) {
                     const std::string s = from_nsstring(msg<id>(ev, sel("characters")));
-                    if (!s.empty() && static_cast<unsigned char>(s[0]) >= 0x20 &&
-                        static_cast<unsigned char>(s[0]) != 0x7F) {
+                    // Arrows, F-keys, Home/End... report characters in Apple's
+                    // private-use block U+F700..U+F8FF (UTF-8 EF 9C 80 ..
+                    // EF A3 BF). They are keys, not text: an editor that
+                    // inserted them would type a box on every arrow press.
+                    const auto u = [&](std::size_t i) { return static_cast<unsigned char>(s[i]); };
+                    const bool function_key = s.size() >= 3 && u(0) == 0xEF && u(1) >= 0x9C && u(1) <= 0xA3;
+                    if (!s.empty() && u(0) >= 0x20 && u(0) != 0x7F && !function_key) {
                         out.push_back(TextEvent{s});
                     }
                 }

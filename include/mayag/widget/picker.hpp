@@ -1,0 +1,136 @@
+#pragma once
+// mayag::widget picker — the fuzzy modal: command palette, file finder,
+// go-to-symbol, theme picker
+//
+//   picker(c, "palette", query_state, items, selected, PickerStyle{...})
+//
+// One widget for every "type to narrow a list" modal. Items come pre-ranked
+// from the app (rank_items does the fuzzy part); the widget draws the query
+// field, the list with matched characters highlighted, a right-aligned hint
+// per item (a keybinding, a path, a line number) and a footer. It posts
+// itself as a modal OVERLAY anchored to the top of the window.
+//
+// Interaction:
+//   Clicked on part_id(id, i)          -> choose item i
+//   Left on part_id(id, part_menu)     -> dismissed by a click outside
+//   keys (app): up/down/ctrl-n/ctrl-p move, enter choose, esc close, the
+//               rest go to the query's TextEditState
+
+#include "control.hpp"
+#include "file_icon.hpp"
+#include "fuzzy.hpp"
+#include "key_hint.hpp"
+#include "text_field.hpp"
+#include "../scene/overlay.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <string>
+#include <vector>
+
+namespace mayag::dsl {
+
+struct PickerItem {
+    std::string label;
+    std::string detail;     ///< dimmed after the label (a path, a category)
+    std::string hint;       ///< right-aligned (a keybinding)
+    std::string icon_name;  ///< a file name for file_icon(), or empty
+};
+
+struct PickerStyle {
+    std::string placeholder = "Type to search\u2026";
+    std::string prefix;            ///< drawn before the query (">", "@", ":")
+    float       width = 620.0f;
+    int         max_rows = 12;
+    std::string empty_text = "No matches";
+    std::vector<std::pair<std::string, std::string>> footer;   ///< key hints
+};
+
+/// Fuzzy-rank `items` by `query` (stable for equal scores). Returns the item
+/// indices in rank order and the matched positions per ranked item.
+struct Ranked { std::vector<int> order; std::vector<FuzzyMatch> matches; };
+[[nodiscard]] inline Ranked rank_items(const std::vector<PickerItem>& items, std::string_view query,
+                                       std::size_t limit = 200) {
+    Ranked r;
+    std::vector<std::pair<int, FuzzyMatch>> hits;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        auto m = fuzzy_match(query, items[i].label);
+        if (!m.ok && !items[i].detail.empty()) {   // fall back to matching "detail/label"
+            auto m2 = fuzzy_match(query, items[i].detail + "/" + items[i].label);
+            if (m2.ok) { m2.score -= 4; m2.positions.clear(); m = std::move(m2); }
+        }
+        if (m.ok) hits.emplace_back(static_cast<int>(i), std::move(m));
+    }
+    if (!query.empty())
+        std::stable_sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) { return a.second.score > b.second.score; });
+    for (auto& [i, m] : hits) {
+        if (r.order.size() >= limit) break;
+        r.order.push_back(i);
+        r.matches.push_back(std::move(m));
+    }
+    return r;
+}
+
+template <ControlContext C>
+inline void picker(const C& c, std::string_view id, const TextEditState& query,
+                   const std::vector<PickerItem>& items, const Ranked& ranked, int chosen,
+                   const PickerStyle& st = {}) {
+    const Theme& t = c.theme;
+    const int n = static_cast<int>(ranked.order.size());
+    const int sel = n == 0 ? -1 : std::clamp(chosen, 0, n - 1);
+    // Keep the selection on screen: a window of max_rows around it.
+    const int top = std::clamp(sel - st.max_rows + 3, 0, std::max(0, n - st.max_rows));
+    std::vector<Node> rows;
+    for (int k = top; k < std::min(n, top + st.max_rows); ++k) {
+        const PickerItem& it = items[static_cast<std::size_t>(ranked.order[static_cast<std::size_t>(k)])];
+        const auto pid = part_id(id, static_cast<std::size_t>(k));
+        const bool on = k == sel, hov = c.hovered(pid);
+        rows.push_back((h(node(it.icon_name.empty() ? Node{} : file_icon(t, it.icon_name, 12.0f).build()),
+                          node(fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.font_size,
+                                          t.text_primary, t.accent).build()),
+                          text_owned(it.detail) | font(t.font_size * 0.88f) | fg(t.text_disabled) | ellipsis
+                              | grow() | min_size(0, 0),
+                          node(it.hint.empty() ? Node{} : key_hint(t, it.hint, "", t.font_size * 0.82f).build()))
+                        | gap(9) | align(Align::center) | pad(0, 12) | height(30) | width(pct(100))
+                        | bg(on ? t.tint(t.accent, 0.20f) : hov ? t.surface_raised : t.overlay.fade(0.0f))
+                        | radius(t.radius_small)
+                        | pointer_cursor | role(a11y::Role::menu_item) | selected(on) | label(it.label)
+                        | id_of(id, static_cast<std::size_t>(k))).build());
+    }
+    if (rows.empty())
+        rows.push_back((h(text_owned(st.empty_text) | font(t.font_size) | fg(t.text_disabled)) | pad(14, 12)).build());
+
+    std::vector<Node> foot;
+    for (const auto& [k, a] : st.footer) foot.push_back(key_hint(t, k, a, t.font_size * 0.8f).build());
+    foot.push_back((spacer()).build());
+    foot.push_back((text_owned(std::to_string(n) + (n == static_cast<int>(items.size()) ? "" : " of " + std::to_string(items.size())))
+                    | font(t.font_size * 0.8f) | fg(t.text_disabled)).build());
+
+    const float qsize = t.font_size * 1.08f;
+    c.overlay(Overlay{
+        .content = (v(h(text_owned(st.prefix) | font(qsize) | fg(t.accent),
+                        node((text_field(t, query, true, part_id(id, part_inc), st.placeholder, qsize)
+                              | grow() | border(0, t.border) | bg(t.overlay.fade(0.0f))).build()))
+                        | gap(4) | align(Align::center) | pad(6, 10) | width(pct(100)),
+                      box() | height(1) | width(pct(100)) | bg(t.border),
+                      v(v_list(std::move(rows), 1.0f)) | pad(6) | width(pct(100)),
+                      h(h_list(std::move(foot), 12.0f)) | align(Align::center) | pad(6, 14) | width(pct(100))
+                          | bg(t.surface) )
+                    | width(st.width) | bg(t.overlay) | border(1, t.border_strong)
+                    | radius(t.radius_medium) | clip | elevation(24)
+                    | role(a11y::Role::dialog) | label(id)).build(),
+        .id = part_id(id, part_menu),
+        .anchor_id = 0,
+        .placement = Placement::cursor,
+        .dismiss = Dismiss::on_click_outside,
+        .layer = 10,
+        .at = [&] {
+            Vec2 sz{1200.0f, 800.0f};
+            if constexpr (requires { c.c.size; }) sz = c.c.size;
+            else if constexpr (requires { c.size; }) sz = c.size;
+            return Vec2{std::max(0.0f, (sz.x - st.width) * 0.5f), std::round(sz.y * 0.10f)};
+        }(),
+    });
+}
+
+}  // namespace mayag::dsl

@@ -482,6 +482,12 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_scaling_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_scaling_tests COMMAND mayag_scaling_tests)
 
+    # The code editor's text model and syntax layer.
+    add_executable(mayag_editor_tests tests/test_editor.cpp)
+    target_link_libraries(mayag_editor_tests PRIVATE mayag)
+    target_compile_options(mayag_editor_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_editor_tests COMMAND mayag_editor_tests)
+
     # image() must render on every backend, not just compile.
     add_executable(mayag_texture_tests tests/test_texture.cpp)
     target_link_libraries(mayag_texture_tests PRIVATE mayag)
@@ -509,7 +515,7 @@ if(MAYAG_BUILD_TESTS)
     # SAME Program the windowed build runs, so a green test here is evidence
     # about the shipped app rather than about a parallel harness.
     if(MAYAG_BUILD_EXAMPLES)
-        foreach(demo counter gallery dashboard typography todo reactive aurora player terminal_settings)
+        foreach(demo counter gallery dashboard typography todo reactive aurora player terminal_settings editor)
             if(TARGET mayag_${demo})
                 add_test(NAME mayag_${demo}_headless
                          COMMAND mayag_${demo} --headless)
