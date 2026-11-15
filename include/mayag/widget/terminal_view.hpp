@@ -333,3 +333,71 @@ template <ControlContext C>
 }
 
 }  // namespace mayag::dsl
+
+namespace mayag::dsl {
+
+/// A TermRowView from a tiny markup, for previews, empty states, tests and
+/// docs (not a VT parser): {r}{g}{y}{b}{m}{c}{w} ANSI colours, {d} dim grey,
+/// {B} bold {I} italic {D} dim {S} strike {R} inverse {U} underline
+/// {~} curly red underline {L} hyperlink 1 {G} green background {0} reset.
+[[nodiscard]] inline TermRowView term_row(std::string_view markup, int cols, TermMark mark = TermMark::none) {
+    static constexpr std::uint32_t pal[8] = {0x15161E, 0xF7768E, 0x9ECE6A, 0xE0AF68, 0x7AA2F7, 0xBB9AF7, 0x7DCFFF, 0xC0CAF5};
+    TermRowView r;
+    r.mark = mark;
+    TermCell pen;
+    for (std::size_t i = 0; i < markup.size();) {
+        if (markup[i] == '{' && i + 2 < markup.size() && markup[i + 2] == '}') {
+            const char k = markup[i + 1];
+            i += 3;
+            const auto fgc = [&](std::uint32_t v) { pen.fg = v; pen.default_fg = false; };
+            switch (k) {
+                case '0': pen = TermCell{}; break;
+                case 'r': fgc(pal[1]); break;  case 'g': fgc(pal[2]); break;  case 'y': fgc(pal[3]); break;
+                case 'b': fgc(pal[4]); break;  case 'm': fgc(pal[5]); break;  case 'c': fgc(pal[6]); break;
+                case 'w': fgc(pal[7]); break;  case 'd': fgc(0x565F89); break;
+                case 'B': pen.flags |= term_attr::bold; break;
+                case 'I': pen.flags |= term_attr::italic; break;
+                case 'D': pen.flags |= term_attr::dim; break;
+                case 'S': pen.flags |= term_attr::strike; break;
+                case 'R': pen.flags |= term_attr::inverse; break;
+                case 'U': pen.ul_style = TermUnderline::single; break;
+                case '~': pen.ul_style = TermUnderline::curly; pen.ul_color = 0xF7768E; break;
+                case 'L': pen.link = 1; break;
+                case 'G': pen.bg = 0x2D3F2D; pen.default_bg = false; break;
+                default: break;
+            }
+            continue;
+        }
+        std::size_t n = 1;
+        const auto c = static_cast<unsigned char>(markup[i]);
+        if (c >= 0xF0) n = 4; else if (c >= 0xE0) n = 3; else if (c >= 0xC0) n = 2;
+        n = std::min(n, markup.size() - i);
+        char32_t cp = c;
+        const auto b = [&](std::size_t k) { return static_cast<char32_t>(static_cast<unsigned char>(markup[i + k]) & 0x3Fu); };
+        if (n == 2) cp = ((c & 0x1Fu) << 6) | b(1);
+        if (n == 3) cp = ((c & 0x0Fu) << 12) | (b(1) << 6) | b(2);
+        if (n == 4) cp = ((c & 0x07u) << 18) | (b(1) << 12) | (b(2) << 6) | b(3);
+        const bool wide = (cp >= 0x2E80 && cp <= 0xA4CF) || (cp >= 0xAC00 && cp <= 0xD7A3) || (cp >= 0xF900 && cp <= 0xFAFF) ||
+                          (cp >= 0xFF00 && cp <= 0xFF60) || (cp >= 0x1F300 && cp <= 0x1FAFF);
+        TermCell cell = pen;
+        cell.text = std::string{markup.substr(i, n)};
+        cell.width = wide ? 2 : 1;
+        r.cells.push_back(cell);
+        if (wide) { TermCell right = pen; right.text = ""; right.width = 0; r.cells.push_back(right); }
+        i += n;
+    }
+    r.cells.resize(static_cast<std::size_t>(std::max(cols, 0)));
+    return r;
+}
+
+/// A TermGrid from markup lines.
+[[nodiscard]] inline TermGrid term_grid(std::initializer_list<std::string_view> lines, int cols, bool cursor = false) {
+    TermGrid g;
+    g.cols = cols;
+    g.rows = static_cast<int>(lines.size());
+    for (auto l : lines) g.lines.push_back(term_row(l, cols));
+    g.cursor_visible = cursor;
+    return g;
+}
+
+}  // namespace mayag::dsl

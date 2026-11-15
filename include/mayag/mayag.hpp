@@ -53,11 +53,15 @@
 // plain DSL composed, so any of them can be included on its own
 // (`#include <mayag/widget/slider.hpp>`); the umbrella pulls them all in.
 #include <mayag/widget/control.hpp>
+#include <mayag/widget/agent_state.hpp>
+#include <mayag/widget/agent_toasts.hpp>
+#include <mayag/widget/attention_queue.hpp>
 #include <mayag/widget/avatar.hpp>
 #include <mayag/widget/badge.hpp>
 #include <mayag/widget/breadcrumbs.hpp>
 #include <mayag/widget/button.hpp>
 #include <mayag/widget/card.hpp>
+#include <mayag/widget/changes_panel.hpp>
 #include <mayag/widget/checkbox.hpp>
 #include <mayag/widget/code_view.hpp>
 #include <mayag/widget/color_swatch.hpp>
@@ -81,9 +85,11 @@
 #include <mayag/widget/link_tooltip.hpp>
 #include <mayag/widget/nav_item.hpp>
 #include <mayag/widget/pane.hpp>
+#include <mayag/widget/pane_overview.hpp>
 #include <mayag/widget/picker.hpp>
 #include <mayag/widget/problems.hpp>
 #include <mayag/widget/progress.hpp>
+#include <mayag/widget/prompt_editor.hpp>
 #include <mayag/widget/radio_group.hpp>
 #include <mayag/widget/resize_hud.hpp>
 #include <mayag/widget/scroll_view.hpp>
@@ -92,6 +98,7 @@
 #include <mayag/widget/setting_row.hpp>
 #include <mayag/widget/slider.hpp>
 #include <mayag/widget/split.hpp>
+#include <mayag/widget/ssh.hpp>
 #include <mayag/widget/status_bar.hpp>
 #include <mayag/widget/stepper.hpp>
 #include <mayag/widget/tab_bar.hpp>
@@ -103,6 +110,7 @@
 #include <mayag/widget/toggle.hpp>
 #include <mayag/widget/typography.hpp>
 #include <mayag/widget/virtual_list.hpp>
+#include <mayag/widget/worktree_list.hpp>
 
 // ── layout ──────────────────────────────────────────────────────────────
 #include <mayag/layout/text_metrics.hpp>

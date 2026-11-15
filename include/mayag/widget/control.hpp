@@ -61,6 +61,18 @@ namespace detail {
     return rest;
 }
 
+/// Advance of `s` at `size` in the frame's real font, when the context can
+/// measure (mayag::Ctx, or a wrapper exposing it as `.c`); a 0.6 em
+/// monospace estimate otherwise.
+template <class C>
+[[nodiscard]] float text_advance(const C& c, std::string_view s, float size) {
+    TextStyle st;
+    st.size = size;
+    if constexpr (requires { c.c.measurer(); }) return c.c.measurer().advance(s, st);
+    else if constexpr (requires { c.measurer(); }) return c.measurer().advance(s, st);
+    else return static_cast<float>(s.size()) * size * 0.6f;
+}
+
 }  // namespace detail
 
 }  // namespace mayag::dsl
