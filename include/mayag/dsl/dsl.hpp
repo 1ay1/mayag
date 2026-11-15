@@ -271,8 +271,15 @@ template <Element... Kids>
     e.style.layout.align = Align::stretch;
 
     [&]<std::size_t... I>(std::index_sequence<I...>) {
-        ((I == 0 ? void()
-                 : void(std::get<I>(e.kids).style.layout.position = Positioning::absolute)), ...);
+        // For a wrapped runtime node, mark the PAYLOAD absolute. Writing to
+        // the wrapper's style would make it non-default, and NodeElem::build
+        // then replaces the payload's whole style with it -- every overlay
+        // in `z(content, node(x))` silently lost its size, fill and radius.
+        const auto pin = [](auto& kid) {
+            if constexpr (requires { kid.payload.style(); }) kid.payload.style().layout.position = Positioning::absolute;
+            else kid.style.layout.position = Positioning::absolute;
+        };
+        ((I == 0 ? void() : pin(std::get<I>(e.kids))), ...);
     }(std::index_sequence_for<Kids...>{});
 
     return e;

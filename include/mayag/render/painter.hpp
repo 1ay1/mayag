@@ -132,7 +132,10 @@ inline void paint_node(const Node& node, DrawList& dl, const PaintOptions& opts,
 
     // ── canvas escape hatch ─────────────────────────────────────────────
     if (node.kind() == NodeKind::canvas && node.canvas() != nullptr) {
-        node.canvas()(dl, frame, node.canvas_user());
+        // No user data: the callback gets the node's own Style, so a stateless
+        // function can still be parameterised (and nothing can dangle when
+        // the tree is copied).
+        node.canvas()(dl, frame, node.canvas_user() != nullptr ? node.canvas_user() : static_cast<const void*>(&st));
     }
 
     if (opts.debug_bounds) {

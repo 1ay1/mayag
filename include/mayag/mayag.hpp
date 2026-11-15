@@ -53,6 +53,7 @@
 // plain DSL composed, so any of them can be included on its own
 // (`#include <mayag/widget/slider.hpp>`); the umbrella pulls them all in.
 #include <mayag/widget/control.hpp>
+#include <mayag/widget/activity_feed.hpp>
 #include <mayag/widget/agent_state.hpp>
 #include <mayag/widget/agent_toasts.hpp>
 #include <mayag/widget/attention_queue.hpp>
@@ -102,6 +103,9 @@
 #include <mayag/widget/status_bar.hpp>
 #include <mayag/widget/stepper.hpp>
 #include <mayag/widget/tab_bar.hpp>
+#include <mayag/widget/tab_launcher.hpp>
+#include <mayag/widget/tab_peek.hpp>
+#include <mayag/widget/tab_strip.hpp>
 #include <mayag/widget/term_search.hpp>
 #include <mayag/widget/term_tabs.hpp>
 #include <mayag/widget/terminal_view.hpp>
@@ -111,6 +115,7 @@
 #include <mayag/widget/typography.hpp>
 #include <mayag/widget/virtual_list.hpp>
 #include <mayag/widget/worktree_list.hpp>
+#include <mayag/widget/workspace_rail.hpp>
 
 // ── layout ──────────────────────────────────────────────────────────────
 #include <mayag/layout/text_metrics.hpp>

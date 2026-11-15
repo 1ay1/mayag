@@ -73,6 +73,13 @@ template <class C>
     else return static_cast<float>(s.size()) * size * 0.6f;
 }
 
+/// Previews are pictures, not controls: strip node ids so a click lands on
+/// the card around them (hit testing picks the innermost NAMED node).
+inline void make_inert(Node& n) {
+    n.style().id = 0;
+    for (auto& k : n.children()) make_inert(k);
+}
+
 }  // namespace detail
 
 }  // namespace mayag::dsl

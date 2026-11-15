@@ -31,15 +31,6 @@ struct PaneCard {
     bool                   focused = false;
 };
 
-namespace detail {
-/// Thumbnails are pictures, not controls: strip node ids so a click lands on
-/// the card (hit testing picks the innermost NAMED node).
-inline void make_inert(Node& n) {
-    n.style().id = 0;
-    for (auto& k : n.children()) make_inert(k);
-}
-}  // namespace detail
-
 template <ControlContext C>
 inline void pane_overview(const C& c, std::string_view id, std::vector<PaneCard> cards, double time, int keyboard = -1,
                           int columns = 3) {
