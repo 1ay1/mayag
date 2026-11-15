@@ -75,7 +75,7 @@ template <ControlContext C>
                | pad(1, 6) | radius(4) | bg(c.hovered(aid) ? t.surface_raised : t.surface.fade(0.0f))
                | border(1, c.hovered(aid) ? t.border_strong : t.border) | pointer_cursor | id_of(id, kTreeAction + static_cast<std::size_t>(i))).build()
             : Node{};
-        return (h(box() | size(2, r.here ? kTreeRowH - 8.0f : 0.0f) | radius(1) | bg(r.here_hue) | margin(0, 4, 0, -6),
+        return (h(box() | size(2, kTreeRowH - 8.0f) | radius(1) | bg(r.here ? r.here_hue : r.here_hue.fade(0.0f)) | margin(0, 4, 0, -6),
                   h_list(std::move(guides)),
                   node(file_icon(t, r.name, 12.0f, r.dir, r.open).build()),
                   text_owned(r.name) | font(t.font_size) | (r.here ? semibold : weight(FontWeight::regular)) | fg(name_col) | ellipsis | grow() | min_size(0, 0),

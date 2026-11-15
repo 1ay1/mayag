@@ -109,7 +109,7 @@ template <ControlContext C>
                               | bg(c.hovered(aid) ? t.surface_raised : t.surface.fade(0.0f))
                               | pointer_cursor | label("new tab here") | id_of(id, kTreeAction + i)).build()
                            : Node{};
-            wts.push_back((h(box() | size(2, wt.here ? 18.0f : 0.0f) | radius(1) | bg(wt.here_hue),
+            wts.push_back((h(box() | size(2, 18.0f) | radius(1) | bg(wt.here ? wt.here_hue : wt.here_hue.fade(0.0f)),
                              text<"\u2387"> | font(fs * 0.85f) | fg(on ? t.accent : t.text_disabled) | width(12),
                              v(text_owned(wt.branch) | font(fs * 0.88f) | (on ? semibold : weight(FontWeight::regular))
                                    | fg(on ? t.text_primary : t.text_secondary) | ellipsis,

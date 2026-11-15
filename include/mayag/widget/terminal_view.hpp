@@ -135,6 +135,102 @@ template <class C>
         if (v[i].row == row && col >= v[i].col && col < v[i].col + v[i].len) { if (which) *which = static_cast<int>(i); return true; }
     return false;
 }
+
+// Box drawing (U+2500-257F) as line weights: bits 0-1 left, 2-3 right, 4-5
+// up, 6-7 down; 0 none, 1 light, 2 heavy, 3 double. Dashed variants draw
+// solid; diagonals (2571-2573) are left to the font.
+inline constexpr std::uint8_t kBoxLines[128] = {
+    0x05, 0x0A, 0x50, 0xA0, 0x05, 0x0A, 0x50, 0xA0, 0x05, 0x0A, 0x50, 0xA0, 0x44, 0x48, 0x84, 0x88,
+    0x41, 0x42, 0x81, 0x82, 0x14, 0x18, 0x24, 0x28, 0x11, 0x12, 0x21, 0x22, 0x54, 0x58, 0x64, 0x94,
+    0xA4, 0x68, 0x98, 0xA8, 0x51, 0x52, 0x61, 0x91, 0xA1, 0x62, 0x92, 0xA2, 0x45, 0x46, 0x49, 0x4A,
+    0x85, 0x86, 0x89, 0x8A, 0x15, 0x16, 0x19, 0x1A, 0x25, 0x26, 0x29, 0x2A, 0x55, 0x56, 0x59, 0x5A,
+    0x65, 0x95, 0xA5, 0x66, 0x69, 0x96, 0x99, 0x6A, 0x9A, 0xA6, 0xA9, 0xAA, 0x05, 0x0A, 0x50, 0xA0,
+    0x0F, 0xF0, 0x4C, 0xC4, 0xCC, 0x43, 0xC1, 0xC3, 0x1C, 0x34, 0x3C, 0x13, 0x31, 0x33, 0x5C, 0xF4,
+    0xFC, 0x53, 0xF1, 0xF3, 0x4F, 0xC5, 0xCF, 0x1F, 0x35, 0x3F, 0x5F, 0xF5, 0xFF, 0x44, 0x41, 0x11,
+    0x14, 0x00, 0x00, 0x00, 0x01, 0x10, 0x04, 0x40, 0x02, 0x20, 0x08, 0x80, 0x09, 0x90, 0x06, 0x60,
+};
+
+/// The codepoint of a one-codepoint cell, or 0.
+[[nodiscard]] inline char32_t single_cp(std::string_view s) noexcept {
+    if (s.size() == 3 && (static_cast<unsigned char>(s[0]) & 0xF0) == 0xE0)
+        return (static_cast<char32_t>(s[0] & 0x0F) << 12) | (static_cast<char32_t>(s[1] & 0x3F) << 6) | static_cast<char32_t>(s[2] & 0x3F);
+    return 0;
+}
+
+/// Is this a character the terminal draws itself (box drawing, blocks)?
+[[nodiscard]] inline bool term_drawn(char32_t cp) noexcept {
+    if (cp >= 0x2500 && cp <= 0x257F) return kBoxLines[cp - 0x2500] != 0;
+    return cp >= 0x2580 && cp <= 0x259F;
+}
+
+/// Draw a box-drawing or block character into the cell at (x, y). Lines meet
+/// exactly at the cell centre and run to the cell edges, so neighbouring
+/// cells join with no gap whatever the line height, which a font glyph can't
+/// promise (it was designed for the font's own line height).
+template <class Rect, class Arc>
+void term_draw_cell(char32_t cp, float x, float y, float cw, float ch, Color<Srgb> col, Rect&& rect, Arc&& arc) {
+    const auto snap = [](float v) { return std::round(v * 2.0f) / 2.0f; };
+    if (cp >= 0x2580) {
+        const auto frac = [&](float fx, float fy, float fw, float fh, float a = 1.0f) {
+            const float x0 = snap(x + cw * fx), y0 = snap(y + ch * fy);
+            const float x1 = snap(x + cw * (fx + fw)), y1 = snap(y + ch * (fy + fh));
+            rect(x0, y0, x1 - x0, y1 - y0, a < 1.0f ? col.fade(a) : col);
+        };
+        const unsigned k = static_cast<unsigned>(cp - 0x2580);
+        if (k == 0) frac(0, 0, 1, 0.5f);                                           // ▀
+        else if (k <= 8) frac(0, 1.0f - static_cast<float>(k) / 8.0f, 1, static_cast<float>(k) / 8.0f);   // ▁..█
+        else if (k <= 15) frac(0, 0, static_cast<float>(16 - k) / 8.0f, 1);      // ▉..▏
+        else if (k == 16) frac(0.5f, 0, 0.5f, 1);                                // ▐
+        else if (k <= 19) frac(0, 0, 1, 1, 0.25f * static_cast<float>(k - 16));  // ░▒▓
+        else if (k == 20) frac(0, 0, 1, 0.125f);                                 // ▔
+        else if (k == 21) frac(0.875f, 0, 0.125f, 1);                            // ▕
+        else {
+            // Quadrants ▖▗▘▙▚▛▜▝▞▟: bits UL 1, UR 2, LL 4, LR 8.
+            static constexpr std::uint8_t q[10] = {4, 8, 1, 1 | 4 | 8, 1 | 8, 1 | 2 | 4, 1 | 2 | 8, 2, 2 | 4, 2 | 4 | 8};
+            const std::uint8_t b = q[k - 22];
+            if (b & 1) frac(0, 0, 0.5f, 0.5f);
+            if (b & 2) frac(0.5f, 0, 0.5f, 0.5f);
+            if (b & 4) frac(0, 0.5f, 0.5f, 0.5f);
+            if (b & 8) frac(0.5f, 0.5f, 0.5f, 0.5f);
+        }
+        return;
+    }
+    const std::uint8_t e = kBoxLines[cp - 0x2500];
+    const int L = e & 3, R = (e >> 2) & 3, U = (e >> 4) & 3, D = (e >> 6) & 3;
+    const float t1 = std::max(1.0f, snap(cw * 0.12f));
+    const float cx = snap(x + cw * 0.5f), cy = snap(y + ch * 0.5f);
+    const auto weight = [&](int w) { return w == 2 ? t1 * 2.0f : t1; };
+    // Rounded corners ╭╮╯╰: a quarter circle plus the straight remainder.
+    if (cp >= 0x256D && cp <= 0x2570) {
+        const float rr = snap(std::min(cw, ch) * 0.5f);
+        const int corner = static_cast<int>(cp - 0x256D);     // 0 ╭ 1 ╮ 2 ╯ 3 ╰
+        const float sx = (corner == 0 || corner == 3) ? 1.0f : -1.0f;   // arc opens toward +x?
+        const float sy = (corner == 0 || corner == 1) ? 1.0f : -1.0f;   // ... toward +y?
+        arc(cx + sx * rr, cy + sy * rr, rr, t1, corner, col);
+        // Straight parts from the arc's ends to the cell edges.
+        if (sx > 0) rect(cx + rr, cy - t1 / 2, x + cw - (cx + rr), t1, col);
+        else rect(x, cy - t1 / 2, cx - rr - x, t1, col);
+        if (sy > 0) rect(cx - t1 / 2, cy + rr, t1, y + ch - (cy + rr), col);
+        else rect(cx - t1 / 2, y, t1, cy - rr - y, col);
+        return;
+    }
+    // Half of the widest vertical / horizontal stroke, so joins overlap.
+    const auto half_v = [&] { return std::max(U == 3 || D == 3 ? t1 * 1.5f : weight(std::max(U, D)) / 2, 0.0f); };
+    const auto half_h = [&] { return std::max(L == 3 || R == 3 ? t1 * 1.5f : weight(std::max(L, R)) / 2, 0.0f); };
+    const auto hseg = [&](float x0, float x1, int w) {
+        if (w == 3) { rect(x0, cy - t1 * 1.5f, x1 - x0, t1, col); rect(x0, cy + t1 * 0.5f, x1 - x0, t1, col); }
+        else if (w > 0) rect(x0, cy - weight(w) / 2, x1 - x0, weight(w), col);
+    };
+    const auto vseg = [&](float y0, float y1, int w) {
+        if (w == 3) { rect(cx - t1 * 1.5f, y0, t1, y1 - y0, col); rect(cx + t1 * 0.5f, y0, t1, y1 - y0, col); }
+        else if (w > 0) rect(cx - weight(w) / 2, y0, weight(w), y1 - y0, col);
+    };
+    const float hv = (U || D) ? half_v() : 0.0f, hh = (L || R) ? half_h() : 0.0f;
+    hseg(x, cx + (L ? hv : 0.0f), L);
+    hseg(cx - (R ? hv : 0.0f), x + cw, R);
+    vseg(y, cy + (U ? hh : 0.0f), U);
+    vseg(cy - (D ? hh : 0.0f), y + ch, D);
+}
 }  // namespace detail
 
 template <ControlContext C>
@@ -157,6 +253,15 @@ template <ControlContext C>
     std::vector<Node> layers;
     const auto rect = [&](float x, float y, float w, float h, Color<Srgb> col, float r = 0.0f) {
         layers.push_back((box() | size(std::max(w, 0.0f), std::max(h, 0.0f)) | bg(col) | radius(r) | absolute(x, y)).build());
+    };
+    // A quarter of a ring centred on (ax, ay): a clip window over one corner
+    // of a rounded, bordered square. corner: 0 ╭ (top-left quarter) 1 ╮ 2 ╯ 3 ╰.
+    const auto arc = [&](float ax, float ay, float rr, float th, int corner, Color<Srgb> col) {
+        const float d = 2.0f * rr + th, half = rr + th / 2;
+        const float qx = (corner == 0 || corner == 3) ? ax - half : ax;
+        const float qy = (corner == 0 || corner == 1) ? ay - half : ay;
+        Node ring = (box() | size(d, d) | border(th, col) | radius(half) | absolute(ax - half - qx, ay - half - qy)).build();
+        layers.push_back((z(node(std::move(ring))) | size(half, half) | clip | absolute(qx, qy)).build());
     };
 
     const int nrows = std::min(g.rows, static_cast<int>(g.lines.size()));
@@ -221,12 +326,19 @@ template <ControlContext C>
                     b.width == 2 || a.width == 2) break;
                 ++c1;
             }
-            // Text of the run; skip right halves of wide characters.
+            // Text of the run; skip right halves of wide characters. Box and
+            // block characters are drawn as geometry and become spaces here.
             std::string text;
             bool visible = false;
+            const bool hidden_run = (a.flags & term_attr::hidden) != 0;
             for (int k = c0; k < c1; ++k) {
                 const TermCell& cell = row.cells[static_cast<std::size_t>(k)];
                 if (cell.width == 0) continue;
+                if (const char32_t cp = detail::single_cp(cell.text); cp != 0 && detail::term_drawn(cp)) {
+                    if (!hidden_run) detail::term_draw_cell(cp, col_x(k), y, cw, ch, fa, rect, arc);
+                    text += ' ';
+                    continue;
+                }
                 text += cell.text.empty() ? std::string{" "} : cell.text;
                 if (cell.text != " " && !cell.text.empty()) visible = true;
             }

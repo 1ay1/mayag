@@ -433,6 +433,8 @@ class window_host {
 
     void handle(const SetTitle& e)       { window_.set_title(e.title); }
     void handle(const WriteClipboard& e) { window_.set_clipboard(e.text); }
+    template <class Msg>
+    Msg handle(const ReadClipboard<Msg>& e) { return e.make(window_.get_clipboard()); }
     void handle(const SetCursor& e)      { window_.set_cursor(e.shape); }
     void handle(const SetFullscreen& e) {
         if constexpr (requires { window_.set_fullscreen(e.on); }) window_.set_fullscreen(e.on);

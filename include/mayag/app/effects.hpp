@@ -15,8 +15,11 @@
 #include <jaal/jaal.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace mayag {
@@ -56,9 +59,28 @@ using release_image = jaal::pure_fx<ReleaseImage, "release_image">;
     return {id, std::move(img)};
 }
 
+/// Read the system clipboard. The window answers in the same step with
+/// `make(text)`, so a paste is a value, not a callback:
+///
+///     using Cmd = mayag::Cmd<Msg, read_clipboard>;
+///     return ReadClipboard<Msg>{[](std::string s) -> Msg { return Pasted{std::move(s)}; }};
+template <class Msg> struct ReadClipboard { std::function<Msg(std::string)> make; };
+struct read_clipboard {
+    static constexpr std::string_view name = "read_clipboard";
+    template <class Msg> using type = ReadClipboard<Msg>;
+    template <class F, class M>
+    static auto fmap(F&& f, ReadClipboard<M> e) -> ReadClipboard<std::invoke_result_t<F, M>> {
+        return {[f = std::forward<F>(f), g = std::move(e.make)](std::string s) { return f(g(std::move(s))); }};
+    }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id& id, F&& f, ReadClipboard<M> e) -> ReadClipboard<std::invoke_result_t<F, const Id&, M>> {
+        return {[id, f = std::forward<F>(f), g = std::move(e.make)](std::string s) { return f(id, g(std::move(s))); }};
+    }
+};
+
 /// Every window effect, for a program that wants the whole set.
 template <class Msg>
 using window_cmd = jaal::Cmd<Msg, set_title, write_clipboard, set_fullscreen, set_cursor,
-                             focus, upload_image, release_image>;
+                             focus, upload_image, release_image, read_clipboard>;
 
 }  // namespace mayag
