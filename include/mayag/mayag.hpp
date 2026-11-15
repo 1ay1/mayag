@@ -61,7 +61,10 @@
 #include <mayag/widget/checkbox.hpp>
 #include <mayag/widget/code_view.hpp>
 #include <mayag/widget/color_swatch.hpp>
+#include <mayag/widget/command_block.hpp>
 #include <mayag/widget/completion_menu.hpp>
+#include <mayag/widget/confirm_dialog.hpp>
+#include <mayag/widget/context_menu.hpp>
 #include <mayag/widget/diff_view.hpp>
 #include <mayag/widget/divider.hpp>
 #include <mayag/widget/dot.hpp>
@@ -75,12 +78,16 @@
 #include <mayag/widget/key_hint.hpp>
 #include <mayag/widget/keybind.hpp>
 #include <mayag/widget/layout.hpp>
+#include <mayag/widget/link_tooltip.hpp>
 #include <mayag/widget/nav_item.hpp>
+#include <mayag/widget/pane.hpp>
 #include <mayag/widget/picker.hpp>
 #include <mayag/widget/problems.hpp>
 #include <mayag/widget/progress.hpp>
 #include <mayag/widget/radio_group.hpp>
+#include <mayag/widget/resize_hud.hpp>
 #include <mayag/widget/scroll_view.hpp>
+#include <mayag/widget/scrollback_bar.hpp>
 #include <mayag/widget/segmented.hpp>
 #include <mayag/widget/setting_row.hpp>
 #include <mayag/widget/slider.hpp>
@@ -88,6 +95,9 @@
 #include <mayag/widget/status_bar.hpp>
 #include <mayag/widget/stepper.hpp>
 #include <mayag/widget/tab_bar.hpp>
+#include <mayag/widget/term_search.hpp>
+#include <mayag/widget/term_tabs.hpp>
+#include <mayag/widget/terminal_view.hpp>
 #include <mayag/widget/text_field.hpp>
 #include <mayag/widget/toast.hpp>
 #include <mayag/widget/toggle.hpp>
