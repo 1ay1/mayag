@@ -226,10 +226,32 @@ void term_draw_cell(char32_t cp, float x, float y, float cw, float ch, Color<Srg
         else if (w > 0) rect(cx - weight(w) / 2, y0, weight(w), y1 - y0, col);
     };
     const float hv = (U || D) ? half_v() : 0.0f, hh = (L || R) ? half_h() : 0.0f;
-    hseg(x, cx + (L ? hv : 0.0f), L);
-    hseg(cx - (R ? hv : 0.0f), x + cw, R);
-    vseg(y, cy + (U ? hh : 0.0f), U);
-    vseg(cy - (D ? hh : 0.0f), y + ch, D);
+    // Double lines: two strokes per arm, each ending where it meets the
+    // stroke of the perpendicular arm on ITS side, so corners and tees join
+    // inner-to-inner and outer-to-outer (╔ ╦ ╬) instead of crossing.
+    const float o_lo = t1 * 1.5f, o_hi = t1 * 0.5f;   // stroke offsets from the centre line
+    const auto dbl_h = [&](bool left_arm) {
+        for (int s = -1; s <= 1; s += 2) {
+            const float y0 = s < 0 ? cy - o_lo : cy + o_hi;
+            const int V = s < 0 ? U : D;
+            const float reach = V == 3 ? -o_hi : V > 0 ? weight(V) / 2 : o_lo;   // how far past the centre
+            if (left_arm) rect(x, y0, cx + reach - x, t1, col);
+            else rect(cx - reach, y0, x + cw - (cx - reach), t1, col);
+        }
+    };
+    const auto dbl_v = [&](bool up_arm) {
+        for (int s = -1; s <= 1; s += 2) {
+            const float x0 = s < 0 ? cx - o_lo : cx + o_hi;
+            const int H = s < 0 ? L : R;
+            const float reach = H == 3 ? -o_hi : H > 0 ? weight(H) / 2 : o_lo;
+            if (up_arm) rect(x0, y, t1, cy + reach - y, col);
+            else rect(x0, cy - reach, t1, y + ch - (cy - reach), col);
+        }
+    };
+    if (L == 3) dbl_h(true); else hseg(x, cx + (L ? hv : 0.0f), L);
+    if (R == 3) dbl_h(false); else hseg(cx - (R ? hv : 0.0f), x + cw, R);
+    if (U == 3) dbl_v(true); else vseg(y, cy + (U ? hh : 0.0f), U);
+    if (D == 3) dbl_v(false); else vseg(cy - (D ? hh : 0.0f), y + ch, D);
 }
 }  // namespace detail
 
