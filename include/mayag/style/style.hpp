@@ -545,4 +545,60 @@ static_assert(auto_length.resolve(200.0f, 7.0f) == 7.0f);
 static_assert(solid_fill(colors::red).visible());
 static_assert(!Fill{}.visible());
 
+/// A Style behind one owning pointer, null meaning the default Style.
+///
+/// Elements and nodes hold their style this way so that moving them (every
+/// pipe stage, every child append, every vector growth) moves 8 bytes, not
+/// ~800, and an element's style becomes its node's without a copy.
+class StyleBox {
+  public:
+    constexpr StyleBox() noexcept = default;
+    constexpr StyleBox(const Style& s) : p_{new Style(s)} {}
+    constexpr StyleBox(Style&& s) : p_{new Style(std::move(s))} {}
+    constexpr StyleBox(const StyleBox& o) : p_{o.p_ ? new Style(*o.p_) : nullptr} {}
+    constexpr StyleBox(StyleBox&& o) noexcept : p_{o.p_} { o.p_ = nullptr; }
+    constexpr StyleBox& operator=(const StyleBox& o) {
+        if (this == &o) return *this;
+        if (o.p_ == nullptr) reset();
+        else if (p_ != nullptr) *p_ = *o.p_;
+        else p_ = new Style(*o.p_);
+        return *this;
+    }
+    constexpr StyleBox& operator=(StyleBox&& o) noexcept {
+        if (this != &o) { delete p_; p_ = o.p_; o.p_ = nullptr; }
+        return *this;
+    }
+    constexpr StyleBox& operator=(const Style& s) {
+        if (p_ != nullptr) *p_ = s; else p_ = new Style(s);
+        return *this;
+    }
+    constexpr StyleBox& operator=(Style&& s) {
+        if (p_ != nullptr) *p_ = std::move(s); else p_ = new Style(std::move(s));
+        return *this;
+    }
+    constexpr ~StyleBox() { delete p_; }
+
+    [[nodiscard]] const Style& get() const noexcept { return p_ != nullptr ? *p_ : fallback(); }
+    /// Writable style, allocated on first write.
+    [[nodiscard]] constexpr Style& mut() {
+        if (p_ == nullptr) p_ = new Style{};
+        return *p_;
+    }
+    [[nodiscard]] constexpr bool is_default() const noexcept { return p_ == nullptr || *p_ == fallback(); }
+    constexpr void reset() noexcept { delete p_; p_ = nullptr; }
+
+    operator const Style&() const noexcept { return get(); }
+
+    friend bool operator==(const StyleBox& a, const StyleBox& b) noexcept {
+        return a.p_ == b.p_ || a.get() == b.get();
+    }
+
+  private:
+    static const Style& fallback() noexcept {
+        static const Style s{};
+        return s;
+    }
+    Style* p_ = nullptr;
+};
+
 }  // namespace mayag

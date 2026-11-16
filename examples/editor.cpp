@@ -554,7 +554,7 @@ struct Editor {
                 break;
             case PickMode::symbols:
                 if (const Buffer* b = cur(m))
-                    for (const auto& s : editor::outline(*b->ed.language, b->ed.lines, b->ed.tab_width))
+                    for (const auto& s : b->ed.symbols())
                         v.push_back({std::string(static_cast<std::size_t>(s.depth) * 2, ' ') + s.name, s.kind,
                                      std::to_string(s.line + 1), ""});
                 break;
@@ -1153,7 +1153,7 @@ struct Editor {
                 st = sl + 1;
             }
             // The innermost symbol enclosing the caret.
-            const auto syms = editor::outline(*b->ed.language, b->ed.lines, b->ed.tab_width);
+            const auto& syms = b->ed.symbols();
             const editor::Symbol* inner = nullptr;
             for (const auto& s : syms) if (s.line <= b->ed.cursor().line) inner = &s;
             if (inner != nullptr) crumbs.push_back({inner->name, false, true});

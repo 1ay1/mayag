@@ -976,7 +976,7 @@ void test_layout_guarantees() {
               "text defaults to ellipsis, so labels degrade gracefully");
 
         auto para = text<"x"> | wrap_text;
-        check(para.style.text.overflow == TextOverflow::wrap,
+        check(para.style.get().text.overflow == TextOverflow::wrap,
               "paragraphs opt IN to wrapping");
     }
 

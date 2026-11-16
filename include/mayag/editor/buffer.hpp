@@ -185,6 +185,22 @@ class EditorState {
     [[nodiscard]] Pos cursor() const { return primary_sel().head; }
     [[nodiscard]] std::uint64_t version() const noexcept { return version_; }
 
+    /// The buffer's symbol outline. Cached until the text or language changes,
+    /// since views ask for it every frame (breadcrumbs, go to symbol). Edits
+    /// go through version_; `lines` is public, so its shape is checked too.
+    [[nodiscard]] const std::vector<Symbol>& symbols() const {
+        if (symbols_version_ != version_ || symbols_lang_ != language || symbols_tab_ != tab_width ||
+            symbols_lines_ != lines.data() || symbols_count_ != lines.size()) {
+            symbols_ = outline(*language, lines, tab_width);
+            symbols_version_ = version_;
+            symbols_lang_ = language;
+            symbols_tab_ = tab_width;
+            symbols_lines_ = lines.data();
+            symbols_count_ = lines.size();
+        }
+        return symbols_;
+    }
+
     [[nodiscard]] Pos clamp(Pos p) const {
         p.line = std::clamp(p.line, 0, line_count() - 1);
         p.col = std::clamp(p.col, 0, line_len(p.line));
@@ -1076,6 +1092,12 @@ class EditorState {
     mutable std::uint64_t    max_cols_version_ = 0;
     mutable std::vector<int> visual_;
     mutable std::uint64_t    visual_version_ = 0, visual_fold_version_ = 0;
+    mutable std::vector<Symbol> symbols_;
+    mutable std::uint64_t    symbols_version_ = ~std::uint64_t{0};
+    mutable const Language*  symbols_lang_ = nullptr;
+    mutable int              symbols_tab_ = 0;
+    mutable const std::string* symbols_lines_ = nullptr;
+    mutable std::size_t      symbols_count_ = 0;
 
     [[nodiscard]] std::uint64_t top_id() const noexcept { return undo_.empty() ? 0 : undo_.back().id; }
 

@@ -44,6 +44,51 @@ struct LineState {
     friend constexpr bool operator==(LineState, LineState) = default;
 };
 
+/// Identifier -> token kind, open-addressed. Built once per language by
+/// detail::sorted(); the lexer asks it about every identifier on every line.
+class WordTable {
+  public:
+    void add(std::string_view w, Tok k) {
+        if (slots_.empty()) slots_.resize(64);
+        if ((count_ + 1) * 2 > slots_.size()) grow();
+        put(w, k);
+    }
+    [[nodiscard]] bool built() const noexcept { return !slots_.empty(); }
+    /// Tok::text when `w` isn't a listed word.
+    [[nodiscard]] Tok find(std::string_view w) const noexcept {
+        if (w.size() > 24) return Tok::text;
+        const std::size_t mask = slots_.size() - 1;
+        for (std::size_t i = hash(w) & mask;; i = (i + 1) & mask) {
+            const Slot& s = slots_[i];
+            if (s.word.empty()) return Tok::text;
+            if (s.word == w) return s.kind;
+        }
+    }
+
+  private:
+    struct Slot { std::string_view word; Tok kind = Tok::text; };
+    static std::size_t hash(std::string_view w) noexcept {
+        std::size_t h = 0x811c9dc5u ^ w.size();
+        for (unsigned char c : w) h = (h ^ c) * 0x01000193u;
+        return h ^ (h >> 15);
+    }
+    void put(std::string_view w, Tok k) {
+        const std::size_t mask = slots_.size() - 1;
+        for (std::size_t i = hash(w) & mask;; i = (i + 1) & mask) {
+            if (slots_[i].word.empty()) { slots_[i] = {w, k}; ++count_; return; }
+            if (slots_[i].word == w) return;   // first listing wins
+        }
+    }
+    void grow() {
+        std::vector<Slot> old = std::move(slots_);
+        slots_.assign(old.size() * 2, Slot{});
+        count_ = 0;
+        for (const Slot& s : old) if (!s.word.empty()) put(s.word, s.kind);
+    }
+    std::vector<Slot> slots_;
+    std::size_t       count_ = 0;
+};
+
 /// A language, as data. Adding one is filling in this struct.
 struct Language {
     std::string_view              name{};
@@ -64,6 +109,10 @@ struct Language {
     bool ini_like         = false;   ///< TOML: [section], key =
     bool markdown         = false;
     bool dollar_vars      = false;   ///< shell $VAR
+
+    /// keywords/constants/types/specials hashed, in that priority. Filled by
+    /// detail::sorted(); a hand-built Language without it still works.
+    WordTable words{};
 };
 
 namespace detail {
@@ -82,7 +131,22 @@ namespace detail {
 
 inline Language sorted(Language l) {
     for (auto* v : {&l.keywords, &l.types, &l.constants, &l.specials}) std::sort(v->begin(), v->end());
+    l.words = {};
+    for (auto w : l.keywords)  l.words.add(w, Tok::keyword);
+    for (auto w : l.constants) l.words.add(w, Tok::constant);
+    for (auto w : l.types)     l.words.add(w, Tok::type);
+    for (auto w : l.specials)  l.words.add(w, Tok::special);
     return l;
+}
+
+/// The listed kind of `w` (keyword, constant, type, special), or Tok::text.
+[[nodiscard]] inline Tok classify(const Language& lang, std::string_view w) {
+    if (lang.words.built()) return lang.words.find(w);
+    if (in(lang.keywords, w)) return Tok::keyword;
+    if (in(lang.constants, w)) return Tok::constant;
+    if (in(lang.types, w)) return Tok::type;
+    if (in(lang.specials, w)) return Tok::special;
+    return Tok::text;
 }
 
 }  // namespace detail
@@ -405,11 +469,8 @@ inline LineState highlight_line(const Language& lang, std::string_view s, LineSt
             std::size_t j = i + 1;
             while (j < n && ident_char(static_cast<unsigned char>(s[j]))) ++j;
             const std::string_view w = s.substr(i, j - i);
-            Tok k = Tok::text;
-            if (in(lang.keywords, w)) k = Tok::keyword;
-            else if (in(lang.constants, w)) k = Tok::constant;
-            else if (in(lang.types, w)) k = Tok::type;
-            else if (in(lang.specials, w)) k = Tok::special;
+            Tok k = classify(lang, w);
+            if (k != Tok::text) {}
             else if (lang.bang_macros && j < n && s[j] == '!') { k = Tok::macro; ++j; }
             else if (next_non_space(j) == '(') k = Tok::function;
             else if (prev_non_space(i) == '.' || (i >= 2 && s.substr(i - 2, 2) == "->")) k = Tok::property;

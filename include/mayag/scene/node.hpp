@@ -103,28 +103,28 @@ class Node {
 
     [[nodiscard]] static Node make_box(Style s, std::vector<Node> kids = {}) {
         Node n{NodeKind::box};
-        n.style_ = s;
+        n.style_ = std::move(s);
         n.children_ = std::move(kids);
         return n;
     }
 
     [[nodiscard]] static Node make_text(std::string content, Style s) {
         Node n{NodeKind::text};
-        n.style_ = s;
+        n.style_ = std::move(s);
         n.text_ = std::move(content);
         return n;
     }
 
     [[nodiscard]] static Node make_image(std::uint32_t texture, Style s) {
         Node n{NodeKind::image};
-        n.style_ = s;
+        n.style_ = std::move(s);
         n.texture_ = texture;
         return n;
     }
 
     [[nodiscard]] static Node make_canvas(CanvasFn fn, const void* user, Style s) {
         Node n{NodeKind::canvas};
-        n.style_ = s;
+        n.style_ = std::move(s);
         n.canvas_ = fn;
         n.canvas_user_ = user;
         return n;
@@ -132,15 +132,17 @@ class Node {
 
     [[nodiscard]] static Node make_spacer(float grow = 1.0f) {
         Node n{NodeKind::spacer};
-        n.style_.layout.grow = grow;
+        n.style_.mut().layout.grow = grow;
         return n;
     }
 
     // -- accessors --------------------------------------------------------
 
     [[nodiscard]] NodeKind kind() const noexcept { return kind_; }
-    [[nodiscard]] const Style& style() const noexcept { return style_; }
-    [[nodiscard]] Style& style() noexcept { return style_; }
+    [[nodiscard]] const Style& style() const noexcept { return style_.get(); }
+    [[nodiscard]] Style& style() { return style_.mut(); }
+    /// Take a boxed style as-is (no copy): how the DSL hands a node its style.
+    void adopt_style(StyleBox&& s) noexcept { style_ = std::move(s); }
     [[nodiscard]] std::string_view text() const noexcept { return text_; }
     [[nodiscard]] std::uint32_t texture() const noexcept { return texture_; }
     [[nodiscard]] CanvasFn canvas() const noexcept { return canvas_; }
@@ -153,7 +155,7 @@ class Node {
     [[nodiscard]] const Rect& frame() const noexcept { return frame_; }
     void set_frame(const Rect& r) noexcept { frame_ = r; }
 
-    [[nodiscard]] std::uint64_t id() const noexcept { return style_.id; }
+    [[nodiscard]] std::uint64_t id() const noexcept { return style_.get().id; }
 
     void add_child(Node c) { children_.push_back(std::move(c)); }
     void set_text(std::string s) { text_ = std::move(s); }
@@ -176,7 +178,7 @@ class Node {
     }
 
     [[nodiscard]] const Node* find(std::uint64_t node_id) const noexcept {
-        if (node_id != 0 && style_.id == node_id) return this;
+        if (node_id != 0 && style_.get().id == node_id) return this;
         for (const auto& c : children_) {
             if (const Node* f = c.find(node_id)) return f;
         }
@@ -198,7 +200,7 @@ class Node {
 
   private:
     NodeKind          kind_ = NodeKind::box;
-    Style             style_{};
+    StyleBox          style_{};
     std::string       text_{};
     std::uint32_t     texture_ = 0;
     CanvasFn          canvas_ = nullptr;

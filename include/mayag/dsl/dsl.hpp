@@ -340,7 +340,7 @@ struct Elem {
     static constexpr NodeKind  kind = Kind;
     static constexpr caps::Set capabilities = Caps;
 
-    Style                     style{};
+    StyleBox                  style{};
     std::string_view          content{};   ///< static text / image key
     std::uint32_t             texture = 0;
     detail::KidBox<Kids...>   kids{};
@@ -358,7 +358,7 @@ struct Elem {
         return n;
     }
     void build_into(Node& n) const& {
-        n.style() = style;
+        n.adopt_style(StyleBox{style});
         if constexpr (Kind == NodeKind::text) {
             n.set_text(std::string{content});
         } else if constexpr (Kind == NodeKind::image) {
@@ -370,7 +370,7 @@ struct Elem {
         }
     }
     void build_into(Node& n) && {
-        n.style() = std::move(style);
+        n.adopt_style(std::move(style));
         if constexpr (Kind == NodeKind::text) {
             n.set_text(std::string{content});
         } else if constexpr (Kind == NodeKind::image) {
@@ -395,7 +395,7 @@ struct ElemR {
     static constexpr NodeKind  kind = Kind;
     static constexpr caps::Set capabilities = Caps;
 
-    Style                     style{};
+    StyleBox                  style{};
     std::string_view          content{};
     std::uint32_t             texture = 0;
     detail::KidBox<Kids...>   kids{};
@@ -412,7 +412,7 @@ struct ElemR {
         return n;
     }
     void build_into(Node& n) const& {
-        n.style() = style;
+        n.adopt_style(StyleBox{style});
         if constexpr (Kind == NodeKind::text) n.set_text(std::string{content});
         else if constexpr (Kind == NodeKind::image) n.set_texture(texture);
         if constexpr (sizeof...(Kids) > 0) {
@@ -422,7 +422,7 @@ struct ElemR {
         n.set_cascade(rules.compile());
     }
     void build_into(Node& n) && {
-        n.style() = std::move(style);
+        n.adopt_style(std::move(style));
         if constexpr (Kind == NodeKind::text) n.set_text(std::string{content});
         else if constexpr (Kind == NodeKind::image) n.set_texture(texture);
         if constexpr (sizeof...(Kids) > 0) {
@@ -502,7 +502,7 @@ template <NodeKind K, caps::Set C, typename... Kids, Modifier M>
 [[nodiscard]] constexpr auto operator|(Elem<K, C, Kids...> e, M m) {
     check_modifier<C, M>();
     Elem<K, C | M::gives, Kids...> out{std::move(e.style), e.content, e.texture, std::move(e.kids)};
-    m.apply(out.style);
+    m.apply(out.style.mut());
     return out;
 }
 
@@ -510,7 +510,7 @@ template <typename... Rs, NodeKind K, caps::Set C, typename... Kids, Modifier M>
 [[nodiscard]] constexpr auto operator|(ElemR<RuleSet<Rs...>, K, C, Kids...> e, M m) {
     check_modifier<C, M>();
     ElemR<RuleSet<Rs...>, K, C | M::gives, Kids...> out{std::move(e.style), e.content, e.texture, std::move(e.kids), std::move(e.rules)};
-    m.apply(out.style);
+    m.apply(out.style.mut());
     return out;
 }
 
@@ -518,7 +518,7 @@ template <NodeKind K, caps::Set C, typename... Kids, Responder R>
 [[nodiscard]] constexpr auto operator|(Elem<K, C, Kids...> e, R r) {
     check_responder<C, R>();
     ElemR<RuleSet<R>, K, C | R::gives, Kids...> out{std::move(e.style), e.content, e.texture, std::move(e.kids), RuleSet<R>{{r}}};
-    r.on_pipe(out.style);
+    r.on_pipe(out.style.mut());
     return out;
 }
 
@@ -528,7 +528,7 @@ template <typename... Rs, NodeKind K, caps::Set C, typename... Kids, Responder R
     ElemR<RuleSet<Rs..., R>, K, C | R::gives, Kids...> out{
         std::move(e.style), e.content, e.texture, std::move(e.kids),
         RuleSet<Rs..., R>{std::tuple_cat(std::move(e.rules.rs), std::tuple<R>{r})}};
-    r.on_pipe(out.style);
+    r.on_pipe(out.style.mut());
     return out;
 }
 
@@ -542,12 +542,12 @@ template <Axis A, typename... Kids>
 [[nodiscard]] constexpr auto make_stack(Kids&&... kids) {
     // Built in one go, never default-then-assign: children may hold
     // capturing lambdas (inline handlers), which have neither.
-    Style st{};
-    st.layout.axis = A;
+    StyleBox st;
+    st.mut().layout.axis = A;
     using E = Elem<NodeKind::box, (sizeof...(Kids) > 0 ? caps::container | caps::parent : caps::container),
                    std::remove_cvref_t<Kids>...>;
-    if constexpr (sizeof...(Kids) == 0) return E{st, {}, 0, {}};
-    else return E{st, {}, 0, KidBox<std::remove_cvref_t<Kids>...>{
+    if constexpr (sizeof...(Kids) == 0) return E{std::move(st), {}, 0, {}};
+    else return E{std::move(st), {}, 0, KidBox<std::remove_cvref_t<Kids>...>{
                                  std::tuple<std::remove_cvref_t<Kids>...>{std::move(kids)...}}};
 }
 
@@ -588,7 +588,7 @@ template <Child... Kids>
 template <Child... Kids>
 [[nodiscard]] constexpr auto z(Kids... kids) {
     auto e = detail::make_stack<Axis::vertical>(std::move(kids)...);
-    e.style.layout.align = Align::stretch;
+    e.style.mut().layout.align = Align::stretch;
 
     [&]<std::size_t... I>(std::index_sequence<I...>) {
         // Everything after the very first child floats. A runtime child that
@@ -608,7 +608,7 @@ template <Child... Kids>
             if constexpr (requires { kid.payload.style(); }) {
                 pin_node(kid.payload);
             } else if constexpr (Element<K>) {
-                if (!first) kid.style.layout.position = Positioning::absolute;
+                if (!first) kid.style.mut().layout.position = Positioning::absolute;
                 first = false;
             } else if constexpr (std::same_as<K, Node>) {
                 pin_node(kid);
@@ -617,7 +617,7 @@ template <Child... Kids>
             } else {
                 for (auto& x : kid) {
                     if constexpr (requires { x.style(); }) pin_node(x);
-                    else { if (!first) x.style.layout.position = Positioning::absolute; first = false; }
+                    else { if (!first) x.style.mut().layout.position = Positioning::absolute; first = false; }
                 }
             }
         };
@@ -671,7 +671,7 @@ struct OwnedText {
     static constexpr NodeKind  kind = NodeKind::text;
     static constexpr caps::Set capabilities = caps::text;
 
-    Style            style{};
+    StyleBox         style{};
     std::string_view content{};   ///< unused; the owned string below is the source
     std::uint32_t    texture = 0;
     std::tuple<>     kids{};
@@ -680,13 +680,15 @@ struct OwnedText {
     std::shared_ptr<const Cascade> cascade{};
 
     [[nodiscard]] Node build() const& {
-        Node n = Node::make_text(owned, style);
+        Node n{NodeKind::text};
+        n.adopt_style(StyleBox{style});
+        n.set_text(owned);
         n.set_cascade(cascade);
         return n;
     }
     [[nodiscard]] Node build() && {
         Node n{NodeKind::text};
-        n.style() = std::move(style);
+        n.adopt_style(std::move(style));
         n.set_text(std::move(owned));
         n.set_cascade(std::move(cascade));
         return n;
@@ -720,13 +722,13 @@ void add_responder(std::shared_ptr<const Cascade>& slot, const R& r) {
 template <Modifier M>
 [[nodiscard]] inline OwnedText operator|(OwnedText e, M m) {
     check_modifier<OwnedText::capabilities, M>();
-    m.apply(e.style);
+    m.apply(e.style.mut());
     return e;
 }
 template <Responder R>
 [[nodiscard]] inline OwnedText operator|(OwnedText e, R r) {
     check_responder<OwnedText::capabilities, R>();
-    r.on_pipe(e.style);
+    r.on_pipe(e.style.mut());
     detail::add_responder(e.cascade, r);
     return e;
 }
@@ -734,15 +736,15 @@ template <Responder R>
 /// Flexible empty space — the idiomatic way to push siblings apart.
 [[nodiscard]] constexpr auto spacer(float grow = 1.0f) {
     Elem<NodeKind::box, caps::flexible> e{};
-    e.style.layout.grow = grow;
+    e.style.mut().layout.grow = grow;
     return e;
 }
 
 /// Fixed-size gap as an element (when `gap()` on the parent is too uniform).
 [[nodiscard]] constexpr auto strut(float size) {
     Elem<NodeKind::box, caps::none> e{};
-    e.style.layout.width  = px(size);
-    e.style.layout.height = px(size);
+    e.style.mut().layout.width  = px(size);
+    e.style.mut().layout.height = px(size);
     return e;
 }
 
@@ -763,7 +765,7 @@ struct NodeElem {
     static constexpr NodeKind  kind = NodeKind::box;
     static constexpr caps::Set capabilities = caps::container | caps::parent;
 
-    Style            style{};
+    StyleBox         style{};
     std::string_view content{};
     std::uint32_t    texture = 0;
     std::tuple<>     kids{};
@@ -782,12 +784,12 @@ struct NodeElem {
         // so `node(x) | pad(8)` behaves like any other element. The payload's
         // own children and layout axis survive, because those came from how
         // the subtree was CONSTRUCTED, not from the pipeline.
-        static const Style kDefault{};
-        if (style != kDefault) {
+        if (!style.is_default()) {
+            const Style& ws = style.get();
             const Axis axis = n.style().layout.axis;
             const float gap = n.style().layout.gap;
-            const std::uint64_t keep_id = n.style().id != 0 ? n.style().id : style.id;
-            n.style() = style;
+            const std::uint64_t keep_id = n.style().id != 0 ? n.style().id : ws.id;
+            n.style() = ws;
             n.style().layout.axis = axis;
             if (n.style().layout.gap == 0.0f) n.style().layout.gap = gap;
             n.style().id = keep_id;
