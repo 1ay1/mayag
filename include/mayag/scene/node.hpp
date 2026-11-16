@@ -187,6 +187,30 @@ class Node {
 
     friend bool operator==(const Node&, const Node&) = default;
 
+    /// Layout's per-pass measure memo (layout/flex.hpp). Two entries, stamped
+    /// with the pass that wrote them. Not part of a node's value: copying or
+    /// moving a node starts it with an empty memo, so stamps only ever
+    /// describe the node object (and subtree) they were computed on.
+    struct MeasureMemo {
+        std::uint32_t gen[2]{};
+        float         cw[2]{}, ch[2]{};
+        const void*   tm[2]{};
+        Vec2          out[2]{};
+        std::uint8_t  next = 0;
+        std::uint32_t passes = 0;   ///< on a root: layout passes run on this tree
+        MeasureMemo() noexcept = default;
+        MeasureMemo(const MeasureMemo&) noexcept {}
+        MeasureMemo& operator=(const MeasureMemo&) noexcept { gen[0] = gen[1] = 0; return *this; }
+        friend constexpr bool operator==(const MeasureMemo&, const MeasureMemo&) noexcept { return true; }
+    };
+    [[nodiscard]] MeasureMemo& measure_memo() const noexcept { return memo_; }
+    void forget_measure() const noexcept { memo_.gen[0] = memo_.gen[1] = 0; }
+    /// A fresh, nonzero stamp for a layout pass over the tree rooted here.
+    [[nodiscard]] std::uint32_t next_layout_pass() noexcept {
+        if (++memo_.passes == 0) ++memo_.passes;
+        return memo_.passes;
+    }
+
     // -- cascade ------------------------------------------------------------
 
     [[nodiscard]] const std::shared_ptr<const Cascade>& cascade() const noexcept { return cascade_; }
@@ -209,6 +233,7 @@ class Node {
     Rect              frame_{};
     std::shared_ptr<const Cascade> cascade_{};
     bool              cascaded_ = false;
+    mutable MeasureMemo memo_{};
 };
 
 }  // namespace mayag

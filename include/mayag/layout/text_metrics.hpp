@@ -39,6 +39,9 @@ class TextMeasurer {
 
     /// Ascent above the baseline, for `Align::baseline`.
     [[nodiscard]] virtual float ascent(const TextStyle& st) const = 0;
+
+    /// Nonzero inside a layout_tree() pass: lets measure() memoise per node.
+    [[nodiscard]] virtual std::uint32_t layout_pass() const noexcept { return 0; }
 };
 
 // ── default: metric-only monospace ──────────────────────────────────────

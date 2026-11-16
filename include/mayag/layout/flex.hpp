@@ -63,11 +63,53 @@ namespace detail {
 
 }  // namespace detail
 
-// ── measurement ─────────────────────────────────────────────────────────
+// ── measurement ────────────────────────────────────────────────────────────────────────
+
+namespace detail {
+/// One layout pass. measure() is pure for a fixed tree, and arrange
+/// re-measures subtrees its parents already measured, so layout_tree() wraps
+/// the caller's measurer in this and measure() memoises per node, keyed on
+/// the pass's generation. Plain measurers (no pass) skip the memo.
+class PassMeasurer final : public TextMeasurer {
+  public:
+    PassMeasurer(const TextMeasurer& inner, std::uint32_t gen) noexcept : inner_{inner}, gen_{gen} {}
+    [[nodiscard]] Vec2 measure(std::string_view s, const TextStyle& st, float w) const override {
+        return inner_.measure(s, st, w);
+    }
+    [[nodiscard]] float advance(std::string_view s, const TextStyle& st) const override {
+        return inner_.advance(s, st);
+    }
+    [[nodiscard]] float ascent(const TextStyle& st) const override { return inner_.ascent(st); }
+    [[nodiscard]] std::uint32_t layout_pass() const noexcept override { return gen_; }
+
+  private:
+    const TextMeasurer& inner_;
+    std::uint32_t       gen_;
+};
+[[nodiscard]] Vec2 measure_uncached(const Node& node, Constraints c, const TextMeasurer& tm);
+}  // namespace detail
 
 /// Intrinsic size of a subtree under `c`, ignoring grow/shrink.
-/// Recursive and pure; the caller owns any caching.
+/// Pure; memoised per node during a layout_tree() pass.
 [[nodiscard]] inline Vec2 measure(const Node& node, Constraints c, const TextMeasurer& tm) {
+    const std::uint32_t g = tm.layout_pass();
+    if (g == 0) return detail::measure_uncached(node, c, tm);
+    auto& m = node.measure_memo();
+    for (int i = 0; i < 2; ++i)
+        if (m.gen[i] == g && m.tm[i] == &tm && m.cw[i] == c.max_width && m.ch[i] == c.max_height)
+            return m.out[i];
+    const Vec2 r = detail::measure_uncached(node, c, tm);
+    const int slot = m.next;
+    m.next = static_cast<std::uint8_t>(slot ^ 1);
+    m.gen[slot] = g;
+    m.tm[slot] = &tm;
+    m.cw[slot] = c.max_width;
+    m.ch[slot] = c.max_height;
+    m.out[slot] = r;
+    return r;
+}
+
+[[nodiscard]] inline Vec2 detail::measure_uncached(const Node& node, Constraints c, const TextMeasurer& tm) {
     const Style& st = node.style();
     const LayoutStyle& L = st.layout;
 
@@ -512,8 +554,13 @@ inline void arrange(Node& node, const Rect& frame, const TextMeasurer& tm) {
 /// sentinels until then, and laying out a sentinel padding is garbage. The
 /// host cascades with the real theme and interaction state before calling
 /// this, so for an app it is a no-op.
-inline Rect layout_tree(Node& root, Vec2 viewport, const TextMeasurer& tm) {
+inline Rect layout_tree(Node& root, Vec2 viewport, const TextMeasurer& outer) {
     if (!root.cascaded()) cascade_static(root, themes::midnight, viewport);
+    // Every node in this tree gets this pass's stamp the first time it's
+    // measured; a node coming from an older tree (copied, reused) carries an
+    // older stamp, so its memo misses. The stamp is the root's own counter,
+    // bumped per pass, so no shared state is involved.
+    const detail::PassMeasurer tm{outer, root.next_layout_pass()};
     const LayoutStyle& L = root.style().layout;
     const Vec2 intrinsic = measure(root, Constraints::tight(viewport), tm);
     const float w = L.width.is_auto()  ? viewport.x : L.width.resolve(viewport.x, intrinsic.x);
