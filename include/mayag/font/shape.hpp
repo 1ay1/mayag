@@ -236,7 +236,8 @@ class KernTable {
         parse_kern(f);
         if (pairs_.empty()) parse_gpos(f);
         std::sort(pairs_.begin(), pairs_.end(),
-                  [](const Pair& a, const Pair& b) { return a.key < b.key; });
+                  [](const Pair& a, const Pair& b) { return a.key() < b.key(); });
+        pairs_.shrink_to_fit();
     }
 
     [[nodiscard]] bool empty() const noexcept { return pairs_.empty(); }
@@ -247,15 +248,21 @@ class KernTable {
         if (pairs_.empty()) return 0.0f;
         const std::uint32_t key = (static_cast<std::uint32_t>(left) << 16) | right;
         auto it = std::lower_bound(pairs_.begin(), pairs_.end(), key,
-                                   [](const Pair& p, std::uint32_t k) { return p.key < k; });
-        return (it != pairs_.end() && it->key == key) ? it->value : 0.0f;
+                                   [](const Pair& p, std::uint32_t k) { return p.key() < k; });
+        return (it != pairs_.end() && it->key() == key) ? static_cast<float>(it->value) : 0.0f;
     }
 
   private:
+    // Split key halves keep this at 6 bytes (a u32 key would pad it to 8);
+    // big fonts expand class kerning to a million pairs.
     struct Pair {
-        std::uint32_t key;     ///< left << 16 | right
-        float         value;
+        std::uint16_t hi, lo;   ///< left, right
+        std::int16_t  value;    ///< font units, as stored in the font
+        Pair(std::uint32_t key, std::int16_t v) noexcept
+            : hi{static_cast<std::uint16_t>(key >> 16)}, lo{static_cast<std::uint16_t>(key)}, value{v} {}
+        [[nodiscard]] std::uint32_t key() const noexcept { return std::uint32_t{hi} << 16 | lo; }
     };
+    static_assert(sizeof(Pair) == 6);
 
     void parse_kern(const ot::FontFile& f) {
         const auto data = f.table(ot::tags::kern);
@@ -296,7 +303,7 @@ class KernTable {
                     if (p + 6 > data.size()) break;
                     pairs_.push_back(Pair{
                         (static_cast<std::uint32_t>(r.u16_at(p)) << 16) | r.u16_at(p + 2),
-                        static_cast<float>(r.i16_at(p + 4))});
+                        r.i16_at(p + 4)});
                 }
             }
 
@@ -356,7 +363,7 @@ class KernTable {
                     if (rec + 4 > limit) break;
                     pairs_.push_back(Pair{
                         (static_cast<std::uint32_t>(coverage[i]) << 16) | r.u16_at(rec),
-                        static_cast<float>(r.i16_at(rec + 2))});
+                        r.i16_at(rec + 2)});
                 }
             }
         }
@@ -383,8 +390,8 @@ class KernTable {
                     const std::size_t rec = off + 16 +
                         (static_cast<std::size_t>(c1) * n_class2 + c2) * 2;
                     if (rec + 2 > limit) continue;
-                    const float v = static_cast<float>(r.i16_at(rec));
-                    if (v != 0.0f) {
+                    const std::int16_t v = r.i16_at(rec);
+                    if (v != 0) {
                         pairs_.push_back(Pair{
                             (static_cast<std::uint32_t>(g) << 16) | g2, v});
                     }

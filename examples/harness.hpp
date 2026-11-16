@@ -240,6 +240,11 @@ int bench(App& app, const Options& o) {
                 "stages %.3f  tick %.3f ms  worst %.3f  (%u instances, %zu nodes)\n",
                 o.bench_frames, sum.view_ms / n, sum.cascade_ms / n, sum.layout_ms / n, sum.paint_ms / n,
                 sum.render_ms / n, sum.cpu_ms() / n, wall / n, worst, last.instances, app.host().tree().count());
+    if (std::FILE* f = std::fopen("/proc/self/status", "r")) {   // Linux: peak resident memory
+        char line[256];
+        while (std::fgets(line, sizeof line, f)) if (std::strncmp(line, "VmHWM:", 6) == 0) std::printf("peak rss%s", line + 6);
+        std::fclose(f);
+    }
     return 0;
 }
 

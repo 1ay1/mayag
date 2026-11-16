@@ -16,6 +16,7 @@
 #include "atlas.hpp"
 #include "color_bitmap.hpp"
 #include "colr.hpp"
+#include "mapped_file.hpp"
 #include "opentype.hpp"
 #include "outline.hpp"
 #include "raster.hpp"
@@ -73,9 +74,28 @@ class Face {
                                                            ot::Error* err = nullptr) {
         auto face = std::shared_ptr<Face>(new Face);
         face->data_ = std::move(data);
+        return face->init(face->data_, face_index, err) ? face : nullptr;
+    }
 
-        auto parsed = ot::FontFile::parse(face->data_, face_index, err);
-        if (!parsed) return nullptr;
+    /// Load from a file, mapped: pages fault in only where the parser and
+    /// rasteriser read, and the kernel shares them across processes.
+    [[nodiscard]] static std::shared_ptr<Face> from_file(const std::string& path,
+                                                         std::uint32_t face_index = 0,
+                                                         ot::Error* err = nullptr) {
+        auto face = std::shared_ptr<Face>(new Face);
+        face->mapped_ = MappedFile{path};
+        if (face->mapped_.empty()) {
+            if (err != nullptr) *err = ot::Error::too_small;
+            return nullptr;
+        }
+        return face->init(face->mapped_.data(), face_index, err) ? face : nullptr;
+    }
+
+  private:
+    bool init(std::span<const std::uint8_t> bytes, std::uint32_t face_index, ot::Error* err) {
+        Face* face = this;
+        auto parsed = ot::FontFile::parse(bytes, face_index, err);
+        if (!parsed) return false;
 
         face->file_    = std::move(*parsed);
         face->glyphs_  = GlyphSource{face->file_};
@@ -110,25 +130,12 @@ class Face {
         // than being dropped, which is exactly what turned emoji into tofu.
         if (!face->glyphs_.valid() && !face->file_.has_color()) {
             if (err != nullptr) *err = ot::Error::unsupported_format;
-            return nullptr;
+            return false;
         }
-        return face;
+        return true;
     }
 
-    [[nodiscard]] static std::shared_ptr<Face> from_file(const std::string& path,
-                                                         std::uint32_t face_index = 0,
-                                                         ot::Error* err = nullptr) {
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        if (!f) {
-            if (err != nullptr) *err = ot::Error::too_small;
-            return nullptr;
-        }
-        const auto size = static_cast<std::size_t>(f.tellg());
-        f.seekg(0);
-        std::vector<std::uint8_t> data(size);
-        f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
-        return from_memory(std::move(data), face_index, err);
-    }
+  public:
 
     // ── identity ────────────────────────────────────────────────────────
 
@@ -380,7 +387,8 @@ class Face {
         return counter.fetch_add(1, std::memory_order_relaxed);
     }
 
-    std::vector<std::uint8_t> data_;
+    std::vector<std::uint8_t> data_;     ///< owned bytes (from_memory)
+    MappedFile                mapped_;   ///< or a mapping (from_file)
     ot::FontFile              file_;
     GlyphSource               glyphs_;
     KernTable                 kerning_;
