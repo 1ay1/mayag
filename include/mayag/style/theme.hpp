@@ -176,7 +176,28 @@ constexpr Color<Srgb> contrasting_on(Color<Srgb> bg, float target,
 }  // namespace detail
 
 /// Derive a full theme from one accent colour.
+namespace detail {
+[[nodiscard]] constexpr Theme make_theme_uncached(Color<Srgb> accent_srgb, Mode mode) noexcept;
+}
+
+/// Pure in (accent, mode), and views call it every frame (theme knobs,
+/// previews), so runtime calls go through a small per-thread memo.
 [[nodiscard]] constexpr Theme make_theme(Color<Srgb> accent_srgb, Mode mode) noexcept {
+    if consteval {
+        return detail::make_theme_uncached(accent_srgb, mode);
+    } else {
+        struct Slot { Color<Srgb> accent; Mode mode; bool used = false; Theme theme; };
+        static thread_local Slot slots[16];
+        static thread_local unsigned next = 0;
+        for (auto& s : slots)
+            if (s.used && s.mode == mode && s.accent == accent_srgb) return s.theme;
+        Slot& s = slots[next++ % 16];
+        s = Slot{accent_srgb, mode, true, detail::make_theme_uncached(accent_srgb, mode)};
+        return s.theme;
+    }
+}
+
+[[nodiscard]] constexpr Theme detail::make_theme_uncached(Color<Srgb> accent_srgb, Mode mode) noexcept {
     const auto accent = accent_srgb.to<Oklch>();
     const bool dark = (mode == Mode::dark);
 

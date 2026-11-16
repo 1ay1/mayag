@@ -72,7 +72,7 @@ struct FrameTiming {
     std::uint32_t draw_calls = 0;
 
     [[nodiscard]] double cpu_ms() const noexcept {
-        return input_ms + update_ms + view_ms + layout_ms + paint_ms + render_ms;
+        return input_ms + update_ms + view_ms + cascade_ms + layout_ms + paint_ms + render_ms;
     }
 
     /// Headroom against a refresh interval. Negative means the frame was

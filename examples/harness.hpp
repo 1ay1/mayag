@@ -25,6 +25,7 @@
 #include <mayag/backend/vulkan.hpp>
 #endif
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -35,12 +36,14 @@ namespace demo {
 using namespace mayag;
 
 struct Options {
-    enum class Mode { window, png, gpu, headless } mode = Mode::window;
+    enum class Mode { window, png, gpu, headless, bench } mode = Mode::window;
     std::string out_path = "out.png";
     Vec2        size{1000, 720};
     float       dpi = 2.0f;
     bool        use_system_fonts = true;
     bool        debug_bounds = false;
+    int         bench_frames = 600;
+    bool        bench_raster = false;
 };
 
 [[nodiscard]] inline Options parse_args(int argc, char** argv, Vec2 default_size) {
@@ -59,6 +62,11 @@ struct Options {
             if (i + 1 < argc && argv[i + 1][0] != '-') o.out_path = argv[++i];
         }
         else if (a == "--headless") { o.mode = Options::Mode::headless; }
+        else if (a == "--bench") {
+            o.mode = Options::Mode::bench;
+            if (i + 1 < argc && argv[i + 1][0] != '-') o.bench_frames = std::atoi(argv[++i]);
+        }
+        else if (a == "--bench-raster") { o.bench_raster = true; }
         else if (a == "--window")   { o.mode = Options::Mode::window; }
         else if (a == "--last-resort") { o.use_system_fonts = false; }
         else if (a == "--debug")    { o.debug_bounds = true; }
@@ -74,6 +82,8 @@ struct Options {
                 "  --png [PATH]      render one frame to a PNG (software) and exit\n"
                 "  --gpu [PATH]      render one frame to a PNG via the GPU and exit\n"
                 "  --headless        run scripted, assert, and exit (CI)\n"
+                "  --bench [N]       redraw N frames headless, print per-stage CPU time\n"
+                "  --bench-raster    include software rasterising in --bench\n"
                 "  --size W H        viewport size in logical pixels\n"
                 "  --dpi SCALE       device pixel ratio (default 2.0)\n"
                 "  --last-resort     force the synthesized last-resort face\n"
@@ -204,6 +214,35 @@ template <Program P>
     return mayag::init_of<P>();
 }
 
+/// --bench: redraw every tick with the frame clock driven, and report the
+/// mean per-stage time. Same pipeline as the window minus the GPU.
+template <class App>
+int bench(App& app, const Options& o) {
+    app.window().set_raster(o.bench_raster);
+    app.window().drive_frames(true);
+    for (int i = 0; i < 60; ++i) app.tick();   // warm caches and atlases
+    FrameTiming sum{};
+    double worst = 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < o.bench_frames; ++i) {
+        app.tick();
+        const FrameTiming& f = app.host().latency().last();
+        sum.input_ms += f.input_ms;   sum.update_ms += f.update_ms;
+        sum.view_ms += f.view_ms;     sum.cascade_ms += f.cascade_ms;
+        sum.layout_ms += f.layout_ms; sum.paint_ms += f.paint_ms;
+        sum.render_ms += f.render_ms;
+        worst = std::max(worst, f.cpu_ms());
+    }
+    const double wall = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const double n = o.bench_frames;
+    const auto& last = app.host().latency().last();
+    std::printf("bench %d frames: view %.3f  cascade %.3f  layout %.3f  paint %.3f  render %.3f  | "
+                "stages %.3f  tick %.3f ms  worst %.3f  (%u instances, %zu nodes)\n",
+                o.bench_frames, sum.view_ms / n, sum.cascade_ms / n, sum.layout_ms / n, sum.paint_ms / n,
+                sum.render_ms / n, sum.cpu_ms() / n, wall / n, worst, last.instances, app.host().tree().count());
+    return 0;
+}
+
 /// Run a Program in whichever mode the flags asked for.
 ///
 /// `drive` is the headless script: it receives the runtime and should exercise
@@ -222,6 +261,9 @@ template <Program P, typename Driver>
 
         case Options::Mode::headless:
             return run_headless<P>(std::move(cfg), std::forward<Driver>(drive));
+
+        case Options::Mode::bench:
+            return run_headless<P>(std::move(cfg), [&o](auto& app) { return bench(app, o); });
 
         case Options::Mode::png: {
             // Build the initial view and render one frame. Uses the Program's

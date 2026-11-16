@@ -71,13 +71,14 @@ class Headless {
     [[nodiscard]] bool driving_frames() const noexcept { return driving_frames_; }
 
     void present(const DrawList& dl, Color<Srgb> clear) {
+        ++frames_presented_;
+        if (!raster_) return;
         const int w = static_cast<int>(size_.x * dpi_);
         const int h = static_cast<int>(size_.y * dpi_);
         if (fb_.width() != w || fb_.height() != h) {
             fb_ = backend::Framebuffer{w, h};
         }
         backend::Tiled::render(dl, fb_, sampler_, &backend::shared_pool(), clear);
-        ++frames_presented_;
 
         if (!record_dir_.empty()) {
             const auto path = record_dir_ + "/frame_" + pad6(frames_presented_) + ".png";
@@ -181,6 +182,9 @@ class Headless {
     /// Emit a FrameEvent on every poll — for driving animations in a test.
     void drive_frames(bool on) { driving_frames_ = on; }
 
+    /// Skip rasterising in present(), to time the CPU pipeline alone.
+    void set_raster(bool on) { raster_ = on; }
+
     /// Write every presented frame as a PNG into `dir`.
     void record_to(std::string dir) { record_dir_ = std::move(dir); }
 
@@ -238,6 +242,7 @@ class Headless {
     double time_ = 0.0;
     double tick_seconds_ = 0.5;   ///< > the double-click window (0.4 s)
     bool  driving_frames_ = false;
+    bool  raster_ = true;
 
     std::deque<Event>     queue_;
     backend::Framebuffer  fb_{1024, 640};

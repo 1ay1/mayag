@@ -265,17 +265,21 @@ struct RuleSet {
     /// or none: an element whose only responder is a theme look shares the
     /// look's pre-built Cascade outright (a refcount bump), which is the
     /// common case for every widget instance.
-    [[nodiscard]] std::shared_ptr<const Cascade> compile() const {
+    [[nodiscard]] std::shared_ptr<const Cascade> compile() const& { return compile_from(rs); }
+    [[nodiscard]] std::shared_ptr<const Cascade> compile() && { return compile_from(std::move(rs)); }
+
+    template <class T>
+    [[nodiscard]] static std::shared_ptr<const Cascade> compile_from(T&& rules) {
         if constexpr (sizeof...(Rs) == 0) {
             return nullptr;
         } else {
             if constexpr (sizeof...(Rs) == 1) {
-                if constexpr (requires { std::get<0>(rs).shared_rules(); }) {
-                    if (auto shared = std::get<0>(rs).shared_rules()) return shared;
+                if constexpr (requires { std::get<0>(rules).shared_rules(); }) {
+                    if (auto shared = std::get<0>(rules).shared_rules()) return shared;
                 }
             }
             auto c = std::make_shared<Cascade>();
-            auto self = std::make_shared<const std::tuple<Rs...>>(rs);
+            auto self = std::make_shared<const std::tuple<Rs...>>(std::forward<T>(rules));
             c->keep.push_back(self);
             // `r` lives inside *self, so an aliasing pointer keeps it alive
             // exactly as long as the Cascade does.
@@ -299,11 +303,36 @@ namespace detail {
 /// (built), a runtime Node, a std::vector<Node> or a fragment (both spliced,
 /// so the parent's gap and wrap apply across them). Defined below.
 template <class K>
-void append_child(Node& parent, const K& k);
+void append_child(Node& parent, K&& k);
 /// How many nodes a children tuple adds (ranges and fragments counted), so
 /// the parent reserves once.
 template <class... K>
 std::size_t child_count_hint(const std::tuple<K...>& kids);
+
+/// An element's children, on the heap. Each pipe stage makes a new element
+/// type, so inline children would be moved (Style and all) once per
+/// modifier per level; boxed, that's one pointer.
+template <class... Kids>
+class KidBox {
+  public:
+    using tuple_type = std::tuple<Kids...>;
+    constexpr explicit KidBox(tuple_type&& t) : p_{new tuple_type(std::move(t))} {}
+    constexpr KidBox(const KidBox& o) : p_{o.p_ ? new tuple_type(*o.p_) : nullptr} {}
+    constexpr KidBox(KidBox&& o) noexcept : p_{std::exchange(o.p_, nullptr)} {}
+    constexpr KidBox& operator=(KidBox o) noexcept { std::swap(p_, o.p_); return *this; }
+    constexpr ~KidBox() { delete p_; }
+    [[nodiscard]] constexpr tuple_type& get() noexcept { return *p_; }
+    [[nodiscard]] constexpr const tuple_type& get() const noexcept { return *p_; }
+  private:
+    tuple_type* p_;
+};
+template <>
+class KidBox<> {
+  public:
+    constexpr KidBox() = default;
+    constexpr explicit KidBox(std::tuple<>&&) {}
+    [[nodiscard]] constexpr std::tuple<> get() const noexcept { return {}; }
+};
 }  // namespace detail
 
 template <NodeKind Kind, caps::Set Caps, typename... Kids>
@@ -311,22 +340,24 @@ struct Elem {
     static constexpr NodeKind  kind = Kind;
     static constexpr caps::Set capabilities = Caps;
 
-    Style                 style{};
-    std::string_view      content{};   ///< static text / image key
-    std::uint32_t         texture = 0;
-    std::tuple<Kids...>   kids{};
+    Style                     style{};
+    std::string_view          content{};   ///< static text / image key
+    std::uint32_t             texture = 0;
+    detail::KidBox<Kids...>   kids{};
 
-    /// Materialise the runtime scene node. This is the only allocation.
-    ///
-    /// Hot: every element of every frame passes through here. The Style
-    /// (~800 bytes) is copied exactly once, straight into the node; children
-    /// are built in place in the reserved vector, never as temporaries.
-    [[nodiscard]] Node build() const {
+    /// Materialise the runtime scene node. A temporary element (the usual
+    /// case) moves its children in; an lvalue copies.
+    [[nodiscard]] Node build() const& {
         Node n{Kind};
         build_into(n);
         return n;
     }
-    void build_into(Node& n) const {
+    [[nodiscard]] Node build() && {
+        Node n{Kind};
+        std::move(*this).build_into(n);
+        return n;
+    }
+    void build_into(Node& n) const& {
         n.style() = style;
         if constexpr (Kind == NodeKind::text) {
             n.set_text(std::string{content});
@@ -334,13 +365,26 @@ struct Elem {
             n.set_texture(texture);
         }
         if constexpr (sizeof...(Kids) > 0) {
-            n.children().reserve(detail::child_count_hint(kids));
-            std::apply([&](const auto&... k) { (detail::append_child(n, k), ...); }, kids);
+            n.children().reserve(detail::child_count_hint(kids.get()));
+            std::apply([&](const auto&... k) { (detail::append_child(n, k), ...); }, kids.get());
+        }
+    }
+    void build_into(Node& n) && {
+        n.style() = std::move(style);
+        if constexpr (Kind == NodeKind::text) {
+            n.set_text(std::string{content});
+        } else if constexpr (Kind == NodeKind::image) {
+            n.set_texture(texture);
+        }
+        if constexpr (sizeof...(Kids) > 0) {
+            n.children().reserve(detail::child_count_hint(kids.get()));
+            std::apply([&](auto&... k) { (detail::append_child(n, std::move(k)), ...); }, kids.get());
         }
     }
 
     /// Implicit conversion so an Elem can be returned where a Node is wanted.
-    operator Node() const { return build(); }
+    operator Node() const& { return build(); }
+    operator Node() && { return std::move(*this).build(); }
 };
 
 /// An element with responders (state variants, variable bindings). A
@@ -351,29 +395,44 @@ struct ElemR {
     static constexpr NodeKind  kind = Kind;
     static constexpr caps::Set capabilities = Caps;
 
-    Style                 style{};
-    std::string_view      content{};
-    std::uint32_t         texture = 0;
-    std::tuple<Kids...>   kids{};
-    Rules                 rules;
+    Style                     style{};
+    std::string_view          content{};
+    std::uint32_t             texture = 0;
+    detail::KidBox<Kids...>   kids{};
+    Rules                     rules;
 
-    [[nodiscard]] Node build() const {
+    [[nodiscard]] Node build() const& {
         Node n{Kind};
         build_into(n);
         return n;
     }
-    void build_into(Node& n) const {
-        // Build as the plain element would -- without copying it first.
+    [[nodiscard]] Node build() && {
+        Node n{Kind};
+        std::move(*this).build_into(n);
+        return n;
+    }
+    void build_into(Node& n) const& {
         n.style() = style;
         if constexpr (Kind == NodeKind::text) n.set_text(std::string{content});
         else if constexpr (Kind == NodeKind::image) n.set_texture(texture);
         if constexpr (sizeof...(Kids) > 0) {
-            n.children().reserve(detail::child_count_hint(kids));
-            std::apply([&](const auto&... k) { (detail::append_child(n, k), ...); }, kids);
+            n.children().reserve(detail::child_count_hint(kids.get()));
+            std::apply([&](const auto&... k) { (detail::append_child(n, k), ...); }, kids.get());
         }
         n.set_cascade(rules.compile());
     }
-    operator Node() const { return build(); }
+    void build_into(Node& n) && {
+        n.style() = std::move(style);
+        if constexpr (Kind == NodeKind::text) n.set_text(std::string{content});
+        else if constexpr (Kind == NodeKind::image) n.set_texture(texture);
+        if constexpr (sizeof...(Kids) > 0) {
+            n.children().reserve(detail::child_count_hint(kids.get()));
+            std::apply([&](auto&... k) { (detail::append_child(n, std::move(k)), ...); }, kids.get());
+        }
+        n.set_cascade(std::move(rules).compile());
+    }
+    operator Node() const& { return build(); }
+    operator Node() && { return std::move(*this).build(); }
 };
 
 template <typename T>
@@ -404,20 +463,24 @@ concept Child =
 
 namespace detail {
 template <class K>
-void append_child(Node& parent, const K& k) {
-    if constexpr (std::same_as<K, Node>) {
-        parent.add_child(k);
-    } else if constexpr (std::same_as<K, Fragment>) {
-        for (const auto& n : k.nodes) parent.add_child(n);
-    } else if constexpr (Element<K>) {
-        if constexpr (requires(Node& n) { k.build_into(n); }) {
+void append_child(Node& parent, K&& k) {
+    using T = std::remove_cvref_t<K>;
+    constexpr bool rv = !std::is_lvalue_reference_v<K>;
+    if constexpr (std::same_as<T, Node>) {
+        parent.add_child(std::forward<K>(k));
+    } else if constexpr (std::same_as<T, Fragment>) {
+        if constexpr (rv) for (auto& n : k.nodes) parent.add_child(std::move(n));
+        else for (const auto& n : k.nodes) parent.add_child(n);
+    } else if constexpr (Element<T>) {
+        if constexpr (requires(Node& n) { std::forward<K>(k).build_into(n); }) {
             // Construct in place in the parent's (reserved) storage.
-            k.build_into(parent.children().emplace_back(K::kind));
+            std::forward<K>(k).build_into(parent.children().emplace_back(T::kind));
         } else {
-            parent.add_child(k.build());
+            parent.add_child(std::forward<K>(k).build());
         }
     } else {
-        for (const auto& x : k) append_child(parent, x);
+        if constexpr (rv) for (auto& x : k) append_child(parent, std::move(x));
+        else for (const auto& x : k) append_child(parent, x);
     }
 }
 
@@ -438,7 +501,7 @@ std::size_t child_count_hint(const std::tuple<K...>& kids) {
 template <NodeKind K, caps::Set C, typename... Kids, Modifier M>
 [[nodiscard]] constexpr auto operator|(Elem<K, C, Kids...> e, M m) {
     check_modifier<C, M>();
-    Elem<K, C | M::gives, Kids...> out{e.style, e.content, e.texture, e.kids};
+    Elem<K, C | M::gives, Kids...> out{std::move(e.style), e.content, e.texture, std::move(e.kids)};
     m.apply(out.style);
     return out;
 }
@@ -446,7 +509,7 @@ template <NodeKind K, caps::Set C, typename... Kids, Modifier M>
 template <typename... Rs, NodeKind K, caps::Set C, typename... Kids, Modifier M>
 [[nodiscard]] constexpr auto operator|(ElemR<RuleSet<Rs...>, K, C, Kids...> e, M m) {
     check_modifier<C, M>();
-    ElemR<RuleSet<Rs...>, K, C | M::gives, Kids...> out{e.style, e.content, e.texture, e.kids, e.rules};
+    ElemR<RuleSet<Rs...>, K, C | M::gives, Kids...> out{std::move(e.style), e.content, e.texture, std::move(e.kids), std::move(e.rules)};
     m.apply(out.style);
     return out;
 }
@@ -454,7 +517,7 @@ template <typename... Rs, NodeKind K, caps::Set C, typename... Kids, Modifier M>
 template <NodeKind K, caps::Set C, typename... Kids, Responder R>
 [[nodiscard]] constexpr auto operator|(Elem<K, C, Kids...> e, R r) {
     check_responder<C, R>();
-    ElemR<RuleSet<R>, K, C | R::gives, Kids...> out{e.style, e.content, e.texture, e.kids, RuleSet<R>{{r}}};
+    ElemR<RuleSet<R>, K, C | R::gives, Kids...> out{std::move(e.style), e.content, e.texture, std::move(e.kids), RuleSet<R>{{r}}};
     r.on_pipe(out.style);
     return out;
 }
@@ -463,8 +526,8 @@ template <typename... Rs, NodeKind K, caps::Set C, typename... Kids, Responder R
 [[nodiscard]] constexpr auto operator|(ElemR<RuleSet<Rs...>, K, C, Kids...> e, R r) {
     check_responder<C, R>();
     ElemR<RuleSet<Rs..., R>, K, C | R::gives, Kids...> out{
-        e.style, e.content, e.texture, e.kids,
-        RuleSet<Rs..., R>{std::tuple_cat(e.rules.rs, std::tuple<R>{r})}};
+        std::move(e.style), e.content, e.texture, std::move(e.kids),
+        RuleSet<Rs..., R>{std::tuple_cat(std::move(e.rules.rs), std::tuple<R>{r})}};
     r.on_pipe(out.style);
     return out;
 }
@@ -476,13 +539,16 @@ template <typename... Rs, NodeKind K, caps::Set C, typename... Kids, Responder R
 namespace detail {
 
 template <Axis A, typename... Kids>
-[[nodiscard]] constexpr auto make_stack(Kids... kids) {
+[[nodiscard]] constexpr auto make_stack(Kids&&... kids) {
     // Built in one go, never default-then-assign: children may hold
     // capturing lambdas (inline handlers), which have neither.
     Style st{};
     st.layout.axis = A;
-    return Elem<NodeKind::box, (sizeof...(Kids) > 0 ? caps::container | caps::parent : caps::container), Kids...>{
-        st, {}, 0, std::tuple<Kids...>{std::move(kids)...}};
+    using E = Elem<NodeKind::box, (sizeof...(Kids) > 0 ? caps::container | caps::parent : caps::container),
+                   std::remove_cvref_t<Kids>...>;
+    if constexpr (sizeof...(Kids) == 0) return E{st, {}, 0, {}};
+    else return E{st, {}, 0, KidBox<std::remove_cvref_t<Kids>...>{
+                                 std::tuple<std::remove_cvref_t<Kids>...>{std::move(kids)...}}};
 }
 
 }  // namespace detail
@@ -495,13 +561,13 @@ template <Axis A, typename... Kids>
 ///       when(m.loading, spinner_node))
 template <Child... Kids>
 [[nodiscard]] constexpr auto v(Kids... kids) {
-    return detail::make_stack<Axis::vertical>(kids...);
+    return detail::make_stack<Axis::vertical>(std::move(kids)...);
 }
 
 /// Horizontal stack. Same children as `v`.
 template <Child... Kids>
 [[nodiscard]] constexpr auto h(Kids... kids) {
-    return detail::make_stack<Axis::horizontal>(kids...);
+    return detail::make_stack<Axis::horizontal>(std::move(kids)...);
 }
 
 /// Z stack — children overlap, all pinned to the parent box.
@@ -521,7 +587,7 @@ template <Child... Kids>
 /// child floating, give the stack an explicit size.
 template <Child... Kids>
 [[nodiscard]] constexpr auto z(Kids... kids) {
-    auto e = detail::make_stack<Axis::vertical>(kids...);
+    auto e = detail::make_stack<Axis::vertical>(std::move(kids)...);
     e.style.layout.align = Align::stretch;
 
     [&]<std::size_t... I>(std::index_sequence<I...>) {
@@ -555,7 +621,7 @@ template <Child... Kids>
                 }
             }
         };
-        (pin(std::get<I>(e.kids)), ...);
+        if constexpr (sizeof...(Kids) > 0) (pin(std::get<I>(e.kids.get())), ...);
     }(std::index_sequence_for<Kids...>{});
 
     return e;
@@ -613,12 +679,20 @@ struct OwnedText {
     std::string owned;
     std::shared_ptr<const Cascade> cascade{};
 
-    [[nodiscard]] Node build() const {
+    [[nodiscard]] Node build() const& {
         Node n = Node::make_text(owned, style);
         n.set_cascade(cascade);
         return n;
     }
-    operator Node() const { return build(); }
+    [[nodiscard]] Node build() && {
+        Node n{NodeKind::text};
+        n.style() = std::move(style);
+        n.set_text(std::move(owned));
+        n.set_cascade(std::move(cascade));
+        return n;
+    }
+    operator Node() const& { return build(); }
+    operator Node() && { return std::move(*this).build(); }
 };
 
 [[nodiscard]] inline OwnedText text_owned(std::string s) {
@@ -697,13 +771,19 @@ struct NodeElem {
     Node payload{};
     std::shared_ptr<const Cascade> cascade{};
 
-    [[nodiscard]] Node build() const {
-        Node n = payload;
+    [[nodiscard]] Node build() const& { return finish(Node{payload}); }
+    [[nodiscard]] Node build() && { return finish(std::move(payload)); }
+    operator Node() const& { return build(); }
+    operator Node() && { return std::move(*this).build(); }
+
+  private:
+    [[nodiscard]] Node finish(Node n) const {
         // Style piped onto the wrapper wins over whatever the node carried,
         // so `node(x) | pad(8)` behaves like any other element. The payload's
         // own children and layout axis survive, because those came from how
         // the subtree was CONSTRUCTED, not from the pipeline.
-        if (style != Style{}) {
+        static const Style kDefault{};
+        if (style != kDefault) {
             const Axis axis = n.style().layout.axis;
             const float gap = n.style().layout.gap;
             const std::uint64_t keep_id = n.style().id != 0 ? n.style().id : style.id;
@@ -731,8 +811,6 @@ struct NodeElem {
         }
         return n;
     }
-
-    operator Node() const { return build(); }
 };
 
 /// NodeElem participates in the modifier pipeline like any other element.

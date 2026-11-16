@@ -20,6 +20,10 @@ app/host.hpp: thread_local
 # the same thread. Per-thread for the same reason as the frame context.
 core/motion.hpp: thread_local
 
+# make_theme()'s memo: a pure function views call every frame. Per-thread so
+# it needs no lock and is never shared.
+style/theme.hpp: thread_local
+
 # Same shape (a flag one view pass raises and its own layout reads), plus
 # one const_cast: clamping a ScrollState's offset into range inside the
 # const view of it layout holds. Idempotent and single-threaded.

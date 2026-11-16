@@ -35,6 +35,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -464,6 +465,7 @@ class FontStack : public Shaper {
     /// Append a face. The first added is primary; later ones are fallbacks.
     void add(std::shared_ptr<Face> face) {
         if (face != nullptr) faces_.push_back(std::move(face));
+        clear_shape_cache();
     }
 
     /// Register another weight/style of an already-added face (Menlo Bold for
@@ -476,6 +478,7 @@ class FontStack : public Shaper {
         const std::size_t at = faces_.size();
         faces_.push_back(std::move(face));
         siblings_.push_back(Sibling{of, at, weight, italic});
+        clear_shape_cache();
     }
 
     /// The face (`base` or one of its siblings) to draw `base`'s glyphs at
@@ -510,6 +513,9 @@ class FontStack : public Shaper {
     void begin_frame(std::uint64_t frame) {
         atlas_.set_frame(frame);
         if (frame % 120 == 0) atlas_.collect(config_.glyph_ttl_frames);
+        std::lock_guard lock{shape_mutex_};
+        shape_frame_ = frame;
+        if (frame % 120 == 0) evict_shapes(frame);
     }
 
     /// Which face can render `codepoint`, and its glyph id.
@@ -536,10 +542,46 @@ class FontStack : public Shaper {
         return faces_.empty() ? FaceMetrics{} : faces_.front()->metrics(size_px);
     }
 
-    // ── shaping ─────────────────────────────────────────────────────────
+    // ── shaping ─────────────────────────────────────────────────────────────────
+
+    using ShapedRun = std::shared_ptr<const ShapeResult>;
+
+    /// Shape through the cache. Layout and paint shape the same strings every
+    /// frame, so a hit skips cmap, advance, kerning and ligature work. The
+    /// result is immutable and shared, so a hit doesn't copy glyphs.
+    [[nodiscard]] ShapedRun shaped(std::string_view text, const ShapeParams& params) const {
+        const std::uint64_t h = shape_hash(text, params);
+        {
+            std::lock_guard lock{shape_mutex_};
+            if (auto it = shapes_.find(ShapeProbe{h, text, &params}); it != shapes_.end()) {
+                it->second.last_used = shape_frame_;
+                return it->second.run;
+            }
+        }
+        auto run = std::make_shared<const ShapeResult>(shape_uncached(text, params));
+        std::lock_guard lock{shape_mutex_};
+        if (shapes_.size() >= kMaxShapes) evict_shapes(shape_frame_ + 1);
+        shapes_.try_emplace(ShapeKey{h, std::string{text}, params}, ShapeEntry{run, shape_frame_});
+        return run;
+    }
 
     [[nodiscard]] ShapeResult shape(std::string_view text,
                                     const ShapeParams& params) const override {
+        if (faces_.empty() || text.empty()) return {};
+        return *shaped(text, params);
+    }
+
+    void clear_shape_cache() {
+        std::lock_guard lock{shape_mutex_};
+        shapes_.clear();
+    }
+    [[nodiscard]] std::size_t shape_cache_size() const {
+        std::lock_guard lock{shape_mutex_};
+        return shapes_.size();
+    }
+
+    [[nodiscard]] ShapeResult shape_uncached(std::string_view text,
+                                             const ShapeParams& params) const {
         ShapeResult out;
         if (faces_.empty() || text.empty()) return out;
 
@@ -857,6 +899,70 @@ class FontStack : public Shaper {
     Atlas                               atlas_;
     std::vector<std::shared_ptr<Face>>  faces_;
 
+    // Shape cache: keyed by text + every ShapeParams field, aged by frame.
+    struct ShapeKey {
+        std::uint64_t hash;
+        std::string   text;
+        ShapeParams   params;
+    };
+    struct ShapeProbe {
+        std::uint64_t      hash;
+        std::string_view   text;
+        const ShapeParams* params;
+    };
+    struct ShapeEntry {
+        ShapedRun     run;
+        std::uint64_t last_used = 0;
+    };
+    static bool same_params(const ShapeParams& a, const ShapeParams& b) noexcept {
+        if (a.size_px != b.size_px || a.letter_spacing != b.letter_spacing || a.kerning != b.kerning ||
+            a.ligatures != b.ligatures || a.weight != b.weight || a.italic != b.italic ||
+            a.axis_count != b.axis_count)
+            return false;
+        for (std::uint8_t i = 0; i < a.axis_count; ++i)
+            if (a.axes[i].tag != b.axes[i].tag || a.axes[i].value != b.axes[i].value) return false;
+        return true;
+    }
+    struct ShapeHash {
+        using is_transparent = void;
+        std::size_t operator()(const ShapeKey& k) const noexcept { return k.hash; }
+        std::size_t operator()(const ShapeProbe& k) const noexcept { return k.hash; }
+    };
+    struct ShapeEq {
+        using is_transparent = void;
+        bool operator()(const ShapeKey& a, const ShapeKey& b) const noexcept {
+            return a.hash == b.hash && a.text == b.text && same_params(a.params, b.params);
+        }
+        bool operator()(const ShapeProbe& a, const ShapeKey& b) const noexcept {
+            return a.hash == b.hash && a.text == b.text && same_params(*a.params, b.params);
+        }
+        bool operator()(const ShapeKey& a, const ShapeProbe& b) const noexcept { return (*this)(b, a); }
+    };
+    static std::uint64_t shape_hash(std::string_view s, const ShapeParams& p) noexcept {
+        std::uint64_t h = 0xcbf29ce484222325ull;
+        const auto mix = [&h](std::uint64_t v) { h = (h ^ v) * 0x100000001b3ull; h ^= h >> 29; };
+        std::size_t i = 0;
+        for (; i + 8 <= s.size(); i += 8) { std::uint64_t w; std::memcpy(&w, s.data() + i, 8); mix(w); }
+        std::uint64_t tail = 0;
+        std::memcpy(&tail, s.data() + i, s.size() - i);
+        mix(tail ^ (static_cast<std::uint64_t>(s.size()) << 56));
+        const auto bits = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return std::uint64_t{u}; };
+        mix(bits(p.size_px) | bits(p.weight) << 32);
+        mix(bits(p.letter_spacing) | std::uint64_t{p.kerning} << 32 | std::uint64_t{p.ligatures} << 33 |
+            std::uint64_t{p.italic} << 34 | std::uint64_t{p.axis_count} << 40);
+        for (std::uint8_t a = 0; a < p.axis_count; ++a) mix(p.axes[a].tag | bits(p.axes[a].value) << 32);
+        return h;
+    }
+    // Drop runs not used since `before - ttl` (the whole cache when full).
+    void evict_shapes(std::uint64_t now) const {
+        const std::uint64_t ttl = shapes_.size() >= kMaxShapes ? 0 : config_.glyph_ttl_frames;
+        std::erase_if(shapes_, [&](const auto& kv) { return kv.second.last_used + ttl < now; });
+    }
+    static constexpr std::size_t kMaxShapes = 1u << 15;
+    mutable std::mutex shape_mutex_;
+    mutable std::unordered_map<ShapeKey, ShapeEntry, ShapeHash, ShapeEq> shapes_;
+    std::uint64_t shape_frame_ = 0;
+
     struct Sibling { std::size_t of, at; std::uint16_t weight; bool italic; };
     std::vector<Sibling> siblings_;
     [[nodiscard]] bool is_sibling(std::size_t i) const noexcept {
@@ -903,7 +1009,7 @@ class StackMeasurer final : public layout::TextMeasurer {
     explicit StackMeasurer(const FontStack& stack) : stack_{&stack} {}
 
     [[nodiscard]] float advance(std::string_view s, const TextStyle& st) const override {
-        return stack_->shape(s, detail::shape_params_of(st)).width;
+        return s.empty() ? 0.0f : stack_->shaped(s, detail::shape_params_of(st))->width;
     }
 
     [[nodiscard]] float ascent(const TextStyle& st) const override {
@@ -917,7 +1023,8 @@ class StackMeasurer final : public layout::TextMeasurer {
 
         if (s.empty()) return {0.0f, line_h};
 
-        const ShapeResult shaped = stack_->shape(s, detail::shape_params_of(st));
+        const auto run = stack_->shaped(s, detail::shape_params_of(st));
+        const ShapeResult& shaped = *run;
 
         const bool wrapping = st.overflow == TextOverflow::wrap &&
                               max_width > 0.0f && !num::is_inf(max_width);
@@ -1082,7 +1189,8 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
         const float line_h = st.line_height > 0.0f ? st.size * st.line_height : fm.line_height;
 
         const ShapeParams sp = detail::shape_params_of(st);
-        const ShapeResult shaped = stack_->shape(s, sp);
+        const auto run = stack_->shaped(s, sp);
+        const ShapeResult& shaped = *run;
 
         const bool wrapping = st.overflow == TextOverflow::wrap && box.width() > 0.0f;
         const auto lines = wrapping
