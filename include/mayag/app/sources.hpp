@@ -151,6 +151,35 @@ using Shared = jaal::shared<T>;
 /// the running one.
 using TaskKey = jaal::task_key;
 
+/// An OS signal, delivered to `on(const Model&, Signal)`: interrupt,
+/// terminate, hangup, resize, child.
+using Signal = jaal::sig;
+
+/// Proof that the current thread holds no lock. A task or stream body may
+/// take `const Unlocked&` as its first parameter; the runtime passes one,
+/// and blocking waits (locks, joins) require it.
+using Unlocked = jaal::unlocked;
+
+/// State several threads use at once, owned jointly (every field must be
+/// safe to share). The one way task bodies share mutable state.
+template <class T>
+using CoOwned = jaal::co_owned<T>;
+
+/// Data reachable only under its lock, in a lock order the compiler
+/// checks: `Guarded<Cache>` (a leaf lock), or `Guarded<Cache, Rank<20,
+/// "cache">>` to nest it under higher-ranked locks.
+template <std::uint16_t V, jaal::meta::fixed_string Name>
+using Rank = jaal::rank<V, Name>;
+template <class T, class R = jaal::leaf>
+using Guarded = jaal::guarded<T, R>;
+
+/// A custom effect with no message in it, for your own Cmd:
+///     struct Beep { int hz; };
+///     using beep = mayag::Effect<Beep, "beep">;
+///     using Cmd  = mayag::Cmd<Msg, beep>;
+template <class Payload, jaal::meta::fixed_string Name>
+using Effect = jaal::pure_fx<Payload, Name>;
+
 /// `when(cond, sub)` keeps subscribe() one expression.
 template <class S>
 [[nodiscard]] S when(bool cond, S s) {
@@ -191,6 +220,17 @@ template <> inline constexpr bool jaal::sendable_opt_in<mayag::Rect> = true;
 template <> inline constexpr bool jaal::frozen_opt_in<mayag::Rect>   = true;
 template <class S> inline constexpr bool jaal::sendable_opt_in<mayag::Color<S>> = true;
 template <class S> inline constexpr bool jaal::frozen_opt_in<mayag::Color<S>>   = true;
+
+/// Declare that a type of YOURS may travel between threads in a Msg or a
+/// task argument (it owns everything it holds), at global scope:
+///     MAYAG_SENDABLE(my::Handle);
+/// Every use is a claim a human made; keep them rare and say why beside it.
+#define MAYAG_SENDABLE(...) \
+    template <> inline constexpr bool jaal::sendable_opt_in<__VA_ARGS__> = true
+/// Declare a type of yours immutable once built, so it may be shared without
+/// a copy (`Shared<T>`):  MAYAG_FROZEN(my::Glyphs);
+#define MAYAG_FROZEN(...) \
+    template <> inline constexpr bool jaal::frozen_opt_in<__VA_ARGS__> = true
 
 template <>
 struct std::hash<mayag::fx::on_frame::key_type> {

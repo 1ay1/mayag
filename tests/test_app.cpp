@@ -8,6 +8,8 @@
 // and the busy-loop warning fires only for real runaways.
 
 #include <mayag/mayag.hpp>
+#include <mayag/widget/text_field.hpp>
+#include <mayag/widget/typography.hpp>
 
 #include <chrono>
 #include <cstdio>

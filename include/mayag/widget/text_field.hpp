@@ -91,14 +91,14 @@ namespace mayag::dsl {
              // Selection highlight and caret float over it.
              node((box() | size(num::max(sel_w, 0.0f), font_size * 1.25f)
                          | bg(t.accent.fade(state.has_selection() ? 0.30f : 0.0f))
-                         | radius(2)
+                         | radius(t.rounded(2))
                          | absolute(sel_x0, 0)).build()),
              node((box() | size(1.5f, font_size * 1.2f)
                          | bg(t.accent.fade(focused ? 1.0f : 0.0f))
                          | absolute(caret_x, 0)).build()))
-         | pad(9, 11)
-         | bg(t.surface)
-         | border(1, focused ? t.accent : t.border)
+         | pad(t.spaced(9), t.spaced(11))
+         | bg(var::surface)
+         | border(t.stroke(1), focused ? t.accent : t.border)
          | radius(t.radius_small)
          | clip
          | cursor(CursorShape::text)

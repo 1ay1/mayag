@@ -57,7 +57,7 @@ template <ControlContext C>
     if (scrolled || hot) {
         const float th = std::max(static_cast<float>(s.visible) / total * height_px, 20.0f);
         const float ty = static_cast<float>(s.first) / total * height_px;
-        parts.push_back((box() | size(hot ? 7.0f : 5.0f, th) | bg(colors::white.fade(hot ? 0.25f : 0.14f)) | radius(3)
+        parts.push_back((box() | size(hot ? 7.0f : 5.0f, th) | bg(colors::white.fade(hot ? 0.25f : 0.14f)) | radius(t.rounded(3))
                          | absolute(hot ? 2.0f : 3.0f, std::min(ty, height_px - th))).build());
     }
     return (z(h_list(std::move(parts))) | width(11) | height(pct(100)) | bg(hot ? colors::white.fade(0.03f) : colors::white.fade(0.0f))

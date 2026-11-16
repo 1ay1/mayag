@@ -12,6 +12,13 @@
 //   TM_SHOT=<dir> ./mayag_terminal --headless   screenshots
 
 #include "harness.hpp"
+#include <mayag/widget/activity_feed.hpp>
+#include <mayag/widget/project_panel.hpp>
+#include <mayag/widget/scrollback_bar.hpp>
+#include <mayag/widget/tab_launcher.hpp>
+#include <mayag/widget/tab_peek.hpp>
+#include <mayag/widget/terminal_view.hpp>
+#include <mayag/widget/workspace_rail.hpp>
 
 #include <array>
 #include <cmath>
@@ -752,9 +759,9 @@ int main(int argc, char** argv) {
         rt.tick(); rt.tick();
         ok(M().motion.animating(), "the pill slides toward it");
         settle(120);
-        const Rect pill = M().motion.pill.rect();
-        ok(std::abs(pill.left() - tab3.left()) < 1.0f && std::abs(pill.width() - tab3.width()) < 1.0f,
-           "and lands exactly on the tab (" + std::to_string(pill.left()) + " vs " + std::to_string(tab3.left()) + ")");
+        const Rect chip_rect = M().motion.pill.rect();
+        ok(std::abs(chip_rect.left() - tab3.left()) < 1.0f && std::abs(chip_rect.width() - tab3.width()) < 1.0f,
+           "and lands exactly on the tab (" + std::to_string(chip_rect.left()) + " vs " + std::to_string(tab3.left()) + ")");
 
         const auto build = M().tabs[3].info;
         ok(build.running && build.progress > 74, "the running build's progress advances");

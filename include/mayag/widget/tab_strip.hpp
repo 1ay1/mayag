@@ -230,24 +230,24 @@ template <ControlContext C>
         Node trailing;
         if (hov && !tb.pinned) {
             trailing = (h(text<"\u00D7"> | font(t.font_size * 1.05f) | fg(c.hovered(cid) ? t.text_primary : t.text_secondary))
-                        | size(20, 20) | center | radius(6) | bg(c.hovered(cid) ? mix(t.surface_raised, colors::white, 0.06f) : t.surface.fade(0.0f))
+                        | size(20, 20) | center | radius(t.rounded(6)) | bg(c.hovered(cid) ? mix(t.surface_raised, colors::white, 0.06f) : t.surface.fade(0.0f))
                         | pointer_cursor | label("close tab") | id_of(id, tab_part_close + i)).build();
         } else if (o.show_numbers && i < 9) {
-            trailing = (h(text_owned("\u2318" + std::to_string(i + 1)) | font(t.font_size * 0.78f) | semibold | fg(t.text_secondary))
-                        | pad(1, 5) | radius(5) | bg(t.surface_raised)).build();
+            trailing = (h(text_owned("\u2318" + std::to_string(i + 1)) | font(t.font_size * 0.78f) | semibold | fg(var::text_secondary))
+                        | pad(t.spaced(1), t.spaced(5)) | radius(t.rounded(5)) | bg(var::surface_raised)).build();
         } else if (tb.bell) {
             trailing = (text<"\U0001F514"> | font(t.font_size * 0.8f)).build();
         } else if (!tb.running && tb.last_exit > 0) {
-            trailing = (h(text_owned("\u2716 " + std::to_string(tb.last_exit)) | font(t.font_size * 0.74f) | semibold | fg(t.danger))
-                        | pad(0, 5) | radius(5) | bg(t.tint(t.danger, 0.14f))).build();
+            trailing = (h(text_owned("\u2716 " + std::to_string(tb.last_exit)) | font(t.font_size * 0.74f) | semibold | fg(var::danger))
+                        | pad(0, t.spaced(5)) | radius(t.rounded(5)) | bg(t.tint(t.danger, 0.14f))).build();
         } else if (recently_active(tb.activity)) {
             trailing = activity_sparkline(tb.activity, on ? hue : mix(hue, t.text_secondary, 0.35f));
         }
 
         if (tb.pinned) {
             items.push_back((h(node(tab_icon(t, tb, time, on, 24.0f)),
-                               node(tb.unread && !on ? (box() | size(5, 5) | bg(hue) | radius(2.5f) | absolute(27, 6)).build() : Node{}))
-                             | size(40, tab_h) | center | radius(10)
+                               node(tb.unread && !on ? (box() | size(5, 5) | bg(hue) | radius(t.rounded(2.5f)) | absolute(27, 6)).build() : Node{}))
+                             | size(40, tab_h) | center | radius(t.rounded(10))
                              | bg(on && !slide ? pill_base : hov ? mix(t.surface, colors::white, 0.04f) : flash > 0 ? t.tint(flash_col, 0.25f * flash) : t.surface.fade(0.0f))
                              | pointer_cursor | role(a11y::Role::tab) | selected(on) | label(tb.title)
                              | id_of(id, i)).build());
@@ -257,24 +257,24 @@ template <ControlContext C>
         std::string line2 = !tb.host.empty() ? tb.host : tb.cwd;
         if (tb.running) line2 = short_duration(tb.elapsed) + (line2.empty() ? "" : "  \u00B7  " + line2);
         const Color<Srgb> title_col = on ? t.text_primary : tb.unread || hov ? mix(t.text_secondary, t.text_primary, 0.6f) : t.text_secondary;
-        auto title_row = h(node(tb.unread && !on ? (box() | size(5, 5) | bg(hue) | radius(2.5f)).build() : Node{}),
+        auto title_row = h(node(tb.unread && !on ? (box() | size(5, 5) | bg(hue) | radius(t.rounded(2.5f))).build() : Node{}),
                            text_owned(tb.title.empty() ? tb.process : tb.title) | font(t.font_size * 0.98f)
                                | (on ? semibold : weight(FontWeight::medium)) | fg(title_col) | ellipsis | grow() | min_size(0, 0))
-                       | gap(5) | align(Align::center) | width(pct(100));
+                       | gap(t.spaced(5)) | align(Align::center) | width(pct(100));
         Node sub = (text_owned(line2) | font(t.font_size * 0.78f)
                     | fg(!tb.host.empty() && tb.host_danger ? t.danger : tb.running ? mix(hue, t.text_secondary, 0.3f) : t.text_disabled)
                     | ellipsis).build();
 
         items.push_back((h(node(tab_icon(t, tb, time, on)),
-                           v(std::move(title_row), node(std::move(sub))) | gap(1) | grow() | min_size(0, 0),
+                           v(std::move(title_row), node(std::move(sub))) | gap(t.spaced(1)) | grow() | min_size(0, 0),
                            h(node(std::move(trailing))) | min_size(20, 0) | align(Align::center) | justify(Justify::end))
-                         | gap(9) | align(Align::center) | pad(0, 7, 0, 9)
+                         | gap(t.spaced(9)) | align(Align::center) | pad(0, t.spaced(7), 0, t.spaced(9))
                          | width(0) | grow() | shrink() | min_size(o.min_tab, tab_h) | max_size(o.max_tab, tab_h) | height(tab_h)
-                         | radius(10)
+                         | radius(t.rounded(10))
                          | bg(on && !slide ? pill_base
                               : flash > 0 ? t.tint(flash_col, 0.28f * flash)
                               : hov ? mix(t.surface, colors::white, 0.035f) : t.surface.fade(0.0f))
-                         | border(1, on && !slide ? pill_edge : flash > 0 ? t.tint(flash_col, 0.55f * flash) : t.border.fade(0.0f))
+                         | border(t.stroke(1), on && !slide ? pill_edge : flash > 0 ? t.tint(flash_col, 0.55f * flash) : t.border.fade(0.0f))
                          | pointer_cursor | role(a11y::Role::tab) | selected(on) | label(tb.title)
                          | id_of(id, i)).build());
     }
@@ -282,12 +282,12 @@ template <ControlContext C>
     // New tab + profile menu, as one rounded group.
     const auto plus = part_id(id, part_inc), menu = part_id(id, part_menu);
     items.push_back((h(h(text<"+"> | font(t.font_size * 1.35f) | fg(c.hovered(plus) ? t.text_primary : t.text_secondary))
-                           | size(30, 30) | center | radius(8) | bg(c.hovered(plus) ? mix(t.surface, colors::white, 0.06f) : t.surface.fade(0.0f))
+                           | size(30, 30) | center | radius(t.rounded(8)) | bg(c.hovered(plus) ? mix(t.surface, colors::white, 0.06f) : t.surface.fade(0.0f))
                            | pointer_cursor | label("new tab") | id_of(id, part_inc),
                        h(text<"\u2304"> | font(t.font_size * 0.9f) | fg(c.hovered(menu) ? t.text_primary : t.text_disabled))
-                           | size(20, 30) | center | radius(8) | bg(c.hovered(menu) ? mix(t.surface, colors::white, 0.06f) : t.surface.fade(0.0f))
+                           | size(20, 30) | center | radius(t.rounded(8)) | bg(c.hovered(menu) ? mix(t.surface, colors::white, 0.06f) : t.surface.fade(0.0f))
                            | pointer_cursor | label("new tab menu") | id_of(id, part_menu))
-                     | gap(1) | align(Align::center) | margin(0, 0, 0, 4)).build());
+                     | gap(t.spaced(1)) | align(Align::center) | margin(0, 0, 0, 4)).build());
     items.push_back((spacer()).build());
 
     // The sliding pill, behind the tabs, in strip coordinates.
@@ -296,13 +296,13 @@ template <ControlContext C>
         const Rect r = motion->pill.rect();
         const Vec2 o2 = motion->strip.rect().origin;
         const float x = r.left() - o2.x, y = r.top() - o2.y;
-        layers.push_back((box() | size(r.width(), r.height()) | linear_gradient(pill_top, pill_base) | border(1, pill_edge)
-                          | radius(10) | elevation(4) | absolute(x, y)).build());
-        layers.push_back((box() | size(18, 2.5f) | bg(active_hue) | radius(1.25f)
+        layers.push_back((box() | size(r.width(), r.height()) | linear_gradient(pill_top, pill_base) | border(t.stroke(1), pill_edge)
+                          | radius(t.rounded(10)) | elevation(t.lift(4)) | absolute(x, y)).build());
+        layers.push_back((box() | size(18, 2.5f) | bg(active_hue) | radius(t.rounded(1.25f))
                           | absolute(x + r.width() * 0.5f - 9.0f, y + r.height() - 2.5f)).build());
     }
-    layers.push_back((box() | size(1e4f, 1) | bg(t.border) | absolute(0, o.height - 1.0f)).build());
-    layers.push_back((h_list(std::move(items), 4.0f) | align(Align::center) | height(o.height) | width(pct(100)) | pad(0, 6) | clip).build());
+    layers.push_back((box() | size(1e4f, 1) | bg(var::border) | absolute(0, o.height - 1.0f)).build());
+    layers.push_back((h_list(std::move(items), 4.0f) | align(Align::center) | height(o.height) | width(pct(100)) | pad(0, t.spaced(6)) | clip).build());
 
     return (z(h_list(std::move(layers))) | width(pct(100)) | height(o.height)
             | linear_gradient(mix(t.surface, colors::white, 0.015f), t.surface)

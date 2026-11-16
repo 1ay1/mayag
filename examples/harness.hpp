@@ -229,14 +229,16 @@ template <Program P, typename Driver>
             // of the live app rather than a separate code path.
             typename P::Model model = first_model<P>().first;
 
-            Ctx ctx{o.size, o.dpi, 0.0, cfg.theme, nullptr};
+            const Theme theme = theme_of<P>(model, cfg.theme);
+            Ctx ctx{o.size, o.dpi, 0.0, theme, nullptr};
             Node root = [&] {
                 typo::StackMeasurer sm{*cfg.fonts};
                 return settled_view<P>(model, ctx, o.size, sm);
             }();
 
             RenderOptions ro;
-            ro.background   = cfg.theme.background;
+            ro.background   = theme.background;
+            ro.theme        = theme;
             ro.dpi_scale    = o.dpi;
             ro.fonts        = cfg.fonts;
             ro.debug_bounds = cfg.debug_bounds;
@@ -266,7 +268,8 @@ template <Program P, typename Driver>
                 device->upload_image(id, std::move(img));
             });
 
-            Ctx ctx{o.size, o.dpi, 0.0, cfg.theme, nullptr};
+            const Theme theme = theme_of<P>(model, cfg.theme);
+            Ctx ctx{o.size, o.dpi, 0.0, theme, nullptr};
             Node root = [&] {
                 typo::StackMeasurer sm{*cfg.fonts};
                 return settled_view<P>(model, ctx, o.size, sm);
@@ -289,7 +292,7 @@ template <Program P, typename Driver>
             device->sync_atlas(backend::view_of(fonts->atlas()));
 
             std::vector<std::uint8_t> px;
-            if (!device->render_offscreen(dl, W, H, cfg.theme.background, px)) {
+            if (!device->render_offscreen(dl, W, H, theme.background, px)) {
                 std::fprintf(stderr, "mayag: offscreen render failed\n");
                 return 1;
             }

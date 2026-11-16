@@ -25,6 +25,19 @@
 // project and never touches the filesystem.
 
 #include "harness.hpp"
+#include <mayag/widget/breadcrumbs.hpp>
+#include <mayag/widget/code_view.hpp>
+#include <mayag/widget/completion_menu.hpp>
+#include <mayag/widget/diff_view.hpp>
+#include <mayag/widget/file_tree.hpp>
+#include <mayag/widget/find_bar.hpp>
+#include <mayag/widget/hover_card.hpp>
+#include <mayag/widget/picker.hpp>
+#include <mayag/widget/problems.hpp>
+#include <mayag/widget/split.hpp>
+#include <mayag/widget/status_bar.hpp>
+#include <mayag/widget/tab_bar.hpp>
+#include <mayag/widget/toast.hpp>
 
 #include <algorithm>
 #include <array>
@@ -106,13 +119,6 @@ struct File { std::string path; std::string text; };
     return out;
 }
 
-[[nodiscard]] std::vector<std::string> split_lines(std::string_view s) {
-    std::vector<std::string> v;
-    std::size_t st = 0;
-    for (std::size_t i = 0; i <= s.size(); ++i)
-        if (i == s.size() || s[i] == '\n') { std::string l{s.substr(st, i - st)}; if (!l.empty() && l.back() == '\r') l.pop_back(); v.push_back(std::move(l)); st = i + 1; }
-    return v;
-}
 [[nodiscard]] std::string basename_of(const std::string& p) {
     const auto s = p.rfind('/');
     return s == std::string::npos ? p : p.substr(s + 1);
@@ -1287,7 +1293,8 @@ struct Editor {
                     if (auto it = changed.find(n.path); it != changed.end()) g = it->second;
                     if (auto it = errors.find(n.path); it != errors.end()) e = it->second;
                 }
-                rows.push_back({n.name, n.depth, n.dir, m.expanded.contains(n.path), b && b->path == n.path, g, e});
+                rows.push_back({.name = n.name, .depth = n.depth, .dir = n.dir, .open = m.expanded.contains(n.path),
+                                .active = b && b->path == n.path, .git = g, .errors = e});
             }
             const std::string root_name = g_builtin ? std::string{"demo"} : std::filesystem::path(g_root).filename().string();
             side = (h(v(h(text_owned(root_name) | font(11) | semibold | tracking(0.6f) | fg(t.text_secondary),

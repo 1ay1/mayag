@@ -8,11 +8,30 @@
 //
 // The whole thing is constexpr, so a theme costs zero bytes of startup work
 // and can be `static_assert`ed against accessibility thresholds.
+//
+// A theme is EVERYTHING about the look, as one plain value:
+//
+//   colour   18 roles + on_* labels       var::accent, var::surface, ...
+//   shape    radii, line widths           var::radius_md, var::line
+//   space    the spacing unit             var::space(2)
+//   type     the base size of a scale     var::font_sm, var::font_xl
+//   depth    elevation, or flat           var::depth(6)
+//   motion   three springs and a scale    transition(), var::motion_emphasis
+//   sheet    every widget's look          Sheet (widget/sheet.hpp)
+//
+// Change any of it per app (AppConfig::theme, or `static Theme theme(const
+// Model&)`), per subtree (`| theme(t)`), or derive a whole look from a few
+// knobs with `derive({...})`.
 
+#include "../core/animation.hpp"
 #include "../core/color.hpp"
 #include "style.hpp"
 
 namespace mayag {
+
+/// Widget looks; defined in widget/sheet.hpp. A theme only POINTS at one,
+/// so the framework never depends on widgets (and Theme stays constexpr).
+struct Sheet;
 
 enum class Mode : std::uint8_t { dark, light };
 
@@ -46,6 +65,10 @@ struct Theme {
     Color<Srgb> warning{};
     Color<Srgb> danger{};
     Color<Srgb> info{};
+    // Labels on status fills (a danger button's text).
+    Color<Srgb> on_success{};
+    Color<Srgb> on_warning{};
+    Color<Srgb> on_danger{};
 
     // Metrics — a theme owns spacing and rounding too, so a component library
     // built on it rescales coherently.
@@ -55,9 +78,55 @@ struct Theme {
     float space_unit    = 8.0f;
     float font_size     = 14.0f;
 
+    // Line widths: hairline borders, control outlines, focus rings.
+    float line_hairline = 1.0f;
+    float line_strong   = 1.5f;
+    float line_focus    = 2.0f;
+
+    /// Multiplies every `var::depth(dp)`. 0: a flat theme, no shadows.
+    float depth_scale   = 1.0f;
+
+    // Motion. `transition()` is motion_ui; `motion_scale` speeds every
+    // spring up (>1) or down (<1); 0 turns transitions off (reduced motion).
+    Spring motion_ui       = {400.0f, 40.0f};
+    Spring motion_emphasis = {220.0f, 14.0f};
+    Spring motion_gentle   = {120.0f, 22.0f};
+    float  motion_scale    = 1.0f;
+
+    /// Every widget's look. Null: the standard sheet. Point it at your own
+    /// (usually a static) to restyle every widget at once.
+    const Sheet* sheet = nullptr;
+
+    friend constexpr bool operator==(const Theme&, const Theme&) = default;
+
     [[nodiscard]] constexpr float space(float multiple) const noexcept {
         return space_unit * multiple;
     }
+
+    // ── theme-relative pixels ─────────────────────────────────────────────────────────────
+    //
+    // A widget designed at the standard theme's proportions writes its
+    // pixels through these, and every theme knob reaches it: `t.rounded(4)`
+    // is 4 px of corner at standard roundness, 0 in a square theme, 6.4 in
+    // a soft one. Each is EXACTLY its argument in the standard theme (the
+    // factor is a ratio of equal floats, i.e. 1.0f), so adopting them is
+    // pixel-identical for every app that does not change the knob.
+
+    /// Corner radius `px`, following roundness.
+    [[nodiscard]] constexpr float rounded(float px) const noexcept { return px * (radius_small / 6.0f); }
+    /// A pill/capsule end on something `height` tall: a full pill at
+    /// standard roundness, square corners in a square theme. (A CIRCLE --
+    /// an avatar, a status dot -- is a shape, not a corner style, and stays
+    /// `radius(d / 2)`.)
+    [[nodiscard]] constexpr float capsule(float height) const noexcept {
+        return num::min(height * 0.5f, height * 0.5f * (radius_small / 6.0f));
+    }
+    /// Padding / gap `px`, following density.
+    [[nodiscard]] constexpr float spaced(float px) const noexcept { return px * (space_unit / 8.0f); }
+    /// Border width `px`, following line weight.
+    [[nodiscard]] constexpr float stroke(float px) const noexcept { return px * line_hairline; }
+    /// Elevation `dp`, following depth (0: flat themes draw no shadow).
+    [[nodiscard]] constexpr float lift(float dp) const noexcept { return dp * depth_scale; }
 
     /// An OPAQUE wash of `c` over the background, `amount` of the way there in
     /// sRGB (perceptual) terms. For row highlights and diff lines.
@@ -150,7 +219,40 @@ constexpr Color<Srgb> contrasting_on(Color<Srgb> bg, float target,
     t.warning = Color<Oklch>{L, C,  75.0f}.to<Srgb>();
     t.danger  = Color<Oklch>{L, C,  27.0f}.to<Srgb>();
     t.info    = Color<Oklch>{L, C, 245.0f}.to<Srgb>();
+    t.on_success = detail::contrasting_on(t.success, 4.5f);
+    t.on_warning = detail::contrasting_on(t.warning, 4.5f);
+    t.on_danger  = detail::contrasting_on(t.danger, 4.5f);
 
+    return t;
+}
+
+/// A whole look from a handful of knobs. Each one is a multiplier on the
+/// generated defaults, so the result is always internally consistent: the
+/// palette is still solved for contrast, radii still nest, springs stay
+/// critically damped where they were.
+struct Seed {
+    Color<Srgb> accent = rgb<0x5B8CFF>;
+    Mode        mode   = Mode::dark;
+    float roundness = 1.0f;   ///< radii; 0 = square corners everywhere
+    float density   = 1.0f;   ///< spacing; 0.75 = compact, 1.25 = airy
+    float type      = 1.0f;   ///< the base font size
+    float depth     = 1.0f;   ///< elevation; 0 = flat
+    float motion    = 1.0f;   ///< spring speed; 0 = no motion
+    float lines     = 1.0f;   ///< border and ring widths
+};
+
+[[nodiscard]] constexpr Theme derive(const Seed& s) noexcept {
+    Theme t = make_theme(s.accent, s.mode);
+    t.radius_small  *= s.roundness;
+    t.radius_medium *= s.roundness;
+    t.radius_large  *= s.roundness;
+    t.space_unit    *= s.density;
+    t.font_size     *= s.type;
+    t.depth_scale    = s.depth;
+    t.motion_scale   = s.motion;
+    t.line_hairline *= s.lines;
+    t.line_strong   *= s.lines;
+    t.line_focus    *= s.lines;
     return t;
 }
 
@@ -163,7 +265,107 @@ inline constexpr Theme forest   = make_theme(rgb<0x30A46C>, Mode::dark);
 inline constexpr Theme orchid   = make_theme(rgb<0x8E4EC6>, Mode::dark);
 inline constexpr Theme daylight = make_theme(rgb<0x0090FF>, Mode::light);
 inline constexpr Theme paper    = make_theme(rgb<0x8B5E3C>, Mode::light);
+
+// Looks, not just palettes: the same widgets, a different shape.
+inline constexpr Theme square  = derive({.accent = rgb<0xE5484D>, .roundness = 0.0f, .depth = 0.0f, .lines = 1.5f});
+inline constexpr Theme soft    = derive({.accent = rgb<0x8E4EC6>, .mode = Mode::light, .roundness = 1.8f,
+                                         .density = 1.2f, .depth = 1.6f, .motion = 0.8f});
+inline constexpr Theme compact = derive({.accent = rgb<0x30A46C>, .roundness = 0.5f, .density = 0.7f,
+                                         .type = 0.9f, .motion = 1.4f});
 }  // namespace themes
+
+// ── themes as values ───────────────────────────────────────────────────────────────────
+
+namespace detail {
+[[nodiscard]] constexpr Color<Srgb> lerp_color(Color<Srgb> a, Color<Srgb> b, float t) noexcept {
+    // Through Oklab, like every transition: no grey dip between hues.
+    const auto x = a.to<Oklab>(), y = b.to<Oklab>();
+    return Color<Oklab>{num::lerp(x.c0, y.c0, t), num::lerp(x.c1, y.c1, t), num::lerp(x.c2, y.c2, t),
+                        num::lerp(a.a, b.a, t)}.to<Srgb>();
+}
+[[nodiscard]] constexpr Spring lerp_spring(Spring a, Spring b, float t) noexcept {
+    return {num::lerp(a.stiffness, b.stiffness, t), num::lerp(a.damping, b.damping, t)};
+}
+}  // namespace detail
+
+/// Blend two themes: every colour (in Oklab), size, radius, line, depth and
+/// spring. Drive `t` from an `Animated<float>` in the model and a theme
+/// switch morphs the whole app, shape and all, not just its colours. Mode
+/// and sheet flip at the midpoint.
+[[nodiscard]] constexpr Theme lerp(const Theme& a, const Theme& b, float t) noexcept {
+    using detail::lerp_color;
+    t = num::saturate(t);
+    // Exact at the ends: a settled theme animation must BE the theme, not a
+    // float round-trip through Oklab of it (pixel-identical renders).
+    if (t <= 0.0f) return a;
+    if (t >= 1.0f) return b;
+    Theme r = t < 0.5f ? a : b;
+    Color<Srgb> Theme::*colors_[] = {
+        &Theme::background, &Theme::surface, &Theme::surface_raised, &Theme::overlay,
+        &Theme::text_primary, &Theme::text_secondary, &Theme::text_disabled,
+        &Theme::border, &Theme::border_strong, &Theme::focus_ring,
+        &Theme::accent, &Theme::accent_hover, &Theme::accent_active, &Theme::on_accent,
+        &Theme::success, &Theme::warning, &Theme::danger, &Theme::info,
+        &Theme::on_success, &Theme::on_warning, &Theme::on_danger};
+    for (auto m : colors_) r.*m = lerp_color(a.*m, b.*m, t);
+    float Theme::*floats_[] = {
+        &Theme::radius_small, &Theme::radius_medium, &Theme::radius_large, &Theme::space_unit,
+        &Theme::font_size, &Theme::line_hairline, &Theme::line_strong, &Theme::line_focus,
+        &Theme::depth_scale, &Theme::motion_scale};
+    for (auto m : floats_) r.*m = num::lerp(a.*m, b.*m, t);
+    r.motion_ui       = detail::lerp_spring(a.motion_ui, b.motion_ui, t);
+    r.motion_emphasis = detail::lerp_spring(a.motion_emphasis, b.motion_emphasis, t);
+    r.motion_gentle   = detail::lerp_spring(a.motion_gentle, b.motion_gentle, t);
+    return r;
+}
+
+/// A legibility problem in a theme: which text role fails on which surface.
+struct ThemeIssue {
+    const char* text;
+    const char* on;
+    float       ratio;
+    float       needed;
+};
+
+/// Check every text role against every surface it is drawn on (WCAG AA:
+/// 4.5 body text, 3.0 large/disabled text and focus rings). Hand-edited or
+/// user-supplied themes are where contrast regressions come from; the
+/// stock themes are static_asserted below. Returns how many issues it wrote.
+constexpr int validate(const Theme& t, ThemeIssue* out, int cap) noexcept {
+    struct Pair { const char* a; Color<Srgb> fg; const char* b; Color<Srgb> bg; float need; };
+    const Pair pairs[] = {
+        {"text_primary", t.text_primary, "background", t.background, 4.5f},
+        {"text_primary", t.text_primary, "surface", t.surface, 4.5f},
+        {"text_primary", t.text_primary, "surface_raised", t.surface_raised, 4.5f},
+        {"text_secondary", t.text_secondary, "background", t.background, 4.5f},
+        {"text_secondary", t.text_secondary, "surface", t.surface, 4.5f},
+        {"text_disabled", t.text_disabled, "surface", t.surface, 2.0f},
+        // Labels on fills are semibold control text: WCAG's large/bold bar.
+        // (The accent is the user's brand colour; mayag never moves it to
+        // hit a number, so the label is what gets solved -- see make_theme.)
+        {"on_accent", t.on_accent, "accent", t.accent, 3.0f},
+        {"on_danger", t.on_danger, "danger", t.danger, 3.0f},
+        {"focus_ring", t.focus_ring, "background", t.background, 3.0f},
+    };
+    int n = 0;
+    for (const auto& p : pairs) {
+        const float r = contrast_ratio(p.fg, p.bg);
+        if (r < p.need) {
+            if (n < cap) out[n] = {p.a, p.b, r, p.need};
+            ++n;
+        }
+    }
+    return n;
+}
+[[nodiscard]] constexpr bool legible(const Theme& t) noexcept { return validate(t, nullptr, 0) == 0; }
+
+static_assert(lerp(themes::midnight, themes::daylight, 0.0f) == themes::midnight);
+static_assert(lerp(themes::midnight, themes::square, 1.0f).radius_medium == 0.0f);
+// Every stock theme and look passes, at compile time.
+static_assert(legible(themes::midnight) && legible(themes::ember) && legible(themes::forest) &&
+              legible(themes::orchid) && legible(themes::daylight) && legible(themes::paper) &&
+              legible(themes::square) && legible(themes::soft) && legible(themes::compact),
+              "mayag theme: a stock theme fails validate(); run it to see which role.");
 
 // ── accessibility, checked at compile time ──────────────────────────────
 //

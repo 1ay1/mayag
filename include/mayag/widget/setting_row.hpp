@@ -16,12 +16,12 @@ template <ControlContext C, Element Control>
 [[nodiscard]] inline Node setting_row(const C& c, std::string_view title_text,
                                       std::string_view description_text, Control control) {
     const Theme& t = c.theme;
-    return (h(v(text_owned(std::string{title_text}) | font(t.font_size) | fg(t.text_primary),
+    return (h(v(text_owned(std::string{title_text}) | font(t.font_size) | fg(var::text_primary),
                 text_owned(std::string{description_text}) | font(t.font_size * 0.86f)
-                    | fg(t.text_secondary) | wrap_text | line_height(1.35f))
-                | gap(3) | grow() | min_size(0, 0),
+                    | fg(var::text_secondary) | wrap_text | line_height(1.35f))
+                | gap(t.spaced(3)) | grow() | min_size(0, 0),
               v(control) | align(Align::end))
-            | gap(24) | align(Align::center) | pad(14, 18) | width(pct(100))).build();
+            | gap(t.spaced(24)) | align(Align::center) | pad(t.spaced(14), t.spaced(18)) | width(pct(100))).build();
 }
 
 /// A titled card of setting rows with hairlines between them.
@@ -35,11 +35,11 @@ template <ControlContext C>
         body.push_back(std::move(rows[i]));
     }
     return (v(text_owned(std::string{title_text}) | font(t.font_size * 0.78f) | semibold
-                  | tracking(0.8f) | fg(t.text_secondary) | pad(0, 4),
+                  | tracking(0.8f) | fg(var::text_secondary) | pad(0, t.spaced(4)),
               v(v_list(std::move(body)))
                   | width(pct(100))
-                  | bg(t.surface) | border(1, t.border) | radius(t.radius_medium))
-            | gap(8) | width(pct(100))).build();
+                  | bg(var::surface) | border(t.stroke(1), t.border) | radius(t.radius_medium))
+            | gap(t.spaced(8)) | width(pct(100))).build();
 }
 
 }  // namespace mayag::dsl

@@ -8,6 +8,7 @@
 // Build:  cmake --build build && ./build/examples/mayag_typography
 
 #include "harness.hpp"
+#include <mayag/widget/divider.hpp>
 
 #include <optional>
 

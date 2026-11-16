@@ -39,28 +39,28 @@ inline void agent_toasts(const C& c, std::string_view id, const std::vector<Agen
             const auto pid = part_id(id, i * 4 + k);
             const bool hov = c.hovered(pid);
             return (h(text_owned(label_) | font(t.font_size * 0.82f) | semibold | fg(primary ? t.on_accent : hov ? t.text_primary : t.text_secondary))
-                    | pad(3, 9) | radius(4) | bg(primary ? (hov ? mix(tone, colors::white, 0.12f) : tone) : hov ? t.surface_raised : t.surface)
-                    | border(1, primary ? tone : t.border) | pointer_cursor | id_of(id, i * 4 + k)).build();
+                    | pad(t.spaced(3), t.spaced(9)) | radius(t.rounded(4)) | bg(primary ? (hov ? mix(tone, colors::white, 0.12f) : tone) : hov ? t.surface_raised : t.surface)
+                    | border(t.stroke(1), primary ? tone : t.border) | pointer_cursor | id_of(id, i * 4 + k)).build();
         };
         const auto did = part_id(id, i * 4 + note_action::dismiss);
         const bool approval = n.agent.state == AgentState::needs_approval;
         cards.push_back((h(box() | width(3) | bg(tone),
                            v(h(text_owned(agent_glyph(n.agent.state, time)) | font(t.font_size * 0.85f) | bold | fg(tone),
-                               text_owned(n.agent.agent) | font(t.font_size * 0.9f) | semibold | fg(t.text_primary),
+                               text_owned(n.agent.agent) | font(t.font_size * 0.9f) | semibold | fg(var::text_primary),
                                text_owned(agent_state_words(n.agent.state)) | font(t.font_size * 0.8f) | fg(tone),
                                spacer(),
                                h(text<"\u00D7"> | font(t.font_size * 0.9f) | fg(c.hovered(did) ? t.text_primary : t.text_disabled))
                                    | pointer_cursor | id_of(id, i * 4 + note_action::dismiss))
-                                 | gap(6) | align(Align::center) | width(pct(100)),
-                             text_owned(n.agent.message) | font(t.font_size * 0.88f) | fg(t.text_secondary) | wrap_text | clamp_lines(3),
-                             text_owned(n.where) | font(t.font_size * 0.75f) | fg(t.text_disabled),
+                                 | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
+                             text_owned(n.agent.message) | font(t.font_size * 0.88f) | fg(var::text_secondary) | wrap_text | clamp_lines(3),
+                             text_owned(n.where) | font(t.font_size * 0.75f) | fg(var::text_disabled),
                              h(node(approval ? btn(note_action::approve, "Approve  y", true) : btn(note_action::go, "Go to pane", true)),
                                node(approval ? btn(note_action::deny, "Deny  n", false) : Node{}),
                                node(approval ? btn(note_action::go, "Go to pane", false) : Node{}))
-                                 | gap(6))
-                               | gap(5) | pad(9, 11) | grow() | min_size(0, 0))
+                                 | gap(t.spaced(6)))
+                               | gap(t.spaced(5)) | pad(t.spaced(9), t.spaced(11)) | grow() | min_size(0, 0))
                          | align(Align::stretch) | width(360)
-                         | bg(t.overlay) | border(1, t.tint(tone, 0.45f)) | radius(t.radius_small) | clip | elevation(16)
+                         | bg(var::overlay) | border(t.stroke(1), t.tint(tone, 0.45f)) | radius(t.radius_small) | clip | elevation(t.lift(16))
                          | role(a11y::Role::dialog) | label(n.agent.agent + " " + agent_state_words(n.agent.state))).build());
     }
     const float est = static_cast<float>(std::min<std::size_t>(notes.size(), 4)) * 132.0f;

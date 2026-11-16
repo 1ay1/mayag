@@ -10,6 +10,11 @@
 //                  the layer that catches "compiles, lays out, draws nothing".
 
 #include <mayag/mayag.hpp>
+#include <mayag/widget/badge.hpp>
+#include <mayag/widget/button.hpp>
+#include <mayag/widget/card.hpp>
+#include <mayag/widget/kbd.hpp>
+#include <mayag/widget/progress.hpp>
 #include <mayag/backend/tiled.hpp>
 #include <mayag/layout/audit.hpp>
 
@@ -39,7 +44,7 @@ void near(float got, float want, float eps, const std::string& what) {
     if (num::abs(got - want) > eps) {
         ++failures;
         std::printf("  FAIL  %s: got %.4f want %.4f (eps %.4f)\n",
-                    what.c_str(), got, want, eps);
+                    what.c_str(), static_cast<double>(got), static_cast<double>(want), static_cast<double>(eps));
     }
 }
 
@@ -88,7 +93,8 @@ void same_color(Color<Srgb> got, Color<Srgb> want, const std::string& what) {
     if (d > 0.05f) {
         ++failures;
         std::printf("  FAIL  %s: got (%.3f %.3f %.3f) want (%.3f %.3f %.3f) dE=%.3f\n",
-                    what.c_str(), got.c0, got.c1, got.c2, want.c0, want.c1, want.c2, d);
+                    what.c_str(), double(got.c0), double(got.c1), double(got.c2),
+                    double(want.c0), double(want.c1), double(want.c2), double(d));
     }
 }
 
@@ -302,6 +308,35 @@ void test_layout() {
         near(k[4].frame().top(), 60.0f, 0.01f, "wrap line 3 stacks below line 2");
         near(k[0].frame().left(), 0.0f,   0.01f, "wrap line restarts at the left");
         near(k[2].frame().left(), 0.0f,   0.01f, "second line also starts at left");
+    }
+
+    // A wrapping container MEASURES as its lines, so its frame contains
+    // every child. It used to measure as one line: line two was laid out
+    // below the parent's frame, where the hit test never looks, so every
+    // control past the first line was dead to the pointer.
+    {
+        auto ui = v(h(box() | size(100, 20), box() | size(100, 20), box() | size(100, 20))
+                    | wrap | gap(10))
+                | width(250);
+        Node n = ui.build();
+        layout::layout_tree(n, {250, 400}, tm);
+        const Node& row = n.children()[0];
+        near(row.frame().height(), 50.0f, 0.01f, "a wrapped row is as tall as its two lines");
+        check(row.frame().contains(row.children()[2].frame().center()),
+              "so the wrapped child lies inside its parent (hit-testable)");
+    }
+
+    // Items stretch to their LINE's cross size, not the container's (CSS
+    // align-content: flex-start). Stretching every card in a wrapped grid to
+    // the grid's full height pushed line two off the end.
+    {
+        auto ui = h(box() | width(100), box() | width(100) | height(40), box() | width(100) | height(20))
+                | width(250) | height(300) | wrap | gap(10);
+        Node n = ui.build();
+        layout::layout_tree(n, {250, 300}, tm);
+        const auto& k = n.children();
+        near(k[0].frame().height(), 40.0f, 0.01f, "an auto-height item stretches to its line, not the container");
+        near(k[2].frame().top(), 50.0f, 0.01f, "so line two starts right after line one");
     }
 
     // Rich inline text: paragraph() flows styled fragments across wrapping
@@ -651,7 +686,7 @@ void test_batching() {
     po.glyphs = &glyphs;
     render::paint(n, dl, po);
 
-    check(dl.size() > 20, "the scene produced real instances");
+    check(dl.size() > 20, "the scene produced real instances (" + std::to_string(dl.size()) + ")");
     check(dl.batches().size() <= 4,
           "whole UI batches into <= 4 draw calls (got " +
           std::to_string(dl.batches().size()) + ")");
@@ -706,6 +741,16 @@ void test_tiled_equivalence() {
            box() | size(90, 90) | bg(th.warning) | blend(BlendMode::multiply))
          | gap(8) | pad(10)).build()});
 
+    // Frosted glass spanning many tiles over a busy background: the blur
+    // reads pixels from NEIGHBOURING tiles, so per-tile rendering made a
+    // mosaic. Tiled now renders in phases around each backdrop.
+    scenes.push_back({"backdrop across tiles",
+        (z(h(box() | size(80, 220) | bg(th.danger), box() | size(80, 220) | bg(th.accent),
+             box() | size(80, 220) | bg(th.success), box() | size(80, 220) | bg(th.warning)),
+           box() | size(220, 160) | radius(18) | backdrop_blur(24.0f, 1.4f) | bg(th.surface.fade(0.3f))
+               | absolute(40, 30))
+         | pad(10)).build()});
+
     for (auto& sc : scenes) {
         for (float scale : {1.0f, 2.0f}) {
             const Vec2 viewport{320, 260};
@@ -748,7 +793,8 @@ void test_tiled_equivalence() {
         fb.clear(rgb<0x336699>);
         for (int y = 0; y < 200; ++y) {
             for (int x = 0; x < 200; ++x) {
-                fb.at(x, y) = Vec4{x / 200.0f, y / 200.0f, 0.5f, (x + y) / 400.0f};
+                fb.at(x, y) = Vec4{static_cast<float>(x) / 200.0f, static_cast<float>(y) / 200.0f, 0.5f,
+                                   static_cast<float>(x + y) / 400.0f};
             }
         }
         std::vector<std::uint8_t> serial, parallel;

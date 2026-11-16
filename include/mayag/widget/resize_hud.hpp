@@ -19,10 +19,10 @@ inline void resize_hud(const C& c, std::string_view id, int cols, int rows, std:
     const Theme& t = c.theme;
     c.overlay(Overlay{
         .content = (v(text_owned(std::to_string(cols) + " \u00D7 " + std::to_string(rows)) | font(t.font_size * 1.6f) | bold
-                          | fg(t.text_primary) | text_align(TextAlign::center),
-                      text_owned(std::string{extra}) | font(t.font_size * 0.85f) | fg(t.text_secondary) | text_align(TextAlign::center))
-                    | gap(2) | pad(10, 18) | align(Align::center)
-                    | bg(t.overlay.fade(0.92f)) | border(1, t.border_strong) | radius(t.radius_medium) | elevation(16)).build(),
+                          | fg(var::text_primary) | text_align(TextAlign::center),
+                      text_owned(std::string{extra}) | font(t.font_size * 0.85f) | fg(var::text_secondary) | text_align(TextAlign::center))
+                    | gap(t.spaced(2)) | pad(t.spaced(10), t.spaced(18)) | align(Align::center)
+                    | bg(t.overlay.fade(0.92f)) | border(t.stroke(1), t.border_strong) | radius(t.radius_medium) | elevation(t.lift(16))).build(),
         .id = part_id(id, part_menu),
         .placement = Placement::centered,
         .dismiss = Dismiss::never,

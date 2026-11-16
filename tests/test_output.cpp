@@ -865,8 +865,8 @@ int main() {
     section("a display reports what wl_output.geometry has to send");
     {
         HeadlessOutput out;
-        const auto id = out.identity();
-        check(!id.make.empty() && !id.model.empty(),
+        const auto ident = out.identity();
+        check(!ident.make.empty() && !ident.model.empty(),
               "make and model are reported, so a protocol layer forwards "
               "rather than inventing them");
 

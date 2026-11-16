@@ -25,12 +25,19 @@
 // static data at compile time, and `build()` is the only thing that touches
 // the heap.
 
+#include "../core/animation.hpp"
 #include "../scene/node.hpp"
+#include "../style/state.hpp"
 #include "../style/style.hpp"
+#include "../style/theme.hpp"
 
+#include <algorithm>
 #include <array>
 #include <concepts>
 #include <cstdint>
+#include <format>
+#include <memory>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -61,6 +68,10 @@ inline constexpr Set sized_y     = 1u << 13;  ///< explicit height
 inline constexpr Set clipped     = 1u << 9;
 inline constexpr Set named       = 1u << 10;  ///< has a stable id
 inline constexpr Set interactive = 1u << 11;
+/// Has children, so text properties set here are inherited by the text
+/// inside it. An empty `box()` has no glyphs anywhere below it, so `bold`
+/// on one is still a compile error.
+inline constexpr Set parent      = 1u << 14;
 
 /// Human-readable name for a single bit, used in diagnostics.
 constexpr std::string_view name_of(Set bit) noexcept {
@@ -79,6 +90,9 @@ constexpr std::string_view name_of(Set bit) noexcept {
         case interactive: return "interactivity";
         case sized_x:     return "an explicit width";
         case sized_y:     return "an explicit height";
+        case parent:      return "a container with children";
+        case text | parent:
+            return "a text element, or a container with children (text properties set on a container are inherited by the text inside it)";
         default:          return "an unknown capability";
     }
 }
@@ -168,9 +182,129 @@ concept Modifier = requires(const M m, Style& s) {
     static constexpr caps::Set bans  = (Bans);                   \
     static constexpr std::string_view label = (Label)
 
+/// A text property: valid on text, and on any container with children,
+/// which then passes it down to the text inside (CSS inheritance). An empty
+/// `box()` has no text anywhere below it, so it is still rejected there.
+#define MAYAG_TEXT_MODIFIER(Name, Label)                                     \
+    MAYAG_MODIFIER(Name, caps::none, caps::none, caps::none, Label);         \
+    static constexpr caps::Set needs_any = caps::text | caps::parent
+
+/// Optional "at least one of" requirement, alongside `needs` ("all of").
+template <typename M>
+[[nodiscard]] consteval caps::Set needs_any_of() noexcept {
+    if constexpr (requires { M::needs_any; }) return M::needs_any;
+    else return caps::none;
+}
+
+/// The capability proof, shared by every element type's pipe.
+///
+/// A COMPOSITE (a bundle, a `when`, a class) checks each member in turn,
+/// with the capabilities earlier members gave, so `styles(fg(c))` is
+/// rejected on an empty box exactly like `fg(c)` alone, and
+/// `styles(border(1, c), border_color(d))` is accepted.
+template <caps::Set C, typename M>
+consteval void check_modifier() {
+    if constexpr (requires { M::is_composite; }) {
+        M::template check<C>();
+    } else {
+        static_assert((M::needs & ~C) == 0,
+                      missing_capability(M::label, caps::first_missing(M::needs, C)));
+        static_assert(needs_any_of<M>() == 0 || (needs_any_of<M>() & C) != 0,
+                      missing_capability(M::label, needs_any_of<M>()));
+        static_assert((M::bans & C) == 0,
+                      forbidden_capability(M::label, M::bans & C));
+    }
+}
+
+/// Check a sequence, threading capabilities through (`border` then
+/// `border_color`). `Bans` off for state variants: a variant REPLACES a
+/// value, so `hovered(width(120))` on a sized box is the point, not a clash.
+template <caps::Set C, bool Bans, typename M, typename... Rest>
+consteval void check_sequence() {
+    if constexpr (Bans || requires { M::is_composite; }) {
+        check_modifier<C, M>();
+    } else {
+        static_assert((M::needs & ~C) == 0,
+                      missing_capability(M::label, caps::first_missing(M::needs, C)));
+        static_assert(needs_any_of<M>() == 0 || (needs_any_of<M>() & C) != 0,
+                      missing_capability(M::label, needs_any_of<M>()));
+    }
+    if constexpr (sizeof...(Rest) > 0) check_sequence<C | M::gives, Bans, Rest...>();
+}
+
+/// A RESPONDER changes how an element responds rather than (only) how it
+/// looks now: a state variant (`hovered(...)`, `when(sel, ...)`), a variable
+/// binding (`vars(...)`), a transition, or a class mixing all of those with
+/// plain modifiers. It is checked against the element like a modifier, and
+/// its rules are recorded; the cascade applies them when their state holds.
+template <typename R>
+concept Responder = requires(const R r, Cascade& c, Style& s) {
+    requires R::is_responder;
+    { R::gives } -> std::convertible_to<caps::Set>;
+    r.on_pipe(s);
+    r.attach(c, std::shared_ptr<const R>{});
+};
+
+template <caps::Set C, typename R>
+consteval void check_responder() {
+    R::template check<C>();
+}
+
+/// The responders piped onto an element, kept in its TYPE so a styled
+/// element stays a literal (constexpr) value: nothing is allocated until
+/// `build()`.
+template <typename... Rs>
+struct RuleSet {
+    // No `{}` initializer: a responder may hold a capturing lambda (an
+    // inline handler) that cannot be default-constructed, and clang
+    // instantiates a default member initializer even when the aggregate is
+    // initialized explicitly.
+    std::tuple<Rs...> rs;
+
+    /// Compile the rules into a Cascade. One allocation holds them all --
+    /// or none: an element whose only responder is a theme look shares the
+    /// look's pre-built Cascade outright (a refcount bump), which is the
+    /// common case for every widget instance.
+    [[nodiscard]] std::shared_ptr<const Cascade> compile() const {
+        if constexpr (sizeof...(Rs) == 0) {
+            return nullptr;
+        } else {
+            if constexpr (sizeof...(Rs) == 1) {
+                if constexpr (requires { std::get<0>(rs).shared_rules(); }) {
+                    if (auto shared = std::get<0>(rs).shared_rules()) return shared;
+                }
+            }
+            auto c = std::make_shared<Cascade>();
+            auto self = std::make_shared<const std::tuple<Rs...>>(rs);
+            c->keep.push_back(self);
+            // `r` lives inside *self, so an aliasing pointer keeps it alive
+            // exactly as long as the Cascade does.
+            std::apply([&](const auto&... r) {
+                (r.attach(*c, std::shared_ptr<const std::remove_cvref_t<decltype(r)>>(self, &r)), ...);
+            }, *self);
+            return c;
+        }
+    }
+};
+
 // ════════════════════════════════════════════════════════════════════════
 // Elem — the compile-time element
 // ════════════════════════════════════════════════════════════════════════
+
+template <typename Rules, NodeKind Kind, caps::Set Caps, typename... Kids>
+struct ElemR;
+
+namespace detail {
+/// Add one child of any accepted kind to `parent`: a compile-time element
+/// (built), a runtime Node, a std::vector<Node> or a fragment (both spliced,
+/// so the parent's gap and wrap apply across them). Defined below.
+template <class K>
+void append_child(Node& parent, const K& k);
+/// How many nodes a children tuple adds (ranges and fragments counted), so
+/// the parent reserves once.
+template <class... K>
+std::size_t child_count_hint(const std::tuple<K...>& kids);
+}  // namespace detail
 
 template <NodeKind Kind, caps::Set Caps, typename... Kids>
 struct Elem {
@@ -183,24 +317,62 @@ struct Elem {
     std::tuple<Kids...>   kids{};
 
     /// Materialise the runtime scene node. This is the only allocation.
+    ///
+    /// Hot: every element of every frame passes through here. The Style
+    /// (~800 bytes) is copied exactly once, straight into the node; children
+    /// are built in place in the reserved vector, never as temporaries.
     [[nodiscard]] Node build() const {
         Node n{Kind};
-        n.style() = style;
-
-        if constexpr (Kind == NodeKind::text) {
-            n = Node::make_text(std::string{content}, style);
-        } else if constexpr (Kind == NodeKind::image) {
-            n = Node::make_image(texture, style);
-        }
-
-        if constexpr (sizeof...(Kids) > 0) {
-            n.children().reserve(sizeof...(Kids));
-            std::apply([&](const auto&... k) { (n.add_child(k.build()), ...); }, kids);
-        }
+        build_into(n);
         return n;
+    }
+    void build_into(Node& n) const {
+        n.style() = style;
+        if constexpr (Kind == NodeKind::text) {
+            n.set_text(std::string{content});
+        } else if constexpr (Kind == NodeKind::image) {
+            n.set_texture(texture);
+        }
+        if constexpr (sizeof...(Kids) > 0) {
+            n.children().reserve(detail::child_count_hint(kids));
+            std::apply([&](const auto&... k) { (detail::append_child(n, k), ...); }, kids);
+        }
     }
 
     /// Implicit conversion so an Elem can be returned where a Node is wanted.
+    operator Node() const { return build(); }
+};
+
+/// An element with responders (state variants, variable bindings). A
+/// separate template so the 99% of elements that have none pay nothing:
+/// `Elem` keeps its exact layout, and existing code naming it is untouched.
+template <typename Rules, NodeKind Kind, caps::Set Caps, typename... Kids>
+struct ElemR {
+    static constexpr NodeKind  kind = Kind;
+    static constexpr caps::Set capabilities = Caps;
+
+    Style                 style{};
+    std::string_view      content{};
+    std::uint32_t         texture = 0;
+    std::tuple<Kids...>   kids{};
+    Rules                 rules;
+
+    [[nodiscard]] Node build() const {
+        Node n{Kind};
+        build_into(n);
+        return n;
+    }
+    void build_into(Node& n) const {
+        // Build as the plain element would -- without copying it first.
+        n.style() = style;
+        if constexpr (Kind == NodeKind::text) n.set_text(std::string{content});
+        else if constexpr (Kind == NodeKind::image) n.set_texture(texture);
+        if constexpr (sizeof...(Kids) > 0) {
+            n.children().reserve(detail::child_count_hint(kids));
+            std::apply([&](const auto&... k) { (detail::append_child(n, k), ...); }, kids);
+        }
+        n.set_cascade(rules.compile());
+    }
     operator Node() const { return build(); }
 };
 
@@ -208,17 +380,92 @@ template <typename T>
 concept Element = requires { T::kind; T::capabilities; } &&
                   std::same_as<std::remove_cvref_t<decltype(T::kind)>, NodeKind>;
 
+// ── children ──────────────────────────────────────────────────────────────────
+
+/// Zero or more nodes spliced into the parent in place: what `each(...)`
+/// and `when(cond, child)` produce. Spliced rather than wrapped, so the
+/// parent's gap, wrap and justify apply across them exactly as if written
+/// inline.
+struct Fragment {
+    std::vector<Node> nodes;
+};
+
+/// Anything that can be a child of `v`, `h` or `z`:
+///   an element                 text<"a">, box() | ..., a widget's return
+///   a runtime Node             a helper function's result
+///   a range of either          std::vector<Node>, std::vector<OwnedText>
+///   a Fragment                 each(...), when(cond, child)
+template <typename T>
+concept Child =
+    Element<T> || std::same_as<T, Node> || std::same_as<T, Fragment> ||
+    (std::ranges::input_range<T> &&
+     (std::same_as<std::remove_cvref_t<std::ranges::range_reference_t<T>>, Node> ||
+      Element<std::remove_cvref_t<std::ranges::range_reference_t<T>>>));
+
+namespace detail {
+template <class K>
+void append_child(Node& parent, const K& k) {
+    if constexpr (std::same_as<K, Node>) {
+        parent.add_child(k);
+    } else if constexpr (std::same_as<K, Fragment>) {
+        for (const auto& n : k.nodes) parent.add_child(n);
+    } else if constexpr (Element<K>) {
+        if constexpr (requires(Node& n) { k.build_into(n); }) {
+            // Construct in place in the parent's (reserved) storage.
+            k.build_into(parent.children().emplace_back(K::kind));
+        } else {
+            parent.add_child(k.build());
+        }
+    } else {
+        for (const auto& x : k) append_child(parent, x);
+    }
+}
+
+template <class K>
+std::size_t count_one(const K& k) {
+    if constexpr (std::same_as<K, Fragment>) return k.nodes.size();
+    else if constexpr (std::ranges::sized_range<K>) return std::ranges::size(k);
+    else return 1;
+}
+template <class... K>
+std::size_t child_count_hint(const std::tuple<K...>& kids) {
+    return std::apply([](const auto&... k) { return (std::size_t{0} + ... + count_one(k)); }, kids);
+}
+}  // namespace detail
+
 // ── the pipe: capability proof + style application ──────────────────────
 
 template <NodeKind K, caps::Set C, typename... Kids, Modifier M>
 [[nodiscard]] constexpr auto operator|(Elem<K, C, Kids...> e, M m) {
-    static_assert((M::needs & ~C) == 0,
-                  missing_capability(M::label, caps::first_missing(M::needs, C)));
-    static_assert((M::bans & C) == 0,
-                  forbidden_capability(M::label, M::bans & C));
-
+    check_modifier<C, M>();
     Elem<K, C | M::gives, Kids...> out{e.style, e.content, e.texture, e.kids};
     m.apply(out.style);
+    return out;
+}
+
+template <typename... Rs, NodeKind K, caps::Set C, typename... Kids, Modifier M>
+[[nodiscard]] constexpr auto operator|(ElemR<RuleSet<Rs...>, K, C, Kids...> e, M m) {
+    check_modifier<C, M>();
+    ElemR<RuleSet<Rs...>, K, C | M::gives, Kids...> out{e.style, e.content, e.texture, e.kids, e.rules};
+    m.apply(out.style);
+    return out;
+}
+
+template <NodeKind K, caps::Set C, typename... Kids, Responder R>
+[[nodiscard]] constexpr auto operator|(Elem<K, C, Kids...> e, R r) {
+    check_responder<C, R>();
+    ElemR<RuleSet<R>, K, C | R::gives, Kids...> out{e.style, e.content, e.texture, e.kids, RuleSet<R>{{r}}};
+    r.on_pipe(out.style);
+    return out;
+}
+
+template <typename... Rs, NodeKind K, caps::Set C, typename... Kids, Responder R>
+[[nodiscard]] constexpr auto operator|(ElemR<RuleSet<Rs...>, K, C, Kids...> e, R r) {
+    check_responder<C, R>();
+    ElemR<RuleSet<Rs..., R>, K, C | R::gives, Kids...> out{
+        e.style, e.content, e.texture, e.kids,
+        RuleSet<Rs..., R>{std::tuple_cat(e.rules.rs, std::tuple<R>{r})}};
+    r.on_pipe(out.style);
     return out;
 }
 
@@ -230,22 +477,29 @@ namespace detail {
 
 template <Axis A, typename... Kids>
 [[nodiscard]] constexpr auto make_stack(Kids... kids) {
-    Elem<NodeKind::box, caps::container, Kids...> e{};
-    e.style.layout.axis = A;
-    e.kids = std::tuple<Kids...>{kids...};
-    return e;
+    // Built in one go, never default-then-assign: children may hold
+    // capturing lambdas (inline handlers), which have neither.
+    Style st{};
+    st.layout.axis = A;
+    return Elem<NodeKind::box, (sizeof...(Kids) > 0 ? caps::container | caps::parent : caps::container), Kids...>{
+        st, {}, 0, std::tuple<Kids...>{std::move(kids)...}};
 }
 
 }  // namespace detail
 
-/// Vertical stack.
-template <Element... Kids>
+/// Vertical stack. Children may be elements, runtime `Node`s, vectors or
+/// ranges of either, `each(...)` and `when(...)` -- mixed freely:
+///
+///     v(text<"Files"> | bold,
+///       each(m.files, [](const File& f) { return text_of(f.name); }),
+///       when(m.loading, spinner_node))
+template <Child... Kids>
 [[nodiscard]] constexpr auto v(Kids... kids) {
     return detail::make_stack<Axis::vertical>(kids...);
 }
 
-/// Horizontal stack.
-template <Element... Kids>
+/// Horizontal stack. Same children as `v`.
+template <Child... Kids>
 [[nodiscard]] constexpr auto h(Kids... kids) {
     return detail::make_stack<Axis::horizontal>(kids...);
 }
@@ -265,21 +519,43 @@ template <Element... Kids>
 ///
 /// Put the thing that defines the size first. If you genuinely want every
 /// child floating, give the stack an explicit size.
-template <Element... Kids>
+template <Child... Kids>
 [[nodiscard]] constexpr auto z(Kids... kids) {
     auto e = detail::make_stack<Axis::vertical>(kids...);
     e.style.layout.align = Align::stretch;
 
     [&]<std::size_t... I>(std::index_sequence<I...>) {
-        // For a wrapped runtime node, mark the PAYLOAD absolute. Writing to
-        // the wrapper's style would make it non-default, and NodeElem::build
-        // then replaces the payload's whole style with it -- every overlay
-        // in `z(content, node(x))` silently lost its size, fill and radius.
-        const auto pin = [](auto& kid) {
-            if constexpr (requires { kid.payload.style(); }) kid.payload.style().layout.position = Positioning::absolute;
-            else kid.style.layout.position = Positioning::absolute;
+        // Everything after the very first child floats. A runtime child that
+        // expands to several nodes (a vector, each(), when()) is pinned node
+        // by node, so `z(base, each(badges, ...))` floats every badge.
+        bool first = true;
+        const auto pin_node = [&](Node& n) {
+            if (!first) n.style().layout.position = Positioning::absolute;
+            first = false;
         };
-        ((I == 0 ? void() : pin(std::get<I>(e.kids))), ...);
+        const auto pin = [&](auto& kid) {
+            using K = std::remove_cvref_t<decltype(kid)>;
+            // For a wrapped runtime node, mark the PAYLOAD absolute. Writing to
+            // the wrapper's style would make it non-default, and NodeElem::build
+            // then replaces the payload's whole style with it -- every overlay
+            // in `z(content, node(x))` silently lost its size, fill and radius.
+            if constexpr (requires { kid.payload.style(); }) {
+                pin_node(kid.payload);
+            } else if constexpr (Element<K>) {
+                if (!first) kid.style.layout.position = Positioning::absolute;
+                first = false;
+            } else if constexpr (std::same_as<K, Node>) {
+                pin_node(kid);
+            } else if constexpr (std::same_as<K, Fragment>) {
+                for (auto& n : kid.nodes) pin_node(n);
+            } else {
+                for (auto& x : kid) {
+                    if constexpr (requires { x.style(); }) pin_node(x);
+                    else { if (!first) x.style.layout.position = Positioning::absolute; first = false; }
+                }
+            }
+        };
+        (pin(std::get<I>(e.kids)), ...);
     }(std::index_sequence_for<Kids...>{});
 
     return e;
@@ -335,8 +611,13 @@ struct OwnedText {
     std::tuple<>     kids{};
 
     std::string owned;
+    std::shared_ptr<const Cascade> cascade{};
 
-    [[nodiscard]] Node build() const { return Node::make_text(owned, style); }
+    [[nodiscard]] Node build() const {
+        Node n = Node::make_text(owned, style);
+        n.set_cascade(cascade);
+        return n;
+    }
     operator Node() const { return build(); }
 };
 
@@ -346,17 +627,33 @@ struct OwnedText {
     return t;
 }
 
+namespace detail {
+/// Runtime elements (owned text, wrapped nodes) cannot grow their type, so
+/// their responders compile straight into a Cascade as they are piped.
+template <typename R>
+void add_responder(std::shared_ptr<const Cascade>& slot, const R& r) {
+    auto c = slot ? std::make_shared<Cascade>(*slot) : std::make_shared<Cascade>();
+    auto self = std::make_shared<const R>(r);
+    c->keep.push_back(self);
+    self->attach(*c, self);
+    slot = std::move(c);
+}
+}  // namespace detail
+
 /// OwnedText participates in the modifier pipeline exactly like `text<>`,
 /// with the same capability checks — it is a text element that happens to
 /// carry its own bytes.
 template <Modifier M>
 [[nodiscard]] inline OwnedText operator|(OwnedText e, M m) {
-    static_assert((M::needs & ~OwnedText::capabilities) == 0,
-                  missing_capability(M::label,
-                      caps::first_missing(M::needs, OwnedText::capabilities)));
-    static_assert((M::bans & OwnedText::capabilities) == 0,
-                  forbidden_capability(M::label, M::bans & OwnedText::capabilities));
+    check_modifier<OwnedText::capabilities, M>();
     m.apply(e.style);
+    return e;
+}
+template <Responder R>
+[[nodiscard]] inline OwnedText operator|(OwnedText e, R r) {
+    check_responder<OwnedText::capabilities, R>();
+    r.on_pipe(e.style);
+    detail::add_responder(e.cascade, r);
     return e;
 }
 
@@ -390,7 +687,7 @@ template <Modifier M>
 /// what a materialised subtree behaves like.
 struct NodeElem {
     static constexpr NodeKind  kind = NodeKind::box;
-    static constexpr caps::Set capabilities = caps::container;
+    static constexpr caps::Set capabilities = caps::container | caps::parent;
 
     Style            style{};
     std::string_view content{};
@@ -398,6 +695,7 @@ struct NodeElem {
     std::tuple<>     kids{};
 
     Node payload{};
+    std::shared_ptr<const Cascade> cascade{};
 
     [[nodiscard]] Node build() const {
         Node n = payload;
@@ -414,6 +712,23 @@ struct NodeElem {
             if (n.style().layout.gap == 0.0f) n.style().layout.gap = gap;
             n.style().id = keep_id;
         }
+        if (cascade) {
+            if (n.cascade()) {
+                // Merge: the payload's own rules first, then the wrapper's.
+                auto merged = std::make_shared<Cascade>(*n.cascade());
+                for (const auto& k : cascade->keep) merged->keep.push_back(k);
+                for (const auto& d : cascade->vars) merged->vars.push_back(d);
+                for (auto r : cascade->rules) merged->add(r);
+                merged->handlers.insert(merged->handlers.end(), cascade->handlers.begin(),
+                                        cascade->handlers.end());
+                // The wrapper's theme scope wins: `node(x) | theme(t)` must
+                // re-theme x even when x carries rules of its own.
+                if (cascade->theme) merged->theme = cascade->theme;
+                n.set_cascade(std::move(merged));
+            } else {
+                n.set_cascade(cascade);
+            }
+        }
         return n;
     }
 
@@ -427,12 +742,20 @@ struct NodeElem {
 /// scroll(state) | size(...)`.
 template <Modifier M>
 [[nodiscard]] inline NodeElem operator|(NodeElem e, M m) {
-    static_assert((M::needs & ~NodeElem::capabilities) == 0,
-                  missing_capability(M::label,
-                      caps::first_missing(M::needs, NodeElem::capabilities)));
-    static_assert((M::bans & NodeElem::capabilities) == 0,
-                  forbidden_capability(M::label, M::bans & NodeElem::capabilities));
-    m.apply(e.style);
+    check_modifier<NodeElem::capabilities, M>();
+    // Onto the PAYLOAD, exactly as piping onto the element that built it
+    // would. (This used to collect into a separate Style that build() then
+    // swapped in wholesale, so `node(card) | grow()` erased the card's fill,
+    // padding and radius -- every helper-returned Node lost its look the
+    // moment a caller sized it.)
+    m.apply(e.payload.style());
+    return e;
+}
+template <Responder R>
+[[nodiscard]] inline NodeElem operator|(NodeElem e, R r) {
+    check_responder<NodeElem::capabilities, R>();
+    r.on_pipe(e.payload.style());
+    detail::add_responder(e.cascade, r);
     return e;
 }
 
@@ -464,6 +787,83 @@ template <Modifier M>
     return list(Axis::horizontal, std::move(children), gap_px);
 }
 
+// ── dynamic children: each / when ────────────────────────────────────────────────
+//
+// The two things every real view does with data, as one expression, in
+// place, beside static children:
+//
+//     v(text<"Inbox"> | bold,
+//       each(m.mails, [](const Mail& x, std::size_t i) {
+//           return h(text_of(x.from), spacer(), text_of(x.when)) | id_of("mail", i);
+//       }),
+//       when(m.mails.empty(), text<"Nothing here"> | fg(var::text_disabled)))
+//
+// Both produce a Fragment, which the parent SPLICES: the rows are the
+// stack's own children, so its gap, wrap and justify apply across them.
+
+namespace detail {
+template <class R>
+void splice_into(std::vector<Node>& out, R&& r) {
+    using T = std::remove_cvref_t<R>;
+    if constexpr (std::same_as<T, Fragment>) {
+        for (auto& n : r.nodes) out.push_back(std::move(n));
+    } else if constexpr (std::same_as<T, Node>) {
+        out.push_back(std::forward<R>(r));
+    } else if constexpr (Element<T>) {
+        out.push_back(r.build());
+    } else {
+        static_assert(Child<T>, "mayag: each()'s function must return an element, a Node, or a Fragment.");
+        for (auto&& x : r) splice_into(out, x);
+    }
+}
+}  // namespace detail
+
+/// One child per item. `fn` takes `(item)` or `(item, index)` and returns an
+/// element, a Node, or another fragment (nested `each` / `when`).
+template <std::ranges::input_range R, class F>
+[[nodiscard]] Fragment each(R&& items, F&& fn) {
+    Fragment f;
+    if constexpr (std::ranges::sized_range<R>) f.nodes.reserve(std::ranges::size(items));
+    std::size_t i = 0;
+    for (auto&& x : items) {
+        if constexpr (std::invocable<F&, decltype(x), std::size_t>) detail::splice_into(f.nodes, fn(x, i));
+        else detail::splice_into(f.nodes, fn(x));
+        ++i;
+    }
+    return f;
+}
+
+/// A child that exists only while `cond` holds. Nothing at all otherwise:
+/// no empty box, no gap left behind.
+template <Child C>
+[[nodiscard]] Fragment when(bool cond, C child) {
+    Fragment f;
+    if (cond) detail::splice_into(f.nodes, std::move(child));
+    return f;
+}
+/// One of two children.
+template <Child A, Child B>
+[[nodiscard]] Fragment when(bool cond, A then_child, B else_child) {
+    Fragment f;
+    if (cond) detail::splice_into(f.nodes, std::move(then_child));
+    else      detail::splice_into(f.nodes, std::move(else_child));
+    return f;
+}
+
+/// Formatted runtime text: `textf("{} of {} files", done, total)`. Owns its
+/// bytes, so it can never dangle (see text_owned).
+template <class... Args>
+[[nodiscard]] inline OwnedText textf(std::format_string<Args...> f, Args&&... args) {
+    return text_owned(std::format(f, std::forward<Args>(args)...));
+}
+
+/// A runtime Node pipes like any element: `helper(m) | pad(8) | hovered(...)`
+/// instead of `node(helper(m)) | ...`. It is checked as a container.
+template <Modifier M>
+[[nodiscard]] inline NodeElem operator|(Node n, M m) { return node(std::move(n)) | m; }
+template <Responder R>
+[[nodiscard]] inline NodeElem operator|(Node n, R r) { return node(std::move(n)) | r; }
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Modifiers — layout
 // ═══════════════════════════════════════════════════════════════════════════
@@ -494,6 +894,30 @@ struct Gap {
     constexpr void apply(Style& s) const { s.layout.gap = v; }
 };
 [[nodiscard]] constexpr Gap gap(float v) { return {v}; }
+
+/// Change a container's main axis. `v(...)` and `h(...)` choose it at
+/// construction; this is for choosing it by STATE, which is what a
+/// responsive layout is: `h(sidebar, main) | when(state::narrower(640),
+/// direction(Axis::vertical))` stacks on a narrow window.
+struct Direction {
+    MAYAG_MODIFIER(Direction, caps::container, caps::none, caps::none, "direction");
+    Axis v;
+    constexpr void apply(Style& s) const { s.layout.axis = v; }
+};
+[[nodiscard]] constexpr Direction direction(Axis a) { return {a}; }
+
+/// Declare capabilities a theme look will supply (a fill, a border, a
+/// shadow), so callers can keep piping `| border_color(...)` onto a widget
+/// whose border comes from the Sheet. Does nothing at runtime.
+template <caps::Set C>
+struct Grant {
+    MAYAG_MODIFIER(Grant, caps::none, C, caps::none, "grant");
+    constexpr void apply(Style&) const noexcept {}
+};
+template <caps::Set C>
+inline constexpr Grant<C> grant{};
+/// What a surface look (button, card, field) provides.
+inline constexpr Grant<caps::fill | caps::stroke | caps::shadow> surface_caps{};
 
 struct JustifyMod {
     MAYAG_MODIFIER(JustifyMod, caps::container, caps::none, caps::none, "justify");
@@ -554,6 +978,20 @@ struct Size {
 };
 [[nodiscard]] constexpr Size size(float w, float hgt) { return {px(w), px(hgt)}; }
 [[nodiscard]] constexpr Size size(Length w, Length hgt) { return {w, hgt}; }
+
+/// Take the whole width / height / both of the parent: the three sizes
+/// every screen root and panel wants, without spelling `pct(100)`.
+struct FillAxis {
+    MAYAG_MODIFIER(FillAxis, caps::none, caps::none, caps::none, "fill");
+    bool x, y;
+    constexpr void apply(Style& s) const {
+        if (x) s.layout.width = pct(100);
+        if (y) s.layout.height = pct(100);
+    }
+};
+[[nodiscard]] constexpr FillAxis fill_width()  { return {true, false}; }
+[[nodiscard]] constexpr FillAxis fill_height() { return {false, true}; }
+[[nodiscard]] constexpr FillAxis fill_both()   { return {true, true}; }
 
 struct MinSize {
     MAYAG_MODIFIER(MinSize, caps::none, caps::none, caps::none, "min_size");
@@ -873,14 +1311,18 @@ struct Elevation {
     float dp;
     constexpr void apply(Style& s) const {
         if (s.shadow_count + std::size_t{2} > max_shadows) return;
-        const float a1 = num::min(0.06f + dp * 0.006f, 0.20f);
-        const float a2 = num::min(0.10f + dp * 0.010f, 0.36f);
-        s.shadows[s.shadow_count++] = Shadow{
-            .offset = {0.0f, dp * 0.5f}, .blur = dp * 1.4f,
-            .color = colors::black.fade(a1)};
-        s.shadows[s.shadow_count++] = Shadow{
-            .offset = {0.0f, dp * 0.15f}, .blur = dp * 0.4f,
-            .color = colors::black.fade(a2)};
+        if (var::is_num(dp)) {
+            // Themed depth: the geometry waits for the theme. Each shadow
+            // carries the token in `spread` and its slot in `offset.x`; the
+            // cascade expands them with the formula below.
+            s.shadows[s.shadow_count++] = Shadow{.offset = {0.0f, 0.0f}, .blur = 0.0f, .spread = dp,
+                                                 .color = colors::black};
+            s.shadows[s.shadow_count++] = Shadow{.offset = {1.0f, 0.0f}, .blur = 0.0f, .spread = dp,
+                                                 .color = colors::black};
+            return;
+        }
+        s.shadows[s.shadow_count++] = elevation_shadow(dp, 0);
+        s.shadows[s.shadow_count++] = elevation_shadow(dp, 1);
     }
 };
 [[nodiscard]] constexpr Elevation elevation(float dp) { return {dp}; }
@@ -944,6 +1386,9 @@ struct Transform {
 }
 [[nodiscard]] constexpr Transform scale(float s) { return {Affine::scaling({s, s})}; }
 [[nodiscard]] constexpr Transform transform(Affine m) { return {m}; }
+/// Move the painted element without moving its layout slot (CSS
+/// `translate`). The tool for motion: siblings do not reflow while it moves.
+[[nodiscard]] constexpr Transform translate(float x, float y) { return {Affine::translation({x, y})}; }
 
 // ════════════════════════════════════════════════════════════════════════
 // Modifiers — text
@@ -952,16 +1397,16 @@ struct Transform {
 /// Every text modifier requires `caps::text`. Piping `bold` onto a box is a
 /// compile error naming the mistake, not a setting that quietly does nothing.
 struct Font {
-    MAYAG_MODIFIER(Font, caps::text, caps::none, caps::none, "font");
+    MAYAG_TEXT_MODIFIER(Font, "font");
     float sz;
-    constexpr void apply(Style& s) const { s.text.size = sz; }
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::size; s.text.size = sz; }
 };
 [[nodiscard]] constexpr Font font(float sz) { return {sz}; }
 
 struct Weight {
-    MAYAG_MODIFIER(Weight, caps::text, caps::none, caps::none, "weight");
+    MAYAG_TEXT_MODIFIER(Weight, "weight");
     FontWeight w;
-    constexpr void apply(Style& s) const { s.text.weight = w; }
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::weight; s.text.weight = w; }
 };
 [[nodiscard]] constexpr Weight weight(FontWeight w) { return {w}; }
 inline constexpr Weight bold{FontWeight::bold};
@@ -986,19 +1431,19 @@ inline constexpr Weight light{FontWeight::light};
 
 /// weight(number): a continuous wght override (100..900+, interpolates).
 struct WeightValue {
-    MAYAG_MODIFIER(WeightValue, caps::text, caps::none, caps::none, "weight");
+    MAYAG_TEXT_MODIFIER(WeightValue, "weight");
     float w;
-    constexpr void apply(Style& s) const { s.text.variations.wght = w; }
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::variations; s.text.variations.wght = w; }
 };
 [[nodiscard]] constexpr WeightValue weight(float w) { return {w}; }
 [[nodiscard]] constexpr WeightValue weight(int w) { return {static_cast<float>(w)}; }
 
 /// variation(tag, value): drive any variable-font axis in USER units.
 struct Variation {
-    MAYAG_MODIFIER(Variation, caps::text, caps::none, caps::none, "variation");
+    MAYAG_TEXT_MODIFIER(Variation, "variation");
     std::uint32_t tag;
     float value;
-    constexpr void apply(Style& s) const {
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::variations;
         if (tag == axis_tag("wght")) s.text.variations.wght = value;
         else                         s.text.variations.set(tag, value);
     }
@@ -1019,58 +1464,58 @@ struct Variation {
 /// Toggle GSUB ligatures (fi, ffi, ...). On by default; `no_ligatures` is the
 /// one code/monospace UIs reach for so every character stays distinct.
 struct Ligatures {
-    MAYAG_MODIFIER(Ligatures, caps::text, caps::none, caps::none, "ligatures");
+    MAYAG_TEXT_MODIFIER(Ligatures, "ligatures");
     bool on;
-    constexpr void apply(Style& s) const { s.text.ligatures = on; }
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::ligatures; s.text.ligatures = on; }
 };
 [[nodiscard]] constexpr Ligatures ligatures(bool on = true) { return {on}; }
 inline constexpr Ligatures no_ligatures{false};
 
 struct Italic {
-    MAYAG_MODIFIER(Italic, caps::text, caps::none, caps::none, "italic");
-    constexpr void apply(Style& s) const { s.text.italic = true; }
+    MAYAG_TEXT_MODIFIER(Italic, "italic");
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::italic; s.text.italic = true; }
 };
 inline constexpr Italic italic{};
 
 struct Underline {
-    MAYAG_MODIFIER(Underline, caps::text, caps::none, caps::none, "underline");
-    constexpr void apply(Style& s) const { s.text.underline = true; }
+    MAYAG_TEXT_MODIFIER(Underline, "underline");
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::underline; s.text.underline = true; }
 };
 inline constexpr Underline underline{};
 
 struct Strike {
-    MAYAG_MODIFIER(Strike, caps::text, caps::none, caps::none, "strikethrough");
-    constexpr void apply(Style& s) const { s.text.strikethrough = true; }
+    MAYAG_TEXT_MODIFIER(Strike, "strikethrough");
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::strike; s.text.strikethrough = true; }
 };
 inline constexpr Strike strikethrough{};
 
 struct Fg {
-    MAYAG_MODIFIER(Fg, caps::text, caps::none, caps::none, "fg");
+    MAYAG_TEXT_MODIFIER(Fg, "fg");
     Color<Srgb> c;
-    constexpr void apply(Style& s) const { s.text.color = c; }
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::color; s.text.color = c; }
 };
 [[nodiscard]] constexpr Fg fg(Color<Srgb> c) { return {c}; }
 template <ColorSpace S>
 [[nodiscard]] constexpr Fg fg(Color<S> c) { return {c.template to<Srgb>()}; }
 
 struct LineHeight {
-    MAYAG_MODIFIER(LineHeight, caps::text, caps::none, caps::none, "line_height");
+    MAYAG_TEXT_MODIFIER(LineHeight, "line_height");
     float v;
-    constexpr void apply(Style& s) const { s.text.line_height = v; }
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::line_height; s.text.line_height = v; }
 };
 [[nodiscard]] constexpr LineHeight line_height(float v) { return {v}; }
 
 struct Tracking {
-    MAYAG_MODIFIER(Tracking, caps::text, caps::none, caps::none, "tracking");
+    MAYAG_TEXT_MODIFIER(Tracking, "tracking");
     float v;
-    constexpr void apply(Style& s) const { s.text.letter_spacing = v; }
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::tracking; s.text.letter_spacing = v; }
 };
 [[nodiscard]] constexpr Tracking tracking(float v) { return {v}; }
 
 struct TextAlignMod {
-    MAYAG_MODIFIER(TextAlignMod, caps::text, caps::none, caps::none, "text_align");
+    MAYAG_TEXT_MODIFIER(TextAlignMod, "text_align");
     TextAlign v;
-    constexpr void apply(Style& s) const { s.text.align = v; }
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::align; s.text.align = v; }
 };
 [[nodiscard]] constexpr TextAlignMod text_align(TextAlign a) { return {a}; }
 
@@ -1180,24 +1625,35 @@ struct CursorMod {
 inline constexpr CursorMod pointer_cursor{CursorShape::pointer};
 inline constexpr CursorMod text_cursor{CursorShape::text};
 
-/// Semantic state, announced alongside the role.
+/// Semantic state, announced alongside the role, and matched by the cascade
+/// (`state::selected`, `state::checked`, ...).
+///
+/// Each modifier sets ONLY its own field: `selected(true) | disabled(false)`
+/// is selected and enabled. (It used to replace the whole state, so the last
+/// one piped silently cleared the others: harmless while the state was only
+/// announced, a styling bug the moment rules match on it.)
 struct StateMod {
     MAYAG_MODIFIER(StateMod, caps::none, caps::none, caps::none, "a11y_state");
-    a11y::State v;
-    constexpr void apply(Style& s) const { s.a11y_state = v; }
+    enum Field : std::uint8_t { f_checked, f_selected, f_disabled, f_expanded, f_value };
+    Field field;
+    bool  on = true;
+    float value = 0.0f;
+    constexpr void apply(Style& s) const {
+        switch (field) {
+            case f_checked:  s.a11y_state.checked = on; break;
+            case f_selected: s.a11y_state.selected = on; break;
+            case f_disabled: s.a11y_state.disabled = on; break;
+            case f_expanded: s.a11y_state.expanded = on; break;
+            case f_value:    s.a11y_state.value = value; s.a11y_state.has_value = true; break;
+        }
+    }
 };
-[[nodiscard]] constexpr StateMod checked(bool on = true) {
-    a11y::State st{}; st.checked = on; return {st};
-}
-[[nodiscard]] constexpr StateMod selected(bool on = true) {
-    a11y::State st{}; st.selected = on; return {st};
-}
-[[nodiscard]] constexpr StateMod disabled(bool on = true) {
-    a11y::State st{}; st.disabled = on; return {st};
-}
-[[nodiscard]] constexpr StateMod a11y_value(float v) {
-    a11y::State st{}; st.value = v; st.has_value = true; return {st};
-}
+[[nodiscard]] constexpr StateMod checked(bool on = true)  { return {StateMod::f_checked, on}; }
+[[nodiscard]] constexpr StateMod selected(bool on = true) { return {StateMod::f_selected, on}; }
+[[nodiscard]] constexpr StateMod disabled(bool on = true) { return {StateMod::f_disabled, on}; }
+/// A disclosure (accordion header, tree row, dropdown) is open.
+[[nodiscard]] constexpr StateMod expanded(bool on = true) { return {StateMod::f_expanded, on}; }
+[[nodiscard]] constexpr StateMod a11y_value(float v) { return {StateMod::f_value, true, v}; }
 
 // ════════════════════════════════════════════════════════════════════════
 // Identity
@@ -1259,18 +1715,265 @@ inline constexpr Id id{node_id(Name.view())};
 // ════════════════════════════════════════════════════════════════════════
 
 /// A reusable bundle of modifiers — the mayag equivalent of a CSS class.
-/// It carries the union of its members' capability requirements, so applying
-/// a bundle is checked exactly as strictly as applying each piece.
+/// Applying a bundle is checked exactly as strictly as applying each piece,
+/// in order (see check_modifier).
 template <Modifier... Ms>
 struct Bundle {
+    static constexpr bool is_composite = true;
     static constexpr caps::Set needs = (caps::none | ... | Ms::needs);
     static constexpr caps::Set gives = (caps::none | ... | Ms::gives);
     static constexpr caps::Set bans  = (caps::none | ... | Ms::bans);
     static constexpr std::string_view label = "style bundle";
+    template <caps::Set C>
+    static consteval void check() {
+        if constexpr (sizeof...(Ms) > 0) check_sequence<C, true, Ms...>();
+    }
 
     std::tuple<Ms...> mods;
     constexpr void apply(Style& s) const {
         std::apply([&](const auto&... m) { (m.apply(s), ...); }, mods);
+    }
+};
+
+/// Conditional modifier — applies only when the flag is set, without losing
+/// the capability check (the check happens regardless of the runtime flag,
+/// which is what you want: correctness should not depend on a bool).
+template <Modifier M>
+struct When {
+    static constexpr bool is_composite = true;
+    static constexpr caps::Set needs = M::needs;
+    static constexpr caps::Set gives = M::gives;
+    static constexpr caps::Set bans  = M::bans;
+    static constexpr std::string_view label = M::label;
+    template <caps::Set C>
+    static consteval void check() { check_modifier<C, M>(); }
+
+    bool cond;
+    M    mod;
+    constexpr void apply(Style& s) const { if (cond) mod.apply(s); }
+};
+template <Modifier M>
+[[nodiscard]] constexpr auto when(bool cond, M m) { return When<M>{cond, m}; }
+
+// ════════════════════════════════════════════════════════════════════════
+// The cascade: state variants, classes, variables, transitions
+// ════════════════════════════════════════════════════════════════════════
+//
+// A view describes how an element looks in EVERY state; style/cascade.hpp
+// decides which state it is in each frame. Nothing here reads the pointer:
+//
+//     constexpr auto button = styles(
+//         pad(8, 14) | radius(8) | bg(var::surface_raised) | fg(var::text_primary),
+//         hovered(bg(var::tint(var::accent, 0.18f))),
+//         pressed(bg(var::accent), fg(var::on_accent), scale(0.97f)),
+//         focus_visible(border(2, var::focus_ring)),
+//         when(state::disabled, opacity(0.45f)),
+//         transition());
+//
+//     h(text<"Save">) | button | id<"save">
+//
+// Rules are resolved in a FIXED order (state::priority), never by
+// declaration order or selector cleverness: pressed beats hover, disabled
+// beats both. See style/state.hpp.
+
+/// Style that applies only while `sel` holds. Built by `when(sel, ...)`,
+/// `hovered(...)`, `pressed(...)` and friends.
+///
+/// Its modifiers are checked against the element like any modifier (a
+/// border colour needs a border), except that a variant may REPLACE a value
+/// the base already set: `hovered(width(120))` on a sized box is the point.
+template <Modifier... Ms>
+struct Variant {
+    static constexpr bool is_responder = true;
+    static constexpr caps::Set gives = caps::none;
+    template <caps::Set C>
+    static consteval void check() {
+        if constexpr (sizeof...(Ms) > 0) check_sequence<C, false, Ms...>();
+    }
+
+    state::Sel        sel{};
+    std::tuple<Ms...> mods{};
+
+    constexpr void on_pipe(Style&) const noexcept {}
+    void attach(Cascade& c, std::shared_ptr<const Variant> self) const {
+        c.add({sel, state::priority(sel), 0, &run, self.get()});
+    }
+    static void run(Style& s, const void* data) {
+        const auto* v = static_cast<const Variant*>(data);
+        std::apply([&](const auto&... m) { (m.apply(s), ...); }, v->mods);
+    }
+};
+
+/// `when(state::selected && !state::hover, bg(...), fg(...))`
+template <Modifier... Ms>
+[[nodiscard]] constexpr auto when(state::Sel sel, Ms... ms) {
+    return Variant<Ms...>{sel, std::tuple<Ms...>{ms...}};
+}
+
+/// Pointer is over the element (or over anything inside it).
+template <Modifier... Ms>
+[[nodiscard]] constexpr auto hovered(Ms... ms) { return when(state::hover, ms...); }
+/// A press began on the element and the pointer is still over it. Dragging
+/// off releases the look, which is the cue that letting go will cancel.
+template <Modifier... Ms>
+[[nodiscard]] constexpr auto pressed(Ms... ms) { return when(state::pressed, ms...); }
+/// Has keyboard focus, however it arrived.
+template <Modifier... Ms>
+[[nodiscard]] constexpr auto focused(Ms... ms) { return when(state::focus, ms...); }
+/// Has focus that arrived by KEYBOARD. Where focus rings belong: a ring
+/// after every mouse click is noise; no ring after Tab is inaccessible.
+template <Modifier... Ms>
+[[nodiscard]] constexpr auto focus_visible(Ms... ms) { return when(state::focus_visible, ms...); }
+/// Focus is on the element or anywhere inside it (a field's container).
+template <Modifier... Ms>
+[[nodiscard]] constexpr auto focus_within(Ms... ms) { return when(state::focus_within, ms...); }
+/// The first frame the element exists. With `transition()`, this is an
+/// entry animation: `starting(opacity(0), translate(0, 8))` fades it in.
+template <Modifier... Ms>
+[[nodiscard]] constexpr auto starting(Ms... ms) { return when(state::starting, ms...); }
+/// The nearest `| group()` ancestor is hovered: a card's chevron that
+/// brightens when the CARD is hovered, not only when the chevron is.
+template <Modifier... Ms>
+[[nodiscard]] constexpr auto group_hovered(Ms... ms) { return when(state::group(state::hover), ms...); }
+
+/// Mark the element as a group: descendants may style on its state with
+/// `state::group(...)` / `group_hovered(...)`.
+struct GroupMod {
+    MAYAG_MODIFIER(GroupMod, caps::none, caps::none, caps::none, "group");
+    constexpr void apply(Style& s) const { s.group = true; }
+};
+/// A function, not a constant: a `group` object would shadow every variable
+/// and parameter named `group` in code that uses the DSL.
+[[nodiscard]] constexpr GroupMod group() { return {}; }
+
+/// App-defined state N (0..7), matched by `state::flag<N>`. For states the
+/// framework cannot know ("dirty", "has error", "is drop target").
+template <int N>
+    requires (N >= 0 && N < 8)
+struct FlagMod {
+    MAYAG_MODIFIER(FlagMod, caps::none, caps::none, caps::none, "flag");
+    bool on;
+    constexpr void apply(Style& s) const {
+        if (on) s.flags = static_cast<std::uint8_t>(s.flags | (1u << N));
+        else    s.flags = static_cast<std::uint8_t>(s.flags & ~(1u << N));
+    }
+};
+template <int N>
+[[nodiscard]] constexpr FlagMod<N> flag(bool on = true) { return {on}; }
+
+/// Spring toward each new resolved style instead of jumping to it.
+///
+/// Springs, not durations: a hover that ends halfway through its fade-in
+/// reverses from where it is, with its velocity, instead of restarting.
+///
+///     transition()                        the theme's motion_ui
+///     transition(var::motion_emphasis)    the theme's lively spring
+///     transition(Spring::bouncy())        a fixed spring, whatever the theme
+///
+/// Theme springs follow the theme's motion_scale, so one setting speeds up,
+/// slows down or (at 0) switches off every transition in the app.
+struct TransitionMod {
+    MAYAG_MODIFIER(TransitionMod, caps::none, caps::none, caps::none, "transition");
+    Transition v;
+    constexpr void apply(Style& s) const { s.transition = v; }
+};
+[[nodiscard]] constexpr TransitionMod transition(var::Motion m = var::motion_ui,
+                                                 std::uint8_t props = transition_props::all) {
+    return {Transition{0.0f, 0.0f, props, static_cast<std::uint8_t>(m)}};
+}
+[[nodiscard]] constexpr TransitionMod transition(Spring spring,
+                                                 std::uint8_t props = transition_props::all) {
+    return {Transition{spring.stiffness, spring.damping, props, 0}};
+}
+[[nodiscard]] constexpr TransitionMod transition(std::uint8_t props) {
+    return transition(var::motion_ui, props);
+}
+
+/// Resolve this element and everything inside it against another theme:
+/// colours, sizes, type, depth, motion and widget looks, all at once.
+///
+///     v(settings(m)) | theme(themes::daylight)          // a light island
+///     sidebar(m)     | theme(derive({.roundness = 0}))  // a square one
+///
+/// The theme is copied once, when the element is built.
+struct ThemeScope {
+    static constexpr bool is_responder = true;
+    static constexpr caps::Set gives = caps::none;
+    template <caps::Set>
+    static consteval void check() {}
+
+    Theme t;
+
+    constexpr void on_pipe(Style&) const noexcept {}
+    void attach(Cascade& c, const std::shared_ptr<const ThemeScope>& self) const {
+        c.theme = std::shared_ptr<const Theme>(self, &self->t);
+    }
+};
+[[nodiscard]] constexpr ThemeScope theme(const Theme& t) { return {t}; }
+
+/// Bind theme variables for this element and everything inside it.
+///
+///     vars(var::accent = rgb<0xF7768E>)            // a red-accented subtree
+///     vars(var::named("brand") = rgb<0x00D1B2>)    // an app token
+///     vars(var::accent = var::danger)              // alias another role
+///
+/// Resolved at render time, so theming a subtree costs nothing at view time
+/// and a theme switch restyles every token without rebuilding the view.
+template <std::size_t N>
+struct Vars {
+    static constexpr bool is_responder = true;
+    static constexpr caps::Set gives = caps::none;
+    template <caps::Set>
+    static consteval void check() {}
+
+    std::array<var::TokenDef, N> defs{};
+
+    constexpr void on_pipe(Style&) const noexcept {}
+    void attach(Cascade& c, const std::shared_ptr<const Vars>&) const {
+        c.vars.insert(c.vars.end(), defs.begin(), defs.end());
+    }
+};
+template <std::same_as<var::TokenDef>... Ds>
+[[nodiscard]] constexpr auto vars(Ds... ds) {
+    return Vars<sizeof...(Ds)>{{ds...}};
+}
+
+/// A CLASS: plain modifiers and responders in one reusable value.
+/// `styles(...)` returns a Bundle when given only modifiers, and a Class as
+/// soon as one argument responds to state.
+template <typename... Xs>
+struct Class {
+    static constexpr bool is_responder = true;
+    static constexpr caps::Set gives = (caps::none | ... | Xs::gives);
+
+    template <caps::Set C, typename X, typename... Rest>
+    static consteval void check_items() {
+        if constexpr (Responder<X>) X::template check<C>();
+        else check_modifier<C, X>();
+        if constexpr (sizeof...(Rest) > 0) check_items<C | X::gives, Rest...>();
+    }
+    template <caps::Set C>
+    static consteval void check() {
+        if constexpr (sizeof...(Xs) > 0) check_items<C, Xs...>();
+    }
+
+    std::tuple<Xs...> items;
+
+    constexpr void on_pipe(Style& s) const {
+        std::apply([&](const auto&... x) {
+            ([&] {
+                if constexpr (Responder<std::remove_cvref_t<decltype(x)>>) x.on_pipe(s);
+                else x.apply(s);
+            }(), ...);
+        }, items);
+    }
+    void attach(Cascade& c, const std::shared_ptr<const Class>& self) const {
+        std::apply([&](const auto&... x) {
+            ([&] {
+                using X = std::remove_cvref_t<decltype(x)>;
+                if constexpr (Responder<X>) x.attach(c, std::shared_ptr<const X>(self, &x));
+            }(), ...);
+        }, items);
     }
 };
 
@@ -1279,23 +1982,11 @@ template <Modifier... Ms>
 [[nodiscard]] constexpr auto styles(Ms... ms) {
     return Bundle<Ms...>{std::tuple<Ms...>{ms...}};
 }
-
-/// Conditional modifier — applies only when the flag is set, without losing
-/// the capability check (the check happens regardless of the runtime flag,
-/// which is what you want: correctness should not depend on a bool).
-template <Modifier M>
-struct When {
-    static constexpr caps::Set needs = M::needs;
-    static constexpr caps::Set gives = M::gives;
-    static constexpr caps::Set bans  = M::bans;
-    static constexpr std::string_view label = M::label;
-
-    bool cond;
-    M    mod;
-    constexpr void apply(Style& s) const { if (cond) mod.apply(s); }
-};
-template <Modifier M>
-[[nodiscard]] constexpr auto when(bool cond, M m) { return When<M>{cond, m}; }
+template <typename... Xs>
+    requires ((Responder<Xs> || ...) && ((Responder<Xs> || Modifier<Xs>) && ...))
+[[nodiscard]] constexpr auto styles(Xs... xs) {
+    return Class<Xs...>{std::tuple<Xs...>{xs...}};
+}
 
 // ---- rich inline text ----
 

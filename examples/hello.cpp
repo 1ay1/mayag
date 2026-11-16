@@ -5,8 +5,7 @@
 //   Model      plain struct — all the state, nothing hidden
 //   Msg        a variant of named messages
 //   update     one overload per message, changes the model in place
-//   view       pure (Model, Ctx) -> Node
-//   on         window input -> Msg (clicks arrive already resolved to a node)
+//   view       pure Model -> Node; each control says what it does, inline
 //   subscribe  the frame clock, only while the spring is moving
 //
 // Build:  cmake --build build && ./build/examples/mayag_hello
@@ -17,7 +16,6 @@
 #include "harness.hpp"
 
 #include <optional>
-#include <string>
 #include <utility>
 
 using namespace mayag;
@@ -41,34 +39,26 @@ struct Hello {
     // ── update: one overload per message ────────────────────────────────────
     static Cmd update(Model& m, Inc)    { m.count++; m.bump.snap(1.0f); m.bump.to(0.0f); return {}; }
     static Cmd update(Model& m, Dec)    { m.count--; m.bump.snap(1.0f); m.bump.to(0.0f); return {}; }
-    static Cmd update(Model& m, Tick t) { m.bump.step(static_cast<float>(t.dt)); return {}; }
+    static Cmd update(Model& m, Tick t) { m.bump.step(t.dt); return {}; }
     static Cmd update(Model&,   Quit)   { return Cmd::quit(); }
 
     // ── view: a pure function of the model ──────────────────────────────
+    // Colours and sizes are theme roles, and each button says what it sends.
     static Node view(const Model& m) {
-        const Theme& t = ctx().theme;
         const float pop = 1.0f + static_cast<float>(m.bump) * 0.25f;   // 1.0 → 1.25
 
-        const auto btn = [&](std::string label, Color<Srgb> tone, auto tag) {
-            return h(text_owned(std::move(label)) | font(28) | bold | fg(t.on_accent)) | center
-                 | size(64, 64) | bg(tone) | radius(t.radius_large) | tag;
-        };
+        constexpr auto key = styles(size(64, 64), center, radius(var::radius_lg), font(28), bold,
+                                    fg(var::on_accent), hovered(scale(1.06f)), pressed(scale(0.94f)),
+                                    transition(var::motion_emphasis));
 
-        return v(text<"HELLO"> | font(12) | semibold | tracking(3.0f) | fg(t.text_secondary),
-                 text_owned(std::to_string(m.count))
-                     | font(96.0f * pop) | bold | fg(t.text_primary),
-                 h(btn("-", t.danger, dsl::id<"dec">),
-                   btn("+", t.success, dsl::id<"inc">)) | gap(16))
-             | gap(20) | center
-             | width(pct(100)) | height(pct(100)) | bg(t.background);
+        return v(text<"HELLO"> | font(12) | semibold | tracking(3.0f) | fg(var::text_secondary),
+                 textf("{}", m.count) | font(96.0f * pop) | bold,
+                 h(h(text<"-">) | key | bg(var::danger) | on_click(Dec{}),
+                   h(text<"+">) | key | bg(var::success) | on_click(Inc{})) | gap(16))
+             | gap(20) | center | fill_both() | bg(var::background) | fg(var::text_primary);
     }
 
-    // ── input ───────────────────────────────────────────────────────────────────
-    static std::optional<Msg> on(const Model&, const Clicked& c) {
-        if (is(c, "inc")) return Inc{};
-        if (is(c, "dec")) return Dec{};
-        return std::nullopt;
-    }
+    // ── keys and the window ──────────────────────────────────────────────
     static std::optional<Msg> on(const Model&, const KeyEvent& k) {
         if (k.key == Key::escape) return Quit{};
         return std::nullopt;
@@ -100,7 +90,7 @@ int main(int argc, char** argv) {
             std::printf("  %s  %s\n", c ? "ok  " : "FAIL", what);
             if (!c) ++fails;
         };
-        rt.click("inc"); rt.click("inc"); rt.click("dec");
+        rt.click_text("+"); rt.click_text("+"); rt.click_text("-");
         ok(rt.model().count == 1, "clicks route to the right messages");
         ok(rt.model().bump.animating(), "a change starts the bump spring");
         // drive_frames makes headless ticks carry real time, so the spring
@@ -111,5 +101,6 @@ int main(int argc, char** argv) {
         ok(!rt.model().bump.animating(), "the spring settles on its own (0% CPU)");
         ok(rt.window().frames_presented() >= 1, "the app rendered");
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
+        return fails;
     });
 }

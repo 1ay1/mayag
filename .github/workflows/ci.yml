@@ -186,7 +186,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        san: [address, undefined]
+        san: [address, undefined, thread]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -198,5 +198,12 @@ jobs:
                 -DCMAKE_CXX_COMPILER=g++-14 \
                 -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.san }} -fno-omit-frame-pointer" \
                 -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.san }}"
-          cmake --build build -j --target mayag_tests
-          ./build/mayag_tests
+          # Every suite that touches the runtime: the tiled renderer's
+          # fork-join (jaal::parallel_for), tasks and streams under
+          # contention, the host, inline handlers, and simulation.
+          suites="mayag_tests mayag_concurrency_tests mayag_app_tests mayag_handler_tests mayag_simulate_tests"
+          cmake --build build -j --target $suites
+          for t in $suites; do
+            echo "== $t"
+            TSAN_OPTIONS=halt_on_error=1 ./build/$t
+          done

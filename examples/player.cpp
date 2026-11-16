@@ -17,6 +17,15 @@
 // Build:  cmake --build build && ./build/examples/mayag_player
 // (--headless self-checks; --png/--gpu write a screenshot)
 
+// GCC 16 at -O2 reports -Wmaybe-uninitialized inside std::shared_ptr's move
+// when a Frame (which holds one) travels through std::variant in the runtime's timer
+// heap. Every member of Frame is initialised; it is a known false positive
+// of the variant-storage analysis (clang and GCC 14 are silent). Scoped to
+// this file so -Werror builds stay meaningful everywhere else.
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
 #include <mayag/mayag.hpp>
 
 #include "harness.hpp"
@@ -54,7 +63,7 @@ struct Player {
     struct Seek { int frame; };
     /// A decoded frame, arriving from the worker. The pixels travel by
     /// mayag::Shared -- 8 MB per message would otherwise be copied twice.
-    struct Frame { mayag::Shared<ImageData> pixels; int index; float ms; };
+    struct Frame { mayag::Shared<ImageData> pixels; int index = 0; float ms = 0.0f; };
     struct Tick { float dt; };
     struct Quit {};
     using Msg = std::variant<Play, Pause, Seek, Frame, Tick, Quit>;
@@ -140,7 +149,7 @@ struct Player {
         return upload(kVideoImage, std::move(f.pixels));
     }
 
-    static Cmd update(Model& m, Tick t) { m.scrub.step(t.dt); return {}; }
+    static Cmd update(Model& m, Tick t) { m.scrub.step(static_cast<double>(t.dt)); return {}; }
     static Cmd update(Model&, Quit)     { return Cmd::quit(); }
 
     /// The decoder, as a SUBSCRIPTION rather than a command. A Sub exists
@@ -307,5 +316,6 @@ int main(int argc, char** argv) {
 
         ok(rt.window().frames_presented() >= 1, "the player rendered");
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
+        return fails;
     });
 }

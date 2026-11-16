@@ -8,7 +8,7 @@ namespace mayag::dsl {
 
 /// A horizontal rule that spans its parent.
 [[nodiscard]] constexpr auto divider(const Theme& t, float thickness = 1.0f) {
-    return box() | height(thickness) | width(pct(100)) | bg(t.border);
+    return box() | height(t.stroke(thickness)) | width(pct(100)) | bg(var::border);
 }
 
 }  // namespace mayag::dsl

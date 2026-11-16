@@ -79,8 +79,8 @@ int main() {
 
         if (off_screen != 0) {
             std::printf("    worst: placement=%d size=%.0fx%.0f -> pos=%.1f,%.1f\n",
-                        static_cast<int>(worst_place), worst_size.x, worst_size.y,
-                        worst_pos.x, worst_pos.y);
+                        static_cast<int>(worst_place), double(worst_size.x), double(worst_size.y),
+                        double(worst_pos.x), double(worst_pos.y));
         }
         check(off_screen == 0,
               "all " + std::to_string(total) +

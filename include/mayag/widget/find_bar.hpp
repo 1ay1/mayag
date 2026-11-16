@@ -35,7 +35,7 @@ template <ControlContext C>
         const bool hov = c.hovered(pid);
         return (h(text_owned(std::string{glyph}) | font(t.font_size * 0.9f) | semibold
                       | fg(on ? t.on_accent : hov ? t.text_primary : t.text_secondary))
-                | size(26, 22) | center | radius(4)
+                | size(26, 22) | center | radius(t.rounded(4))
                 | bg(on ? t.accent : hov ? t.surface_raised : t.surface.fade(0.0f))
                 | pointer_cursor | role(a11y::Role::checkbox) | checked(on) | label(what)
                 | id_of(id, part)).build();
@@ -44,14 +44,14 @@ template <ControlContext C>
         const auto pid = part_id(id, part);
         const bool hov = enabled && c.hovered(pid);
         return (h(text_owned(std::string{glyph}) | font(t.font_size) | fg(enabled ? (hov ? t.text_primary : t.text_secondary) : t.text_disabled))
-                | size(26, 22) | center | radius(4) | bg(hov ? t.surface_raised : t.surface.fade(0.0f))
+                | size(26, 22) | center | radius(t.rounded(4)) | bg(hov ? t.surface_raised : t.surface.fade(0.0f))
                 | cursor(enabled ? CursorShape::pointer : CursorShape::arrow)
                 | role(a11y::Role::button) | disabled(!enabled) | label(what) | id_of(id, part)).build();
     };
     const bool none = !query.text.empty() && match_count == 0;
     auto field = [&](const TextEditState& st, std::size_t part, std::string_view ph, bool focused) {
         return (text_field(t, st, focused, part_id(id, part), ph, t.font_size)
-                | width(300) | border(1, none && part == find_part::query ? t.danger : focused ? t.accent : t.border)).build();
+                | width(300) | border(t.stroke(1), none && part == find_part::query ? t.danger : focused ? t.accent : t.border)).build();
     };
     const std::string count = query.text.empty() ? std::string{}
                             : match_count == 0 ? std::string{"No results"}
@@ -67,16 +67,16 @@ template <ControlContext C>
                   node(button_(find_part::next, "\u2193", match_count > 0, "next match")),
                   spacer(),
                   node(button_(find_part::close, "\u00D7", true, "close")))
-              | gap(4) | align(Align::center) | width(pct(100));
+              | gap(t.spaced(4)) | align(Align::center) | width(pct(100));
     Node row2 = show_replace
         ? (h(strut(26), node(field(replacement, find_part::replace, "Replace", focus_field == 1)),
              node(button_(find_part::replace_one, "\u21B5", match_count > 0, "replace")),
              node(button_(find_part::replace_all, "\u21CA", match_count > 0, "replace all")),
-             text<"replace / all"> | font(t.font_size * 0.8f) | fg(t.text_disabled))
-           | gap(4) | align(Align::center) | width(pct(100))).build()
+             text<"replace / all"> | font(t.font_size * 0.8f) | fg(var::text_disabled))
+           | gap(t.spaced(4)) | align(Align::center) | width(pct(100))).build()
         : Node{};
-    return (v(std::move(row1), node(std::move(row2))) | gap(5) | pad(6, 10) | width(pct(100))
-            | bg(t.surface) | border(1, t.border)).build();
+    return (v(std::move(row1), node(std::move(row2))) | gap(t.spaced(5)) | pad(t.spaced(6), t.spaced(10)) | width(pct(100))
+            | bg(var::surface) | border(t.stroke(1), t.border)).build();
 }
 
 }  // namespace mayag::dsl

@@ -26,9 +26,9 @@ template <ControlContext C>
                   | fg(active || hov ? t.text_primary : t.text_secondary) | grow(),
               text_owned(std::string{trailing}) | font(t.font_size * 0.9f)
                   | fg(trailing_hot ? t.accent : t.text_disabled))
-            | gap(10) | align(Align::center) | pad(7, 10) | width(pct(100))
+            | gap(t.spaced(10)) | align(Align::center) | pad(t.spaced(7), t.spaced(10)) | width(pct(100))
             | bg(active ? t.surface_raised : (hov ? t.surface_raised.fade(0.5f) : t.surface.fade(0.0f)))
-            | border(1, c.focused(pid) ? t.focus_ring : t.border.fade(0.0f))
+            | border(t.stroke(1), c.focused(pid) ? t.focus_ring : t.border.fade(0.0f))
             | radius(t.radius_small)
             | pointer_cursor
             | role(a11y::Role::tab) | selected(active) | label(name)

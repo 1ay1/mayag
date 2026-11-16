@@ -368,9 +368,20 @@ struct Env {
                                 vec2{f.axis.z, f.axis.w}, f.params.x), f.px);
     }
     if (f.kind == KIND_SHADOW) {
+        if ((f.flags & FLAG_INSET) != 0u) {
+            // An INNER shadow lives inside the shape: darkness where the
+            // shadow's box -- offset by (params.z, params.w) and shrunk by
+            // the spread -- has NOT reached, clipped to the shape itself.
+            // (It used to be 1 - drop shadow over the whole grown quad,
+            // which painted a dark slab AROUND every inner-shadowed box.)
+            const f32 clip = coverage(rounded_box(f.local, f.half, f.radii), f.px);
+            const vec2 off{f.params.z, f.params.w};
+            const vec2 inner{mg::max(f.half.x - f.params.y, 0.0f), mg::max(f.half.y - f.params.y, 0.0f)};
+            const f32 d = rounded_box(f.local - off, inner, f.radii);
+            return (1.0f - shadow_coverage(d, mg::max(f.params.x, 0.01f))) * clip;
+        }
         const f32 d = rounded_box(f.local, f.half, f.radii);
-        const f32 c = shadow_coverage(d, mg::max(f.params.x, 0.01f));
-        return (f.flags & FLAG_INSET) != 0u ? 1.0f - c : c;
+        return shadow_coverage(d, mg::max(f.params.x, 0.01f));
     }
     return coverage(rounded_box(f.local, f.half, f.radii), f.px);
 }

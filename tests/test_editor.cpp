@@ -7,6 +7,8 @@
 #include <mayag/editor/buffer.hpp>
 #include <mayag/widget/fuzzy.hpp>
 #include <mayag/widget/diff_view.hpp>
+#include <mayag/widget/diff_view.hpp>
+#include <mayag/widget/fuzzy.hpp>
 
 #include <cstdio>
 #include <string>

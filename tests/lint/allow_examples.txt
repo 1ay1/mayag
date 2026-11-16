@@ -1,0 +1,4 @@
+# examples/ -- apps. EMPTY on purpose: an app never touches a raw thread,
+# mutex, atomic, thread_local, future or const_cast. Background work is a
+# Cmd::task / Sub::stream, shared state is a Shared<T> / CoOwned<T> /
+# Guarded<T>, and the runtime that runs them is jaal, behind mayag.

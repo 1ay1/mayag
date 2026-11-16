@@ -11,7 +11,7 @@ namespace mayag::dsl {
     return box() | size(d, d)
                  | bg(tint)
                  | radius(d * 0.5f)
-                 | border(2, t.surface, StrokeAlign::outside);
+                 | border(t.stroke(2), t.surface, StrokeAlign::outside);
 }
 
 }  // namespace mayag::dsl

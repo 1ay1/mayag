@@ -33,9 +33,11 @@
 #include "../render/painter.hpp"
 #include "../scene/node.hpp"
 #include "../scene/overlay.hpp"
+#include "../style/cascade.hpp"
 #include "../style/theme.hpp"
 #include "effects.hpp"
 #include "event.hpp"
+#include "handlers.hpp"
 #include "interaction.hpp"
 #include "latency.hpp"
 #include "sources.hpp"
@@ -153,19 +155,51 @@ template <Program P>
     return P::view(m);
 }
 
+/// Build a subtree in another theme -- ALL of it, every widget included.
+///
+///     themed(themes::daylight, [&] { return settings_panel(m); })
+///     themed(brutal, [&](const Ctx& c) { return slider(c, "vol", m.vol, 120); })
+///
+/// Inside `build`, `ctx().theme` IS `t`, so widgets that read the theme
+/// directly draw in it; and the result is scoped with `| theme(t)`, so every
+/// token, sheet look and motion below resolves against it too. The one call
+/// that makes "this part of the app looks different" true for everything.
+template <class F>
+[[nodiscard]] auto themed(const Theme& t, F&& build) {
+    Ctx c = ctx();
+    c.theme = t;
+    Node n = [&] {
+        detail::ctx_scope scope{c};
+        if constexpr (std::invocable<F&, const Ctx&>) return Node(build(c));
+        else return Node(build());
+    }();
+    return dsl::node(std::move(n)) | dsl::theme(t);
+}
+
+/// The theme a program renders in for `m`: its `static Theme theme(const
+/// Model&)` when it has one, else `fallback` (AppConfig::theme). The live
+/// host and one-shot renders both use this, so a screenshot is the app.
+template <Program P>
+[[nodiscard]] Theme theme_of(const typename P::Model& m, const Theme& fallback) {
+    if constexpr (requires { { P::theme(m) } -> std::convertible_to<Theme>; }) return P::theme(m);
+    else return fallback;
+}
+
 /// view() run to a fixed point, for one-shot renders (screenshots, tests).
 ///
 /// A view reads what LAST frame's layout measured (scrollbar extents live in
 /// the model's ScrollState). The live host gets there by drawing one more
 /// frame; a single offscreen render has no next frame, so it re-runs view
 /// after layout until those measurements stop changing (two passes in
-/// practice). The returned tree is laid out against `size`.
+/// practice). The returned tree is resolved against `c.theme` (at rest) and
+/// laid out against `size`.
 template <Program P>
 [[nodiscard]] Node settled_view(const typename P::Model& m, const Ctx& c, Vec2 size,
                                 const layout::TextMeasurer& measurer) {
     (void)take_scroll_geometry_changed();
     Node root = view_of<P>(m, c);
     for (int pass = 0; pass < 4; ++pass) {
+        cascade_static(root, c.theme, size);
         layout::layout_tree(root, size, measurer);
         if (!take_scroll_geometry_changed()) break;
         root = view_of<P>(m, c);
@@ -192,6 +226,11 @@ struct AppConfig {
     bool        resizable = true;
     bool        vsync     = true;
     Theme       theme     = themes::midnight;
+    /// Animate theme changes: when `P::theme(model)` changes, the WHOLE UI
+    /// morphs from the old theme to the new one -- colours in Oklab, radii,
+    /// spacing, type size, depth, springs -- on the theme's own motion
+    /// (instant when the new theme's motion_scale is 0: reduced motion).
+    bool        theme_morph = true;
 
     /// The font engine. Null: discovered from the system at startup.
     std::shared_ptr<typo::FontStack> fonts = nullptr;
@@ -219,11 +258,16 @@ inline constexpr std::chrono::nanoseconds kFramePeriod{16'666'667};
 /// paint and the GPU submit (~0.5 ms measured) with room to spare.
 inline constexpr std::chrono::nanoseconds kLatchMargin{2'000'000};
 
-template <Program P, class W>
+template <Program P, class W, class Clock = jaal::platform::steady_clock>
 class window_host {
   public:
     using event_type = window_events;
-    using clock      = std::chrono::steady_clock;
+    /// The runtime's clock, the same one the kernel steps on: real time in an
+    /// app, jaal::platform::sim_clock under simulation (set_clock), so a
+    /// simulated run paces frames, springs and morphs in simulated time.
+    using clock      = Clock;
+    using time_point = typename Clock::time_point;
+    using duration_t = typename Clock::duration;
 
     window_host(W& window, AppConfig cfg) : window_(window), cfg_(std::move(cfg)) {
         if (cfg_.fonts == nullptr) cfg_.fonts = typo::system::default_stack();
@@ -233,7 +277,8 @@ class window_host {
         input_.set_multi_click_interval(window_.double_click_interval());
         size_ = window_.size();
         dpi_  = window_.dpi_scale();
-        start_ = clock::now();
+        start_ = now_();
+        vblank_ = start_;
     }
 
     window_host(const window_host&)            = delete;
@@ -292,22 +337,26 @@ class window_host {
         // A window with no fd (Cocoa) is read here on a short poll. When the
         // poll was the only reason we were called, draw only if it brought
         // something; the messages it routed are already folded.
-        if (poll_window_ && cx_ && clock::now() >= next_poll_) {
-            next_poll_ = clock::now() + kPollPeriod;
+        if (poll_window_ && cx_ && now_() >= next_poll_) {
+            next_poll_ = now_() + kPollPeriod;
             const auto before = emitted_;
             pump_erased();
-            if (poll_only && !dirty_ && emitted_ == before) return;
+            if (poll_only && !dirty_ && emitted_ == before && handled_.empty()) return;
         }
+        // Handler messages from this pump: into the kernel now. jaal folds
+        // them on the very next turn (a message is pending), which draws.
+        flush_handled(k);
 
         // The frame tick goes straight into the kernel on this thread (no
         // mailbox, no wake syscall) and is folded on the next turn, which
         // jaal runs at once because a message is pending. So the frame is
         // drawn AFTER its tick, not one tick late.
-        const auto now = clock::now();
+        const auto now = now_();
         time_ = std::chrono::duration<double>(now - start_).count();
         sync_display();
         if (const auto dt = take_frame()) {
             if (tracked_.animating()) { tracked_.step_all(*dt); dirty_ = true; }
+            if (motion_.animating() || morphing_) { motion_dt_ += *dt; morph_dt_ += *dt; dirty_ = true; }
             if (frames_on_ && frame_make_) {
                 k.dispatch(frame_make_(*dt));
                 tick_pending_ = true;    // the next present draws it
@@ -337,7 +386,8 @@ class window_host {
     /// slot's late-latch point after its first draw; the next slot after its
     /// late one. So at most two frames per refresh, the second carrying the
     /// freshest input just before the vblank.
-    [[nodiscard]] clock::time_point next_draw_at(clock::time_point now = clock::now()) const noexcept {
+    [[nodiscard]] time_point next_draw_at() const noexcept { return next_draw_at(now_()); }
+    [[nodiscard]] time_point next_draw_at(time_point now) const noexcept {
         if (slot_of(now) != drawn_slot_) return now;
         if (latched_) return slot_start(drawn_slot_ + 1);
         return std::max(now, latch_point(drawn_slot_));
@@ -348,37 +398,39 @@ class window_host {
     // no report yet, from start-up at 60 Hz. Slot n runs [vblank + n*period,
     // vblank + (n+1)*period).
 
-    [[nodiscard]] std::int64_t slot_of(clock::time_point t) const noexcept {
+    [[nodiscard]] std::int64_t slot_of(time_point t) const noexcept {
         const auto d = t - vblank_;
-        return d >= clock::duration::zero() ? d / period_ : -((-d) / period_) - 1;
+        return d >= duration_t::zero() ? d / period_ : -((-d) / period_) - 1;
     }
-    [[nodiscard]] clock::time_point slot_start(std::int64_t n) const noexcept {
+    [[nodiscard]] time_point slot_start(std::int64_t n) const noexcept {
         return vblank_ + n * period_;
     }
     /// Late enough to carry the newest input, early enough to make the vblank
     /// that ends slot n.
-    [[nodiscard]] clock::time_point latch_point(std::int64_t n) const noexcept {
+    [[nodiscard]] time_point latch_point(std::int64_t n) const noexcept {
         return slot_start(n + 1) - latch_margin();
     }
     /// The window's learned margin when it measures one (macOS, capped there
     /// at half a refresh), else the fixed default capped at a quarter.
-    [[nodiscard]] clock::duration latch_margin() const noexcept {
+    [[nodiscard]] duration_t latch_margin() const noexcept {
         if constexpr (requires { window_.latch_margin(); })
-            return std::min<clock::duration>(
-                std::chrono::duration_cast<clock::duration>(window_.latch_margin()), period_ / 2);
-        return std::min<clock::duration>(std::chrono::duration_cast<clock::duration>(kLatchMargin),
+            return std::min<duration_t>(
+                std::chrono::duration_cast<duration_t>(window_.latch_margin()), period_ / 2);
+        return std::min<duration_t>(std::chrono::duration_cast<duration_t>(kLatchMargin),
                                          period_ / 4);
     }
     void sync_display() {
-        if constexpr (requires { window_.display_timing(); }) {
+        // A window reports vblanks on the REAL clock; under a simulated
+        // clock they are meaningless, and the 60 Hz default grid is used.
+        if constexpr (requires(W& w) { { w.display_timing()->vblank } -> std::convertible_to<time_point>; }) {
             const auto t = window_.display_timing();
             if (!t || t->seq == display_seq_) return;   // nothing new
             display_seq_ = t->seq;
             // Re-express the last draw's slot against the new anchor, so a
             // re-anchor can't make an already-drawn slot look fresh.
-            const auto drawn_at = drawn_slot_ >= 0 ? slot_start(drawn_slot_) : clock::time_point{};
+            const auto drawn_at = drawn_slot_ >= 0 ? slot_start(drawn_slot_) : time_point{};
             vblank_ = t->vblank;
-            if (t->period.count() > 0) period_ = std::chrono::duration_cast<clock::duration>(t->period);
+            if (t->period.count() > 0) period_ = std::chrono::duration_cast<duration_t>(t->period);
             if (drawn_slot_ >= 0) drawn_slot_ = slot_of(drawn_at + period_ / 2);
         }
     }
@@ -386,7 +438,7 @@ class window_host {
     /// Owed when the frame clock is running and its tick is due, a spring is
     /// moving, or presentation state (hover, focus) changed under the model.
     [[nodiscard]] bool owes_frame() const noexcept {
-        const auto now = clock::now();
+        const auto now = now_();
         if (external_loop_ && tick_pending_) return true;   // a display-link frame draws now
         if ((dirty_ || draw_owed_) && now >= next_draw_at(now)) return true;
         if (!external_loop_ && animating() && now >= next_frame_) return true;
@@ -399,7 +451,7 @@ class window_host {
 
     [[nodiscard]] std::optional<std::chrono::nanoseconds> wait_hint() const noexcept {
         using ns = std::chrono::nanoseconds;
-        const auto now = clock::now();
+        const auto now = now_();
         if (dirty_ || draw_owed_) {
             return std::max(std::chrono::duration_cast<ns>(next_draw_at(now) - now), ns{0});
         }
@@ -424,7 +476,7 @@ class window_host {
         frames_on_ = true;
         last_tick_.reset();
         sync_display();
-        next_frame_ = clock::now();   // the first tick at once, then on vblank
+        next_frame_ = now_();   // the first tick at once, then on vblank
     }
     void stop_source(std::type_identity<fx::on_frame>, const fx::on_frame::key_type&) {
         frames_on_ = false;
@@ -439,7 +491,7 @@ class window_host {
     void handle(const SetFullscreen& e) {
         if constexpr (requires { window_.set_fullscreen(e.on); }) window_.set_fullscreen(e.on);
     }
-    void handle(const FocusNode& e) { input_.set_focus(e.node_id); dirty_ = true; }
+    void handle(const FocusNode& e) { input_.set_focus_visible(e.node_id); dirty_ = true; }
     void handle(const UploadImage& e) {
         if constexpr (requires { window_.upload_image(e.id, std::shared_ptr<const ImageData>{}); }) {
             // shared<T> holds a shared_ptr<const T>; alias it without a copy.
@@ -462,6 +514,17 @@ class window_host {
     [[nodiscard]] W& window() noexcept { return window_; }
     [[nodiscard]] const Interaction& input() const noexcept { return input_; }
     [[nodiscard]] const Node& tree() const noexcept { return tree_; }
+    /// Read time from `c` (the kernel's clock) instead of a default one.
+    void set_clock(const Clock& c) noexcept { clock_ = &c; }
+    [[nodiscard]] typename Clock::time_point now_() const noexcept {
+        return clock_ != nullptr ? clock_->now() : own_clock_.now();
+    }
+    /// A `transition(...)` spring is still moving (the host is drawing for it).
+    [[nodiscard]] bool transitioning() const noexcept { return motion_.animating() || morphing_; }
+    /// A theme morph is running (see AppConfig::theme_morph).
+    [[nodiscard]] bool morphing() const noexcept { return morphing_; }
+    /// The theme the last frame was drawn in (mid-morph: the blend).
+    [[nodiscard]] const Theme& theme() const noexcept { return theme_; }
     [[nodiscard]] const LatencyStats& latency() const noexcept { return latency_; }
     [[nodiscard]] bool busy_loop_detected() const noexcept { return busy_warned_; }
     [[nodiscard]] std::string_view renderer_name() const noexcept { return window_.renderer_name(); }
@@ -497,9 +560,14 @@ class window_host {
     /// Fire the frame clock now with this dt (headless driver: 1/60 per tick).
     template <class K>
     void tick_frame(K& k, double dt) {
+        flush_handled(k);
         if (frames_on_ && frame_make_) k.dispatch(frame_make_(dt));
         time_ += dt;
         if (tracked_.animating()) { tracked_.step_all(dt); dirty_ = true; }
+        if (motion_.animating()) dirty_ = true;
+        motion_dt_ += dt;
+        morph_dt_ += dt;
+        if (morphing_) dirty_ = true;
     }
 
     // ── driven from a foreign loop (Cocoa) ───────────────────────────────
@@ -517,9 +585,12 @@ class window_host {
     void vsync(K& k, double dt) {
         if (!animating()) return;
         dt = std::min(std::max(dt, 0.0), 0.1);
-        time_ = std::chrono::duration<double>(clock::now() - start_).count();
+        time_ = std::chrono::duration<double>(now_() - start_).count();
         if (tracked_.animating()) tracked_.step_all(dt);
         if (frames_on_ && frame_make_) k.dispatch(frame_make_(dt));
+        motion_dt_ += dt;
+        morph_dt_ += dt;
+        if (morphing_) dirty_ = true;
         dirty_ = true;          // springs and widget motion redraw even without a tick
         tick_pending_ = true;   // a display-link frame draws at once, unpaced
     }
@@ -529,7 +600,7 @@ class window_host {
     /// when nothing is animating or the next frame isn't due yet.
     std::optional<double> take_frame() {
         if (external_loop_) return std::nullopt;   // vsync() does this
-        const auto now = clock::now();
+        const auto now = now_();
         if (!animating() || now < next_frame_) return std::nullopt;
         const double dt = last_tick_
             ? std::min(std::chrono::duration<double>(now - *last_tick_).count(), 0.1)
@@ -567,7 +638,7 @@ class window_host {
     }
 
     [[nodiscard]] bool animating() const noexcept {
-        return frames_on_ || motion_pending_ || tracked_.animating();
+        return frames_on_ || motion_pending_ || tracked_.animating() || motion_.animating() || morphing_;
     }
 
     // ── input → gestures ────────────────────────────────────────────────
@@ -601,6 +672,15 @@ class window_host {
             }
             if ((k->key == Key::enter || k->key == Key::space) &&
                 input_.focused() != 0 && k->mods.none()) {
+                // An inline on_click on the focused node answers first: an
+                // element that says what a click does needs no on(Activated).
+                const auto before = handled_.size();
+                collect_handlers(Gesture{Gesture::Kind::activate, input_.focused()});
+                if (handled_.size() > before) {
+                    (void)emit(cx, Activated{input_.focused()});
+                    dirty_ = true;
+                    return;
+                }
                 // Consumed only when the program handled it; otherwise the
                 // key falls through to its own Space/Enter binding.
                 if (emit(cx, Activated{input_.focused()}) > 0) {
@@ -647,9 +727,12 @@ class window_host {
         const auto before_hover   = input_.hovered();
         const auto before_pressed = input_.pressed();
         const auto before_focus   = input_.focused();
+        const bool before_vis     = input_.focus_visible();
+        const bool before_inside  = input_.press_inside();
         const auto gestures = input_.handle(ev, tree_, window_.now());
         if (input_.hovered() != before_hover || input_.pressed() != before_pressed ||
-            input_.focused() != before_focus) {
+            input_.focused() != before_focus || input_.focus_visible() != before_vis ||
+            input_.press_inside() != before_inside) {
             dirty_ = true;
         }
 
@@ -679,6 +762,7 @@ class window_host {
     void emit_gestures(Cx& cx, const std::vector<Gesture>& gestures) {
         using K = Gesture::Kind;
         for (const auto& g : gestures) {
+            collect_handlers(g);
             switch (g.kind) {
                 case K::click:    (void)emit(cx, Clicked{g.node_id, g.local, g.click_count, g.button}); break;
                 case K::activate: (void)emit(cx, Activated{g.node_id}); break;
@@ -692,6 +776,65 @@ class window_host {
         }
     }
 
+    // ── inline handlers (`| on_click(Save{})`) ─────────────────────────
+
+    /// The node a gesture landed on, in the main tree or an overlay.
+    [[nodiscard]] const Node* node_by_id(std::uint64_t id) const {
+        if (id == 0) return nullptr;
+        if (const Node* n = tree_.find(id)) return n;
+        for (const auto& o : overlays_.items())
+            if (const Node* n = o.content.find(id)) return n;
+        return nullptr;
+    }
+
+    /// Run the handlers on the gesture's node; their messages wait in
+    /// handled_ until a kernel is at hand (flush_handled).
+    void collect_handlers(const Gesture& g) {
+        using K = Gesture::Kind;
+        const Node* n = node_by_id(g.node_id);
+        if (n == nullptr || n->cascade() == nullptr || n->cascade()->handlers.empty()) return;
+        const auto run = [&](On on, const auto& event) {
+            for (const auto& h : n->cascade()->handlers)
+                if (h.on == on) {
+                    HandlerResult r = h.call(h.fn, &event);
+                    if (r.msg) handled_.push_back(std::move(r));
+                }
+        };
+        switch (g.kind) {
+            case K::click:    run(On::click, Clicked{g.node_id, g.local, g.click_count, g.button}); break;
+            case K::activate: run(On::click, Clicked{g.node_id, {}, 1, MouseButton::left}); break;
+            case K::press:    run(On::press, Pressed{g.node_id, g.local, g.button}); break;
+            case K::release:  run(On::release, Released{g.node_id, g.local, g.button}); break;
+            case K::enter:    run(On::enter, Entered{g.node_id}); break;
+            case K::leave:    run(On::leave, Left{g.node_id}); break;
+            case K::drag:     run(On::drag, Dragged{g.node_id, g.local, g.delta}); break;
+            case K::scroll:   run(On::scroll, Scrolled{g.node_id, g.local, g.delta}); break;
+        }
+        if (!handled_.empty()) dirty_ = true;
+    }
+
+  public:
+    /// Hand queued handler messages to the kernel, in gesture order. Called
+    /// by every loop before it folds, so a click's message is folded on the
+    /// same turn as the click.
+    template <class K>
+    void flush_handled(K& k) {
+        if (handled_.empty()) return;
+        auto batch = std::exchange(handled_, {});
+        for (const auto& r : batch) {
+            if (auto m = to_program_msg<typename P::Msg>(r)) {
+                k.dispatch(std::move(*m));
+            } else if (!handler_type_warned_) {
+                handler_type_warned_ = true;
+                std::fputs("mayag: an on_click/on_* handler produced a message that is not one of the "
+                           "program's Msg alternatives; it was dropped.\n", stderr);
+            }
+        }
+        dirty_ = true;
+    }
+    [[nodiscard]] bool has_handled() const noexcept { return !handled_.empty(); }
+
+  private:
     [[nodiscard]] static CursorShape cursor_at(const Node& n, Vec2 p) {
         CursorShape found = CursorShape::arrow;
         walk_cursor(n, p, found);
@@ -704,6 +847,52 @@ class window_host {
     }
 
     // ── the frame ───────────────────────────────────────────────────────
+
+    /// Follow the program's theme, morphing between themes on a spring.
+    /// Mid-morph the frame's theme is `lerp(from, to, x)`, and since view()
+    /// runs every frame with it, EVERYTHING follows: widgets that read
+    /// concrete theme values, layout (spacing and type reflow smoothly),
+    /// tokens, sheets. At rest the theme is the target exactly (lerp's ends
+    /// are exact), so a settled frame is pixel-identical to no morph at all.
+    void advance_theme(const Theme& target, double dt) {
+        if (!theme_seen_) {
+            theme_ = theme_from_ = theme_to_ = target;
+            theme_seen_ = true;
+            return;
+        }
+        if (!(target == theme_to_)) {
+            theme_from_ = theme_;            // from wherever the eye is now
+            theme_to_   = target;
+            if (cfg_.theme_morph && target.motion_scale > 0.0f) {
+                morphing_ = true;
+                morph_x_ = 0.0f;
+                morph_v_ = 0.0f;
+                dt = 1.0 / 120.0;            // feedback on the frame the change lands
+            } else {
+                morphing_ = false;
+                theme_ = target;
+                return;
+            }
+        }
+        if (!morphing_) { theme_ = theme_to_; return; }
+        // Critically damped, sped up by the theme's motion_scale.
+        const float k = theme_to_.motion_scale;
+        const float stiff = 170.0f * k * k, damp = 26.0f * k;
+        float rem = num::clamp(static_cast<float>(dt), 0.0f, 0.25f);
+        while (rem > 0.0f) {
+            const float h = num::min(rem, 1.0f / 240.0f);
+            rem -= h;
+            morph_v_ += (stiff * (1.0f - morph_x_) - damp * morph_v_) * h;
+            morph_x_ += morph_v_ * h;
+        }
+        if (num::abs(1.0f - morph_x_) < 1e-3f && num::abs(morph_v_) < 1e-2f) {
+            morphing_ = false;
+            morph_x_ = 1.0f;
+            theme_ = theme_to_;
+            return;
+        }
+        theme_ = lerp(theme_from_, theme_to_, morph_x_);
+    }
 
     template <class OnFault>
     void draw_impl(const typename P::Model& model, OnFault&& fault) {
@@ -719,7 +908,13 @@ class window_host {
         tracked_.clear();
         clear_animation_request();
 
-        Ctx ctx{size_, dpi_, time_, cfg_.theme, &latency_, {}, &bindings_->measurer,
+        // The theme is application state when the program says so:
+        // `static Theme theme(const Model&)`. Then a theme switch is an
+        // ordinary update(); every var:: token, the Ctx theme and the window's
+        // clear colour follow it on the same frame. Otherwise AppConfig's.
+        advance_theme(theme_of<P>(model, cfg_.theme), std::exchange(morph_dt_, 0.0));
+
+        Ctx ctx{size_, dpi_, time_, theme_, &latency_, {}, &bindings_->measurer,
                 &tracked_, &overlays_, &input_};
         if constexpr (requires { window_.photon_stats(); }) ctx.photon = window_.photon_stats();
         {
@@ -733,6 +928,35 @@ class window_host {
         }
 
         const auto& measurer = bindings_->measurer;
+        {
+            // The cascade: inheritance, state variants, tokens. Before layout,
+            // because a variant may change padding or size.
+            ScopedTimer t{frame.cascade_ms};
+            CascadeInput ci{};
+            ci.theme         = &theme_;
+            ci.viewport      = size_;
+            ci.hovered       = input_.hovered();
+            ci.pressed       = input_.pressed();
+            ci.press_inside  = input_.press_inside();
+            ci.focused       = input_.focused();
+            ci.focus_visible = input_.focus_visible();
+            ci.previous_ids  = seen_ids_valid_ ? &seen_ids_ : nullptr;
+            CascadeResult cr = cascade(tree_, ci);
+            for (auto& o : overlays_.items()) {
+                const CascadeResult r = cascade(o.content, ci);
+                cr.transitions = cr.transitions || r.transitions;
+                cr.starting = cr.starting || r.starting;
+            }
+            const bool springs = cr.transitions;
+            starting_pending_ = cr.starting;
+
+            seen_ids_.clear();
+            collect_starting_ids(tree_, seen_ids_);
+            for (const auto& o : overlays_.items()) collect_starting_ids(o.content, seen_ids_);
+            seen_ids_valid_ = true;
+
+            springs_ = springs;
+        }
         { ScopedTimer t{frame.layout_ms}; layout::layout_tree(tree_, size_, measurer); }
         tracked_.observe_all(tree_);
 
@@ -744,6 +968,21 @@ class window_host {
                                                  o.offset, o.at.value_or(input_.cursor()));
             layout::arrange(o.content, placed, measurer);
         }
+
+        // Transitions run AFTER layout. Everything they animate is paint-only
+        // (colour, border, radii, shadows, opacity, transform), and layout has
+        // already clamped radii to the real box: a pill that becomes a square
+        // springs from its true radius (11 px), not from `radius_full`'s 1e9.
+        motion_.begin_frame();
+        if (springs_ || motion_.size() > 0) {
+            const double dt = std::exchange(motion_dt_, 0.0);
+            motion_.visit_root(tree_, dt);
+            std::uint64_t salt = 0;
+            for (auto& o : overlays_.items()) motion_.visit_root(o.content, dt, o.id != 0 ? o.id : ++salt);
+        } else {
+            motion_dt_ = 0.0;
+        }
+        motion_.end_frame();
 
         if (cfg_.debug_bounds) {
             const auto issues = layout::audit(tree_, &measurer);
@@ -778,11 +1017,14 @@ class window_host {
         // layout changed a scroll region's size (a scrollbar drawn from last
         // frame's numbers is now stale and needs one more pass).
         motion_pending_ = animation_was_requested() || tracked_.animating() ||
-                          take_scroll_geometry_changed();
+                          take_scroll_geometry_changed() ||
+                          // A `starting(...)` look lasts exactly one frame;
+                          // the next one is owed or it would stick forever.
+                          starting_pending_;
 
         frame.instances  = static_cast<std::uint32_t>(draws_.size());
         frame.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
-        { ScopedTimer t{frame.render_ms}; window_.present(draws_, cfg_.theme.background); }
+        { ScopedTimer t{frame.render_ms}; window_.present(draws_, theme_.background); }
         latency_.record(frame);
         // Frames nobody asked for. Frames the user is driving (moving the
         // pointer over a live view) don't count.
@@ -808,7 +1050,7 @@ class window_host {
     bool                external_loop_ = false; // a foreign loop drives input and frames
     mutable bool        poll_only_ = false;     // owes_frame() said yes only to poll
     std::uint64_t       emitted_ = 0;           // input events that produced a Msg
-    clock::time_point   next_poll_{};
+    time_point   next_poll_{};
     std::function<std::size_t(const window_events&)> cx_;
     std::function<void(int)> stop_;
 
@@ -823,13 +1065,32 @@ class window_host {
     Vec2                size_{};
     float               dpi_ = 1.0f;
     double              time_ = 0.0;
-    clock::time_point   start_{};
+    // The cascade's frame state: transitions in flight, the time they owe,
+    // and which nodes existed last frame (for `starting(...)`).
+    const Clock*        clock_ = nullptr;   // the kernel's, when it has state (sim)
+    Clock               own_clock_{};
+    StyleMotion         motion_{};
+    std::vector<HandlerResult> handled_{};
+    bool                handler_type_warned_ = false;
+    bool                springs_ = false;
+    Theme               theme_{};        // what this frame is drawn in
+    Theme               theme_from_{};   // a morph runs from here...
+    Theme               theme_to_{};     // ...to here (the program's theme)
+    bool                theme_seen_ = false;
+    bool                morphing_ = false;
+    float               morph_x_ = 1.0f, morph_v_ = 0.0f;
+    double              morph_dt_ = 0.0;
+    double              motion_dt_ = 0.0;
+    std::unordered_set<std::uint64_t> seen_ids_{};
+    bool                seen_ids_valid_ = false;
+    bool                starting_pending_ = false;
+    time_point   start_{};
     bool                dirty_ = true;
     bool                draw_owed_ = false;     // a draw was held back for pacing
     bool                tick_pending_ = false;  // a frame tick was dispatched; draw it next
-    clock::time_point   last_draw_{};
-    clock::time_point   vblank_ = clock::now();                 // a refresh boundary
-    clock::duration     period_ = std::chrono::duration_cast<clock::duration>(kFramePeriod);
+    time_point   last_draw_{};
+    time_point   vblank_{};                 // a refresh boundary (set at start)
+    duration_t     period_ = std::chrono::duration_cast<duration_t>(kFramePeriod);
     std::int64_t        drawn_slot_ = -1;                       // slot of the last draw
     bool                latched_ = false;                       // that slot had its late draw
     std::uint64_t       display_seq_ = 0;
@@ -837,8 +1098,8 @@ class window_host {
 
     bool                frames_on_ = false;
     std::function<typename P::Msg(double)> frame_make_;
-    clock::time_point   next_frame_{};
-    std::optional<clock::time_point> last_tick_;
+    time_point   next_frame_{};
+    std::optional<time_point> last_tick_;
 
     std::uint64_t       frame_counter_ = 0;
     int                 coalesced_moves_ = 0;

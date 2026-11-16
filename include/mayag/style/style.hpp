@@ -147,6 +147,18 @@ struct Shadow {
 
 inline constexpr std::size_t max_shadows = 4;
 
+/// Material-style elevation as two shadows (key + ambient), from one dp.
+/// The ONE definition: `elevation(8)` and `elevation(var::depth(8))` both
+/// expand through it, so a literal and a token draw identical pixels.
+[[nodiscard]] constexpr Shadow elevation_shadow(float dp, int layer) noexcept {
+    if (layer == 0) {
+        const float a1 = num::min(0.06f + dp * 0.006f, 0.20f);
+        return Shadow{.offset = {0.0f, dp * 0.5f}, .blur = dp * 1.4f, .color = colors::black.fade(a1)};
+    }
+    const float a2 = num::min(0.10f + dp * 0.010f, 0.36f);
+    return Shadow{.offset = {0.0f, dp * 0.15f}, .blur = dp * 0.4f, .color = colors::black.fade(a2)};
+}
+
 // ── text ────────────────────────────────────────────────────────────────
 
 enum class FontWeight : std::uint16_t {
@@ -216,6 +228,27 @@ struct FontVariations {
     }
 };
 
+/// Which TextStyle fields a style SET, as opposed to left at their defaults.
+///
+/// This is what makes text properties inherit: a container that says
+/// `| fg(c) | font(13)` sets those bits on its own TextStyle, and the cascade
+/// copies every field whose bit is set down to descendants that did not set
+/// it themselves. Bits, not optionals, so TextStyle stays a literal type.
+namespace text_bits {
+inline constexpr std::uint16_t size        = 1u << 0;
+inline constexpr std::uint16_t weight      = 1u << 1;
+inline constexpr std::uint16_t italic      = 1u << 2;
+inline constexpr std::uint16_t underline   = 1u << 3;
+inline constexpr std::uint16_t strike      = 1u << 4;
+inline constexpr std::uint16_t color       = 1u << 5;
+inline constexpr std::uint16_t line_height = 1u << 6;
+inline constexpr std::uint16_t tracking    = 1u << 7;
+inline constexpr std::uint16_t align       = 1u << 8;
+inline constexpr std::uint16_t ligatures   = 1u << 9;
+inline constexpr std::uint16_t variations  = 1u << 10;
+inline constexpr std::uint16_t all         = (1u << 11) - 1u;
+}  // namespace text_bits
+
 struct TextStyle {
     float        size        = 16.0f;
     FontWeight   weight      = FontWeight::regular;
@@ -254,6 +287,11 @@ struct TextStyle {
     /// (CSS line-clamp). 0 = unlimited. Only meaningful with overflow == wrap.
     std::uint16_t max_lines = 0;
 
+    /// `text_bits` this style set explicitly (see above). Overflow and
+    /// line clamping are deliberately NOT inheritable: an inherited `wrap`
+    /// is exactly how a label turns into a vertical ribbon of letters.
+    std::uint16_t set = 0;
+
     friend constexpr bool operator==(const TextStyle&, const TextStyle&) = default;
     [[nodiscard]] constexpr float line_advance() const noexcept { return size * line_height; }
 
@@ -281,6 +319,32 @@ struct Backdrop {
 
 enum class BlendMode : std::uint8_t {
     normal, multiply, screen, overlay, additive, subtract, difference,
+};
+
+/// Animate changes to the resolved style instead of jumping.
+///
+/// A spring, not a duration: a hover that ends halfway through its fade-in
+/// reverses from where it is, with its velocity, instead of restarting.
+/// `props` selects what moves (`transition_props`); 0 means no transition.
+namespace transition_props {
+inline constexpr std::uint8_t color     = 1u << 0;   ///< fill, border, text and shadow colours
+inline constexpr std::uint8_t shape     = 1u << 1;   ///< border width, radii, shadow geometry, backdrop blur
+inline constexpr std::uint8_t opacity   = 1u << 2;
+inline constexpr std::uint8_t transform = 1u << 3;   ///< transform and offset
+inline constexpr std::uint8_t all       = color | shape | opacity | transform;
+}  // namespace transition_props
+
+struct Transition {
+    float        stiffness = 0.0f;
+    float        damping   = 0.0f;
+    std::uint8_t props     = 0;
+    /// 0: the spring above. 1..3: the theme's motion_ui / emphasis / gentle,
+    /// resolved by the cascade (and scaled by the theme's motion_scale).
+    std::uint8_t motion    = 0;
+    friend constexpr bool operator==(const Transition&, const Transition&) = default;
+    [[nodiscard]] constexpr bool on() const noexcept {
+        return props != 0 && (stiffness > 0.0f || motion != 0);
+    }
 };
 
 // ── layout ──────────────────────────────────────────────────────────────
@@ -398,7 +462,23 @@ struct Style {
 
     float   opacity = 1.0f;
     bool    clip    = false;    ///< clip children to this box's rounded rect
+    /// Applied about the box's centre at paint time (CSS `transform`). Moves
+    /// pixels, never layout: siblings do not reflow around a scaled button.
     Affine  transform = Affine::identity();
+
+    // ── cascade ─────────────────────────────────────────────────────────
+    //
+    // Inputs to style/cascade.hpp. They describe how this style RESPONDS
+    // (to state, to time); the painter never reads them.
+
+    /// Descendants may style on this node's state: `state::group(state::hover)`.
+    bool          group = false;
+    /// The id was synthesised by the cascade so the node can be HOVERED
+    /// (it has pointer variants but no `id<>`). Hit-testable, never a Tab stop.
+    bool          hit_only = false;
+    /// Eight app-defined states, matched by `st::flag<N>`.
+    std::uint8_t  flags = 0;
+    Transition    transition{};
 
     // ── accessibility ───────────────────────────────────────────────────
     //

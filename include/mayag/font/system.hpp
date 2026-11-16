@@ -264,7 +264,11 @@ namespace detail {
         e.weight     = parsed->weight();
         e.italic     = parsed->is_italic();
         e.color      = parsed->has_color();
-        e.outlines   = parsed->has_outlines();
+        // Outlines THIS engine rasterises: glyf and CFF. CFF2 (macOS's
+        // SFIndia.ttc, variable CJK faces) parses but has no glyph source,
+        // so counting it made covering() pick a face Face::from_file then
+        // rejected -- and Bengali, Gurmukhi, Tamil... got no face at all.
+        e.outlines   = parsed->has_table(ot::tags::glyf) || parsed->has_table(ot::tags::cff);
         e.glyphs     = parsed->num_glyphs();
 
         // Probe one representative codepoint per script rather than
@@ -575,7 +579,13 @@ class Database {
     //    specialised face per script is chosen by covering().
     for (const auto& probe : script_probes) {
         if (probe.script == Script::emoji) continue;   // handled last, in colour
-        add_entry(db.covering(probe.codepoint));
+        // The best candidate first; if it will not load, the next one. One
+        // unloadable face must not leave a whole script as tofu.
+        if (add_entry(db.covering(probe.codepoint))) continue;
+        for (const FontEntry* e : db.covering_script(probe.script)) {
+            if (already(e)) break;          // the script is covered already
+            if (add_entry(e)) break;
+        }
     }
 
     // 3. Colour emoji last: it must not shadow a text face for dual-mapped

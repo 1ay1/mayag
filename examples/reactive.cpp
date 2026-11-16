@@ -15,6 +15,8 @@
 //   ./mayag_reactive --headless   asserts the latency budget in CI
 
 #include "harness.hpp"
+#include <mayag/widget/divider.hpp>
+#include <mayag/widget/layout.hpp>
 
 using namespace mayag;
 using namespace mayag::dsl;

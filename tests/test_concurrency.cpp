@@ -16,6 +16,7 @@
 // Built a second time under -fsanitize=thread (mayag_concurrency_tsan).
 
 #include <mayag/mayag.hpp>
+#include <mayag/widget/find_bar.hpp>
 
 #include <atomic>
 #include <chrono>

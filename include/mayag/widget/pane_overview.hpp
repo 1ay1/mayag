@@ -43,15 +43,15 @@ inline void pane_overview(const C& c, std::string_view id, std::vector<PaneCard>
         const bool hov = c.hovered(pid) || static_cast<int>(i) == keyboard;
         const bool hot = wants_attention(k.agent.state);
         const Color<Srgb> tone = agent_tone(t, k.agent.state);
-        row.push_back((v(h(text_owned(i < 9 ? std::to_string(i + 1) : std::string{}) | font(t.font_size * 0.72f) | fg(t.text_disabled) | width(10),
-                           text_owned(k.title) | font(t.font_size * 0.88f) | semibold | fg(t.text_primary) | ellipsis | grow() | min_size(0, 0),
+        row.push_back((v(h(text_owned(i < 9 ? std::to_string(i + 1) : std::string{}) | font(t.font_size * 0.72f) | fg(var::text_disabled) | width(10),
+                           text_owned(k.title) | font(t.font_size * 0.88f) | semibold | fg(var::text_primary) | ellipsis | grow() | min_size(0, 0),
                            node(k.host ? host_badge(c, *k.host, true) : Node{}),
                            node(agent_badge(c, k.agent, time, false)))
-                           | gap(6) | align(Align::center) | pad(6, 8) | width(pct(100)) | bg(t.surface),
+                           | gap(t.spaced(6)) | align(Align::center) | pad(t.spaced(6), t.spaced(8)) | width(pct(100)) | bg(var::surface),
                          v(node(std::move(k.preview))) | height(150) | width(pct(100)) | clip,
                          node(hot && !k.agent.message.empty()
                                   ? (h(text_owned(k.agent.message) | font(t.font_size * 0.8f) | fg(tone) | ellipsis)
-                                     | pad(4, 8) | width(pct(100)) | bg(t.tint(tone, 0.12f))).build()
+                                     | pad(t.spaced(4), t.spaced(8)) | width(pct(100)) | bg(t.tint(tone, 0.12f))).build()
                                   : Node{}))
                        | grow() | width(0) | radius(t.radius_small) | clip
                        | border(hot || hov ? 2.0f : 1.0f, hot ? tone : hov ? t.accent : t.border)
@@ -68,15 +68,15 @@ inline void pane_overview(const C& c, std::string_view id, std::vector<PaneCard>
     else if constexpr (requires { c.size; }) sz = c.size;
     const int waiting = static_cast<int>(std::count_if(cards.begin(), cards.end(), [](const PaneCard& k) { return wants_attention(k.agent.state); }));
     c.overlay(Overlay{
-        .content = (v(h(text<"All panes"> | font(t.font_size * 1.2f) | semibold | fg(t.text_primary),
+        .content = (v(h(text<"All panes"> | font(t.font_size * 1.2f) | semibold | fg(var::text_primary),
                         text_owned(std::to_string(cards.size()) + " panes \u00B7 " + std::to_string(waiting) + " waiting on you")
                             | font(t.font_size * 0.88f) | fg(waiting ? t.warning : t.text_secondary),
                         spacer(),
-                        text<"1-9 open \u00B7 esc close"> | font(t.font_size * 0.8f) | fg(t.text_disabled))
-                        | gap(12) | align(Align::center) | width(pct(100)),
+                        text<"1-9 open \u00B7 esc close"> | font(t.font_size * 0.8f) | fg(var::text_disabled))
+                        | gap(t.spaced(12)) | align(Align::center) | width(pct(100)),
                       v(v_list(std::move(grid_rows), 14.0f)) | width(pct(100)))
-                    | gap(16) | pad(24, 28) | size(sz.x * 0.9f, sz.y * 0.86f)
-                    | bg(t.background) | border(1, t.border_strong) | radius(t.radius_medium) | elevation(30)
+                    | gap(t.spaced(16)) | pad(t.spaced(24), t.spaced(28)) | size(sz.x * 0.9f, sz.y * 0.86f)
+                    | bg(var::background) | border(t.stroke(1), t.border_strong) | radius(t.radius_medium) | elevation(t.lift(30))
                     | role(a11y::Role::dialog) | label("pane overview")).build(),
         .id = part_id(id, part_menu),
         .placement = Placement::centered,

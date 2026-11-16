@@ -77,9 +77,9 @@ struct Aurora {
     // ── update ──────────────────────────────────────────────────────────
     static Cmd update(Model& m, Tick t) {
         if (m.running) m.time += t.dt;
-        m.hue.step(t.dt);
-        m.bloom.step(t.dt);
-        m.density.step(t.dt);
+        m.hue.step(static_cast<double>(t.dt));
+        m.bloom.step(static_cast<double>(t.dt));
+        m.density.step(static_cast<double>(t.dt));
         return {};
     }
     static Cmd update(Model& m, Toggle) { m.running = !m.running; return {}; }
@@ -341,5 +341,6 @@ int main(int argc, char** argv) {
         ok(rt.window().frames_presented() > 1, "the scene rendered");
 
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
+        return fails;
     });
 }

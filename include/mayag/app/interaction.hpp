@@ -75,6 +75,19 @@ class Interaction {
         return id != 0 && focused_ == id;
     }
 
+    /// Focus arrived by keyboard (Tab, or the app moving it after a key).
+    /// The cascade's `focus_visible` state: rings for keyboard users, none
+    /// after a click.
+    [[nodiscard]] bool focus_visible() const noexcept { return focused_ != 0 && focus_by_key_; }
+    /// The pressed node is still under the pointer (press styling releases
+    /// when you drag off, which is the cue that letting go will cancel).
+    [[nodiscard]] bool press_inside() const noexcept { return press_inside_; }
+
+    /// The app moved focus (a `focus` effect). Treated as keyboard-visible:
+    /// focus moved by code is usually a response to a key, and an invisible
+    /// focus jump is the worse failure.
+    void set_focus_visible(std::uint64_t id) noexcept { focused_ = id; focus_by_key_ = true; }
+
     void set_focus(std::uint64_t id) noexcept { focused_ = id; }
 
     // ── the state machine ───────────────────────────────────────────────
@@ -97,6 +110,7 @@ class Interaction {
                 // working the moment the cursor leaves the knob.
                 if (pressed_ != 0) {
                     dragged_ = dragged_ || (e.position - press_origin_).length() > drag_threshold;
+                    press_inside_ = identify_control(root, e.position) == pressed_;
                     if (dragged_) {
                         if (const Node* n = root.find(pressed_)) {
                             out.push_back(Gesture{Gesture::Kind::drag, pressed_, e.position,
@@ -121,9 +135,10 @@ class Interaction {
 
             else if constexpr (std::is_same_v<T, MouseDown>) {
                 cursor_ = e.position;
-                const std::uint64_t hit = identify(root, e.position);
+                const std::uint64_t hit = identify_control(root, e.position);
 
                 pressed_           = hit;
+                press_inside_      = true;
                 press_origin_      = e.position;
                 press_button_      = e.button;
                 press_click_count_ = e.click_count;
@@ -132,6 +147,7 @@ class Interaction {
                 // Clicking anywhere moves keyboard focus there — including to
                 // nothing, which is how you dismiss a text field.
                 focused_ = hit;
+                focus_by_key_ = false;
 
                 if (hit != 0) {
                     const Node* n = root.find(hit);
@@ -143,7 +159,7 @@ class Interaction {
 
             else if constexpr (std::is_same_v<T, MouseUp>) {
                 cursor_ = e.position;
-                const std::uint64_t hit = identify(root, e.position);
+                const std::uint64_t hit = identify_control(root, e.position);
                 const std::uint64_t was = pressed_;
 
                 if (was != 0) {
@@ -238,6 +254,7 @@ class Interaction {
     /// order. This is Tab handling, and having it here means every mayag app
     /// gets keyboard navigation without writing any.
     void focus_next(const Node& root, bool backward = false) {
+        focus_by_key_ = true;
         std::vector<std::uint64_t> order;
         collect_focusable(root, order);
         if (order.empty()) { focused_ = 0; return; }
@@ -270,6 +287,27 @@ class Interaction {
     /// How far the pointer may move between clicks of a sequence.
     void set_multi_click_slop(float px) noexcept { multi_click_slop_ = px; }
 
+    // -- hit testing --------------------------------------------------------
+
+    /// Topmost NAMED node containing `p`. Unnamed nodes are transparent to
+    /// hit testing: a `v(...)` wrapper should not swallow clicks meant for
+    /// the button inside it, and requiring an explicit `id<>` to be clickable
+    /// makes that rule predictable.
+    [[nodiscard]] static std::uint64_t identify(const Node& root, Vec2 p) {
+        std::uint64_t found = 0;
+        hit_recurse(root, p, found, false);
+        return found;
+    }
+    /// The innermost CONTROL under `p`: like identify(), but a node that is
+    /// only hit-testable so the cascade can hover it is looked through. A
+    /// hover-styled card must not swallow the click meant for the button
+    /// inside it, nor become the click target itself.
+    [[nodiscard]] static std::uint64_t identify_control(const Node& root, Vec2 p) {
+        std::uint64_t found = 0;
+        hit_recurse(root, p, found, true);
+        return found;
+    }
+
   private:
     /// Innermost node under `p` that is BOTH named and a scroll viewport.
     ///
@@ -300,17 +338,7 @@ class Interaction {
         return continues ? last_click_count_ + 1 : 1;
     }
 
-    /// Topmost NAMED node containing `p`. Unnamed nodes are transparent to
-    /// hit testing: a `v(...)` wrapper should not swallow clicks meant for
-    /// the button inside it, and requiring an explicit `id<>` to be clickable
-    /// makes that rule predictable.
-    [[nodiscard]] static std::uint64_t identify(const Node& root, Vec2 p) {
-        std::uint64_t found = 0;
-        hit_recurse(root, p, found);
-        return found;
-    }
-
-    static void hit_recurse(const Node& n, Vec2 p, std::uint64_t& found) {
+    static void hit_recurse(const Node& n, Vec2 p, std::uint64_t& found, bool controls_only) {
         if (found != 0) return;                  // already settled, higher up
         if (!n.frame().contains(p)) return;
         // Clipping parents cull their subtree — a scrolled-away child is not
@@ -327,21 +355,23 @@ class Interaction {
         // it could take a double-click made it swallow every click meant for
         // the controls painted over it.
         for (auto it = n.children().rbegin(); it != n.children().rend(); ++it) {
-            hit_recurse(*it, p, found);
+            hit_recurse(*it, p, found, controls_only);
             if (found != 0) return;
         }
 
-        if (n.style().id != 0) found = n.style().id;
+        if (n.style().id != 0 && !(controls_only && n.style().hit_only)) found = n.style().id;
     }
 
     static void collect_focusable(const Node& n, std::vector<std::uint64_t>& out) {
-        if (n.style().id != 0) out.push_back(n.style().id);
+        if (n.style().id != 0 && !n.style().hit_only) out.push_back(n.style().id);
         for (const auto& kid : n.children()) collect_focusable(kid, out);
     }
 
     std::uint64_t hovered_ = 0;
     std::uint64_t pressed_ = 0;
     std::uint64_t focused_ = 0;
+    bool          focus_by_key_ = false;
+    bool          press_inside_ = true;
     Vec2          cursor_{};
     Vec2          press_origin_{};
     MouseButton   press_button_ = MouseButton::left;

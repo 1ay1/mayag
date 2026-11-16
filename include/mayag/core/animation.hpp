@@ -73,6 +73,8 @@ struct Spring {
     [[nodiscard]] static constexpr Spring gentle()  { return {120.0f, 22.0f}; }
     [[nodiscard]] static constexpr Spring bouncy()  { return {220.0f, 14.0f}; }
     [[nodiscard]] static constexpr Spring stiff()   { return {500.0f, 42.0f}; }
+
+    friend constexpr bool operator==(Spring, Spring) = default;
 };
 
 // ── the animated value ──────────────────────────────────────────────────

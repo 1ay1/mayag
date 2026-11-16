@@ -170,7 +170,7 @@ int main(int argc, char** argv) {
 
     std::printf("\nmayag present benchmark\n");
     std::printf("  surface     %.0f x %.0f logical @ %.1fx = %.0f x %.0f physical\n",
-                size.x, size.y, static_cast<double>(dpi), px.x, px.y);
+                double(size.x), double(size.y), static_cast<double>(dpi), double(px.x), double(px.y));
     std::printf("  scene       %zu instances in %zu batches\n",
                 scene.size(), scene.batches().size());
     std::printf("  sampling    %d frames after %d warmup\n\n", frames, warmup);

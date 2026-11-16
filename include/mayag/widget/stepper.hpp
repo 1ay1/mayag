@@ -23,7 +23,7 @@ template <ControlContext C>
                 | size(28, 28) | center
                 | bg(c.pressed(pid) && !off ? t.surface_raised
                                             : (hov ? t.surface_raised.fade(0.6f) : t.surface.fade(0.0f)))
-                | border(1, c.focused(pid) ? t.focus_ring : t.border.fade(0.0f))
+                | border(t.stroke(1), c.focused(pid) ? t.focus_ring : t.border.fade(0.0f))
                 | radius(t.radius_small - 2.0f)
                 | cursor(off ? CursorShape::arrow : CursorShape::pointer)
                 | role(a11y::Role::button) | disabled(off)
@@ -31,11 +31,11 @@ template <ControlContext C>
                 | id_of(id, part)).build();
     };
     return h(node(button_part(part_dec, "\u2212", at_min)),
-             text_owned(std::move(value)) | font(t.font_size) | semibold | fg(t.text_primary)
+             text_owned(std::move(value)) | font(t.font_size) | semibold | fg(var::text_primary)
                  | text_align(TextAlign::center) | width(46),
              node(button_part(part_inc, "+", at_max)))
-         | align(Align::center) | pad(2)
-         | bg(t.surface) | border(1, t.border) | radius(t.radius_small);
+         | align(Align::center) | pad(t.spaced(2))
+         | bg(var::surface) | border(t.stroke(1), t.border) | radius(t.radius_small);
 }
 
 }  // namespace mayag::dsl

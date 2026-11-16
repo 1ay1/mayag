@@ -148,6 +148,7 @@ class headless_app {
     /// and draw if anything changed.
     void tick() {
         host_.pump(*cx_);
+        host_.flush_handled(kernel_);
         if (window_.driving_frames()) host_.tick_frame(kernel_, 1.0 / 60.0);
         const auto t = step();
         if (t.model_changed || host_.owes_frame() || window_.driving_frames()) draw();
@@ -182,6 +183,23 @@ class headless_app {
 
     void click(std::string_view name) { window_.click(host_.center_of(name)); tick(); }
     void click(std::uint64_t id)      { window_.click(host_.center_of(id)); tick(); }
+    /// Click the control showing `label`: the innermost NAMED node (an id<>
+    /// or a handler) around the first text equal to it. Tests read like the
+    /// UI: `rt.click_text("Save")`. Returns false (and clicks nothing) when
+    /// no such text is on screen.
+    bool click_text(std::string_view label) {
+        const Node* hit = nullptr;
+        const auto find = [&](const auto& self, const Node& n, const Node* named) -> bool {
+            if (n.style().id != 0 && !n.style().hit_only) named = &n;
+            if (n.kind() == NodeKind::text && n.text() == label) { hit = named ? named : &n; return true; }
+            for (const auto& k : n.children()) if (self(self, k, named)) return true;
+            return false;
+        };
+        if (!find(find, host_.tree(), nullptr) || hit == nullptr) return false;
+        window_.click(hit->frame().center());
+        tick();
+        return true;
+    }
     void type(std::string_view s)     { window_.type(s); tick(); }
     void press_key(Key k, Mods m = {}) { window_.press_key(k, m); tick(); }
 
@@ -190,7 +208,6 @@ class headless_app {
     [[nodiscard]] const model_type& model() const noexcept { return kernel_.model(); }
     [[nodiscard]] platform::Headless& window() noexcept { return window_; }
     [[nodiscard]] host_type& host() noexcept { return host_; }
-    [[nodiscard]] kernel_type& kernel() noexcept { return kernel_; }
     [[nodiscard]] const Interaction& input() const noexcept { return host_.input(); }
     [[nodiscard]] const Node& tree() const noexcept { return host_.tree(); }
     [[nodiscard]] const LatencyStats& latency() const noexcept { return host_.latency(); }
@@ -207,7 +224,7 @@ class headless_app {
     struct context {
         headless_app& app;
         std::size_t emit(const window_events& ev) {
-            return app.kernel_.route(jaal::detail::run::to_kernel_event<event_type>(ev), app.fwd_);
+            return app.kernel_.route(jaal::to_kernel_event<event_type>(ev), app.fwd_);
         }
         void stop(int code) { app.kernel_.stop(code); }
     };
@@ -233,7 +250,7 @@ class headless_app {
     jaal::platform::native_reactor              reactor_;   // before kernel_: it holds the waker
     platform::Headless                          window_;
     host_type                                   host_;
-    jaal::detail::run::forward_host<host_type, event_type> fwd_;
+    jaal::forward_host<host_type, event_type> fwd_;
     kernel_type                                 kernel_;
     std::optional<context>                      cx_;
 };
@@ -295,6 +312,7 @@ class embedded_app {
         for (int guard = 0; guard < 64; ++guard) {
             again_ = false;
             host_.pump(*cx_);
+            host_.flush_handled(kernel_);
             const auto t = kernel_.step(fwd_);
             if (t.quit() || kernel_.quitting()) { finish(t.exit.value_or(0)); break; }
             if (first_ || t.model_changed || host_.owes_frame()) {
@@ -323,7 +341,7 @@ class embedded_app {
         const auto n = kernel_.route(event_type{s}, fwd_);
         if (n == 0 && (s == jaal::sig::interrupt || s == jaal::sig::terminate ||
                        s == jaal::sig::hangup)) {
-            kernel_.stop(jaal::detail::run::exit_code_for(s));
+            kernel_.stop(jaal::exit_code_for(s));
         }
         turn();
     }
@@ -339,7 +357,7 @@ class embedded_app {
     struct context {
         embedded_app& app;
         std::size_t emit(const window_events& ev) {
-            return app.kernel_.route(jaal::detail::run::to_kernel_event<event_type>(ev), app.fwd_);
+            return app.kernel_.route(jaal::to_kernel_event<event_type>(ev), app.fwd_);
         }
         void stop(int code) { app.kernel_.stop(code); }
         // attach() watches fds through this; a foreign loop has none.
@@ -375,7 +393,7 @@ class embedded_app {
 
     loop_hooks                                             hooks_;
     host_type                                              host_;
-    jaal::detail::run::forward_host<host_type, event_type> fwd_;
+    jaal::forward_host<host_type, event_type> fwd_;
     kernel_type                                            kernel_;
     std::optional<context>                                 cx_;
     bool          in_turn_ = false, again_ = false, first_ = true, done_ = false;
@@ -390,8 +408,13 @@ template <Program P, class Driver>
 int run_headless(AppConfig cfg, Driver&& drive) {
     cfg.log_renderer = false;
     headless_app<P> app{std::move(cfg)};
-    drive(app);
-    return 0;
+    // A driver may return its verdict (an int, 0 = pass, or a bool, true =
+    // pass). It used to be dropped, so an example whose self-check printed
+    // FAIL still exited 0 and ctest called it green.
+    using R = std::invoke_result_t<Driver&, headless_app<P>&>;
+    if constexpr (std::same_as<R, bool>) return drive(app) ? 0 : 1;
+    else if constexpr (std::is_integral_v<R>) return static_cast<int>(drive(app)) == 0 ? 0 : 1;
+    else { drive(app); return 0; }
 }
 
 namespace detail {
@@ -453,7 +476,7 @@ int run_on(W& window, AppConfig cfg) {
 
     // Declared after `app`, so they are torn down before it: ^C works again
     // as soon as the program starts shutting down.
-    auto sigs = jaal::platform::native_signals::install(jaal::detail::run::all_signals);
+    auto sigs = jaal::platform::native_signals::install(jaal::all_signals);
     if (sigs) {
         loop.watch_signals(sigs->handle());
         loop.on_signal = [&](int) {

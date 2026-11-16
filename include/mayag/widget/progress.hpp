@@ -15,9 +15,9 @@ namespace mayag::dsl {
 /// two sources of truth, and the loser overflowed its parent.
 [[nodiscard]] constexpr auto progress(const Theme& t, float fraction, float h = 6.0f) {
     return z(box() | width(pct(num::saturate(fraction) * 100.0f)) | height(h)
-                   | bg(t.accent) | radius(h * 0.5f))
+                   | bg(var::accent) | radius(t.capsule(h)))
          | width(pct(100)) | height(h)
-         | bg(t.border) | radius(h * 0.5f) | clip;
+         | bg(var::border) | radius(t.capsule(h)) | clip;
 }
 
 }  // namespace mayag::dsl

@@ -10,6 +10,9 @@
 //   ./mayag_todo --headless   scripted, asserted, for CI
 
 #include "harness.hpp"
+#include <mayag/widget/layout.hpp>
+#include <mayag/widget/text_field.hpp>
+#include <mayag/widget/virtual_list.hpp>
 
 using namespace mayag;
 using namespace mayag::dsl;

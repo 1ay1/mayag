@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <vector>
 
@@ -449,7 +450,7 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
                     float v = static_cast<float>(src.at(sx, sy)) / 255.0f;
                     // Feather the outermost ring by the fractional strength so
                     // sub-pixel bold values interpolate smoothly.
-                    if ((num::abs(dx) == radius || num::abs(dy) == radius) && frac > 0.0f)
+                    if ((std::abs(dx) == radius || std::abs(dy) == radius) && frac > 0.0f)
                         v *= frac;
                     best = num::max(best, v);
                 }

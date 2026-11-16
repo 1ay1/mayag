@@ -7,6 +7,15 @@
 // layout, painting, and rasterisation.
 
 #include "harness.hpp"
+#include <mayag/widget/avatar.hpp>
+#include <mayag/widget/card.hpp>
+#include <mayag/widget/dot.hpp>
+#include <mayag/widget/kbd.hpp>
+#include <mayag/widget/layout.hpp>
+#include <mayag/widget/nav_item.hpp>
+#include <mayag/widget/progress.hpp>
+#include <mayag/widget/toggle.hpp>
+#include <mayag/widget/typography.hpp>
 
 #include <optional>
 

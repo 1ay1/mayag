@@ -113,7 +113,7 @@ int main() {
     const double total    = cpu_side + r_ms + e_ms;  // + software rasterisation
 
     std::printf("  dense screen, 60 cards at %.0fx%.0f, best of 10\n\n",
-                vp.x, vp.y);
+                double(vp.x), double(vp.y));
     const auto row = [&](const char* n, double t) {
         std::printf("    %-8s %7.3f ms  %5.1f%%\n", n, t, 100.0 * t / total);
     };
@@ -163,7 +163,7 @@ int main() {
     // real lever would be a narrower framebuffer format.
     //
     // This check exists to notice if that ever stops being true.
-    const double bytes = static_cast<double>(vp.x) * vp.y * 20.0;
+    const double bytes = static_cast<double>(vp.x) * static_cast<double>(vp.y) * 20.0;
     const double gbs   = bytes / 1e6 / (e_ms / 1000.0) / 1000.0;
     std::printf("    encode moves %.1f MB at %.1f GB/s\n\n", bytes / 1e6, gbs);
     check(gbs > 1.0,

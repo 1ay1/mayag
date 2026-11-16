@@ -38,7 +38,7 @@ template <ControlContext C>
                               : it.tone == T::dim ? t.text_disabled : t.text_secondary;
         return (h(text_owned(it.icon) | font(t.font_size * 0.9f) | fg(it.active ? t.accent : col),
                   text_owned(it.text) | font(t.font_size * 0.88f) | fg(hov ? t.text_primary : col))
-                | gap(5) | align(Align::center) | pad(0, 7) | height(pct(100))
+                | gap(t.spaced(5)) | align(Align::center) | pad(0, t.spaced(7)) | height(pct(100))
                 | bg(hov ? t.surface_raised : it.active ? t.surface_raised.fade(0.6f) : t.surface.fade(0.0f))
                 | pointer_cursor | role(a11y::Role::button) | label(it.text.empty() ? it.icon : it.text)
                 | id_of(id, part)).build();
@@ -47,8 +47,8 @@ template <ControlContext C>
     for (std::size_t i = 0; i < left.size(); ++i) l.push_back(seg(left[i], i));
     for (std::size_t i = 0; i < right.size(); ++i) r.push_back(seg(right[i], 100 + i));
     return (h(h(h_list(std::move(l))) | height(pct(100)), spacer(), h(h_list(std::move(r))) | height(pct(100)))
-            | align(Align::center) | pad(0, 4) | height(26) | width(pct(100))
-            | bg(t.surface) | border(1, t.border)).build();
+            | align(Align::center) | pad(0, t.spaced(4)) | height(26) | width(pct(100))
+            | bg(var::surface) | border(t.stroke(1), t.border)).build();
 }
 
 }  // namespace mayag::dsl

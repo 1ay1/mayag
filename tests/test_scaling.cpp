@@ -14,6 +14,7 @@
 // also tight enough to flake on a loaded CI box.
 
 #include <mayag/mayag.hpp>
+#include <mayag/widget/virtual_list.hpp>
 #include <mayag/backend/tiled.hpp>
 #include <mayag/widget/virtual_list.hpp>
 

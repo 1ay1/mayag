@@ -20,6 +20,7 @@
 // The callback is invoked only for visible indices.
 
 #include "../dsl/dsl.hpp"
+#include "../app/host.hpp"
 #include "../core/scroll_state.hpp"
 #include "../layout/flex.hpp"
 
@@ -109,6 +110,9 @@ struct VisibleRange {
     float row_height = 0.0f;
     if (total > 0) {
         Node probe = build(0);
+        // Resolve theme tokens (padding in var::space units, ...) before
+        // measuring, against the frame's theme when there is one.
+        cascade_static(probe, ctx().theme, scroll.viewport);
         row_height = layout::measure(
             probe, layout::Constraints{num::max(scroll.viewport.x, 1.0f), num::inf},
             measurer).y;

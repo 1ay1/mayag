@@ -19,10 +19,10 @@ template <ControlContext C>
     return h(z(text<"\u2713"> | font(12) | bold | fg(t.on_accent.fade(on ? 1.0f : 0.0f)))
                  | size(18, 18) | center
                  | bg(on ? t.accent : t.surface)
-                 | border(1.5f, detail::edge(t, c.focused(nid), hov, on ? t.accent : t.border_strong))
-                 | radius(5),
-             text_owned(std::string{caption_text}) | font(t.font_size) | fg(t.text_primary))
-         | gap(10) | align(Align::center)
+                 | border(t.stroke(1.5f), detail::edge(t, c.focused(nid), hov, on ? t.accent : t.border_strong))
+                 | radius(t.rounded(5)),
+             text_owned(std::string{caption_text}) | font(t.font_size) | fg(var::text_primary))
+         | gap(t.spaced(10)) | align(Align::center)
          | pointer_cursor
          | role(a11y::Role::checkbox) | checked(on) | label(caption_text)
          | id_of(id);

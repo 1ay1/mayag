@@ -278,11 +278,11 @@ template <ControlContext C>
     };
     // A quarter of a ring centred on (ax, ay): a clip window over one corner
     // of a rounded, bordered square. corner: 0 ╭ (top-left quarter) 1 ╮ 2 ╯ 3 ╰.
-    const auto arc = [&](float ax, float ay, float rr, float th, int corner, Color<Srgb> col) {
-        const float d = 2.0f * rr + th, half = rr + th / 2;
+    const auto arc = [&](float ax, float ay, float rr, float thick, int corner, Color<Srgb> col) {
+        const float d = 2.0f * rr + thick, half = rr + thick / 2;
         const float qx = (corner == 0 || corner == 3) ? ax - half : ax;
         const float qy = (corner == 0 || corner == 1) ? ay - half : ay;
-        Node ring = (box() | size(d, d) | border(th, col) | radius(half) | absolute(ax - half - qx, ay - half - qy)).build();
+        Node ring = (box() | size(d, d) | border(thick, col) | radius(half) | absolute(ax - half - qx, ay - half - qy)).build();
         layers.push_back((z(node(std::move(ring))) | size(half, half) | clip | absolute(qx, qy)).build());
     };
 

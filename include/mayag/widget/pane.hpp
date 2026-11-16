@@ -44,20 +44,20 @@ template <ControlContext C>
         ? (h(node(dot(p.focused ? t.accent : t.text_disabled, 6).build()),
              text_owned(p.title) | font(t.font_size * 0.88f) | fg(p.focused ? t.text_primary : t.text_secondary)
                  | ellipsis | grow() | min_size(0, 0),
-             text_owned(p.broadcast ? "BROADCAST" : "") | font(t.font_size * 0.72f) | bold | tracking(0.6f) | fg(t.danger),
-             text_owned(p.zoomed ? "ZOOMED" : "") | font(t.font_size * 0.72f) | bold | tracking(0.6f) | fg(t.warning),
+             text_owned(p.broadcast ? "BROADCAST" : "") | font(t.font_size * 0.72f) | bold | tracking(0.6f) | fg(var::danger),
+             text_owned(p.zoomed ? "ZOOMED" : "") | font(t.font_size * 0.72f) | bold | tracking(0.6f) | fg(var::warning),
              h(text<"\u00D7"> | font(t.font_size) | fg(c.hovered(part_id(id, pane_part_close)) ? t.text_primary : t.text_disabled))
                  | size(18, 18) | center | pointer_cursor | id_of(id, pane_part_close))
-           | gap(7) | align(Align::center) | pad(0, 8) | height(24) | width(pct(100))
+           | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(8)) | height(24) | width(pct(100))
            | bg(p.focused ? t.surface_raised : t.surface)).build()
         : Node{};
     Node footer = p.exited
         ? (h(text_owned(p.exit_code == 0 ? "[process completed]" : "[process exited with code " + std::to_string(p.exit_code) + "]")
                  | font(t.font_size * 0.88f) | fg(p.exit_code == 0 ? t.text_secondary : t.danger),
              spacer(),
-             h(text<"Restart  \u23CE"> | font(t.font_size * 0.85f) | fg(t.on_accent)) | pad(3, 10) | radius(4)
+             h(text<"Restart  \u23CE"> | font(t.font_size * 0.85f) | fg(var::on_accent)) | pad(t.spaced(3), t.spaced(10)) | radius(t.rounded(4))
                  | bg(c.hovered(part_id(id, part_inc)) ? t.accent_hover : t.accent) | pointer_cursor | id_of(id, part_inc))
-           | align(Align::center) | pad(6, 12) | width(pct(100)) | bg(t.surface)).build()
+           | align(Align::center) | pad(t.spaced(6), t.spaced(12)) | width(pct(100)) | bg(var::surface)).build()
         : Node{};
     return (v(node(std::move(strip)), v(node(std::move(content))) | grow() | width(pct(100)) | min_size(0, 0), node(std::move(footer)))
             | grow() | width(pct(100)) | height(pct(100)) | min_size(0, 0)

@@ -165,7 +165,7 @@ vertex Varyings mayag_vertex(uint vid [[vertex_id]],
     float2 corner = float2((vid << 1) & 2, vid & 2) * 0.5;
 
     // Shadows need the quad grown so the blur is not clipped at the edge.
-    float pad = (I.kind == 6u) ? I.params.x * 3.0 + 2.0 : 1.0;
+    float pad = (I.kind == 6u && (I.flags & 32u) == 0u) ? I.params.x * 3.0 + 2.0 : 1.0;
 
     float2 half_size = I.rect.zw * 0.5 + float2(pad);
     float2 centre    = I.rect.xy + I.rect.zw * 0.5;
@@ -213,9 +213,15 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
         cov = mg_coverage(mg_segment(v.local + (v.axis.xy + v.axis.zw) * 0.5,
                                      v.axis.xy, v.axis.zw, v.params.x), px);
     } else if (v.kind == KIND_SHADOW) {
-        float d = mg_rounded_box(v.local, v.half_size, v.radii);
-        cov = mg_shadow(d, max(v.params.x, 0.01));
-        if ((v.flags & FLAG_INSET) != 0u) cov = 1.0 - cov;
+        if ((v.flags & FLAG_INSET) != 0u) {
+            float clip = mg_coverage(mg_rounded_box(v.local, v.half_size, v.radii), px);
+            float2 inner = max(v.half_size - v.params.y, float2(0.0));
+            float d = mg_rounded_box(v.local - v.params.zw, inner, v.radii);
+            cov = (1.0 - mg_shadow(d, max(v.params.x, 0.01))) * clip;
+        } else {
+            float d = mg_rounded_box(v.local, v.half_size, v.radii);
+            cov = mg_shadow(d, max(v.params.x, 0.01));
+        }
     } else if (v.kind == KIND_GLYPH) {
         float raw = atlas.sample(smp, v.uv).r;
         // A bitmap entry IS coverage; an SDF entry must be thresholded. The

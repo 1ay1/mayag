@@ -16,6 +16,7 @@
 // final rects). Both are pure functions over the tree; nothing global.
 
 #include "../scene/node.hpp"
+#include "../style/cascade.hpp"
 #include "../style/style.hpp"
 #include "text_metrics.hpp"
 
@@ -111,18 +112,51 @@ namespace detail {
             float max_cross = 0.0f;
             int   flow_kids = 0;
 
+            // A wrapping container with a bounded main axis measures as the
+            // LINES arrange() will break it into (same greedy rule): main =
+            // the longest line, cross = every line stacked with the gap.
+            // Measuring it as one line made its frame one line tall while
+            // arrange() placed later lines below it -- outside the parent's
+            // frame, where the hit test (which prunes by frame) never looks,
+            // so every control past the first line was dead to the pointer.
+            const bool wrapping = L.wrap && num::isfinite_or(avail_main, -1.0f) > 0.0f;
+            float line_main = 0.0f, line_cross = 0.0f, lines_cross = 0.0f, longest = 0.0f;
+            int   in_line = 0, lines = 0;
+
             for (const auto& kid : node.children()) {
                 if (!detail::in_flow(kid)) continue;   // out of flow: no contribution
                 const Vec2 ks = measure(kid, child_c, tm);
                 const Insets km = kid.style().layout.margin;
-                sum_main  += detail::main_of(ks + km.total(), ax);
-                max_cross  = num::max(max_cross, detail::cross_of(ks + km.total(), ax));
+                const float km_main = detail::main_of(ks + km.total(), ax);
+                const float km_cross = detail::cross_of(ks + km.total(), ax);
+                sum_main  += km_main;
+                max_cross  = num::max(max_cross, km_cross);
                 ++flow_kids;
+                if (wrapping) {
+                    const float with_gap = (in_line > 0 ? L.gap : 0.0f) + km_main;
+                    if (in_line > 0 && line_main + with_gap > avail_main + 0.01f) {
+                        longest = num::max(longest, line_main);
+                        lines_cross += line_cross + (lines > 0 ? L.gap : 0.0f);
+                        ++lines;
+                        line_main = km_main;
+                        line_cross = km_cross;
+                        in_line = 1;
+                    } else {
+                        line_main += with_gap;
+                        line_cross = num::max(line_cross, km_cross);
+                        ++in_line;
+                    }
+                }
             }
             if (flow_kids > 1) sum_main += L.gap * static_cast<float>(flow_kids - 1);
 
-            (void)avail_main;
-            content = detail::compose(ax, sum_main + pad_main, max_cross + pad_cross);
+            if (wrapping && flow_kids > 0) {
+                longest = num::max(longest, line_main);
+                lines_cross += line_cross + (lines > 0 ? L.gap : 0.0f);
+                content = detail::compose(ax, longest + pad_main, lines_cross + pad_cross);
+            } else {
+                content = detail::compose(ax, sum_main + pad_main, max_cross + pad_cross);
+            }
             break;
         }
     }
@@ -328,6 +362,19 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
                                         detail::ascent_of(kids[it.index], tm, cross_of(it.base, ax)));
         }
 
+        // The cross extent children stretch and align within. One line: the
+        // container's. Wrapped: THIS line's -- its tallest item -- as CSS
+        // `align-content: flex-start` with `align-items: stretch` does.
+        // Stretching every line to the whole container made each card in a
+        // wrapped grid as tall as the grid, pushing line two off the end.
+        float line_avail_cross = avail_cross;
+        if (lines.size() > 1) {
+            line_avail_cross = 0.0f;
+            for (const auto& it : items)
+                line_avail_cross = num::max(line_avail_cross,
+                                            cross_of(it.base, ax) + cross_of(it.margin.total(), ax));
+        }
+
         for (std::size_t k = 0; k < items.size(); ++k) {
             auto& it = items[k];
             Node& kid = kids[it.index];
@@ -344,13 +391,13 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
             const bool cross_is_auto = cross_explicit.is_auto();
 
             if (L.align == Align::stretch && cross_is_auto) {
-                kid_cross = num::max(avail_cross - kid_margin_cross, 0.0f);
+                kid_cross = num::max(line_avail_cross - kid_margin_cross, 0.0f);
             }
             kid_cross = (ax == Axis::horizontal)
                 ? clamp_axis(kid_cross, kl.min_height, kl.max_height, avail_cross)
                 : clamp_axis(kid_cross, kl.min_width,  kl.max_width,  avail_cross);
 
-            const float cross_free = avail_cross - kid_cross - kid_margin_cross;
+            const float cross_free = line_avail_cross - kid_cross - kid_margin_cross;
             // In baseline mode the child's own ascent decides its offset (so
             // its baseline meets the row's); otherwise the usual align rule.
             const float cross_align = do_baseline
@@ -391,6 +438,11 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
 
 inline void arrange(Node& node, const Rect& frame, const TextMeasurer& tm) {
     node.set_frame(frame);
+    // Corner radii are clamped now that the real size is known, so `pill` /
+    // `radius_full` become an actual pill -- for EVERY node, leaves and
+    // scroll viewports included (they return early below). Transitions run
+    // after layout and must see real radii, not 1e9.
+    node.style().corners = node.style().corners.clamp_to(frame.size);
     if (node.children().empty()) return;
 
     // ── scroll viewports ────────────────────────────────────────────────
@@ -447,16 +499,21 @@ inline void arrange(Node& node, const Rect& frame, const TextMeasurer& tm) {
         return;
     }
 
-    // Children live inside the padding box; corner radii are clamped now that
-    // the real size is known, so `pill` becomes an actual pill.
-    node.style().corners = node.style().corners.clamp_to(frame.size);
-
+    // Children live inside the padding box.
     const Rect content = deflate(frame, node.style().layout.padding);
     detail::arrange_children(node, content, tm);
 }
 
 /// Full layout of a root node into a viewport. Returns the root's rect.
+///
+/// A tree that has not been through the cascade yet (a test, a one-shot
+/// render, a tool) is resolved first against the default theme, at rest:
+/// theme tokens (`var::space(2)`, `var::radius_md`, `var::accent`) are
+/// sentinels until then, and laying out a sentinel padding is garbage. The
+/// host cascades with the real theme and interaction state before calling
+/// this, so for an app it is a no-op.
 inline Rect layout_tree(Node& root, Vec2 viewport, const TextMeasurer& tm) {
+    if (!root.cascaded()) cascade_static(root, themes::midnight, viewport);
     const LayoutStyle& L = root.style().layout;
     const Vec2 intrinsic = measure(root, Constraints::tight(viewport), tm);
     const float w = L.width.is_auto()  ? viewport.x : L.width.resolve(viewport.x, intrinsic.x);

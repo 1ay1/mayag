@@ -100,7 +100,7 @@ namespace {
 // Mean absolute difference and the worst offending region, so a failure says
 // WHERE rather than just "they differ".
 void report(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b,
-            int w, int h) {
+            int w, int /*h*/) {
     const std::size_t n = std::min(a.size(), b.size());
     if (n == 0) { std::printf("  (nothing to compare)\n"); return; }
 

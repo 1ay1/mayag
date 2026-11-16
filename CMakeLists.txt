@@ -37,10 +37,22 @@ endif()
 # dump. MSVC's C++26 mode is not there yet, so it falls back to C++23 and the
 # diagnostics degrade to a generic message — everything else works.
 # ─────────────────────────────────────────────────────────────────────────
+# A CMake older than the compiler (CMake 3.31 + AppleClang 21) doesn't list
+# cxx_std_26 even though the compiler takes -std=c++2c; requiring the
+# feature is then a hard configure error. Probe the flag and pass it
+# directly instead (the same treatment jaal gives itself).
+set(MAYAG_STD_FLAG "")
 if(MSVC)
     set(CMAKE_CXX_STANDARD 23)
-else()
+elseif("cxx_std_26" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
     set(CMAKE_CXX_STANDARD 26)
+else()
+    set(CMAKE_CXX_STANDARD 23)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-std=c++2c" MAYAG_HAS_CXX2C)
+    if(MAYAG_HAS_CXX2C)
+        set(MAYAG_STD_FLAG "-std=c++2c")
+    endif()
 endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -129,8 +141,14 @@ target_include_directories(mayag INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
 
-target_compile_features(mayag INTERFACE
-    $<IF:$<CXX_COMPILER_ID:MSVC>,cxx_std_23,cxx_std_26>)
+if(NOT MSVC AND "cxx_std_26" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+    target_compile_features(mayag INTERFACE cxx_std_26)
+else()
+    target_compile_features(mayag INTERFACE cxx_std_23)
+    if(MAYAG_STD_FLAG)
+        target_compile_options(mayag INTERFACE ${MAYAG_STD_FLAG})
+    endif()
+endif()
 
 # jaal (third_party/jaal) is the runtime: the loop, timers, tasks, streams
 # and the OS waiting. mayag is a jaal host that draws.
@@ -184,7 +202,13 @@ else()
         -Wconversion             # float/int narrowing matters in a geometry lib
         -Wno-sign-conversion     # too noisy against std::size_t indexing
         -Wnon-virtual-dtor
-        -Wdouble-promotion)      # accidental float->double in a hot pixel loop
+        -Wdouble-promotion       # accidental float->double in a hot pixel loop
+        # GCC (unlike clang) warns when a DESIGNATED initializer omits a
+        # member that has a default -- `Spec{.key = k, .kind = Kind::choice}`.
+        # Omitting defaulted members is the point of designated init, and
+        # spelling every one out would make each call site restate the
+        # struct. A member WITHOUT a default is still value-initialised.
+        -Wno-missing-field-initializers)
 endif()
 
 if(MAYAG_NATIVE_TUNING AND NOT MSVC)
@@ -335,6 +359,48 @@ if(MAYAG_BUILD_TESTS)
     add_test(NAME mayag_tests COMMAND mayag_tests)
     set_tests_properties(mayag_tests PROPERTIES TIMEOUT 120)
 
+    # The cascade: inheritance, state variants, tokens, transitions. Mostly
+    # pure style resolution, plus one live headless app; never a display.
+    add_executable(mayag_cascade_tests tests/test_cascade.cpp)
+    target_link_libraries(mayag_cascade_tests PRIVATE mayag)
+    target_compile_options(mayag_cascade_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_cascade_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
+    add_test(NAME mayag_cascade_tests COMMAND mayag_cascade_tests)
+
+    # The widget boundary (mayag.hpp includes no widget; nothing outside
+    # widget/ includes one; widget/all.hpp is complete) and the DSL's
+    # dynamic children.
+    add_executable(mayag_widget_header_tests tests/test_widget_headers.cpp)
+    target_link_libraries(mayag_widget_header_tests PRIVATE mayag)
+    target_compile_options(mayag_widget_header_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_widget_header_tests PRIVATE MAYAG_PLATFORM_HEADLESS
+        MAYAG_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME mayag_widget_header_tests COMMAND mayag_widget_header_tests)
+
+    # Inline event handlers (on_click, on_slide, on_enter ...) through the
+    # real host and kernel, headless.
+    add_executable(mayag_handler_tests tests/test_handlers.cpp)
+    target_link_libraries(mayag_handler_tests PRIVATE mayag)
+    target_compile_options(mayag_handler_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_handler_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
+    add_test(NAME mayag_handler_tests COMMAND mayag_handler_tests)
+
+    # Deterministic simulation: the real host + kernel on jaal's seeded
+    # world (simulated time, seeded task latencies, fault injection).
+    add_executable(mayag_simulate_tests tests/test_simulate.cpp)
+    target_link_libraries(mayag_simulate_tests PRIVATE mayag)
+    target_compile_options(mayag_simulate_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_simulate_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
+    add_test(NAME mayag_simulate_tests COMMAND mayag_simulate_tests)
+
+    # Themes: numeric tokens, derive/lerp/validate, widget sheets, subtree
+    # themes, theme motion, and perf budgets on the hot paths.
+    add_executable(mayag_theme_tests tests/test_theme.cpp)
+    target_link_libraries(mayag_theme_tests PRIVATE mayag)
+    target_compile_options(mayag_theme_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_theme_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
+    add_test(NAME mayag_theme_tests COMMAND mayag_theme_tests)
+
     # The window host on jaal, driven through the headless platform. It is the
     # same host run<P>() uses on a real window.
     add_executable(mayag_app_tests tests/test_app.cpp)
@@ -459,10 +525,46 @@ if(MAYAG_BUILD_TESTS)
     add_test(NAME mayag_embedded_tests COMMAND mayag_embedded_tests)
 
     # Layering: apps talk to mayag only. jaal is mayag's runtime, never an
-    # app's dependency, so no example may name it.
+    # app's dependency, so no example (and no test, outside comments) may name
+    # it. Every runtime concept an app needs has a mayag name (Cmd, Sub,
+    # Sink, Shared, TaskKey, Signal, Unlocked, CoOwned, Guarded, Effect,
+    # MAYAG_SENDABLE), so there is never a reason to.
     add_test(NAME mayag_examples_use_only_mayag
              COMMAND ${CMAKE_COMMAND} -E env sh -c
                      "! grep -rnE 'jaal' '${CMAKE_CURRENT_SOURCE_DIR}/examples'")
+    add_test(NAME mayag_tests_use_only_mayag
+             COMMAND ${CMAKE_COMMAND} -E env sh -c
+                     "! sed 's|//.*||' '${CMAKE_CURRENT_SOURCE_DIR}'/tests/*.cpp | grep -nE 'jaal(::|/)'")
+
+    # ... and mayag talks to jaal only through jaal's PUBLIC API: no
+    # detail:: namespaces, no kernel keys (pool_access, cap_access), no
+    # minted capabilities (thread_root). If mayag needs something jaal keeps
+    # private, the fix is a public API in jaal, not a reach past it.
+    add_test(NAME mayag_uses_jaal_public_api
+             COMMAND ${CMAKE_COMMAND} -E env sh -c
+                     "! find '${CMAKE_CURRENT_SOURCE_DIR}/include/mayag' -name '*.hpp' -exec sed 's|//.*||' {} + | grep -nE 'jaal::detail|pool_access|cap_access|thread_root|sink_access|loop_key'")
+
+    # Runtime primitives: jaal's own concurrency banlist, pointed at mayag.
+    # Raw threads, mutexes, atomics, thread_locals, futures and const_cast
+    # are allowed only where tests/lint/allow_include.txt says, with a reason
+    # a human signed; apps (examples/) get an EMPTY allowlist. The second
+    # half fails when a grant is no longer used, so the list cannot rot.
+    set(_MAYAG_BANLIST ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/lint/banlist.cmake)
+    set(_MAYAG_PRUNE   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/lint/prune_allowlist.cmake)
+    if(EXISTS ${_MAYAG_BANLIST})
+        add_test(NAME mayag_runtime_banlist
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_include.txt
+                         -P ${_MAYAG_BANLIST})
+        add_test(NAME mayag_runtime_allowlist_tight
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_include.txt
+                         -P ${_MAYAG_PRUNE})
+        add_test(NAME mayag_examples_banlist
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/examples
+                         -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_examples.txt
+                         -P ${_MAYAG_BANLIST})
+    endif()
 
     # The same test under ThreadSanitizer. Not part of the default suite --
     # TSan is ~10x slower and needs a compatible toolchain -- but it is the
@@ -515,7 +617,7 @@ if(MAYAG_BUILD_TESTS)
     # SAME Program the windowed build runs, so a green test here is evidence
     # about the shipped app rather than about a parallel harness.
     if(MAYAG_BUILD_EXAMPLES)
-        foreach(demo counter gallery dashboard typography todo reactive aurora player terminal_settings editor terminal_widgets agent_terminal terminal)
+        foreach(demo counter gallery dashboard typography todo reactive aurora player terminal_settings editor terminal_widgets agent_terminal terminal styled stylebook studio)
             if(TARGET mayag_${demo})
                 add_test(NAME mayag_${demo}_headless
                          COMMAND mayag_${demo} --headless)
@@ -534,7 +636,11 @@ if(MAYAG_BUILD_TESTS)
         srgb_interp_without_gradient
         duplicate_width
         size_then_height
-        dangling_text)
+        dangling_text
+        text_prop_on_empty_box
+        variant_border_color_without_border
+        class_member_checked
+        negate_compound_selector)
 
     foreach(case ${MAYAG_MUST_FAIL})
         add_executable(mayag_nc_${case} EXCLUDE_FROM_ALL tests/negative/${case}.cpp)

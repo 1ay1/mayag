@@ -1252,6 +1252,12 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
         }
     }
 
+  public:
+    /// The texture slot this renderer's glyph quads sample (backends bind
+    /// the atlas there).
+    [[nodiscard]] std::uint32_t atlas_slot() const noexcept { return slot_; }
+
+  private:
     FontStack*    stack_;
     std::uint32_t slot_;
 };

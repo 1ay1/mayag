@@ -31,19 +31,19 @@ inline void tab_peek(const C& c, std::string_view id, std::uint64_t anchor, cons
     const Color<Srgb> status_col = tb.running ? hue : tb.last_exit == 0 ? t.success : tb.last_exit > 0 ? t.danger : t.text_disabled;
     c.overlay(Overlay{
         .content = (v(h(node(tab_icon(t, tb, time, true, 28.0f)),
-                        v(text_owned(tb.title) | font(t.font_size) | semibold | fg(t.text_primary) | ellipsis,
+                        v(text_owned(tb.title) | font(t.font_size) | semibold | fg(var::text_primary) | ellipsis,
                           text_owned(!tb.host.empty() ? tb.host + "  \u00B7  " + tb.cwd : tb.cwd) | font(t.font_size * 0.8f)
                               | fg(tb.host_danger ? t.danger : t.text_secondary) | ellipsis)
-                            | gap(2) | grow() | min_size(0, 0),
+                            | gap(t.spaced(2)) | grow() | min_size(0, 0),
                         text_owned(status) | font(t.font_size * 0.78f) | fg(status_col))
-                        | gap(10) | align(Align::center) | pad(10, 12) | width(pct(100)),
+                        | gap(t.spaced(10)) | align(Align::center) | pad(t.spaced(10), t.spaced(12)) | width(pct(100)),
                       v(node(std::move(preview))) | height(132) | width(pct(100)) | clip
-                          | border(1, t.border) | radius(8) | margin(0, 10),
-                      h(text_owned(std::string{footer}) | font(t.font_size * 0.75f) | fg(t.text_disabled) | ellipsis | grow() | min_size(0, 0),
+                          | border(t.stroke(1), t.border) | radius(t.rounded(8)) | margin(0, 10),
+                      h(text_owned(std::string{footer}) | font(t.font_size * 0.75f) | fg(var::text_disabled) | ellipsis | grow() | min_size(0, 0),
                         node(tb.activity.empty() ? Node{} : activity_sparkline(tb.activity, hue, 12.0f, 28)))
-                        | gap(8) | align(Align::center) | pad(8, 12) | width(pct(100)))
-                    | width(width_px) | bg(t.overlay) | border(1, mix(t.border_strong, hue, 0.25f))
-                    | radius(12) | clip | elevation(18)
+                        | gap(t.spaced(8)) | align(Align::center) | pad(t.spaced(8), t.spaced(12)) | width(pct(100)))
+                    | width(width_px) | bg(var::overlay) | border(t.stroke(1), mix(t.border_strong, hue, 0.25f))
+                    | radius(t.rounded(12)) | clip | elevation(t.lift(18))
                     | role(a11y::Role::dialog) | label("tab preview")).build(),
         .id = part_id(id, part_menu),
         .anchor_id = anchor,

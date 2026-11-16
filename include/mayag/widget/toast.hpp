@@ -30,14 +30,14 @@ inline void toasts(const C& c, std::string_view id, const std::vector<Toast>& it
         using K = Toast::Kind;
         const Color<Srgb> tone = k.kind == K::error ? t.danger : k.kind == K::warning ? t.warning
                                : k.kind == K::success ? t.success : t.info;
-        cards.push_back((h(box() | size(3, 34) | bg(tone) | radius(2),
-                           v(text_owned(k.title) | font(t.font_size) | semibold | fg(t.text_primary) | ellipsis,
-                             text_owned(k.body) | font(t.font_size * 0.88f) | fg(t.text_secondary) | wrap_text)
-                               | gap(3) | grow() | min_size(0, 0),
+        cards.push_back((h(box() | size(3, 34) | bg(tone) | radius(t.rounded(2)),
+                           v(text_owned(k.title) | font(t.font_size) | semibold | fg(var::text_primary) | ellipsis,
+                             text_owned(k.body) | font(t.font_size * 0.88f) | fg(var::text_secondary) | wrap_text)
+                               | gap(t.spaced(3)) | grow() | min_size(0, 0),
                            text_owned(k.action.empty() ? std::string{"\u00D7"} : k.action) | font(t.font_size * 0.9f)
                                | fg(k.action.empty() ? t.text_disabled : t.accent))
-                         | gap(10) | align(Align::center) | pad(10, 12) | width(340)
-                         | bg(t.overlay) | border(1, t.border_strong) | radius(t.radius_small) | elevation(12)
+                         | gap(t.spaced(10)) | align(Align::center) | pad(t.spaced(10), t.spaced(12)) | width(340)
+                         | bg(var::overlay) | border(t.stroke(1), t.border_strong) | radius(t.radius_small) | elevation(t.lift(12))
                          | pointer_cursor | id_of(id, i)).build());
     }
     const float h_est = static_cast<float>(items.size()) * 66.0f;

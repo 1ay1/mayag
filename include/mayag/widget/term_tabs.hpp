@@ -61,40 +61,40 @@ template <ControlContext C>
             status = (text_owned(agent_glyph(tb.agent.state, time)) | font(t.font_size * 0.85f) | bold
                       | fg(agent_tone(t, tb.agent.state))).build();
         else if (tb.bell) status = (text<"\U0001F514"> | font(t.font_size * 0.8f)).build();
-        else if (tb.running) status = (text<"\u25CF"> | font(t.font_size * 0.7f) | fg(t.info)).build();
-        else if (tb.exit_code > 0) status = (text<"\u2716"> | font(t.font_size * 0.75f) | fg(t.danger)).build();
-        else if (tb.activity && !on) status = (text<"\u25CF"> | font(t.font_size * 0.7f) | fg(t.warning)).build();
+        else if (tb.running) status = (text<"\u25CF"> | font(t.font_size * 0.7f) | fg(var::info)).build();
+        else if (tb.exit_code > 0) status = (text<"\u2716"> | font(t.font_size * 0.75f) | fg(var::danger)).build();
+        else if (tb.activity && !on) status = (text<"\u25CF"> | font(t.font_size * 0.7f) | fg(var::warning)).build();
         else status = (text_owned(i < 9 ? std::string{"\u2318"} + std::to_string(i + 1) : std::string{})
-                       | font(t.font_size * 0.78f) | fg(t.text_disabled)).build();
+                       | font(t.font_size * 0.78f) | fg(var::text_disabled)).build();
         Node close = hov
             ? (h(text<"\u00D7"> | font(t.font_size) | fg(c.hovered(cid) ? t.text_primary : t.text_secondary))
-               | size(18, 18) | center | radius(4) | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
+               | size(18, 18) | center | radius(t.rounded(4)) | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
                | pointer_cursor | label("close tab") | id_of(id, term_part_close + i)).build()
             : (box() | size(18, 18)).build();
         const std::string label_text = tb.process.empty() || tb.title.find(tb.process) != std::string::npos
                                            ? tb.title : tb.process + " \u2014 " + tb.title;
         Node bar = tb.progress >= 0
             ? (z(box() | width(pct(static_cast<float>(tb.progress))) | height(2) | bg(tb.progress_error ? t.danger : t.info))
-               | width(pct(100)) | height(2) | bg(t.border) | absolute(0, 32)).build()
+               | width(pct(100)) | height(2) | bg(var::border) | absolute(0, 32)).build()
             : Node{};
         // An ssh tab is coloured by its environment: a prod tab is red, always.
         const bool remote = tb.host.has_value();
         const Color<Srgb> stripe = remote && tb.host->env != SshHost::Env::none ? env_tone(t, tb.host->env)
                                  : wants_attention(tb.agent.state) ? agent_tone(t, tb.agent.state) : accent;
-        const bool show_stripe = on || tb.color || remote && tb.host->env != SshHost::Env::none || wants_attention(tb.agent.state);
+        const bool show_stripe = on || tb.color || (remote && tb.host->env != SshHost::Env::none) || wants_attention(tb.agent.state);
         items.push_back((z(h(node(std::move(status)) ,
                              node(remote ? host_badge(c, *tb.host, true) : Node{}),
                              text_owned(label_text) | font(t.font_size) | fg(on ? t.text_primary : t.text_secondary)
                                  | ellipsis | grow() | min_size(0, 0),
                              text_owned(tb.readonly ? "\U0001F512" : "") | font(t.font_size * 0.8f),
                              node(std::move(close)))
-                               | gap(8) | align(Align::center) | pad(0, 8, 0, 12) | width(pct(100)) | height(pct(100)),
+                               | gap(t.spaced(8)) | align(Align::center) | pad(0, t.spaced(8), 0, t.spaced(12)) | width(pct(100)) | height(pct(100)),
                            box() | size(1e4f, 2) | bg(show_stripe ? (on ? stripe : stripe.fade(0.6f)) : t.surface.fade(0.0f)) | absolute(0, 0),
                            node(std::move(bar)))
                          | width(remote ? 240.0f : 200.0f) | height(34) | shrink() | min_size(90, 34)
                          | bg(on ? t.background : wants_attention(tb.agent.state) ? t.tint(agent_tone(t, tb.agent.state), 0.08f)
                                  : hov ? mix(t.surface, t.background, 0.5f) : t.surface)
-                         | border(1, t.border) | clip
+                         | border(t.stroke(1), t.border) | clip
                          | role(a11y::Role::tab) | selected(on) | label(label_text)
                          | id_of(id, i)).build());
     }
@@ -105,7 +105,7 @@ template <ControlContext C>
     items.push_back((h(text<"\u2304"> | font(t.font_size) | fg(c.hovered(menu) ? t.text_primary : t.text_disabled))
                      | size(22, 34) | center | pointer_cursor | label("new tab menu") | id_of(id, part_menu)).build());
     return (h(h_list(std::move(items))) | height(34) | width(pct(100)) | align(Align::center) | clip
-            | bg(t.surface)).build();
+            | bg(var::surface)).build();
 }
 
 }  // namespace mayag::dsl

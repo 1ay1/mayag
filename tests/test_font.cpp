@@ -16,6 +16,7 @@
 //   8. integration      — text actually reaches the framebuffer
 
 #include <mayag/mayag.hpp>
+#include <mayag/widget/text_field.hpp>
 
 #include <fstream>
 
@@ -41,7 +42,7 @@ void near(float got, float want, float eps, const std::string& what) {
     ++checks;
     if (num::abs(got - want) > eps) {
         ++failures;
-        std::printf("  FAIL  %s: got %.4f want %.4f\n", what.c_str(), got, want);
+        std::printf("  FAIL  %s: got %.4f want %.4f\n", what.c_str(), static_cast<double>(got), static_cast<double>(want));
     }
 }
 void section(const char* n) { std::printf("\n%s\n", n); }
@@ -855,10 +856,10 @@ void test_italic() {
 
     const std::uint16_t g = vf->glyph_for('H');
     // Upright.
-    { typo::ShapeParams p; p.size_px = 100.0f; stack.shape("H", p); }
+    { typo::ShapeParams p; p.size_px = 100.0f; (void)stack.shape("H", p); }
     const Rect up = vf->outline(g).control_bounds();
     // Italic.
-    { typo::ShapeParams p; p.size_px = 100.0f; p.italic = true; stack.shape("H", p); }
+    { typo::ShapeParams p; p.size_px = 100.0f; p.italic = true; (void)stack.shape("H", p); }
     const Rect it = vf->outline(g).control_bounds();
 
     check(up.size.x > 0.0f && it.size.x > 0.0f, "glyph has outline in both states");
@@ -921,17 +922,17 @@ void test_synthetic_bold() {
     const typo::CachedGlyph* reg = stack.glyph(0, g, 32.0f, 400.0f, {}, false);
     if (reg == nullptr) { check(false, "regular glyph rasterises"); return; }
     const Vec2 reg_size = reg->size;
-    const typo::CachedGlyph* bold = stack.glyph(0, g, 32.0f, 700.0f, {}, false);
-    if (bold == nullptr) { check(false, "bold glyph rasterises"); return; }
+    const typo::CachedGlyph* heavy = stack.glyph(0, g, 32.0f, 700.0f, {}, false);
+    if (heavy == nullptr) { check(false, "heavy glyph rasterises"); return; }
 
-    check(bold->size.x > reg_size.x, "synthetic bold thickens the glyph (wider)");
-    check(bold->size.y >= reg_size.y, "synthetic bold does not shrink the glyph");
+    check(heavy->size.x > reg_size.x, "synthetic heavy thickens the glyph (wider)");
+    check(heavy->size.y >= reg_size.y, "synthetic heavy does not shrink the glyph");
 
     // A weight the face CAN'T reach embolds; a normal weight does not.
     const typo::CachedGlyph* reg2 = stack.glyph(0, g, 32.0f, 400.0f, {}, false);
     check(reg2 != nullptr, "regular weight still caches its own slim glyph");
 
-    // SDF path (large text) must embolden too, so bold looks the same on both
+    // SDF path (large text) must embolden too, so heavy looks the same on both
     // sides of the SDF threshold.
     typo::FontConfig sdf_cfg; sdf_cfg.mode = typo::RenderMode::sdf;
     typo::FontStack sdf{sdf_cfg};
@@ -941,9 +942,9 @@ void test_synthetic_bold() {
     const Vec2 sreg_size = sreg->size;
     const bool sreg_is_sdf = sreg->is_sdf;
     const typo::CachedGlyph* sbold = sdf.glyph(0, g, 64.0f, 700.0f, {}, false);
-    if (sbold == nullptr) { check(false, "sdf bold rasterises"); return; }
+    if (sbold == nullptr) { check(false, "sdf heavy rasterises"); return; }
     check(sreg_is_sdf && sbold->is_sdf, "both are distance-field glyphs");
-    check(sbold->size.x > sreg_size.x, "synthetic bold thickens the SDF field too");
+    check(sbold->size.x > sreg_size.x, "synthetic heavy thickens the SDF field too");
 }
 
 /// Ellipsis truncation — the DEFAULT overflow. A label too long for its box is
@@ -1087,10 +1088,31 @@ void test_justify() {
 void test_ligatures() {
     section("ligatures (GSUB)");
 
+    // A face whose GSUB really ligates Latin f-ligatures. `has_ligatures()`
+    // only says a liga feature exists; many faces use it for other scripts or
+    // contextual forms, and the first such face on a system proved nothing.
+    // Selected by behaviour; if ligature faces exist but NONE folds fi/fl/ff,
+    // that is an engine bug and the check below fails.
     std::shared_ptr<typo::Face> lf;
+    bool any_liga = false;
     for (const auto& e : typo::system::Database::instance().entries()) {
         auto f = typo::Face::from_file(e.path, e.face_index);
-        if (f && f->has_ligatures() && f->has_glyph(U'f') && f->has_glyph(U'i')) { lf = f; break; }
+        if (!(f && f->has_ligatures() && f->has_glyph(U'f') && f->has_glyph(U'i'))) continue;
+        any_liga = true;
+        typo::FontStack probe;
+        probe.add(f);
+        typo::ShapeParams p; p.size_px = 32.0f;
+        bool folds = false;
+        for (const char* w : {"fi", "fl", "ff"}) {
+            p.ligatures = false; const auto off = probe.shape(w, p).glyphs.size();
+            p.ligatures = true;  const auto on  = probe.shape(w, p).glyphs.size();
+            folds = folds || on < off;
+        }
+        if (folds) { lf = f; break; }
+    }
+    if (!lf && any_liga) {
+        check(false, "at least one fi/fl/ffi ligature folds into fewer glyphs (no installed face ligates)");
+        return;
     }
     if (!lf) {
         check(true, "no ligature font installed — skipping (not a failure)");
@@ -1268,10 +1290,17 @@ void test_variations() {
     for (const char* p : {"/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf"}) {
         if (std::filesystem::exists(p)) { vf = typo::Face::from_file(p); break; }
     }
+    // A PROPORTIONAL face: the sweep below asserts that heavier weights set
+    // wider, which a monospace variable font (SF Mono, the first variable
+    // face on macOS) correctly never does -- every weight keeps one advance.
+    const auto proportional = [](const typo::Face& f) {
+        const auto gi = f.glyph_for(U'i'), gm = f.glyph_for(U'M');
+        return gi != 0 && gm != 0 && f.advance(gi, 100.0f) != f.advance(gm, 100.0f);
+    };
     if (!vf || !vf->is_variable()) {
         for (const auto& e : typo::system::Database::instance().entries()) {
             auto f = typo::Face::from_file(e.path, e.face_index);
-            if (f && f->is_variable() && f->has_glyph(U'H')) { vf = f; break; }
+            if (f && f->is_variable() && f->has_glyph(U'H') && proportional(*f)) { vf = f; break; }
         }
     }
     if (!vf || !vf->is_variable()) {

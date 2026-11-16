@@ -536,12 +536,12 @@ inline void paint_glyph(V1& s, std::size_t off, int depth) {
     } else if (fmt == 6 || fmt == 7) {       // PaintRadialGradient
         Extend ext; const std::uint32_t clo = be24(d, spoff + 1);
         auto stops = parse_color_line(d, spoff + clo, s.ctx, ext);
-        const float cx0 = be16s(d, spoff + 4),  cy0 = be16s(d, spoff + 6);
+        // (c0 = spoff+4, +6) is not used by the c1-distance approximation below.
         const float r0  = be16s(d, spoff + 8);
         const float cx1 = be16s(d, spoff + 10), cy1 = be16s(d, spoff + 12);
         const float r1  = be16s(d, spoff + 14);
         const V1* sp = &s;
-        fn = [stops, ext, cx0, cy0, r0, cx1, cy1, r1, sp](float px, float py) {
+        fn = [stops, ext, r0, cx1, cy1, r1, sp](float px, float py) {
             const Vec2 f = sp->px_to_font(px, py);
             // Approximate two-circle radial as distance from c1 remapped by
             // the radii (exact for the common concentric r0=0 case).

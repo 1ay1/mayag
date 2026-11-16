@@ -1285,5 +1285,6 @@ int main(int argc, char** argv) {
         }
 
         std::printf("%s\n", fails == 0 ? "PASS" : "FAIL");
+        return fails;
     });
 }

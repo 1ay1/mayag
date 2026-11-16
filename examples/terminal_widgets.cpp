@@ -16,6 +16,17 @@
 // link_tooltip, quick-select hint labels.
 
 #include "harness.hpp"
+#include <mayag/widget/command_block.hpp>
+#include <mayag/widget/confirm_dialog.hpp>
+#include <mayag/widget/context_menu.hpp>
+#include <mayag/widget/find_bar.hpp>
+#include <mayag/widget/link_tooltip.hpp>
+#include <mayag/widget/pane.hpp>
+#include <mayag/widget/resize_hud.hpp>
+#include <mayag/widget/scrollback_bar.hpp>
+#include <mayag/widget/term_search.hpp>
+#include <mayag/widget/term_tabs.hpp>
+#include <mayag/widget/terminal_view.hpp>
 
 #include <array>
 

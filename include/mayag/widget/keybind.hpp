@@ -84,24 +84,24 @@ template <ControlContext C>
     std::vector<Node> caps_;
     if (recording) {
         caps_.push_back((text<"Press a shortcut\u2026"> | font(t.font_size * 0.9f)
-                         | fg(t.accent)).build());
+                         | fg(var::accent)).build());
     } else if (ch.empty()) {
         caps_.push_back((text<"Unassigned"> | font(t.font_size * 0.9f) | italic
-                         | fg(t.text_disabled)).build());
+                         | fg(var::text_disabled)).build());
     } else {
         for (auto& cap : chord_caps(ch)) {
             caps_.push_back((h(text_owned(std::move(cap)) | font(t.font_size * 0.85f)
-                                 | semibold | fg(t.text_primary))
-                             | pad(2, 7)
-                             | bg(t.surface_raised) | border(1, t.border_strong)
-                             | radius(4)).build());
+                                 | semibold | fg(var::text_primary))
+                             | pad(t.spaced(2), t.spaced(7))
+                             | bg(var::surface_raised) | border(t.stroke(1), t.border_strong)
+                             | radius(t.rounded(4))).build());
         }
     }
     return h(h_list(std::move(caps_), 4.0f))
          | align(Align::center) | justify(Justify::end)
-         | pad(5, 8) | min_size(150, 32)
+         | pad(t.spaced(5), t.spaced(8)) | min_size(150, 32)
          | bg(recording ? t.accent.fade(0.12f) : (hov ? t.surface_raised.fade(0.5f) : t.surface.fade(0.0f)))
-         | border(1, recording ? t.accent
+         | border(t.stroke(1), recording ? t.accent
                                : conflict ? t.danger
                                : detail::edge(t, c.focused(pid), hov, t.border.fade(0.0f)))
          | radius(t.radius_small)

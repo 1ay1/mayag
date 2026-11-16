@@ -47,7 +47,7 @@ template <ControlContext C>
         const bool show_x = hov || (on && !tb.dirty);
         Node close = show_x
             ? (h(text<"\u00D7"> | font(t.font_size * 1.05f) | fg(c.hovered(cid) ? t.text_primary : t.text_secondary))
-               | size(18, 18) | center | radius(4)
+               | size(18, 18) | center | radius(t.rounded(4))
                | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
                | pointer_cursor | label("close tab") | id_of(id, part_close + i)).build()
             : tb.dirty ? (h(node(dot(t.text_secondary, 7).build())) | size(18, 18) | center).build()
@@ -59,19 +59,19 @@ template <ControlContext C>
         if (tb.errors > 0) tn.style().text.color = t.danger;
         items.push_back((h(node(file_icon(t, tb.title, t.font_size).build()),
                            node(std::move(tn)),
-                           text_owned(tb.detail) | font(t.font_size * 0.85f) | fg(t.text_disabled) | ellipsis,
+                           text_owned(tb.detail) | font(t.font_size * 0.85f) | fg(var::text_disabled) | ellipsis,
                            node(std::move(close)))
-                         | gap(7) | align(Align::center) | pad(0, 6, 0, 12) | height(pct(100)) | max_size(260, 1e6f)
+                         | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(6), 0, t.spaced(12)) | height(pct(100)) | max_size(260, 1e6f)
                          | bg(on ? t.background : (hov ? mix(t.surface, t.background, 0.5f) : t.surface))
                          | role(a11y::Role::tab) | selected(on) | label(tb.title)
                          | id_of(id, i)).build());
         // Hairline separators; the active tab merges into the editor below.
-        items.push_back((box() | size(1, 34) | bg(t.border)).build());
+        items.push_back((box() | size(1, 34) | bg(var::border)).build());
     }
     return (h(h(h_list(std::move(items))) | grow() | min_size(0, 0) | clip,
               node(std::move(trailing)))
             | height(34) | width(pct(100)) | align(Align::center)
-            | bg(t.surface) | border(1, t.border)).build();
+            | bg(var::surface) | border(t.stroke(1), t.border)).build();
 }
 
 }  // namespace mayag::dsl

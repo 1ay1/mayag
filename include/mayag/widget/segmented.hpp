@@ -25,10 +25,10 @@ template <ControlContext C>
                             | font(t.font_size * 0.92f)
                             | (on ? semibold : weight(FontWeight::regular))
                             | fg(on ? t.text_primary : hov ? t.text_primary : t.text_secondary))
-                        | pad(5, 12) | center
+                        | pad(t.spaced(5), t.spaced(12)) | center
                         | bg(on ? t.surface_raised : (hov ? t.surface_raised.fade(0.45f)
                                                           : t.surface_raised.fade(0.0f)))
-                        | border(1, c.focused(pid) ? t.focus_ring
+                        | border(t.stroke(1), c.focused(pid) ? t.focus_ring
                                                    : (on ? t.border : t.border.fade(0.0f)))
                         | radius(t.radius_small - 2.0f)
                         | elevation(on ? 1.0f : 0.0f)
@@ -37,9 +37,9 @@ template <ControlContext C>
                         | id_of(id, i)).build());
     }
     return h(h_list(std::move(segs), 2.0f))
-         | pad(3)
-         | bg(t.surface)
-         | border(1, t.border)
+         | pad(t.spaced(3))
+         | bg(var::surface)
+         | border(t.stroke(1), t.border)
          | radius(t.radius_small)
          | role(a11y::Role::group) | label(id);
 }

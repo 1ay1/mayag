@@ -21,15 +21,15 @@ template <ControlContext C>
         const auto pid = part_id(id, i);
         const bool on  = static_cast<int>(i) == chosen;
         const bool hov = c.hovered(pid);
-        rows.push_back((h(z(box() | size(8, 8) | bg(t.on_accent.fade(on ? 1.0f : 0.0f)) | radius(4))
+        rows.push_back((h(z(box() | size(8, 8) | bg(t.on_accent.fade(on ? 1.0f : 0.0f)) | radius(t.rounded(4)))
                               | size(18, 18) | center
                               | bg(on ? t.accent : t.surface)
-                              | border(1.5f, detail::edge(t, c.focused(pid), hov,
+                              | border(t.stroke(1.5f), detail::edge(t, c.focused(pid), hov,
                                                           on ? t.accent : t.border_strong))
-                              | radius(9),
+                              | radius(t.rounded(9)),
                             text_owned(std::string{options[i]}) | font(t.font_size)
-                              | fg(t.text_primary))
-                        | gap(10) | align(Align::center)
+                              | fg(var::text_primary))
+                        | gap(t.spaced(10)) | align(Align::center)
                         | pointer_cursor
                         | role(a11y::Role::radio) | checked(on) | label(options[i])
                         | id_of(id, i)).build());

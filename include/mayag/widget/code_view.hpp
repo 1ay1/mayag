@@ -158,6 +158,7 @@ template <class C>
 template <ControlContext C>
 [[nodiscard]] inline Node code_view(const C& c, std::string_view id, const editor::EditorState& ed,
                                     const CodeTheme& th, const CodeViewOptions& o = {}) {
+    const Theme& t = c.theme;   // geometry follows the theme's knobs (t.rounded / t.stroke)
     using namespace editor;
     const float fs = o.font_size;
     const float lh = std::round(fs * o.line_height);
@@ -258,7 +259,7 @@ template <ControlContext C>
                 const int vr = vrow(p.line);
                 if (vr < first || vr >= last || ed.hidden(p.line)) continue;
                 const float x = col_x(p.line, p.col);
-                layers.push_back((box() | size(cw, lh - 2) | bg(th.bracket) | border(1, th.indent_guide_active) | radius(2)
+                layers.push_back((box() | size(cw, lh - 2) | bg(th.bracket) | border(t.stroke(1), th.indent_guide_active) | radius(t.rounded(2))
                                   | absolute(x, row_y(vr) + 1)).build());
             }
         }
@@ -298,9 +299,9 @@ template <ControlContext C>
         std::uint32_t at = 0;
         const auto push_run = [&](std::uint32_t a, std::uint32_t b, Color<Srgb> col_, bool italic_ = false) {
             if (b <= a) return;
-            const std::string t = detail::expand_tabs(std::string_view{s}.substr(a, b - a), col, ed.tab_width, o.show_whitespace);
+            const std::string seg = detail::expand_tabs(std::string_view{s}.substr(a, b - a), col, ed.tab_width, o.show_whitespace);
             col = ed.display_col(l, static_cast<int>(b));
-            Node n = (text_owned(t) | font(fs) | fg(col_) | no_ligatures | clip_text).build();
+            Node n = (text_owned(seg) | font(fs) | fg(col_) | no_ligatures | clip_text).build();
             if (italic_) n.style().text.italic = true;
             runs.push_back(std::move(n));
         };
@@ -313,7 +314,7 @@ template <ControlContext C>
         if (ed.folds.contains(l)) {
             const int hidden_n = ed.fold_end(l).value_or(l) - l;
             runs.push_back((h(text_owned(" \u22EF " + std::to_string(hidden_n) + " lines ") | font(fs * 0.85f) | fg(th.fold_marker))
-                            | bg(th.folded_bg) | radius(3) | pad(0, 2) | margin(0, 0, 0, 6)
+                            | bg(th.folded_bg) | radius(t.rounded(3)) | pad(0, t.spaced(2)) | margin(0, 0, 0, 6)
                             | id_of(id, part_fold_base + static_cast<std::size_t>(l))).build());
         }
         if (runs.empty()) continue;
@@ -345,14 +346,14 @@ template <ControlContext C>
             const float x0 = col_x(l, d.range.start.col);
             const float x1 = std::max(col_x(l, c1), x0 + cw);
             // A dashed underline reads as a squiggle at this size.
-            layers.push_back((box() | size(x1 - x0, 0.0f) | border(1.5f, col) | dashed(2.5f, 1.5f)
+            layers.push_back((box() | size(x1 - x0, 0.0f) | border(t.stroke(1.5f), col) | dashed(2.5f, 1.5f)
                               | absolute(x0, row_y(vr) + lh - 3)).build());
             if (std::find(shown.begin(), shown.end(), l) != shown.end()) continue;
             shown.push_back(l);
             const float ex = col_x(l, ed.line_len(l)) + cw * 3.0f;
             layers.push_back((h(text_owned(d.message) | font(fs * 0.88f) | fg(col) | ellipsis)
-                              | height(lh) | align(Align::center) | pad(0, 8) | max_size(560, lh)
-                              | bg(mix(th.bg, col, 0.10f)) | radius(3)
+                              | height(lh) | align(Align::center) | pad(0, t.spaced(8)) | max_size(560, lh)
+                              | bg(mix(th.bg, col, 0.10f)) | radius(t.rounded(3))
                               | absolute(ex, row_y(vr))).build());
         }
     }
@@ -393,7 +394,7 @@ template <ControlContext C>
             Color<Srgb> col = th.hint;
             for (const auto& d : *o.diagnostics)
                 if (d.range.start.line == l) { col = d.severity == editor::Diagnostic::Severity::error ? th.error : d.severity == editor::Diagnostic::Severity::warning ? th.warning : th.info; break; }
-            gut.push_back((box() | size(6, 6) | bg(col) | radius(3) | absolute(3, y + (lh - 6) * 0.5f)).build());
+            gut.push_back((box() | size(6, 6) | bg(col) | radius(t.rounded(3)) | absolute(3, y + (lh - 6) * 0.5f)).build());
         }
         // Fold chevron.
         if (ed.foldable(l) || ed.folds.contains(l)) {
@@ -427,9 +428,9 @@ template <ControlContext C>
             const Color<Srgb> col = g.kind == editor::GitMark::Kind::added ? th.git_added
                                   : g.kind == editor::GitMark::Kind::deleted ? th.git_deleted : th.git_modified;
             if (g.kind == editor::GitMark::Kind::deleted)
-                layers.push_back((box() | size(8, 3) | bg(col) | radius(1) | absolute(gutter - 10, row_y(vr) - 1)).build());
+                layers.push_back((box() | size(8, 3) | bg(col) | radius(t.rounded(1)) | absolute(gutter - 10, row_y(vr) - 1)).build());
             else
-                layers.push_back((box() | size(3, lh) | bg(col) | radius(1) | absolute(gutter - 8, row_y(vr))).build());
+                layers.push_back((box() | size(3, lh) | bg(col) | radius(t.rounded(1)) | absolute(gutter - 8, row_y(vr))).build());
         }
     }
 
@@ -450,7 +451,7 @@ template <ControlContext C>
     auto bar = z(z(h_list(std::move(marks))),
                  box() | size(active_bar ? 8.0f : 6.0f, std::max(thumb.height(), 0.0f))
                        | bg(ed.scroll.scrollable_y() ? (active_bar ? colors::white.fade(0.22f) : colors::white.fade(0.12f)) : colors::white.fade(0.0f))
-                       | radius(4) | absolute(active_bar ? 2.0f : 3.0f, thumb.top()))
+                       | radius(t.rounded(4)) | absolute(active_bar ? 2.0f : 3.0f, thumb.top()))
              | width(detail::kBarWidth) | height(pct(100))
              | bg(active_bar ? colors::white.fade(0.03f) : colors::white.fade(0.0f))
              | id_of(id, part_bar);
@@ -462,7 +463,7 @@ template <ControlContext C>
         const float frac = std::clamp(tw / std::max(content_w - gutter, 1.0f), 0.05f, 1.0f);
         const float len = std::max(tw * frac, 30.0f);
         const float x = gutter + (tw - len) * (ed.scroll.offset.x / ed.scroll.max_offset.x);
-        hbar = (box() | size(len, 5) | bg(colors::white.fade(0.12f)) | radius(3) | absolute(x, std::max(ed.scroll.viewport.y - 8, 0.0f))).build();
+        hbar = (box() | size(len, 5) | bg(colors::white.fade(0.12f)) | radius(t.rounded(3)) | absolute(x, std::max(ed.scroll.viewport.y - 8, 0.0f))).build();
     }
     layers.push_back(std::move(hbar));
 

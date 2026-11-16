@@ -17,14 +17,14 @@ template <fixed_string Key>
     // characters and must never break across lines. Wrapping mode is also
     // what makes a narrow cap look like a text-engine failure rather than a
     // sizing one.
-    return h(text<Key> | font(t.font_size * 0.82f) | fg(t.text_secondary)
+    return h(text<Key> | font(t.font_size * 0.82f) | fg(var::text_secondary)
                        | ellipsis | min_size(t.font_size * 0.7f, 0.0f))
          | center
          | min_size(t.font_size * 1.5f, t.font_size * 1.3f)
-         | pad(2.0f, 7.0f)
-         | bg(t.background)
-         | border(1, t.border_strong)
-         | radius(4.0f)
+         | pad(t.spaced(2.0f), t.spaced(7.0f))
+         | bg(var::background)
+         | border(t.stroke(1), t.border_strong)
+         | radius(t.rounded(4.0f))
          | inner_shadow(2.0f, colors::black.fade(0.25f), {0.0f, -1.0f});
 }
 

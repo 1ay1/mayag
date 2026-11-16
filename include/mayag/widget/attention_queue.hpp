@@ -58,34 +58,34 @@ template <ControlContext C>
         const Color<Srgb> tone = agent_tone(t, it.agent.state);
         rows.push_back((h(box() | width(3) | bg(tone),
                           v(h(text_owned(agent_glyph(it.agent.state, time)) | font(t.font_size * 0.85f) | bold | fg(tone),
-                              text_owned(it.agent.agent) | font(t.font_size * 0.88f) | semibold | fg(t.text_primary),
+                              text_owned(it.agent.agent) | font(t.font_size * 0.88f) | semibold | fg(var::text_primary),
                               text_owned(agent_state_words(it.agent.state)) | font(t.font_size * 0.8f) | fg(tone),
                               spacer(),
-                              text_owned(waited(it.agent.since)) | font(t.font_size * 0.75f) | fg(t.text_disabled),
+                              text_owned(waited(it.agent.since)) | font(t.font_size * 0.75f) | fg(var::text_disabled),
                               node(hov ? (h(text<"\u00D7"> | font(t.font_size * 0.85f) | fg(c.hovered(did) ? t.text_primary : t.text_disabled))
                                           | pointer_cursor | label("dismiss") | id_of(id, 4096 + i)).build() : Node{}))
-                                | gap(6) | align(Align::center) | width(pct(100)),
-                            text_owned(it.agent.message) | font(t.font_size * 0.85f) | fg(t.text_secondary) | wrap_text | clamp_lines(2),
-                            text_owned(it.where) | font(t.font_size * 0.75f) | fg(t.text_disabled) | ellipsis)
-                              | gap(3) | pad(7, 10) | grow() | min_size(0, 0))
+                                | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
+                            text_owned(it.agent.message) | font(t.font_size * 0.85f) | fg(var::text_secondary) | wrap_text | clamp_lines(2),
+                            text_owned(it.where) | font(t.font_size * 0.75f) | fg(var::text_disabled) | ellipsis)
+                              | gap(t.spaced(3)) | pad(t.spaced(7), t.spaced(10)) | grow() | min_size(0, 0))
                         | align(Align::stretch) | width(pct(100)) | radius(t.radius_small)
-                        | bg(hov ? t.surface_raised : t.surface) | border(1, hov ? t.tint(tone, 0.5f) : t.border)
+                        | bg(hov ? t.surface_raised : t.surface) | border(t.stroke(1), hov ? t.tint(tone, 0.5f) : t.border)
                         | clip | pointer_cursor | role(a11y::Role::list_item) | label(it.agent.agent + " " + agent_state_words(it.agent.state))
                         | id_of(id, i)).build());
     }
     const int urgent = static_cast<int>(std::count_if(items.begin(), items.end(), [](const auto& x) {
         return x.agent.state == AgentState::needs_approval || x.agent.state == AgentState::needs_input; }));
-    Node empty = items.empty() ? (v(text<"Nothing is waiting for you."> | font(t.font_size * 0.88f) | fg(t.text_disabled))
-                                  | pad(10, 4)).build() : Node{};
-    return (v(h(text<"WAITING ON YOU"> | font(t.font_size * 0.72f) | semibold | tracking(0.8f) | fg(t.text_secondary),
+    Node empty = items.empty() ? (v(text<"Nothing is waiting for you."> | font(t.font_size * 0.88f) | fg(var::text_disabled))
+                                  | pad(t.spaced(10), t.spaced(4))).build() : Node{};
+    return (v(h(text<"WAITING ON YOU"> | font(t.font_size * 0.72f) | semibold | tracking(0.8f) | fg(var::text_secondary),
                 spacer(),
-                node(urgent > 0 ? (h(text_owned(std::to_string(urgent)) | font(t.font_size * 0.75f) | bold | fg(t.on_accent))
-                                   | pad(0, 6) | radius(8) | bg(t.warning)).build() : Node{}),
-                text<"\u2318J"> | font(t.font_size * 0.72f) | fg(t.text_disabled))
-                  | gap(6) | align(Align::center) | width(pct(100)),
+                node(urgent > 0 ? (h(text_owned(std::to_string(urgent)) | font(t.font_size * 0.75f) | bold | fg(var::on_accent))
+                                   | pad(0, t.spaced(6)) | radius(t.rounded(8)) | bg(var::warning)).build() : Node{}),
+                text<"\u2318J"> | font(t.font_size * 0.72f) | fg(var::text_disabled))
+                  | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
               node(std::move(empty)),
               v(v_list(std::move(rows), 6.0f)) | width(pct(100)))
-            | gap(8) | width(pct(100)) | role(a11y::Role::list) | label("attention queue")).build();
+            | gap(t.spaced(8)) | width(pct(100)) | role(a11y::Role::list) | label("attention queue")).build();
 }
 
 }  // namespace mayag::dsl

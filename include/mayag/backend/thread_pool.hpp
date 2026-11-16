@@ -1,26 +1,19 @@
 #pragma once
 // mayag::backend::ThreadPool — tiled rendering's parallel_for, on jaal.
 //
-// The workers are jaal::kernel::pool threads: created once, kept warm, shut
-// down by jaal. What this adds is the fork-join a frame needs:
+// Every thread here is a jaal::kernel::pool worker, and the fork-join is
+// jaal::parallel_for(pool&): jaal owns the threads, the shared block, the
+// wait and its deadlock checks (it aborts with the reason if the caller holds
+// a lock or is one of the pool's own jobs). mayag adds only the sizing and
+// the inline path.
 //
-//   * indices are claimed with one atomic fetch_add, so a worker that finishes
-//     a blank tile takes the next one instead of idling behind a text-heavy one
-//   * the calling thread drains too, so N cores means N threads, and it never
-//     waits on a helper that hasn't started yet
-//   * each call is its own block, co-owned by the helpers. A helper that wakes
-//     after every index is claimed only touches that block, never `fn` or the
-//     next call (the race TSAN found in the old hand-rolled pool).
-//
-// Same shape as maya's view-side executor (maya/host/executor.hpp).
+// The workers are made once and kept warm, so a frame's fork-join costs a few
+// microseconds rather than a thread spawn per tile.
 
 #include <jaal/kernel/pool.hpp>
+#include <jaal/kernel/scope.hpp>
 
-#include <algorithm>
-#include <atomic>
 #include <cstddef>
-#include <exception>
-#include <functional>
 #include <memory>
 #include <thread>
 
@@ -41,6 +34,7 @@ class ThreadPool {
 
     /// Run `fn(i)` for i in [0, count) across the pool and this thread.
     /// Blocks until every index has run. A throw from `fn` is rethrown here.
+    /// `fn` must be safe to call from several threads at once.
     template <typename Fn>
     void parallel_for(std::size_t count, Fn&& fn) {
         if (count == 0) return;
@@ -48,47 +42,10 @@ class ThreadPool {
             for (std::size_t i = 0; i < count; ++i) fn(i);
             return;
         }
-
-        const std::function<void(std::size_t)> body = [&fn](std::size_t i) { fn(i); };
-        auto job = std::make_shared<Join>();
-        job->fn = &body;
-        job->n  = count;
-
-        // One helper per worker, not per index: each drains until empty.
-        const std::size_t helpers = std::min<std::size_t>(workers_, count - 1);
-        for (std::size_t h = 0; h < helpers; ++h)
-            ::jaal::kernel::pool_access::post(*pool_, [job](std::stop_token) { job->drain(); });
-
-        job->drain();
-        for (std::size_t d = job->done.load(std::memory_order_acquire); d < count;
-             d = job->done.load(std::memory_order_acquire))
-            job->done.wait(d, std::memory_order_acquire);
-        if (job->error) std::rethrow_exception(job->error);
+        ::jaal::parallel_for(*pool_, count, workers_ + 1, fn);
     }
 
   private:
-    struct Join {
-        const std::function<void(std::size_t)>* fn = nullptr;   // valid until done == n
-        std::size_t                             n  = 0;
-        std::atomic<std::size_t>                next{0};
-        std::atomic<std::size_t>                done{0};
-        std::atomic<bool>                       failed{false};
-        std::exception_ptr                      error;           // set once, by whoever flips failed
-
-        void drain() {
-            for (;;) {
-                const std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
-                if (i >= n) return;
-                try {
-                    (*fn)(i);
-                } catch (...) {
-                    if (!failed.exchange(true, std::memory_order_acq_rel)) error = std::current_exception();
-                }
-                if (done.fetch_add(1, std::memory_order_acq_rel) + 1 == n) done.notify_one();
-            }
-        }
-    };
-
     unsigned                               workers_ = 0;
     std::unique_ptr<::jaal::kernel::pool>  pool_;
 };

@@ -427,7 +427,14 @@ inline void apply_gvar(std::span<const std::uint8_t> gvar, const GvarHeader& h,
         if (idx & private_points) {
             points = read_point_numbers(gvar, dpos, all_points);
         }
-        const std::size_t delta_count = all_points ? n_points : points.size();
+        // "All points" means every outline point PLUS the four phantom
+        // points (side bearings / advance) the spec appends. Reading only
+        // the outline's count left the four phantom x-deltas unread, so the
+        // y run started inside them: every point moved vertically by a
+        // neighbour's horizontal delta. Invisible at the default instance,
+        // and it broke glyphs like `N` at heavier weights.
+        constexpr std::size_t kPhantoms = 4;
+        const std::size_t delta_count = all_points ? n_points + kPhantoms : points.size();
         std::vector<std::int32_t> pdx = read_packed_deltas(gvar, dpos, delta_count);
         std::vector<std::int32_t> pdy = read_packed_deltas(gvar, dpos, delta_count);
         serialized += var_data_size;

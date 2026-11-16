@@ -1,34 +1,45 @@
 #pragma once
 // mayag::widget button — primary / secondary / ghost / danger
+//
+// Behaviour here, look in the theme's Sheet (widget/sheet.hpp): every
+// colour, size, radius, border, shadow, state variant and spring of every
+// button comes from `Sheet::button` / `primary` / `danger` / `ghost`, so a
+// theme restyles them all -- and anything piped after the call wins:
+//
+//     button<"Deploy">(t)                            the theme's primary
+//     button<"Cancel">(t, ButtonVariant::ghost)
+//     button<"Delete">(t) | bg(var::danger)          one-off override
 
 #include "../dsl/dsl.hpp"
 #include "../style/theme.hpp"
+#include "sheet.hpp"
 
 namespace mayag::dsl {
 
 enum class ButtonVariant { primary, secondary, ghost, danger };
 
-/// A button. All four variants share one body; the variant only chooses
-/// colours, which is exactly the property that keeps a design system coherent.
+namespace detail {
+[[nodiscard]] inline const Look& button_look(const Theme& t, ButtonVariant v) {
+    const Sheet& s = sheet_of(t);
+    switch (v) {
+        case ButtonVariant::primary:   return s.primary;
+        case ButtonVariant::danger:    return s.danger;
+        case ButtonVariant::ghost:     return s.ghost;
+        case ButtonVariant::secondary: break;
+    }
+    return s.button;
+}
+}  // namespace detail
+
+/// A button. Its capabilities stay live (fill, stroke, shadow), so a caller
+/// may pipe `| border_color(...)` or `| bg(...)` on top.
 template <fixed_string Label>
-[[nodiscard]] constexpr auto button(const Theme& t, ButtonVariant variant = ButtonVariant::primary) {
-    const bool primary_ = (variant == ButtonVariant::primary);
-    const bool danger_  = (variant == ButtonVariant::danger);
-    const bool ghost_   = (variant == ButtonVariant::ghost);
-
-    const Color<Srgb> face =
-        primary_ ? t.accent : danger_ ? t.danger : ghost_ ? t.surface.fade(0.0f) : t.surface_raised;
-    const Color<Srgb> label_color =
-        primary_ ? t.on_accent : danger_ ? readable_on(t.danger) : t.text_primary;
-    const Color<Srgb> edge = ghost_ ? t.border : (primary_ || danger_) ? face : t.border_strong;
-
-    return h(text<Label> | font(t.font_size) | semibold | fg(label_color))
-         | center
-         | pad(t.space(1.25f), t.space(2))
-         | bg(face)
-         | border(1, edge)
-         | radius(t.radius_small)
-         | when(primary_ || danger_, elevation(3.0f));
+[[nodiscard]] inline auto button(const Theme& t, ButtonVariant variant = ButtonVariant::primary) {
+    return h(text<Label> | with_look(sheet_of(t).label))
+         | center | surface_caps
+         | with_look(detail::button_look(t, variant), t)
+         | pointer_cursor
+         | role(a11y::Role::button);
 }
 
 }  // namespace mayag::dsl

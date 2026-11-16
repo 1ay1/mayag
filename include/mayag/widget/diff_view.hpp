@@ -74,21 +74,21 @@ struct DiffStats { int added = 0, removed = 0; };
     for (std::size_t k = 0; k < lines.size(); ++k) {
         if (!show[k]) { elided = true; continue; }
         if (elided && !rows.empty())
-            rows.push_back((h(text<"\u22EF"> | font(size) | fg(t.text_disabled)) | pad(1, 6)
+            rows.push_back((h(text<"\u22EF"> | font(size) | fg(var::text_disabled)) | pad(t.spaced(1), t.spaced(6))
                             | width(pct(100))).build());
         elided = false;
         const auto& l = lines[k];
         const Color<Srgb> tone = l.op == Op::add ? t.success : l.op == Op::del ? t.danger : t.text_secondary;
         const char* sign = l.op == Op::add ? "+" : l.op == Op::del ? "-" : " ";
         rows.push_back((h(text_owned(l.old_no ? std::to_string(l.old_no) : "") | font(size * 0.9f)
-                              | fg(t.text_disabled) | text_align(TextAlign::right) | width(gutter),
+                              | fg(var::text_disabled) | text_align(TextAlign::right) | width(gutter),
                           text_owned(l.new_no ? std::to_string(l.new_no) : "") | font(size * 0.9f)
-                              | fg(t.text_disabled) | text_align(TextAlign::right) | width(gutter),
+                              | fg(var::text_disabled) | text_align(TextAlign::right) | width(gutter),
                           text_owned(sign) | font(size) | bold | fg(tone) | width(size * 1.2f)
                               | text_align(TextAlign::center),
                           text_owned(l.text) | font(size) | no_ligatures
                               | fg(l.op == Op::same ? t.text_secondary : tone) | grow())
-                        | gap(6) | align(Align::center) | pad(1, 6) | width(pct(100))
+                        | gap(t.spaced(6)) | align(Align::center) | pad(t.spaced(1), t.spaced(6)) | width(pct(100))
                         | bg(l.op == Op::same ? t.surface.fade(0.0f) : t.tint(tone, 0.10f))).build());
     }
     return v_list(std::move(rows)).build();

@@ -2,7 +2,8 @@
 // ─────────────────────────────────────────────────────────────────────────
 //  mayag — a GPU UI framework for C++26
 //
-//  #include <mayag/mayag.hpp> is the entire public surface.
+//  #include <mayag/mayag.hpp> is the framework; widgets are opt-in, one
+//  header each, under <mayag/widget/>.
 //
 //      using namespace mayag;
 //      using namespace mayag::dsl;
@@ -42,6 +43,8 @@
 // ── style & scene ───────────────────────────────────────────────────────
 #include <mayag/style/style.hpp>
 #include <mayag/style/theme.hpp>
+#include <mayag/style/state.hpp>
+#include <mayag/style/cascade.hpp>
 #include <mayag/scene/node.hpp>
 #include <mayag/scene/a11y.hpp>
 
@@ -49,74 +52,21 @@
 #include <mayag/dsl/dsl.hpp>
 
 // ── widgets ─────────────────────────────────────────────────────────────
-// One widget per header under include/mayag/widget/, as in maya. Each is
-// plain DSL composed, so any of them can be included on its own
-// (`#include <mayag/widget/slider.hpp>`); the umbrella pulls them all in.
-#include <mayag/widget/control.hpp>
-#include <mayag/widget/activity_feed.hpp>
-#include <mayag/widget/project_panel.hpp>
-#include <mayag/widget/agent_state.hpp>
-#include <mayag/widget/agent_toasts.hpp>
-#include <mayag/widget/attention_queue.hpp>
-#include <mayag/widget/avatar.hpp>
-#include <mayag/widget/badge.hpp>
-#include <mayag/widget/breadcrumbs.hpp>
-#include <mayag/widget/button.hpp>
-#include <mayag/widget/card.hpp>
-#include <mayag/widget/changes_panel.hpp>
-#include <mayag/widget/checkbox.hpp>
-#include <mayag/widget/code_view.hpp>
-#include <mayag/widget/color_swatch.hpp>
-#include <mayag/widget/command_block.hpp>
-#include <mayag/widget/completion_menu.hpp>
-#include <mayag/widget/confirm_dialog.hpp>
-#include <mayag/widget/context_menu.hpp>
-#include <mayag/widget/diff_view.hpp>
-#include <mayag/widget/divider.hpp>
-#include <mayag/widget/dot.hpp>
-#include <mayag/widget/dropdown.hpp>
-#include <mayag/widget/file_icon.hpp>
-#include <mayag/widget/file_tree.hpp>
-#include <mayag/widget/find_bar.hpp>
-#include <mayag/widget/fuzzy.hpp>
-#include <mayag/widget/hover_card.hpp>
-#include <mayag/widget/kbd.hpp>
-#include <mayag/widget/key_hint.hpp>
-#include <mayag/widget/keybind.hpp>
-#include <mayag/widget/layout.hpp>
-#include <mayag/widget/link_tooltip.hpp>
-#include <mayag/widget/nav_item.hpp>
-#include <mayag/widget/pane.hpp>
-#include <mayag/widget/pane_overview.hpp>
-#include <mayag/widget/picker.hpp>
-#include <mayag/widget/problems.hpp>
-#include <mayag/widget/progress.hpp>
-#include <mayag/widget/prompt_editor.hpp>
-#include <mayag/widget/radio_group.hpp>
-#include <mayag/widget/resize_hud.hpp>
-#include <mayag/widget/scroll_view.hpp>
-#include <mayag/widget/scrollback_bar.hpp>
-#include <mayag/widget/segmented.hpp>
-#include <mayag/widget/setting_row.hpp>
-#include <mayag/widget/slider.hpp>
-#include <mayag/widget/split.hpp>
-#include <mayag/widget/ssh.hpp>
-#include <mayag/widget/status_bar.hpp>
-#include <mayag/widget/stepper.hpp>
-#include <mayag/widget/tab_bar.hpp>
-#include <mayag/widget/tab_launcher.hpp>
-#include <mayag/widget/tab_peek.hpp>
-#include <mayag/widget/tab_strip.hpp>
-#include <mayag/widget/term_search.hpp>
-#include <mayag/widget/term_tabs.hpp>
-#include <mayag/widget/terminal_view.hpp>
-#include <mayag/widget/text_field.hpp>
-#include <mayag/widget/toast.hpp>
-#include <mayag/widget/toggle.hpp>
-#include <mayag/widget/typography.hpp>
-#include <mayag/widget/virtual_list.hpp>
-#include <mayag/widget/worktree_list.hpp>
-#include <mayag/widget/workspace_rail.hpp>
+// Widgets are NOT included here, as in maya. mayag.hpp is the framework:
+// the DSL, styling, layout, rendering and the app runtime. Widgets are
+// application vocabulary built ON it, one per header, so include the ones
+// you use:
+//
+//   #include <mayag/widget/button.hpp>
+//   #include <mayag/widget/scroll_view.hpp>
+//   #include <mayag/widget/tab_strip.hpp>
+//
+// or every one of them, for prototyping:
+//
+//   #include <mayag/widget/all.hpp>
+//
+// See include/mayag/widget/ for the full list. Nothing outside that folder
+// is a widget, and nothing outside it includes one.
 
 // ── layout ──────────────────────────────────────────────────────────────
 #include <mayag/layout/text_metrics.hpp>
@@ -173,6 +123,10 @@ struct RenderOptions {
     /// `typo::system::default_stack()` — so text renders correctly with no
     /// configuration at all.
     std::shared_ptr<typo::FontStack> fonts = nullptr;
+
+    /// Resolves `var::` tokens and `state::dark` rules. A one-shot render has
+    /// no pointer, so every element renders in its rest state.
+    Theme theme = themes::midnight;
 };
 
 namespace detail {
@@ -203,6 +157,7 @@ template <typename Ui>
     const layout::TextMeasurer& measurer =
         static_cast<const layout::TextMeasurer&>(bound.measurer);
 
+    cascade_static(root, opts.theme, viewport);
     layout::layout_tree(root, viewport, measurer);
 
     DrawList dl;

@@ -35,10 +35,10 @@ template <ControlContext C>
             const auto pid = part_id(id, i);
             const bool on = static_cast<int>(i) == chosen;
             rows.push_back((h(text_owned(on ? "\u2713" : " ") | font(t.font_size * 0.9f)
-                                  | fg(t.accent) | width(16),
+                                  | fg(var::accent) | width(16),
                               text_owned(options[i]) | font(t.font_size)
-                                  | fg(t.text_primary) | grow())
-                            | align(Align::center) | pad(7, 10) | width(pct(100))
+                                  | fg(var::text_primary) | grow())
+                            | align(Align::center) | pad(t.spaced(7), t.spaced(10)) | width(pct(100))
                             | bg(c.hovered(pid) ? t.accent.fade(0.18f) : t.overlay.fade(0.0f))
                             | radius(t.radius_small - 2.0f)
                             | pointer_cursor
@@ -47,9 +47,9 @@ template <ControlContext C>
         }
         c.overlay(Overlay{
             .content = (v(v_list(std::move(rows), 1.0f))
-                        | pad(4) | width(width_px)
-                        | bg(t.overlay) | border(1, t.border_strong)
-                        | radius(t.radius_medium) | elevation(12)
+                        | pad(t.spaced(4)) | width(width_px)
+                        | bg(var::overlay) | border(t.stroke(1), t.border_strong)
+                        | radius(t.radius_medium) | elevation(t.lift(12))
                         | role(a11y::Role::menu)).build(),
             .id = part_id(id, part_menu),
             .anchor_id = nid,
@@ -57,11 +57,11 @@ template <ControlContext C>
             .dismiss = Dismiss::on_click_outside,
         });
     }
-    return h(text_owned(current) | font(t.font_size) | fg(t.text_primary) | grow(),
-             text<"\u25BE"> | font(t.font_size * 0.85f) | fg(t.text_secondary))
-         | align(Align::center) | gap(8) | pad(7, 11) | width(width_px)
+    return h(text_owned(current) | font(t.font_size) | fg(var::text_primary) | grow(),
+             text<"\u25BE"> | font(t.font_size * 0.85f) | fg(var::text_secondary))
+         | align(Align::center) | gap(t.spaced(8)) | pad(t.spaced(7), t.spaced(11)) | width(width_px)
          | bg(hov || open ? t.surface_raised : t.surface)
-         | border(1, detail::edge(t, c.focused(nid) || open, hov, t.border))
+         | border(t.stroke(1), detail::edge(t, c.focused(nid) || open, hov, t.border))
          | radius(t.radius_small)
          | pointer_cursor
          | role(a11y::Role::button) | label(id)

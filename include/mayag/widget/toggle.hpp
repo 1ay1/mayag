@@ -8,6 +8,7 @@
 // switch_control interaction: Clicked / Activated on node_id(id) -> flip.
 
 #include "control.hpp"
+#include "sheet.hpp"
 
 #include <string_view>
 
@@ -20,31 +21,28 @@ namespace mayag::dsl {
     const float x    = on ? (w - knob - 3.0f) : 3.0f;
     return z(box() | size(knob, knob)
                    | bg(on ? t.on_accent : t.text_secondary)
-                   | radius(knob * 0.5f)
+                   | radius(t.capsule(knob))
                    | absolute(x, 3.0f)
-                   | elevation(2.0f))
+                   | elevation(t.lift(2.0f)))
          | size(w, h)
          | bg(on ? t.accent : t.surface_raised)
-         | border(1, on ? t.accent : t.border_strong)
-         | radius(h * 0.5f);
+         | border(t.stroke(1), on ? t.accent : t.border_strong)
+         | radius(t.capsule(h));
 }
 
+/// An interactive on/off switch. Its look -- including hover, press,
+/// focus and how the knob moves -- is the theme's (Sheet::track / knob);
+/// the knob reads `checked` through the group and slides on a transform, so
+/// it springs with the theme's motion instead of jumping.
 template <ControlContext C>
 [[nodiscard]] inline auto switch_control(const C& c, std::string_view id, bool on) {
-    const Theme& t = c.theme;
-    const auto nid = node_id(id);
-    constexpr float w = 38.0f, hgt = 22.0f, knob = 16.0f;
-    const bool hov = c.hovered(nid);
-    return z(box() | size(knob, knob)
-                   | bg(on ? t.on_accent : (hov ? t.text_primary : t.text_secondary))
-                   | radius(knob * 0.5f)
-                   | absolute(on ? w - knob - 3.0f : 3.0f, 3.0f)
-                   | elevation(1.5f))
-         | size(w, hgt)
-         | bg(on ? (c.pressed(nid) ? t.accent_active : hov ? t.accent_hover : t.accent)
-                 : t.surface_raised)
-         | border(1.5f, detail::edge(t, c.focused(nid), hov, on ? t.accent : t.border_strong))
-         | radius(hgt * 0.5f)
+    const Sheet& s = sheet_of(c.theme);
+    constexpr float w = 38.0f, hgt = 22.0f, knob = 16.0f, inset = 3.0f;
+    return z(box() | size(knob, knob) | absolute(inset, inset)
+                   | with_look(s.knob)
+                   | when(state::group(state::checked), translate(w - knob - 2.0f * inset, 0.0f)))
+         | size(w, hgt) | group()
+         | with_look(s.track, c.theme)
          | pointer_cursor
          | role(a11y::Role::checkbox) | checked(on) | label(id)
          | id_of(id);

@@ -69,7 +69,7 @@ template <ControlContext C, Element Content>
                                     : active ? t.text_secondary.fade(0.85f)
                                              : t.text_disabled.fade(0.75f))
                                  : t.text_disabled.fade(0.0f))
-                       | radius(w * 0.5f)
+                       | radius(t.capsule(w))
                        | absolute((detail::kBarWidth - w) * 0.5f, thumb.top()))
              | width(detail::kBarWidth) | height(pct(100))
              | bg(show && active ? t.text_disabled.fade(0.12f) : t.background.fade(0.0f))
@@ -80,7 +80,7 @@ template <ControlContext C, Element Content>
 
     return h(v(content) | scroll(state) | grow() | height(pct(100)) | min_size(0, 0) | id_of(id),
              std::move(bar))
-         | gap(2) | width(pct(100)) | grow() | min_size(0, 0);
+         | gap(t.spaced(2)) | width(pct(100)) | grow() | min_size(0, 0);
 }
 
 }  // namespace mayag::dsl

@@ -1,0 +1,54 @@
+# Files in include/mayag/ allowed raw concurrency (or const_cast) primitives,
+# and which ones. Checked by jaal's own banlist (tests/lint/banlist.cmake in
+# third_party/jaal), pointed at mayag -- the same gate jaal runs on itself
+# and maya runs on maya.
+#
+# The runtime is jaal: the event loop, timers, tasks, streams, signals, the
+# worker pool and the render fork-join (jaal::parallel_for on a warm
+# jaal::kernel::pool) are all jaal's. What remains below is code at a
+# boundary jaal cannot own -- a thread Apple starts, a C API's signature, a
+# cache reached through an interface with no capability parameter -- each
+# with the reason a human signed off on. Adding a line means writing one.
+# examples/ is held to an EMPTY allowlist: apps never touch these.
+
+# Ambient per-frame context: which Ctx view() is building for. Per-thread
+# because a headless test and a window may render on different threads; it
+# is never shared, only scoped (detail::ctx_scope).
+app/host.hpp: thread_local
+
+# Set during one view pass by a widget mid-animation, read right after by
+# the same thread. Per-thread for the same reason as the frame context.
+core/motion.hpp: thread_local
+
+# Same shape (a flag one view pass raises and its own layout reads), plus
+# one const_cast: clamping a ScrollState's offset into range inside the
+# const view of it layout holds. Idempotent and single-threaded.
+core/scroll_state.hpp: thread_local const_cast
+
+# The C++ keyword table for syntax highlighting contains the STRINGS
+# "const_cast" and "thread_local"; nothing here uses either.
+editor/syntax.hpp: const_cast thread_local
+
+# A Face is shared by the measurer, the painter and the atlas, which reach
+# it through layout::TextMeasurer / render::GlyphRenderer -- interfaces with
+# no capability parameter, so jaal::guarded cannot be named there. The mutex
+# guards the variation coords and the bounded outline cache; it is a leaf
+# (nothing is called under it). The atomic is the process-wide face-id
+# counter, a relaxed fetch_add.
+font/font.hpp: atomic mutex
+
+# mmap/MapViewOfFile take a non-const pointer for a read-only mapping.
+font/mapped_file.hpp: const_cast
+
+# addPresentedHandler runs on a thread Metal owns. The mutex is a leaf
+# around two small vectors the handler appends to and the render thread
+# drains; nothing else runs under it.
+backend/metal.hpp: mutex
+
+# The run-loop wake is called from jaal's mailbox on any thread (that is its
+# job) and coalesces with one atomic flag; const_cast for a CoreFoundation
+# constant the C API declares non-const.
+platform/macos_loop.hpp: atomic const_cast
+
+# libwayland's listener tables are declared non-const in C.
+platform/wayland_protocol.hpp: const_cast

@@ -23,6 +23,16 @@
 //   AT_SHOT=<dir> ./mayag_agent_terminal --headless
 
 #include "harness.hpp"
+#include <mayag/widget/agent_toasts.hpp>
+#include <mayag/widget/attention_queue.hpp>
+#include <mayag/widget/changes_panel.hpp>
+#include <mayag/widget/pane.hpp>
+#include <mayag/widget/pane_overview.hpp>
+#include <mayag/widget/prompt_editor.hpp>
+#include <mayag/widget/status_bar.hpp>
+#include <mayag/widget/term_tabs.hpp>
+#include <mayag/widget/terminal_view.hpp>
+#include <mayag/widget/worktree_list.hpp>
 
 #include <array>
 
@@ -507,7 +517,7 @@ int main(int argc, char** argv) {
 
         rt.press_key(Key::s, cmd_sh);
         rt.type("gpu");
-        ok(M().hosts && AT::Model{}.host_q.text.empty() && rank_hosts(kHosts, M().host_q.text).front() == 1, "the host picker fuzzy-finds gpu-box");
+        ok(M().hosts && rank_hosts(kHosts, M().host_q.text).front() == 1, "the host picker fuzzy-finds gpu-box");
         shot("hosts");
         rt.press_key(Key::enter);
         ok(M().log.back() == "ssh:gpu-box" && !M().hostkey, "enter connects to a known host");

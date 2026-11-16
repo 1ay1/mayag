@@ -88,36 +88,36 @@ inline void picker(const C& c, std::string_view id, const TextEditState& query,
         rows.push_back((h(node(it.icon_name.empty() ? Node{} : file_icon(t, it.icon_name, 12.0f).build()),
                           node(fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.font_size,
                                           t.text_primary, t.accent).build()),
-                          text_owned(it.detail) | font(t.font_size * 0.88f) | fg(t.text_disabled) | ellipsis
+                          text_owned(it.detail) | font(t.font_size * 0.88f) | fg(var::text_disabled) | ellipsis
                               | grow() | min_size(0, 0),
                           node(it.hint.empty() ? Node{} : key_hint(t, it.hint, "", t.font_size * 0.82f).build()))
-                        | gap(9) | align(Align::center) | pad(0, 12) | height(30) | width(pct(100))
+                        | gap(t.spaced(9)) | align(Align::center) | pad(0, t.spaced(12)) | height(30) | width(pct(100))
                         | bg(on ? t.tint(t.accent, 0.20f) : hov ? t.surface_raised : t.overlay.fade(0.0f))
                         | radius(t.radius_small)
                         | pointer_cursor | role(a11y::Role::menu_item) | selected(on) | label(it.label)
                         | id_of(id, static_cast<std::size_t>(k))).build());
     }
     if (rows.empty())
-        rows.push_back((h(text_owned(st.empty_text) | font(t.font_size) | fg(t.text_disabled)) | pad(14, 12)).build());
+        rows.push_back((h(text_owned(st.empty_text) | font(t.font_size) | fg(var::text_disabled)) | pad(t.spaced(14), t.spaced(12))).build());
 
     std::vector<Node> foot;
     for (const auto& [k, a] : st.footer) foot.push_back(key_hint(t, k, a, t.font_size * 0.8f).build());
     foot.push_back((spacer()).build());
     foot.push_back((text_owned(std::to_string(n) + (n == static_cast<int>(items.size()) ? "" : " of " + std::to_string(items.size())))
-                    | font(t.font_size * 0.8f) | fg(t.text_disabled)).build());
+                    | font(t.font_size * 0.8f) | fg(var::text_disabled)).build());
 
     const float qsize = t.font_size * 1.08f;
     c.overlay(Overlay{
-        .content = (v(h(text_owned(st.prefix) | font(qsize) | fg(t.accent),
+        .content = (v(h(text_owned(st.prefix) | font(qsize) | fg(var::accent),
                         node((text_field(t, query, true, part_id(id, part_inc), st.placeholder, qsize)
                               | grow() | border(0, t.border) | bg(t.overlay.fade(0.0f))).build()))
-                        | gap(4) | align(Align::center) | pad(6, 10) | width(pct(100)),
-                      box() | height(1) | width(pct(100)) | bg(t.border),
-                      v(v_list(std::move(rows), 1.0f)) | pad(6) | width(pct(100)),
-                      h(h_list(std::move(foot), 12.0f)) | align(Align::center) | pad(6, 14) | width(pct(100))
-                          | bg(t.surface) )
-                    | width(st.width) | bg(t.overlay) | border(1, t.border_strong)
-                    | radius(t.radius_medium) | clip | elevation(24)
+                        | gap(t.spaced(4)) | align(Align::center) | pad(t.spaced(6), t.spaced(10)) | width(pct(100)),
+                      box() | height(1) | width(pct(100)) | bg(var::border),
+                      v(v_list(std::move(rows), 1.0f)) | pad(t.spaced(6)) | width(pct(100)),
+                      h(h_list(std::move(foot), 12.0f)) | align(Align::center) | pad(t.spaced(6), t.spaced(14)) | width(pct(100))
+                          | bg(var::surface) )
+                    | width(st.width) | bg(var::overlay) | border(t.stroke(1), t.border_strong)
+                    | radius(t.radius_medium) | clip | elevation(t.lift(24))
                     | role(a11y::Role::dialog) | label(id)).build(),
         .id = part_id(id, part_menu),
         .anchor_id = 0,

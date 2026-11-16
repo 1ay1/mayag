@@ -27,7 +27,7 @@
 #include "software.hpp"
 #include "thread_pool.hpp"
 
-#include <atomic>
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -108,7 +108,59 @@ class Tiled {
         }
 
         // ── render tiles ────────────────────────────────────────────────
-        std::atomic<long> culled{0};
+        // One slot per tile, summed after the join: each tile writes only its
+        // own slot, so the count needs no atomic.
+        std::vector<long> culled(static_cast<std::size_t>(n_tiles), 0);
+
+        // A backdrop (frosted glass) blurs pixels from AROUND its own rect,
+        // which other tiles are drawing at the same moment. Per tile it would
+        // blur only that tile's 64 px -- a visible mosaic. So a frame with
+        // backdrops renders in PHASES split at each one: every tile draws the
+        // instances before it, the backdrop is applied once over its whole
+        // region (exactly as the reference rasteriser does), then tiles carry
+        // on. Frames without backdrops take the single-phase path unchanged.
+        std::vector<std::uint32_t> backdrops;
+        for (std::uint32_t gi = 0; gi < dl.instances().size(); ++gi)
+            if (static_cast<ShapeKind>(dl.instances()[gi].kind) == ShapeKind::backdrop) backdrops.push_back(gi);
+        if (!backdrops.empty()) {
+            const auto run_phase = [&](std::uint32_t lo, std::uint32_t hi, bool clear_first) {
+                const auto tile_phase = [&](std::size_t index) {
+                    const int tx = static_cast<int>(index) % tiles_x;
+                    const int ty = static_cast<int>(index) / tiles_x;
+                    const Rect tile{
+                        static_cast<float>(tx * tile_size), static_cast<float>(ty * tile_size),
+                        static_cast<float>(num::min(tile_size, fb.width()  - tx * tile_size)),
+                        static_cast<float>(num::min(tile_size, fb.height() - ty * tile_size))};
+                    if (clear_first) fill_tile(fb, tile, clear);
+                    const auto& list = bins[index];
+                    auto it = std::lower_bound(list.begin(), list.end(), lo);
+                    for (; it != list.end() && *it < hi; ++it) {
+                        const std::uint32_t gi = *it;
+                        const Batch& batch = dl.batches()[owner[gi]];
+                        const Rect scissor = clamp_scissor(batch.clip, fb).intersect(tile);
+                        if (scissor.empty()) continue;
+                        Software::draw_instance_public(dl.instances()[gi], fb, scissor,
+                                                       batch.texture, batch.blend, sampler);
+                    }
+                };
+                if (pool != nullptr && n_tiles > 1) pool->parallel_for(static_cast<std::size_t>(n_tiles), tile_phase);
+                else for (int i = 0; i < n_tiles; ++i) tile_phase(static_cast<std::size_t>(i));
+            };
+            std::uint32_t lo = 0;
+            bool first = true;
+            for (const std::uint32_t b : backdrops) {
+                run_phase(lo, b, first);
+                first = false;
+                const Batch& batch = dl.batches()[owner[b]];
+                const Rect scissor = clamp_scissor(batch.clip, fb);
+                if (!scissor.empty())
+                    Software::draw_instance_public(dl.instances()[b], fb, scissor, batch.texture, batch.blend, sampler);
+                lo = b + 1;
+            }
+            run_phase(lo, static_cast<std::uint32_t>(dl.instances().size()), first);
+            for (const auto& b : bins) if (b.empty()) ++stats.tiles_skipped;
+            return stats;
+        }
 
         const auto render_tile = [&](std::size_t index) {
             const int tx = static_cast<int>(index) % tiles_x;
@@ -137,7 +189,7 @@ class Tiled {
                     break;
                 }
             }
-            if (start > 0) culled.fetch_add(static_cast<long>(start), std::memory_order_relaxed);
+            if (start > 0) culled[index] = static_cast<long>(start);
 
             for (std::size_t k = start; k < list.size(); ++k) {
                 const std::uint32_t gi = list[k];
@@ -157,7 +209,7 @@ class Tiled {
         }
 
         for (const auto& b : bins) if (b.empty()) ++stats.tiles_skipped;
-        stats.instances_culled = culled.load(std::memory_order_relaxed);
+        for (const long c : culled) stats.instances_culled += c;
         return stats;
     }
 
@@ -205,7 +257,7 @@ class Tiled {
         const Rect shape{inst.rect.x, inst.rect.y, inst.rect.z, inst.rect.w};
         const auto kind = static_cast<ShapeKind>(inst.kind);
         float pad = 1.0f;
-        if (kind == ShapeKind::shadow) pad = inst.params.x * 3.0f + 2.0f;
+        if (kind == ShapeKind::shadow && (inst.flags & instance_flags::inset) == 0u) pad = inst.params.x * 3.0f + 2.0f;
         return shape.expand(pad);
     }
 

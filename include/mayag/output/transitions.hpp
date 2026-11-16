@@ -79,9 +79,9 @@ struct WindowMotion {
     Spring          spring = Spring::snappy();
 
     void step(float dt) {
-        presence.step(dt, spring);
-        position.step(dt, spring);
-        size.step(dt, spring);
+        presence.step(static_cast<double>(dt), spring);
+        position.step(static_cast<double>(dt), spring);
+        size.step(static_cast<double>(dt), spring);
     }
     /// Is anything still moving? A compositor asks this to know whether it
     /// may stop requesting frames -- an idle desktop must cost nothing.
@@ -176,7 +176,7 @@ struct WorkspaceMotion {
     /// and at that scale a fast spring reads as a jolt.
     Spring              spring = Spring::smooth();
 
-    void step(float dt) { offset.step(dt, spring); }
+    void step(float dt) { offset.step(static_cast<double>(dt), spring); }
     [[nodiscard]] bool animating() const noexcept { return offset.animating(); }
     void go_to(int index) { offset.to(static_cast<float>(index)); }
 };
@@ -233,7 +233,7 @@ struct OverviewMotion {
     Animated<float> t{0.0f};
     Spring          spring = Spring::smooth();
 
-    void step(float dt) { t.step(dt, spring); }
+    void step(float dt) { t.step(static_cast<double>(dt), spring); }
     [[nodiscard]] bool animating() const noexcept { return t.animating(); }
     void show() { t.to(1.0f); }
     void hide() { t.to(0.0f); }

@@ -81,10 +81,10 @@ template <ControlContext C>
     if (a.state == AgentState::none) return Node{};
     const Color<Srgb> tone = agent_tone(t, a.state);
     return (h(text_owned(agent_glyph(a.state, time)) | font(t.font_size * 0.85f) | bold | fg(tone),
-              text_owned(a.agent) | font(t.font_size * 0.82f) | semibold | fg(t.text_primary),
+              text_owned(a.agent) | font(t.font_size * 0.82f) | semibold | fg(var::text_primary),
               text_owned(words ? agent_state_words(a.state) : "") | font(t.font_size * 0.78f) | fg(tone))
-            | gap(5) | align(Align::center) | pad(1, 7) | radius(9)
-            | bg(t.tint(tone, 0.14f)) | border(1, t.tint(tone, 0.32f))).build();
+            | gap(t.spaced(5)) | align(Align::center) | pad(t.spaced(1), t.spaced(7)) | radius(t.rounded(9))
+            | bg(t.tint(tone, 0.14f)) | border(t.stroke(1), t.tint(tone, 0.32f))).build();
 }
 
 }  // namespace mayag::dsl

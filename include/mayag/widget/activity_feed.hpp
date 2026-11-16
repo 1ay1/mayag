@@ -56,18 +56,18 @@ inline void activity_feed(const C& c, std::string_view id, const std::vector<Act
         const auto pid = part_id(id, i), did = part_id(id, 4096 + i);
         const bool hov = c.hovered(pid) || c.hovered(did);
         const Color<Srgb> ws = e.hue ? rgb_hex(e.hue) : t.accent;
-        cards.push_back((h(h(text_owned(glyph) | font(t.font_size * 0.9f) | bold | fg(tone)) | size(26, 26) | center | radius(13)
+        cards.push_back((h(h(text_owned(glyph) | font(t.font_size * 0.9f) | bold | fg(tone)) | size(26, 26) | center | radius(t.rounded(13))
                                | bg(t.tint(tone, 0.18f)),
-                           v(text_owned(head) | font(t.font_size * 0.92f) | semibold | fg(t.text_primary) | ellipsis,
-                             h(box() | size(6, 6) | radius(3) | bg(ws),
-                               text_owned(sub) | font(t.font_size * 0.76f) | fg(t.text_secondary) | ellipsis)
-                                 | gap(6) | align(Align::center))
-                               | gap(2) | grow() | min_size(0, 0),
+                           v(text_owned(head) | font(t.font_size * 0.92f) | semibold | fg(var::text_primary) | ellipsis,
+                             h(box() | size(6, 6) | radius(t.rounded(3)) | bg(ws),
+                               text_owned(sub) | font(t.font_size * 0.76f) | fg(var::text_secondary) | ellipsis)
+                                 | gap(t.spaced(6)) | align(Align::center))
+                               | gap(t.spaced(2)) | grow() | min_size(0, 0),
                            node(hov ? (h(text<"\u00D7"> | font(t.font_size * 0.9f) | fg(c.hovered(did) ? t.text_primary : t.text_disabled))
                                        | pointer_cursor | id_of(id, 4096 + i)).build() : Node{}))
-                         | gap(10) | align(Align::center) | pad(8, 10) | width(320) | radius(12)
-                         | bg(mix(t.overlay, tone, loud ? 0.06f : 0.0f)) | border(1, loud ? t.tint(tone, 0.45f) : t.border_strong)
-                         | elevation(14) | opacity(fade) | pointer_cursor
+                         | gap(t.spaced(10)) | align(Align::center) | pad(t.spaced(8), t.spaced(10)) | width(320) | radius(t.rounded(12))
+                         | bg(mix(t.overlay, tone, loud ? 0.06f : 0.0f)) | border(t.stroke(1), loud ? t.tint(tone, 0.45f) : t.border_strong)
+                         | elevation(t.lift(14)) | opacity(fade) | pointer_cursor
                          | role(a11y::Role::button) | label(head) | id_of(id, i)).build());
     }
     if (cards.empty()) return;

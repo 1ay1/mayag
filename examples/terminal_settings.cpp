@@ -19,6 +19,20 @@
 //   ./mayag_terminal_settings --headless   scripted and asserted, for CI
 
 #include "harness.hpp"
+#include <mayag/widget/color_swatch.hpp>
+#include <mayag/widget/diff_view.hpp>
+#include <mayag/widget/dot.hpp>
+#include <mayag/widget/dropdown.hpp>
+#include <mayag/widget/fuzzy.hpp>
+#include <mayag/widget/key_hint.hpp>
+#include <mayag/widget/keybind.hpp>
+#include <mayag/widget/nav_item.hpp>
+#include <mayag/widget/scroll_view.hpp>
+#include <mayag/widget/segmented.hpp>
+#include <mayag/widget/slider.hpp>
+#include <mayag/widget/stepper.hpp>
+#include <mayag/widget/text_field.hpp>
+#include <mayag/widget/toggle.hpp>
 
 #include <algorithm>
 #include <array>
@@ -691,8 +705,8 @@ struct TerminalSettings {
     static Cmd update(Model& m, ResetSpec e) { settle(m); focus_spec(m, e.si); reset_spec(m, e.si); return {}; }
     static Cmd update(Model& m, OpenDrop e) {
         settle(m); focus_spec(m, e.si);
-        const auto id = node_id(spec(m, e.si).key);
-        m.open_drop = m.open_drop == id ? 0 : id;
+        const auto drop = node_id(spec(m, e.si).key);
+        m.open_drop = m.open_drop == drop ? 0 : drop;
         return {};
     }
     static Cmd update(Model& m, CloseDrop) { m.open_drop = 0; return {}; }
@@ -836,6 +850,9 @@ struct TerminalSettings {
         t.radius_medium = 6.0f;
         return t;
     }
+    /// The theme is application state: picking an accent re-themes the whole
+    /// window -- every widget, the clear colour -- and the host morphs to it.
+    static Theme theme(const Model& m) { return theme_of(m); }
 
     static Node control_for(const Look& L, const Model& m, int si) {
         const Theme& t = L.theme;
@@ -1077,7 +1094,7 @@ struct TerminalSettings {
         static constexpr std::array<const char*, 5> names{"NORMAL", "SEARCH", "INSERT", "RECORD", "COMMAND"};
         const std::array<Color<Srgb>, 5> tones{t.accent, t.info, t.success, t.danger, t.warning};
         const auto mi = static_cast<std::size_t>(m.mode);
-        auto pill = h(text_owned(names[mi]) | font(11) | bold | tracking(0.8f) | fg(readable_on(tones[mi])))
+        auto name_chip = h(text_owned(names[mi]) | font(11) | bold | tracking(0.8f) | fg(readable_on(tones[mi])))
                   | pad(0, 10) | height(pct(100)) | center | bg(tones[mi]);
 
         Node middle;
@@ -1121,7 +1138,7 @@ struct TerminalSettings {
         if (c.photon.samples > 0) std::snprintf(perf, sizeof perf, "%.2fms cpu  %.1fms \u2192 photon", cpu, c.photon.mean_ms);
         else if (cpu > 0.0) std::snprintf(perf, sizeof perf, "%.2fms cpu", cpu);
         const auto vis = visible(m);
-        return (h(std::move(pill),
+        return (h(std::move(name_chip),
                   v(node(std::move(middle))) | grow() | min_size(0, 0) | pad(0, 14),
                   h(h_list(std::move(hints), 12.0f)),
                   text_owned(perf) | font(11) | fg(t.text_disabled) | pad(0, 14),

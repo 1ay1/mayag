@@ -60,7 +60,7 @@ int main() {
     // ── correctness first ────────────────────────────────────────────
     section("round trip: encode then decode reproduces the pixels");
     {
-        for (const auto [w, h] : {std::pair{1, 1}, {2, 3}, {17, 5}, {64, 64}}) {
+        for (const auto& [w, h] : {std::pair{1, 1}, {2, 3}, {17, 5}, {64, 64}}) {
             const auto original = make_rgba(w, h);
             const auto encoded  = imageio::encode_png(original, w, h);
             const auto decoded  = imageio::decode_png(encoded);

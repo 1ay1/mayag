@@ -39,24 +39,24 @@ inline void context_menu(const C& c, std::string_view id, const std::vector<Menu
         const MenuItem& it = items[i];
         if (!it.section.empty())
             rows.push_back((text_owned(it.section) | font(t.font_size * 0.75f) | semibold | tracking(0.6f)
-                            | fg(t.text_disabled) | pad(6, 10, 2, 10)).build());
-        if (it.separator) { rows.push_back((box() | height(1) | width(pct(100)) | bg(t.border) | margin(4, 0)).build()); continue; }
+                            | fg(var::text_disabled) | pad(t.spaced(6), t.spaced(10), t.spaced(2), t.spaced(10))).build());
+        if (it.separator) { rows.push_back((box() | height(1) | width(pct(100)) | bg(var::border) | margin(4, 0)).build()); continue; }
         const auto pid = part_id(id, i);
         const bool hov = it.enabled && (c.hovered(pid) || static_cast<int>(i) == keyboard_index);
-        rows.push_back((h(text_owned(it.checked ? "\u2713" : "") | font(t.font_size * 0.9f) | fg(t.accent) | width(14),
+        rows.push_back((h(text_owned(it.checked ? "\u2713" : "") | font(t.font_size * 0.9f) | fg(var::accent) | width(14),
                           text_owned(it.label) | font(t.font_size)
                               | fg(!it.enabled ? t.text_disabled : it.danger ? t.danger : hov ? t.text_primary : t.text_primary)
                               | grow() | min_size(0, 0),
                           text_owned(it.shortcut) | font(t.font_size * 0.85f) | fg(hov ? t.text_secondary : t.text_disabled))
-                        | gap(8) | align(Align::center) | pad(0, 10) | height(26) | width(pct(100))
+                        | gap(t.spaced(8)) | align(Align::center) | pad(0, t.spaced(10)) | height(26) | width(pct(100))
                         | bg(hov ? (it.danger ? t.tint(t.danger, 0.22f) : t.tint(t.accent, 0.22f)) : t.overlay.fade(0.0f))
-                        | radius(4) | cursor(it.enabled ? CursorShape::pointer : CursorShape::arrow)
+                        | radius(t.rounded(4)) | cursor(it.enabled ? CursorShape::pointer : CursorShape::arrow)
                         | role(a11y::Role::menu_item) | disabled(!it.enabled) | label(it.label)
                         | id_of(id, i)).build());
     }
     c.overlay(Overlay{
-        .content = (v(v_list(std::move(rows))) | pad(4) | width(240)
-                    | bg(t.overlay) | border(1, t.border_strong) | radius(t.radius_small) | elevation(16)
+        .content = (v(v_list(std::move(rows))) | pad(t.spaced(4)) | width(240)
+                    | bg(var::overlay) | border(t.stroke(1), t.border_strong) | radius(t.radius_small) | elevation(t.lift(16))
                     | role(a11y::Role::menu)).build(),
         .id = part_id(id, part_menu),
         .anchor_id = anchor,

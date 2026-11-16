@@ -26,7 +26,9 @@
 ## Quickstart
 
 ```cpp
-#include <mayag/mayag.hpp>
+#include <mayag/mayag.hpp>            // the framework: DSL, styling, layout, rendering, runtime
+#include <mayag/widget/button.hpp>    // widgets are opt-in, one header each
+#include <mayag/widget/badge.hpp>
 
 using namespace mayag;
 using namespace mayag::dsl;
@@ -84,7 +86,9 @@ box() | border_color(colors::red)
 //        (add `| border(width, color)` first).
 
 box() | bold
-// error: mayag: `| weight` is not valid here — it requires a text element.
+// error: mayag: `| weight` is not valid here — it requires a text element,
+//        or a container with children (text properties set on a container
+//        are inherited by the text inside it).
 
 text<"hi"> | gap(8)
 // error: mayag: `| gap` is not valid here — it requires a container
@@ -120,6 +124,160 @@ Widgets are the same story — `button`, `badge`, `toggle`, `card` are ordinary 
 ```cpp
 button<"Deploy">(theme) | grow() | id<"deploy-btn">
 ```
+
+They live in `include/mayag/widget/`, one per header, and **`<mayag/mayag.hpp>` includes none of them** (as in maya). Include the ones you use, or `<mayag/widget/all.hpp>` while sketching. Nothing outside that folder is a widget or depends on one; a test enforces both.
+
+### Events where they happen
+
+An element says what it does next to what it is. You don't need an `id<>`, an `on(Clicked)` router or string matching:
+
+```cpp
+h(text<"Save">) | button_look | on_click(Save{})
+slider(c, "vol", m.vol, 120)  | on_slide([](Vec2 p) { return SetVol{p.x / 120}; })
+row | on_click([i](const Clicked& c) { return c.count == 2 ? Msg{Open{i}} : Msg{Select{i}}; })
+card | on_enter(Peek{i}) | on_leave(Unpeek{})
+```
+
+- **What a handler can be:** `on_click`, `on_press`, `on_release`, `on_drag`, `on_scroll`, `on_enter`, `on_leave` and `on_slide` take either a message or a function of the gesture. The function can return a message, a `std::optional` of one (empty means nothing is sent), or `Msg` itself. The host matches the result to your `Msg` by type and folds it on the same turn as the gesture.
+- **Handlers make controls:** an element with a handler gets a stable id, so it hovers and takes Tab focus, and Enter/Space trigger its `on_click`. Click handlers also show the pointer cursor.
+- **Two-way binding for forms:** add `Edit<Model>` to `Msg` once, with `update(m, Edit<Model> e) { e(m); }`, then:
+
+  ```cpp
+  switch_control(c, "wifi", m.wifi) | on_click(toggle(&Model::wifi))
+  slider(c, "vol", m.vol, 120)      | on_slide(set_from_x(&Model::vol, 120))
+  h(text<"Reset">)                 | on_click(set(&Model::vol, 0.5f))
+  ```
+
+  An edit is still a message, so replay, undo and vetoes keep working.
+- **Tests read like the UI:** `rt.click_text("Save")`.
+- **Cost:** a handler adds about 95 ns per element per frame.
+
+### Data in the tree
+
+Any child of `v`, `h` or `z` can be an element, a runtime `Node`, a `std::vector` of either, or one of two fragments, mixed freely:
+
+```cpp
+v(text<"Inbox"> | bold,
+  each(m.mails, [](const Mail& x, std::size_t i) {
+      return h(text_of(x.from), spacer(), textf("{} min", x.age)) | id_of("mail", i);
+  }),
+  when(m.mails.empty(), text<"Nothing here"> | fg(var::text_disabled)),
+  sidebar(m) | width(220))      // a helper returning Node pipes directly
+```
+
+`each` and `when` are *spliced*: the rows are the stack's own children, so its `gap`, `wrap` and `justify` apply across them. `when(c, a, b)` picks one; `when(c, a)` leaves nothing at all when false, so no empty box and no stray gap. `textf` is `std::format` that owns its bytes. Inside `z(...)`, every node after the first floats, including each node of a fragment.
+
+## Styling: CSS that type-checks
+
+A view describes how an element looks in **every** state. The cascade
+(`style/cascade.hpp`) works out which state it is in every frame, between
+view and layout, so `view()` never asks "am I hovered?":
+
+```cpp
+constexpr auto button = styles(
+    pad(9, 16), radius(10), bg(var::surface_raised), fg(var::text_primary),
+    hovered(bg(var::tint(var::accent, 0.22f))),
+    pressed(bg(var::accent), fg(var::on_accent), scale(0.96f)),
+    focus_visible(border(2, var::focus_ring)),     // rings for Tab, not for clicks
+    when(state::disabled, opacity(0.4f)),
+    transition());                                  // spring between them
+
+h(text<"Save">) | button | id<"save">
+```
+
+| CSS | mayag |
+|---|---|
+| `.btn { ... }` | `constexpr auto btn = styles(...)`, which compose: `styles(btn, bg(...))` |
+| `:hover` `:active` `:focus-visible` `:focus-within` | `hovered(...)` `pressed(...)` `focus_visible(...)` `focus_within(...)` |
+| `[aria-selected]:hover`, `:not(...)` | `when(state::selected && state::hover, ...)`, `when(!state::selected, ...)` |
+| `.card:hover .chevron` | `group()` on the card, `group_hovered(...)` on the chevron |
+| `@media (max-width: 720px)` | `when(state::narrower(720), direction(Axis::vertical))` |
+| `prefers-color-scheme` | `when(state::dark, ...)` / `when(state::light, ...)` |
+| `color` / `font-*` inheritance | `v(...) \| fg(c) \| font(13)` styles all text inside |
+| `var(--accent)`, `--accent: red` on a subtree | `bg(var::accent)`, `vars(var::accent = rgb<0xF7768E>)` |
+| `transition`, `@starting-style` | `transition()` (springs), `starting(opacity(0), translate(0, 12))` |
+| `transform: scale() / translate()` | `scale(0.96f)`, `translate(0, 12)`: moves paint, not layout |
+
+**What it keeps from CSS** is the vocabulary. **What it drops** is the part that hurts:
+
+- **No global selectors.** A style applies to the element it is piped onto. Nothing at a distance restyles your node.
+- **No specificity arithmetic.** Rules resolve by a *fixed* ranking: environment < group < app states (selected/checked/expanded/flags) < hover < focus-within < focus < focus-visible < pressed < disabled < starting. Within a rank, the selector with more conditions wins, then the later declaration. Write `pressed(...)` before `hovered(...)` and pressed still wins.
+- **No OR.** `!(a && b)` is a compile error; two rules read better than one clever one.
+- **Everything is type-checked.** A variant is checked against its element like any modifier, so `box() | hovered(border_color(red))` fails to compile because there is no border to recolour. A class is checked member by member, in order.
+
+**Tokens bind late.** `var::accent` travels through the tree as a token and resolves *where it lands*. A theme switch restyles every token without rebuilding the view, and a `vars(...)` island (an inverted card, a danger zone) recolours even the text it *inherits*. CSS fixes `var()` where it is declared, so an island there has to restate its text colour. An unbound `var::named("brand")` renders magenta on purpose: a missing definition should be impossible to miss.
+
+**The theme can be application state.** If the program declares `static Theme theme(const Model&)`, a theme switch is an ordinary `update()`. Tokens, `ctx().theme` and the window's clear colour all follow it on the same frame.
+
+**Hover works without ids.** A node with pointer variants but no `id<>` gets a stable, structural, *hover-only* id. It can light up, but it is never a Tab stop or a click target, so a hover-styled card never swallows the click meant for the button inside it. Hover propagates to ancestors the way `:hover` does.
+
+**Motion is springs.** `transition()` interpolates colours in Oklab, plus geometry, opacity and transform. It is critically damped by default; pass `Spring::bouncy()` for overshoot. A hover that ends half-way reverses from where it is, with its velocity. Feedback starts on the frame the input lands, and when everything settles the app goes back to 0% CPU.
+
+**See all of it in one place:** [`examples/stylebook.cpp`](examples/stylebook.cpp) is nine cards, one feature each: inheritance, states, token islands, groups, switches, disclosure, fields, entry motion and breakpoints. Every look is a constexpr class, and its `--headless` run checks every feature end to end through the real host. [`examples/styled.cpp`](examples/styled.cpp) is the same system applied to an ordinary app.
+
+## Themes are the whole look
+
+A `Theme` is one plain value that owns **everything** about how an app looks
+and feels. Each part is a token, resolved at render time like `var::accent`:
+
+| Part | Theme fields | Use in a style |
+|---|---|---|
+| colour | 18 roles + `on_*` labels | `bg(var::surface)`, `fg(var::on_accent)` |
+| shape | `radius_small/medium/large`, `line_*` | `radius(var::radius_md)`, `border(var::line, var::border)` |
+| space | `space_unit` | `pad(var::space(1.5f), var::space(2))`, `gap(var::space(1))` |
+| type | `font_size` | `font(var::font_sm)` … `font(var::font_2xl)` |
+| depth | `depth_scale` (0 = flat) | `elevation(var::depth(6))` |
+| motion | `motion_ui / emphasis / gentle`, `motion_scale` (0 = reduced motion) | `transition()`, `transition(var::motion_emphasis)` |
+| widgets | `sheet`: every widget's look | `Sheet::button`, `::card`, `::track`, `::slider_knob`, … |
+
+Change it at whatever level you need:
+
+```cpp
+// a whole look from a few knobs (the palette is still solved for contrast)
+Theme t = derive({.accent = rgb<0xFF6B35>, .mode = Mode::light,
+                  .roundness = 0, .density = 0.8f, .depth = 0, .motion = 1.4f});
+
+t.radius_medium = 3;                       // any single token
+t.motion_ui     = Spring::bouncy();
+
+static const Sheet mine = [] {             // any widget's whole look
+    Sheet s = Sheet::standard();
+    s.primary = look(pad(10, 18), radius(0), bg(var::warning), border(2, var::text_primary),
+                     shadow(0, var::text_primary, {4, 4}),
+                     hovered(translate(-2, -2)), pressed(translate(4, 4)),
+                     transition(var::motion_emphasis));
+    return s;
+}();
+t.sheet = &mine;
+
+v(settings(m)) | theme(themes::daylight)   // one subtree, everything
+button<"Delete">(t) | bg(var::danger)      // one instance: pipes beat the look
+```
+
+- **Theme changes morph.** When `static Theme theme(const Model&)` returns something new, the host blends the old theme into the new one on a spring. That covers colours (in Oklab), radii, spacing, type size, depth and springs, and every widget, including those that read the theme directly. It's a pure function of the model, so there is no animation code in the app, and it is pixel-exact at rest. It is instant when the new theme's `motion_scale` is 0. Turn it off with `AppConfig::theme_morph = false`.
+- **`themed(t, [&] { ... })` builds any subtree in another theme.** Every widget inside draws in `t`, and every token, sheet and spring below resolves against it. It's the one call that makes "this part looks different" true for everything.
+- **Stock looks, not just palettes.** `looks::brutal()`, `looks::glass()` and `looks::terminal()` swap every widget's *shape* (`sheets::brutal / glass / terminal`). Each takes a `Seed`, so `looks::glass({.accent = brand})` keeps the shape and changes the colour.
+- **Where the theme comes from.** Per app: `AppConfig::theme`. As state: `static Theme theme(const Model&)`, which makes switching an ordinary `update()`; transitioned elements crossfade and morph shape. Per subtree: `| theme(t)`.
+- **Widgets are drawn in the theme you hand them.** If that isn't the frame's theme, the widget scopes its subtree to it.
+- **Stock looks.** `themes::square`, `soft` and `compact` are complete looks, not just palettes; `midnight`, `daylight` and the rest are still there. `lerp(a, b, t)` blends two themes, shape and motion included. `validate(t)` / `legible(t)` check text contrast, and every stock theme is `static_assert`ed legible.
+
+**Every widget follows the theme, not just the restyled ones.** Widgets with a sheet look (button, card, panel, glass, switch, slider) take their whole shape from it. Every other widget writes its geometry through the theme's knobs: `t.rounded(px)` for corners, `t.spaced(px)` for padding and gaps, `t.stroke(px)` for borders, `t.lift(dp)` for elevation and `t.capsule(h)` for pill ends. Its colours are `var::` roles. In the standard theme those are exactly the old pixels; in a square, dense, flat or soft theme they reshape. `tests/test_theme.cpp` renders every widget in all eight stock looks and checks two things: every label stays legible on the fill behind it, and roundness 0 makes every widget square.
+
+**Fast.** Tokens are float/colour sentinels, so elements stay `constexpr` and each modifier takes them with no new overloads. The cascade finds tokens with one branch-free `min()` per node and skips nodes without them, at about 50 ns/node all-in. A widget's look is compiled once per sheet: attaching it copies the fields it set and shares its rule set by refcount, so a themed widget allocates no rules of its own. 2,000 themed buttons build in about 2.8 ms and resolve in 0.4 ms; `tests/test_theme.cpp` keeps both within a budget. Stylebook card 10 cycles all five looks live and shows `| theme(...)` islands side by side.
+
+**See it: [`examples/studio.cpp`](examples/studio.cpp)**, *mayag studio*. A live theme designer sits beside a real app: six looks, eight knobs, Remix, and every drag morphs the whole interface, including the designer's own controls. The bottom strip renders the same app state in three worlds at once (brutal, glass, terminal), and Play in any of them drives the one model. The app code never mentions a colour or a size.
+
+### Correctness fixes that came with it
+
+Making every widget follow every theme turned up bugs in older code. All are fixed and covered by tests:
+
+- **Inner shadows** painted a dark slab *around* their box. They now stay clipped inside the shape, with real offset and spread (kernel, MSL and regenerated GLSL/SPIR-V).
+- **`node(x) | modifier`** replaced `x`'s whole style, so a helper-returned card lost its fill, padding and radius the moment a caller sized it. It now modifies `x`.
+- **Example self-checks that print `FAIL`** used to exit 0. `run_headless` now returns the driver's verdict.
+- **Variable fonts** misread `gvar` phantom points, corrupting glyphs such as `N` at heavy weights. **Font discovery** treated CFF2-only faces (macOS's SFIndia) as drawable, which left five Indic scripts with no face. The test suite now selects fonts by behaviour, and all 49 test binaries pass on macOS.
+- **The tiled renderer** blurred frosted glass per 64 px tile, which looked like a mosaic.
+- **Text with no colour** reads in the theme's `text_primary` inside themed subtrees and light themes, not literal white.
+- **The whole tree builds warning-free** with GCC `-Werror` and clang `-Wall -Wextra -Wshadow -Wconversion`.
 
 ## Colour spaces are types
 
@@ -1045,6 +1203,69 @@ resolved through `libxkbcommon` when present (dead keys, AltGr, IME-adjacent
 layouts) and degrades to "keys work, exotic text doesn't" when it is absent.
 
 Built by default on Linux and BSD; `-DMAYAG_WITH_WAYLAND=OFF` opts out.
+
+## The runtime is jaal: one strict boundary
+
+```
+your app  ──►  mayag  ──►  jaal
+```
+
+**Everything about running a program is jaal's:**
+
+- the event loop, `update()` folding and the frame clock
+- timers, tasks, streams, keyed tasks and teardown
+- OS waiting (epoll, kqueue, Windows) and signals
+- the worker pool, and the render fork-join (`jaal::parallel_for` on a warm `jaal::kernel::pool`)
+- the clock every frame is paced by
+- fault handling
+
+mayag is a jaal *host*: it draws, routes input and runs window effects. It runs no loop, thread or timer of its own.
+
+**Your app talks to mayag only.** Every runtime concept has a mayag name, so an app never includes or names jaal:
+
+| You need | Spell it |
+|---|---|
+| effects / subscriptions | `mayag::Cmd<Msg, ...>`, `mayag::Sub<Msg, ...>` |
+| a custom effect | `mayag::Effect<Payload, "name">` |
+| a task talking back | `mayag::Sink<Msg>` |
+| a big immutable value across threads | `mayag::Shared<T>` |
+| state tasks share | `mayag::CoOwned<T>`, `mayag::Guarded<T[, Rank<N, "name">]>` |
+| proof of holding no lock (task bodies) | `const mayag::Unlocked&` |
+| OS signals | `on(const Model&, mayag::Signal)` |
+| your type in a Msg | `MAYAG_SENDABLE(T)` / `MAYAG_FROZEN(T)` |
+
+**It is enforced by ctest, not by convention:**
+
+- **`mayag_examples_use_only_mayag` / `mayag_tests_use_only_mayag`:** no app or test code names jaal.
+- **`mayag_examples_banlist`:** jaal's own concurrency banlist runs over `examples/` with an *empty* allowlist. No raw threads, mutexes, atomics, `thread_local`, futures or `const_cast`.
+- **`mayag_runtime_banlist` + `mayag_runtime_allowlist_tight`:** the same banlist over `include/mayag`. The few primitives at boundaries jaal cannot own (a thread Metal calls back on, a C API signature, a cache behind a capability-less interface) are each listed with a reason in `tests/lint/allow_include.txt`, and a grant that is no longer used fails the build.
+- **`mayag_uses_jaal_public_api`:** mayag itself uses only jaal's public API. That means no `detail::`, no kernel keys (`pool_access`, `cap_access`) and no minted capabilities. When mayag needed more (a warm-pool fork-join, hosting the kernel from a foreign loop), the fix went into jaal as public API (`jaal::parallel_for(pool&, ...)`, `jaal::forward_host`, `jaal::to_kernel_event`, `jaal::all_signals`), tested by jaal's own suite under TSan.
+
+## Deterministic simulation: async UI bugs become seeds
+
+`<mayag/app/simulate.hpp>` runs a program through the **real** host (cascade, layout, hit testing, inline handlers, theme morph, transitions) and the **real** kernel, on jaal's seeded simulation world:
+
+- **Simulated time:** timers, springs, morphs and frame pacing all see it, so 30 simulated seconds take milliseconds.
+- **Seeded task timing:** task bodies run on the loop thread at seeded latencies, so results race clicks, timers and each other in an order that is random but exactly repeatable.
+- **Fault injection:** tasks can be made to crash or vanish at a set rate.
+
+```cpp
+auto r = mayag::explore<Search>(cfg, {.runs = 1000}, [](auto& app) {
+    app.type("m"); app.wait(3ms); app.type("ay");
+    app.settle();
+    return app.model().shown_for == app.model().query ? 0 : 1;   // the invariant
+});
+if (!r.ok()) mayag::run_simulated<Search>(cfg, r.seed, scenario);   // exact replay
+```
+
+`tests/test_simulate.cpp` does exactly this for the classic out-of-order-results hazard (docs/async-hazards.md #2):
+
+1. explore finds a seed where a late reply overwrites a newer one.
+2. Replaying that seed fails identically and draws the stale result on screen.
+3. Two runs of a seed draw the identical screen at the identical simulated instant.
+4. The generation-stamp fix holds across 1,000 seeds, in about a second of wall time.
+
+The threaded paths that simulation replaces (the worker pool, the render fork-join) are checked the other way, under ThreadSanitizer.
 
 ## Building
 

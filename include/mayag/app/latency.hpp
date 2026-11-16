@@ -35,6 +35,8 @@
 
 #include "../core/geometry.hpp"
 
+#include <jaal/platform/clock.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -49,6 +51,7 @@ struct FrameTiming {
     double input_ms   = 0.0;   ///< draining and dispatching events
     double update_ms  = 0.0;   ///< P::update over all messages this frame
     double view_ms    = 0.0;   ///< P::view
+    double cascade_ms = 0.0;   ///< state variants, inheritance, tokens, transitions
     double layout_ms  = 0.0;
     double paint_ms   = 0.0;   ///< tree -> draw list
     double render_ms  = 0.0;   ///< rasterise + encode + present
@@ -201,21 +204,22 @@ class BusyLoopDetector {
 
 /// Scoped timer writing into a double, in milliseconds.
 class ScopedTimer {
+    using clock = jaal::platform::steady_clock;   // the runtime's clock
+
   public:
     explicit ScopedTimer(double& out) noexcept
-        : out_{&out}, start_{std::chrono::steady_clock::now()} {}
+        : out_{&out}, start_{clock{}.now()} {}
 
     ~ScopedTimer() {
-        *out_ += std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - start_).count();
+        *out_ += std::chrono::duration<double, std::milli>(clock{}.now() - start_).count();
     }
 
     ScopedTimer(const ScopedTimer&) = delete;
     ScopedTimer& operator=(const ScopedTimer&) = delete;
 
   private:
-    double*                                            out_;
-    std::chrono::steady_clock::time_point              start_;
+    double*             out_;
+    clock::time_point   start_;
 };
 
 }  // namespace mayag

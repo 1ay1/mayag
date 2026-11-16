@@ -341,7 +341,7 @@ class Software {
         // Grow the iteration bounds for blurred shapes so the falloff is not
         // cut off at the geometric edge.
         float pad = 1.0f;
-        if (kind == ShapeKind::shadow) pad = inst.params.x * 3.0f + 2.0f;
+        if (kind == ShapeKind::shadow && (inst.flags & instance_flags::inset) == 0u) pad = inst.params.x * 3.0f + 2.0f;
 
         const Rect bounds = shape.expand(pad).intersect(scissor).pixel_snap_out();
         if (bounds.empty()) return;

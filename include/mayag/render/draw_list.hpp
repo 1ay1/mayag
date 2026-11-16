@@ -306,12 +306,21 @@ class DrawList {
     void shadow(const Rect& r, const Shadow& sh, Corners radii) {
         Instance i{};
         i.kind   = static_cast<std::uint32_t>(ShapeKind::shadow);
+        i.color  = premultiplied(sh.color);
+        if (sh.inset) {
+            // Inner: the quad IS the shape (it is clipped to it); the
+            // shadow box's offset and spread travel in params.
+            i.rect   = {r.origin.x, r.origin.y, r.size.x, r.size.y};
+            i.radii  = radii.clamp_to(r.size).as_vec4();
+            i.params = {num::max(sh.blur, 0.01f), sh.spread, sh.offset.x, sh.offset.y};
+            i.flags |= instance_flags::inset;
+            push(i);
+            return;
+        }
         const Rect b = r.translate(sh.offset).expand(sh.spread);
         i.rect   = {b.origin.x, b.origin.y, b.size.x, b.size.y};
         i.radii  = radii.clamp_to(b.size).as_vec4();
-        i.color  = premultiplied(sh.color);
         i.params = {num::max(sh.blur, 0.01f), sh.spread, 0.0f, 0.0f};
-        if (sh.inset) i.flags |= instance_flags::inset;
         push(i);
     }
 

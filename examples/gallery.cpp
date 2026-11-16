@@ -9,6 +9,10 @@
 // Every one of those is a pure `update()` on the model.
 
 #include "harness.hpp"
+#include <mayag/widget/divider.hpp>
+#include <mayag/widget/layout.hpp>
+#include <mayag/widget/setting_row.hpp>
+#include <mayag/widget/toggle.hpp>
 
 using namespace mayag;
 using namespace mayag::dsl;
