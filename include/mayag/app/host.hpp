@@ -1026,6 +1026,7 @@ class window_host {
         frame.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
         { ScopedTimer t{frame.render_ms}; window_.present(draws_, theme_.background); }
         latency_.record(frame);
+        if (framestats_) report_frames();
         // Frames nobody asked for. Frames the user is driving (moving the
         // pointer over a live view) don't count.
         if (input_since_render_) busy_.idle();
@@ -1102,6 +1103,22 @@ class window_host {
     std::optional<time_point> last_tick_;
 
     std::uint64_t       frame_counter_ = 0;
+    // MAYAG_FRAMESTATS=1: print per-stage means about once a second.
+    bool framestats_ = [] { const char* e = std::getenv("MAYAG_FRAMESTATS"); return e && *e && *e != '0'; }();
+    double framestats_at_ = 0.0;
+    std::size_t framestats_frames_ = 0;
+    void report_frames() {
+        ++framestats_frames_;
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (framestats_at_ == 0.0) framestats_at_ = now;
+        if (now - framestats_at_ < 1.0) return;
+        const FrameTiming m = latency_.mean(framestats_frames_);
+        std::fprintf(stderr, "mayag: %zu frames  view %.3f  cascade %.3f  layout %.3f  paint %.3f  render %.3f  = %.3f ms  (%u instances, %u draws)\n",
+                     framestats_frames_, m.view_ms, m.cascade_ms, m.layout_ms, m.paint_ms, m.render_ms, m.cpu_ms(),
+                     m.instances, m.draw_calls);
+        framestats_at_ = now;
+        framestats_frames_ = 0;
+    }
     int                 coalesced_moves_ = 0;
     LatencyStats        latency_{};
     BusyLoopDetector    busy_{};

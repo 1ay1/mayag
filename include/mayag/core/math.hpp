@@ -13,6 +13,7 @@
 // (0, 1, inf, nan) that a naive Newton iteration gets wrong.
 
 #include <bit>
+#include <cmath>
 #include <concepts>
 #include <cstdint>
 #include <limits>
@@ -114,6 +115,7 @@ template <typename T> requires std::is_arithmetic_v<T>
 /// The double accumulator is what makes the float result correctly rounded for
 /// every normal input we care about.
 [[nodiscard]] constexpr float sqrt(float x) noexcept {
+    if !consteval { return std::sqrt(x); }
     if (is_nan(x) || x < 0.0f) return std::numeric_limits<float>::quiet_NaN();
     if (x == 0.0f || is_inf(x)) return x;
 
@@ -131,6 +133,7 @@ template <typename T> requires std::is_arithmetic_v<T>
 /// LMS cone responses — those are non-negative in practice, but a signed
 /// version keeps out-of-gamut intermediates from becoming NaN.
 [[nodiscard]] constexpr float cbrt(float x) noexcept {
+    if !consteval { return std::cbrt(x); }
     if (is_nan(x) || is_inf(x) || x == 0.0f) return x;
     const float s = sign(x);
     const double v = static_cast<double>(x < 0.0f ? -x : x);
@@ -147,6 +150,7 @@ template <typename T> requires std::is_arithmetic_v<T>
 
 /// exp via range reduction to [-ln2/2, ln2/2] then a degree-7 Taylor series.
 [[nodiscard]] constexpr float exp(float x) noexcept {
+    if !consteval { return std::exp(x); }
     if (is_nan(x)) return x;
     if (x > 88.7f)  return inf;
     if (x < -87.3f) return 0.0f;
@@ -168,6 +172,7 @@ template <typename T> requires std::is_arithmetic_v<T>
 
 /// Natural log via mantissa/exponent split + atanh series (fast, symmetric error).
 [[nodiscard]] constexpr float log(float x) noexcept {
+    if !consteval { return std::log(x); }
     if (is_nan(x) || x < 0.0f) return std::numeric_limits<float>::quiet_NaN();
     if (x == 0.0f) return -inf;
     if (is_inf(x)) return inf;
@@ -199,6 +204,7 @@ template <typename T> requires std::is_arithmetic_v<T>
         return static_cast<float>(invert ? 1.0 / acc : acc);
     }
     if (base < 0.0f) return std::numeric_limits<float>::quiet_NaN();
+    if !consteval { return std::pow(base, e); }
     return exp(e * log(base));
 }
 
@@ -206,6 +212,7 @@ template <typename T> requires std::is_arithmetic_v<T>
 
 /// sin via reduction to [-pi, pi] and a degree-15 Taylor series.
 [[nodiscard]] constexpr float sin(float x) noexcept {
+    if !consteval { return std::sin(x); }
     if (is_nan(x) || is_inf(x)) return std::numeric_limits<float>::quiet_NaN();
     double r = static_cast<double>(x - tau * floor((x + pi) / tau));
     const double r2 = r * r;
@@ -217,15 +224,20 @@ template <typename T> requires std::is_arithmetic_v<T>
     return static_cast<float>(sum);
 }
 
-[[nodiscard]] constexpr float cos(float x) noexcept { return sin(x + half_pi); }
+[[nodiscard]] constexpr float cos(float x) noexcept {
+    if !consteval { return std::cos(x); }
+    return sin(x + half_pi);
+}
 
 [[nodiscard]] constexpr float tan(float x) noexcept {
+    if !consteval { return std::tan(x); }
     const float c = cos(x);
     return c == 0.0f ? inf : sin(x) / c;
 }
 
 /// atan on the full line via the [-1,1] core series plus the reciprocal identity.
 [[nodiscard]] constexpr float atan(float x) noexcept {
+    if !consteval { return std::atan(x); }
     if (is_nan(x)) return x;
     if (is_inf(x)) return x > 0 ? half_pi : -half_pi;
 
@@ -250,6 +262,7 @@ template <typename T> requires std::is_arithmetic_v<T>
 }
 
 [[nodiscard]] constexpr float atan2(float y, float x) noexcept {
+    if !consteval { return std::atan2(y, x); }
     if (x > 0.0f)              return atan(y / x);
     if (x < 0.0f && y >= 0.0f) return atan(y / x) + pi;
     if (x < 0.0f)              return atan(y / x) - pi;

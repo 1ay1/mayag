@@ -115,6 +115,24 @@ class LatencyStats {
         return sum / static_cast<double>(count_);
     }
 
+    /// Per-stage mean over the last `n` frames.
+    [[nodiscard]] FrameTiming mean(std::size_t n = window) const noexcept {
+        FrameTiming m{};
+        n = num::min(n, count_);
+        if (n == 0) return m;
+        for (std::size_t k = 0; k < n; ++k) {
+            const FrameTiming& f = samples_[(next_ + window - 1 - k) % window];
+            m.input_ms += f.input_ms;     m.update_ms += f.update_ms;   m.view_ms += f.view_ms;
+            m.cascade_ms += f.cascade_ms; m.layout_ms += f.layout_ms;   m.paint_ms += f.paint_ms;
+            m.render_ms += f.render_ms;
+        }
+        const double d = static_cast<double>(n);
+        m.input_ms /= d; m.update_ms /= d; m.view_ms /= d; m.cascade_ms /= d;
+        m.layout_ms /= d; m.paint_ms /= d; m.render_ms /= d;
+        m.instances = last().instances; m.draw_calls = last().draw_calls;
+        return m;
+    }
+
     /// The frame that hurt. Reported because a single 30 ms hitch is more
     /// visible than a permanently mediocre average.
     [[nodiscard]] double worst_cpu_ms() const noexcept {
