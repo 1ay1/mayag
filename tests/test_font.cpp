@@ -908,10 +908,13 @@ void test_synthetic_bold() {
 
     std::shared_ptr<typo::Face> sf;
     for (const auto& e : typo::system::Database::instance().entries()) {
+        // A REGULAR static face: a real Bold already reaches 700 and is
+        // (rightly) not emboldened again.
+        if (e.weight > 500) continue;
         auto f = typo::Face::from_file(e.path, e.face_index);
         if (f && !f->is_variable() && f->has_glyph(U'o') && f->has_outlines()) { sf = f; break; }
     }
-    if (!sf) { check(true, "no static outline font — skipping"); return; }
+    if (!sf) { check(true, "no regular static outline font — skipping"); return; }
     check(!sf->can_reach_weight(700.0f), "static face can't reach bold on its own");
 
     // Force the coverage path (SDF faux-bold is a separate, deferred concern).
