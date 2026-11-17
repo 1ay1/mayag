@@ -316,6 +316,7 @@ template <class... Kids>
 class KidBox {
   public:
     using tuple_type = std::tuple<Kids...>;
+    constexpr KidBox() requires std::default_initializable<tuple_type> : p_{new tuple_type{}} {}
     constexpr explicit KidBox(tuple_type&& t) : p_{new tuple_type(std::move(t))} {}
     constexpr KidBox(const KidBox& o) : p_{o.p_ ? new tuple_type(*o.p_) : nullptr} {}
     constexpr KidBox(KidBox&& o) noexcept : p_{std::exchange(o.p_, nullptr)} {}
@@ -343,7 +344,7 @@ struct Elem {
     StyleBox                  style{};
     std::string_view          content{};   ///< static text / image key
     std::uint32_t             texture = 0;
-    detail::KidBox<Kids...>   kids{};
+    detail::KidBox<Kids...>   kids;   // no `{}`: children may not be default-constructible
 
     /// Materialise the runtime scene node. A temporary element (the usual
     /// case) moves its children in; an lvalue copies.
@@ -398,7 +399,7 @@ struct ElemR {
     StyleBox                  style{};
     std::string_view          content{};
     std::uint32_t             texture = 0;
-    detail::KidBox<Kids...>   kids{};
+    detail::KidBox<Kids...>   kids;   // no `{}`: children may not be default-constructible
     Rules                     rules;
 
     [[nodiscard]] Node build() const& {

@@ -777,11 +777,8 @@ So the runtime detects it and says something actionable:
 
 ```
 mayag: rendering continuously at 60 fps for several seconds.
-       If this is not a game or a visualiser, something is requesting
-       frames that should not be:
-         * a Sub::every_frame whose condition is always true
-         * an Animated<T> that never settles
-         * a view that marks itself dirty every frame
+       Something keeps asking for frames: an on_frame subscription
+       that is always on, or a spring that never settles.
        An idle mayag app should sit at 0% CPU.
 ```
 
@@ -835,6 +832,74 @@ sits at 0% CPU, asleep in `epoll_wait`. `tests/test_live.cpp` runs a real
 window whose only wake source is a background thread and checks the message
 is folded within a few ms and that the loop used almost no CPU while it
 waited. `tests/test_concurrency.cpp` runs under ThreadSanitizer.
+
+## Performance
+
+The same small app (a title, an animated progress bar, a scrolling list of
+200 two-line rows) in mayag, GTK4 and Qt6 Widgets, on Linux/Wayland with an
+NVIDIA GPU, median of 9 runs (`bench/compare.py`):
+
+| | first frame on screen | CPU while animating | RSS |
+|---|---|---|---|
+| mayag | **29 ms** | **1.2–1.8%** | 151 MB |
+| GTK4 | 184 ms | 2.2–2.8% | 171 MB |
+| Qt6 Widgets | 45 ms | 5.0% | 84 MB |
+
+First frame is spawn to the first `wl_surface.commit` with a buffer, read from
+`WAYLAND_DEBUG` in every toolkit, so all three are cut at the same point. Qt's
+memory is lowest because Qt Widgets draws on the CPU and never loads the GPU
+driver; mayag and GTK4 both carry it.
+
+### Startup
+
+- System font discovery is cached in `~/.cache/mayag/fonts.cache`, keyed on
+  every font directory's mtime, so adding or removing a font rescans.
+- Kerning is read from the font's own tables; opening a face builds nothing.
+- The Vulkan instance and device are made on a worker while the window talks
+  to the compositor, and fonts load on another. If the GPU isn't ready when
+  the window is, the first frames go out through the CPU renderer and the
+  window switches to Vulkan as soon as it is.
+
+`MAYAG_STARTUP=1` prints each phase in ms since exec.
+
+### Reusing what didn't change
+
+A frame rebuilds the view, styles it, lays it out and paints it. `memo()`
+skips all of that for a subtree whose inputs didn't change:
+
+```cpp
+Node list = memo(MemoKey{}.add(m.rows_version).add(m.selected),
+                 [&] { return rows(m); });
+```
+
+On a hit the subtree comes back from last frame already styled and laid out.
+It is still restyled when something it resolves against changes (theme, var
+bindings, inherited text, hover/press/focus inside it), relaid out if the
+space it gets changes, and kept while a transition inside it is moving. Hover
+that `build` read through `ctx()` is tracked, so a subtree styled that way is
+rebuilt when the pointer moves. The key has to cover what `build` reads from
+the model; size, DPI and theme are folded in for you.
+
+Widgets do the same through their context: `memo_widget(c, key, build)` in
+`widget/control.hpp`. `file_tree` memoises itself this way.
+
+`tests/test_memo.cpp` runs an app with and without memo through hover, press,
+scroll, transitions, theme, resize and key changes and requires identical
+frames. `tools/memo-check.sh EXAMPLE` does the same for any example's
+scripted run. A reused subtree that only moved is shifted rather than laid
+out again, which can round 1 ulp away from a fresh layout: at most 1/255 on
+an antialiased edge.
+
+### Seeing where the time goes
+
+- `MAYAG_FRAMESTATS=1` prints per-stage frame times once a second, and how
+  many identical frames were not resubmitted to the GPU.
+- Every example takes `--bench N` (headless, per-stage means and peak RSS)
+  and `--headless --record DIR` (every frame as a PNG).
+- `MAYAG_MEMO=0` turns memo off, `MAYAG_GPU_ASYNC=0` waits for the GPU before
+  the first frame, `MAYAG_FONT_CACHE=0` skips the font cache.
+- `tools/photon-bench-linux.sh` drives a real uinput mouse and prints the
+  window's measured input-to-photon latency.
 
 ## Accessibility
 
