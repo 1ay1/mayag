@@ -20,6 +20,7 @@
 #include "../style/style.hpp"
 #include "text_metrics.hpp"
 
+#include <span>
 #include <vector>
 
 namespace mayag::layout {
@@ -304,48 +305,65 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
                                           : Vec2{margin.bottom, margin.right};
         }
     };
-    std::vector<Item> items;
-    items.reserve(kids.size());
+    // Up to 32 children live on the stack; bigger containers use the heap.
+    // Lines below are spans into this one buffer, so nothing is copied.
+    Item inline_items[32];
+    std::vector<Item> heap_items;
+    Item* store = inline_items;
+    if (kids.size() > 32) { heap_items.resize(kids.size()); store = heap_items.data(); }
+    std::size_t n_items = 0;
 
     const Constraints cc = Constraints::tight(content.size);
 
     for (std::size_t i = 0; i < kids.size(); ++i) {
         if (!in_flow(kids[i])) continue;
         const Vec2 base = measure(kids[i], cc, tm);
-        items.push_back(Item{i, base, main_of(base, ax), kids[i].style().layout.margin});
+        store[n_items++] = Item{i, base, main_of(base, ax), kids[i].style().layout.margin};
     }
+    const std::span<Item> all_items{store, n_items};
 
-    if (!items.empty()) {
+    if (!all_items.empty()) {
         // Partition into lines. Without wrap that's one line holding every item;
         // with wrap, greedily break when the next item would overflow the main
         // axis. Each line then runs the full grow/shrink/justify/align machinery
         // independently and stacks along the cross axis.
         struct Slice { std::size_t lo, hi; };
-        std::vector<Slice> lines;
+        Slice inline_lines[8];
+        std::vector<Slice> heap_lines;
+        std::size_t n_lines = 0;
+        const auto add_line = [&](Slice s) {
+            if (n_lines < 8) inline_lines[n_lines] = s;
+            else {
+                if (heap_lines.empty()) heap_lines.assign(inline_lines, inline_lines + 8);
+                heap_lines.push_back(s);
+            }
+            ++n_lines;
+        };
         if (L.wrap && avail_main > 0.0f) {
             std::size_t start = 0;
             float line_main = 0.0f;
-            for (std::size_t i = 0; i < items.size(); ++i) {
-                const float w = items[i].main + main_of(items[i].margin.total(), ax);
+            for (std::size_t i = 0; i < all_items.size(); ++i) {
+                const float w = all_items[i].main + main_of(all_items[i].margin.total(), ax);
                 const float with_gap = (i > start ? L.gap : 0.0f) + w;
                 if (i > start && line_main + with_gap > avail_main + 0.01f) {
-                    lines.push_back({start, i});
+                    add_line({start, i});
                     start = i;
                     line_main = w;
                 } else {
                     line_main += with_gap;
                 }
             }
-            lines.push_back({start, items.size()});
+            add_line({start, all_items.size()});
         } else {
-            lines.push_back({0, items.size()});
+            add_line({0, all_items.size()});
         }
+        const std::span<const Slice> lines = n_lines <= 8
+            ? std::span<const Slice>{inline_lines, n_lines}
+            : std::span<const Slice>{heap_lines};
 
         float cross_cursor = 0.0f;   // accumulated cross offset across lines
-        const std::vector<Item> all_items = items;
         for (const Slice& slice : lines) {
-        items.assign(all_items.begin() + static_cast<std::ptrdiff_t>(slice.lo),
-                     all_items.begin() + static_cast<std::ptrdiff_t>(slice.hi));
+        const std::span<Item> items = all_items.subspan(slice.lo, slice.hi - slice.lo);
         float line_cross = 0.0f;   // tallest child in this line (cross axis)
         const float gaps = L.gap * static_cast<float>(items.size() - 1);
         float used = gaps;
@@ -484,7 +502,11 @@ inline void arrange(Node& node, const Rect& frame, const TextMeasurer& tm) {
     // `radius_full` become an actual pill -- for EVERY node, leaves and
     // scroll viewports included (they return early below). Transitions run
     // after layout and must see real radii, not 1e9.
-    node.style().corners = node.style().corners.clamp_to(frame.size);
+    {
+        const Corners& c = std::as_const(node).style().corners;
+        const Corners clamped = c.clamp_to(frame.size);
+        if (!(clamped == c)) node.style().corners = clamped;   // writes allocate
+    }
     if (node.children().empty()) return;
 
     // ── scroll viewports ────────────────────────────────────────────────

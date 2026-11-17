@@ -551,41 +551,71 @@ static_assert(!Fill{}.visible());
 /// pipe stage, every child append, every vector growth) moves 8 bytes, not
 /// ~800, and an element's style becomes its node's without a copy.
 class StyleBox {
+    // Style blocks are 800 bytes and every styled node gets one each frame,
+    // so freed blocks are kept on a small per-thread list and reused instead
+    // of going back to malloc. Plain new/delete during constant evaluation.
+    struct Pool {
+        static constexpr int kMax = 4096;
+        void* free_[kMax];
+        int   n = 0;
+        ~Pool() { while (n > 0) ::operator delete(free_[--n]); }
+    };
+    static Pool& pool() noexcept {
+        static thread_local Pool p;
+        return p;
+    }
+    template <class... A>
+    static constexpr Style* make(A&&... a) {
+        if consteval { return new Style(std::forward<A>(a)...); }
+        Pool& p = pool();
+        void* mem = p.n > 0 ? p.free_[--p.n] : ::operator new(sizeof(Style));
+        return ::new (mem) Style(std::forward<A>(a)...);
+    }
+    static constexpr void drop(Style* s) noexcept {
+        if (s == nullptr) return;
+        if consteval { delete s; return; }
+        s->~Style();
+        Pool& p = pool();
+        if (p.n < Pool::kMax) p.free_[p.n++] = s;
+        else ::operator delete(s);
+    }
+
   public:
     constexpr StyleBox() noexcept = default;
-    constexpr StyleBox(const Style& s) : p_{new Style(s)} {}
-    constexpr StyleBox(Style&& s) : p_{new Style(std::move(s))} {}
-    constexpr StyleBox(const StyleBox& o) : p_{o.p_ ? new Style(*o.p_) : nullptr} {}
+    constexpr StyleBox(const Style& s) : p_{make(s)} {}
+    constexpr StyleBox(Style&& s) : p_{make(std::move(s))} {}
+    constexpr StyleBox(const StyleBox& o) : p_{o.p_ ? make(*o.p_) : nullptr} {}
     constexpr StyleBox(StyleBox&& o) noexcept : p_{o.p_} { o.p_ = nullptr; }
     constexpr StyleBox& operator=(const StyleBox& o) {
         if (this == &o) return *this;
         if (o.p_ == nullptr) reset();
         else if (p_ != nullptr) *p_ = *o.p_;
-        else p_ = new Style(*o.p_);
+        else p_ = make(*o.p_);
         return *this;
     }
     constexpr StyleBox& operator=(StyleBox&& o) noexcept {
-        if (this != &o) { delete p_; p_ = o.p_; o.p_ = nullptr; }
+        if (this != &o) { drop(p_); p_ = o.p_; o.p_ = nullptr; }
         return *this;
     }
     constexpr StyleBox& operator=(const Style& s) {
-        if (p_ != nullptr) *p_ = s; else p_ = new Style(s);
+        if (p_ != nullptr) *p_ = s; else p_ = make(s);
         return *this;
     }
     constexpr StyleBox& operator=(Style&& s) {
-        if (p_ != nullptr) *p_ = std::move(s); else p_ = new Style(std::move(s));
+        if (p_ != nullptr) *p_ = std::move(s); else p_ = make(std::move(s));
         return *this;
     }
-    constexpr ~StyleBox() { delete p_; }
+    constexpr ~StyleBox() { drop(p_); }
 
     [[nodiscard]] const Style& get() const noexcept { return p_ != nullptr ? *p_ : fallback(); }
     /// Writable style, allocated on first write.
     [[nodiscard]] constexpr Style& mut() {
-        if (p_ == nullptr) p_ = new Style{};
+        if (p_ == nullptr) p_ = make();
         return *p_;
     }
     [[nodiscard]] constexpr bool is_default() const noexcept { return p_ == nullptr || *p_ == fallback(); }
-    constexpr void reset() noexcept { delete p_; p_ = nullptr; }
+    constexpr void reset() noexcept { drop(p_); p_ = nullptr; }
+    [[nodiscard]] constexpr bool allocated() const noexcept { return p_ != nullptr; }
 
     operator const Style&() const noexcept { return get(); }
 

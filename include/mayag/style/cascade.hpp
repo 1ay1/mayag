@@ -312,6 +312,17 @@ struct Walk {
 
     void visit(Node& n, const TextStyle* parent_text, const Scope& scope,
                state::Mask group_state, bool has_group, bool parent_disabled) {
+        // A plain box with the default style and no rules: resolving a
+        // default style changes nothing, so don't make one. Its children
+        // still inherit what it would have passed down.
+        if (!n.has_own_style() && n.cascade() == nullptr && n.kind() != NodeKind::text &&
+            !deep.contains(&n)) {
+            TextStyle pass_down = std::as_const(n).style().text;
+            if (parent_text != nullptr) inherit_text(pass_down, *parent_text);
+            const bool disabled_here = (own_state(n, in, parent_disabled) & state::bit::disabled) != 0;
+            for (auto& k : n.children()) visit(k, &pass_down, scope, group_state, has_group, disabled_here);
+            return;
+        }
         Style& s = n.style();
         const Cascade* cc = n.cascade().get();
 
@@ -384,15 +395,17 @@ struct Walk {
 inline void assign_hit_ids(Node& n, std::uint64_t path) {
     constexpr state::Mask pointer = state::bit::hover | state::bit::pressed;
     const Cascade* cc = n.cascade().get();
-    if (n.style().id == 0 && cc != nullptr && !cc->handlers.empty()) {
+    const std::uint64_t own = std::as_const(n).style().id;   // reads must not allocate
+    if (own == 0 && cc != nullptr && !cc->handlers.empty()) {
         // An element with handlers IS a control: it takes clicks, focus and
         // Enter/Space. A structural id makes it one without an id<>.
         n.style().id = path | 1u;
-    } else if (n.style().id == 0 && cc != nullptr && (cc->uses & pointer) != 0) {
+    } else if (own == 0 && cc != nullptr && (cc->uses & pointer) != 0) {
         n.style().id = path | 1u;   // never 0
         n.style().hit_only = true;
     }
-    const std::uint64_t base = n.style().id != 0 ? n.style().id : path;
+    const std::uint64_t id = std::as_const(n).style().id;
+    const std::uint64_t base = id != 0 ? id : path;
     std::uint64_t i = 0;
     for (auto& k : n.children()) {
         std::uint64_t h = base ^ (0x9E3779B97F4A7C15ull + ++i);
@@ -623,9 +636,10 @@ class StyleMotion {
     // structural path. Every transitioning node animates, named or not: a
     // chevron that brightens on group hover needs no id to fade.
     void visit(Node& n, double dt, std::uint64_t path) {
-        Style& s = n.style();
-        const std::uint64_t key = (s.id != 0 && !s.hit_only) ? s.id : path;
-        if (s.transition.on()) {
+        const Style& cs = std::as_const(n).style();
+        const std::uint64_t key = (cs.id != 0 && !cs.hit_only) ? cs.id : path;
+        if (cs.transition.on()) {
+            Style& s = n.style();
             auto [it, fresh] = springs_.try_emplace(key);
             Spring1& sp = it->second;
             sp.frame = frame_;

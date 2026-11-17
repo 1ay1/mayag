@@ -141,6 +141,8 @@ class Node {
     [[nodiscard]] NodeKind kind() const noexcept { return kind_; }
     [[nodiscard]] const Style& style() const noexcept { return style_.get(); }
     [[nodiscard]] Style& style() { return style_.mut(); }
+    /// False while the node still uses the shared default style (no block).
+    [[nodiscard]] bool has_own_style() const noexcept { return style_.allocated(); }
     /// Take a boxed style as-is (no copy): how the DSL hands a node its style.
     void adopt_style(StyleBox&& s) noexcept { style_ = std::move(s); }
     [[nodiscard]] std::string_view text() const noexcept { return text_; }

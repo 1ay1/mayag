@@ -2082,7 +2082,7 @@ template <typename... Xs>
 /// further modifiers (width, gap, padding) with the usual `|`.
 template <typename... Kids>
 [[nodiscard]] constexpr auto paragraph(Kids... kids) {
-    return h(kids...) | wrap | baseline;
+    return h(std::move(kids)...) | wrap | baseline;
 }
 
 }  // namespace mayag::dsl
