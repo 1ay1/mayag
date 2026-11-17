@@ -643,7 +643,7 @@ if(MAYAG_BUILD_TESTS)
     # SAME Program the windowed build runs, so a green test here is evidence
     # about the shipped app rather than about a parallel harness.
     if(MAYAG_BUILD_EXAMPLES)
-        foreach(demo counter gallery dashboard typography todo reactive aurora player terminal_settings editor terminal_widgets agent_terminal terminal styled stylebook studio)
+        foreach(demo counter gallery dashboard typography todo reactive aurora babel player terminal_settings editor terminal_widgets agent_terminal terminal styled stylebook studio)
             if(TARGET mayag_${demo})
                 add_test(NAME mayag_${demo}_headless
                          COMMAND mayag_${demo} --headless)

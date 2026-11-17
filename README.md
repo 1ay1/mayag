@@ -366,6 +366,7 @@ animate, <kbd>tab</kbd> to move focus, <kbd>esc</kbd> to quit.
 | `gallery` | every visual feature, 6 live themes, drag + hover + animation |
 | `dashboard` | a realistic app layout with a clickable sidebar |
 | `typography` | the font engine: type scale, kerning, script fallback |
+| `babel` | 26 scripts orbiting in depth around a hero that types itself out, so you can watch Arabic join, Devanagari conjuncts fuse and Hangul compose; type in any script, mixed directions included |
 | `todo` | a real app: text input, virtualised list, overlays, springs |
 | `reactive` | 60 Hz continuous input with its own latency budget on screen |
 

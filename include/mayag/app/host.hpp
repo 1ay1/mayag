@@ -328,6 +328,12 @@ struct AppConfig {
 
     /// Told about every fault (where, what). Empty: one line to stderr.
     std::function<void(std::string_view where, std::string_view what)> on_error = {};
+
+    /// The app animates on purpose, every frame, for as long as it runs (a
+    /// visualiser, a screensaver, a game). Silences the busy-loop warning,
+    /// which otherwise flags a frame subscription that never stops. An
+    /// ordinary UI should leave this off and idle at 0% CPU.
+    bool continuous_animation = false;
 };
 
 // ── the host ────────────────────────────────────────────────────────────
@@ -1145,7 +1151,7 @@ class window_host {
         if (input_since_render_) busy_.idle();
         else busy_.frame_presented(time_);
         input_since_render_ = false;
-        if (busy_.busy() && !busy_warned_) {
+        if (busy_.busy() && !busy_warned_ && !cfg_.continuous_animation) {
             busy_warned_ = true;
             std::fprintf(stderr,
                 "mayag: rendering continuously at %.0f fps for several seconds.\n"
