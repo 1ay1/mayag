@@ -434,12 +434,19 @@ class DrawList {
     /// Convert to linear premultiplied — the only correct form to blend in.
     /// Doing this once on the CPU means the shader never has to, and means an
     /// sRGB value can never reach the blender un-linearised.
-    [[nodiscard]] static Vec4 premultiplied(Color<Srgb> c) noexcept {
+    [[nodiscard]] Vec4 premultiplied(Color<Srgb> c) noexcept {
+        // Every glyph of a text run converts the same colour; skip the three
+        // pow()s when it repeats.
+        if (c == last_srgb_) return last_premul_;
         const auto l = c.to<Linear>();
-        return {l.c0 * l.a, l.c1 * l.a, l.c2 * l.a, l.a};
+        last_srgb_ = c;
+        last_premul_ = {l.c0 * l.a, l.c1 * l.a, l.c2 * l.a, l.a};
+        return last_premul_;
     }
 
     std::vector<Instance> instances_;
+    Color<Srgb>           last_srgb_{0.0f, 0.0f, 0.0f, 0.0f};
+    Vec4                  last_premul_{0.0f, 0.0f, 0.0f, 0.0f};
     std::vector<Batch>    batches_;
     std::vector<Rect>     clip_stack_;
     Rect                  current_clip_{Vec2{}, Vec2{num::inf, num::inf}};
