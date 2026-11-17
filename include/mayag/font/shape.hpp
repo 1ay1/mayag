@@ -574,6 +574,10 @@ struct ShapeResult {
     bool  has_rtl = false;
     /// True when the text contains scripts needing contextual shaping.
     bool  needs_complex = false;
+    /// Unwrapped extent, filled by FontStack's cache: the widest line between
+    /// explicit newlines, and how many lines there are. 0 lines = not filled.
+    float widest_line = 0.0f;
+    int   line_count = 0;
 
     [[nodiscard]] bool empty() const noexcept { return glyphs.empty(); }
 

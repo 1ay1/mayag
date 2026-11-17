@@ -566,7 +566,19 @@ class FontStack : public Shaper {
                 return it->second.run;
             }
         }
-        auto run = std::make_shared<const ShapeResult>(shape_uncached(text, params));
+        auto fresh = shape_uncached(text, params);
+        // The unwrapped extent, computed once here instead of per measure.
+        {
+            float widest = 0.0f, cur = 0.0f;
+            int lines = 1;
+            for (const auto& g : fresh.glyphs) {
+                if (g.cluster < text.size() && (text[g.cluster] == '\n' || text[g.cluster] == '\r')) { widest = num::max(widest, cur); cur = 0.0f; ++lines; }
+                else cur += g.advance;
+            }
+            fresh.widest_line = num::max(widest, cur);
+            fresh.line_count = lines;
+        }
+        auto run = std::make_shared<const ShapeResult>(std::move(fresh));
         std::lock_guard lock{shape_mutex_};
         if (shapes_.size() >= kMaxShapes) evict_shapes(shape_frame_ + 1);
         shapes_.try_emplace(ShapeKey{h, std::string{text}, params}, ShapeEntry{run, shape_frame_});
@@ -1016,6 +1028,17 @@ class StackMeasurer final : public layout::TextMeasurer {
   public:
     explicit StackMeasurer(const FontStack& stack) : stack_{&stack} {}
 
+    /// Measured sizes of recent (text, style, width) triples. Views rebuild
+    /// the same labels every frame; a hit here skips the shape cache's hash
+    /// map, lock and refcounts. Direct-mapped, so a miss just overwrites.
+    struct SizeMemo {
+        std::uint64_t key = 0;
+        float         max_width = 0.0f;
+        Vec2          size{};
+        std::string   text;
+        TextStyle     style{};
+    };
+
     [[nodiscard]] float advance(std::string_view s, const TextStyle& st) const override {
         return s.empty() ? 0.0f : stack_->shaped(s, detail::shape_params_of(st))->width;
     }
@@ -1026,16 +1049,43 @@ class StackMeasurer final : public layout::TextMeasurer {
 
     [[nodiscard]] Vec2 measure(std::string_view s, const TextStyle& st,
                                float max_width) const override {
+        if (s.empty()) {
+            const FaceMetrics fm = stack_->metrics(st.size);
+            return {0.0f, st.line_height > 0.0f ? st.size * st.line_height : fm.line_height};
+        }
+        // Hash the text and width; the style is compared in full on a hit.
+        std::uint64_t h = 0xcbf29ce484222325ull ^ s.size();
+        for (unsigned char c : s) h = (h ^ c) * 0x100000001b3ull;
+        std::uint32_t wbits; std::memcpy(&wbits, &max_width, 4);
+        h ^= wbits * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 31;
+        SizeMemo& slot = memo_[h & (kMemo - 1)];
+        if (slot.key == h && slot.max_width == max_width && slot.text == s && slot.style == st) return slot.size;
+        const Vec2 r = measure_uncached(s, st, max_width);
+        slot.key = h; slot.max_width = max_width; slot.text.assign(s); slot.style = st; slot.size = r;
+        return r;
+    }
+
+  private:
+    static constexpr std::size_t kMemo = 1024;
+    mutable std::vector<SizeMemo> memo_ = std::vector<SizeMemo>(kMemo);
+
+    [[nodiscard]] Vec2 measure_uncached(std::string_view s, const TextStyle& st, float max_width) const {
         const FaceMetrics fm = stack_->metrics(st.size);
         const float line_h = st.line_height > 0.0f ? st.size * st.line_height : fm.line_height;
-
-        if (s.empty()) return {0.0f, line_h};
 
         const auto run = stack_->shaped(s, detail::shape_params_of(st));
         const ShapeResult& shaped = *run;
 
         const bool wrapping = st.overflow == TextOverflow::wrap &&
                               max_width > 0.0f && !num::is_inf(max_width);
+
+        // The cache filled in the unwrapped extent. A wrapping line that
+        // already fits (the usual case) measures the same as a non-wrapping one.
+        if (shaped.line_count > 0 &&
+            (!wrapping || (shaped.widest_line <= max_width && st.max_lines == 0))) {
+            return {shaped.widest_line, static_cast<float>(shaped.line_count) * line_h};
+        }
 
         if (!wrapping) {
             // Still honour explicit newlines.
@@ -1063,6 +1113,7 @@ class StackMeasurer final : public layout::TextMeasurer {
         return {widest, static_cast<float>(n) * line_h};
     }
 
+  public:
     /// One wrapped line: a glyph range and its measured width.
     struct Line {
         std::size_t begin = 0, end = 0;   ///< indices into ShapeResult::glyphs

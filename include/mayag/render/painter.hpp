@@ -96,6 +96,26 @@ inline void paint_node(const Node& node, DrawList& dl, const PaintOptions& opts,
     const Corners radii = xf.radii(st.corners, opts.dpi_scale).clamp_to(frame.size);
     const float   k = opts.dpi_scale * xf.len();   // logical px -> painted px
 
+    // Cull against the clip (a scroll viewport, usually). The node's own
+    // marks reach at most its frame plus shadow reach; children can sit
+    // outside it, so they're still visited unless this node clips them.
+    const Rect& clip = dl.clip();
+    const bool clip_bounded = clip.size.x < 1e8f && clip.size.y < 1e8f;
+    bool own_visible = true;   // only the leaf early-out above uses it
+    if (clip_bounded) {
+        float reach = 0.0f;
+        for (std::uint8_t i = 0; i < st.shadow_count; ++i) {
+            const Shadow& sh = st.shadows[i];
+            if (!sh.inset)
+                reach = num::max(reach, (num::abs(sh.offset.x) + num::abs(sh.offset.y) + sh.spread + sh.blur * 3.0f) * k + 2.0f);
+        }
+        own_visible = !frame.expand(reach + 1.0f).intersect(clip).empty();
+        // Off-screen and nothing below that could be elsewhere: done. (A
+        // clipping node hides its subtree; a leaf has none.) Text, the bulk
+        // of any list, is always a leaf.
+        if (!own_visible && (st.clip || node.children().empty())) return;
+    }
+
     // ── outer shadows ───────────────────────────────────────────────────
     for (std::uint8_t i = 0; i < st.shadow_count; ++i) {
         const Shadow& sh = st.shadows[i];
