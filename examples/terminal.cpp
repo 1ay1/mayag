@@ -591,7 +591,11 @@ struct Terminal {
         ScrollbackInfo sb{.total = 2400, .first = 2364, .visible = 36,
                           .marks = {{400, ScrollbackMark::Kind::prompt}, {900, ScrollbackMark::Kind::prompt}, {1310, ScrollbackMark::Kind::error},
                                     {1800, ScrollbackMark::Kind::prompt}, {2364, ScrollbackMark::Kind::prompt}}};
-        Node body = (h(v(node(terminal_view(look, "term", g, tt, {.font_size = 13.0f, .padding = 14.0f, .focused = true, .marks = false})))
+        // The grid is a pure function of which screen the tab shows.
+        Node grid = memo(MemoKey{}.add(static_cast<int>(cur.screen)), [&] {
+            return terminal_view(look, "term", g, tt, {.font_size = 13.0f, .padding = 14.0f, .focused = true, .marks = false});
+        });
+        Node body = (h(v(node(std::move(grid)))
                            | grow() | height(pct(100)) | min_size(0, 0),
                        node(scrollback_bar(look, "sb", sb, 700.0f)))
                      | grow() | width(pct(100)) | min_size(0, 0)).build();
