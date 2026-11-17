@@ -1312,10 +1312,22 @@ class WaylandWindow {
     } presentation_listener{&on_pres_clock};
 
     /// An input event arrived. A frame shows the NEWEST input it was drawn
-    /// with (pointer moves coalesce), so latency is measured from that.
+    /// with (pointer moves coalesce), so latency is measured from that: from
+    /// the event's own timestamp when the compositor gave one (it's the
+    /// kernel's, on CLOCK_MONOTONIC in ms), else from when we read it.
     void note_input() {
-        unshown_input_ = wldetail::monotonic_now();
+        const double now = wldetail::monotonic_now();
+        double t = now;
+        if (last_event_ms_ != 0) {
+            // Both in wrapping 32-bit ms; the unsigned difference is the age.
+            const auto now_ms = static_cast<std::uint32_t>(static_cast<std::uint64_t>(now * 1000.0));
+            const std::uint32_t age = now_ms - last_event_ms_;
+            if (age < 1000) t = now - static_cast<double>(age) / 1000.0;
+            last_event_ms_ = 0;
+        }
+        unshown_input_ = t;
     }
+    void note_event_time(std::uint32_t ms) noexcept { if (ms != 0) last_event_ms_ = ms; }
 
     void record_photon(double ms) {
         photon_[photon_next_++ % photon_.size()] = ms;
@@ -1422,9 +1434,10 @@ class WaylandWindow {
         w->pending_.push_back(MouseMove{Vec2{-1.0f, -1.0f}, Vec2{}, w->mods_});
     }
 
-    static void on_ptr_motion(void* data, wl::proxy*, std::uint32_t,
+    static void on_ptr_motion(void* data, wl::proxy*, std::uint32_t time_ms,
                               wl::fixed_t sx, wl::fixed_t sy) {
         Impl* w = self(data);
+        w->note_event_time(time_ms);
         const Vec2 p{static_cast<float>(wl::fixed_to_double(sx)),
                      static_cast<float>(wl::fixed_to_double(sy))};
         const Vec2 delta{p.x - w->pointer_pos_.x, p.y - w->pointer_pos_.y};
@@ -1791,6 +1804,7 @@ class WaylandWindow {
     std::uint64_t vblank_seq_ = 0;
     std::uint32_t period_ns_ = 0;         // refresh period from the compositor
     double     unshown_input_ = -1.0;     // oldest input not yet on screen (s)
+    std::uint32_t last_event_ms_ = 0;     // newest input's wl timestamp this dispatch
     std::array<double, 120> photon_{};
     std::size_t photon_next_ = 0, photon_count_ = 0;
     double     photon_last_ = 0.0;
