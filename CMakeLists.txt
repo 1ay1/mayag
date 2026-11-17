@@ -437,6 +437,14 @@ if(MAYAG_BUILD_TESTS)
     target_compile_definitions(mayag_unicode_tests PRIVATE MAYAG_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME mayag_unicode_tests COMMAND mayag_unicode_tests)
 
+    # OpenType shaping must match HarfBuzz exactly: 500 captured hb-shape
+    # outputs across ~200 system fonts and every complex script family.
+    add_executable(mayag_shaping_tests tests/test_shaping.cpp)
+    target_link_libraries(mayag_shaping_tests PRIVATE mayag)
+    target_compile_options(mayag_shaping_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_shaping_tests PRIVATE MAYAG_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME mayag_shaping_tests COMMAND mayag_shaping_tests)
+
     # Font discovery + the synthesized last-resort face. The last-resort checks
     # need no files and run everywhere; the discovery checks assert invariants
     # ("if a face covers a script, covering() finds it") rather than the

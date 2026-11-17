@@ -161,6 +161,71 @@ inline constexpr ScriptProbe script_probes[] = {
     return std::popcount(s);
 }
 
+/// OpenType script tags under which a font shapes `s`, or none when `s`
+/// needs no contextual shaping (any face that covers it can draw it).
+[[nodiscard]] inline std::span<const std::uint32_t> ot_tags_for(Script s) noexcept {
+    using ot::make_tag;
+    static constexpr std::uint32_t arab[] = {make_tag('a','r','a','b')};
+    static constexpr std::uint32_t syrc[] = {make_tag('s','y','r','c')};
+    static constexpr std::uint32_t thaa[] = {make_tag('t','h','a','a')};
+    static constexpr std::uint32_t hebr[] = {make_tag('h','e','b','r')};
+    static constexpr std::uint32_t deva[] = {make_tag('d','e','v','2'), make_tag('d','e','v','a'), make_tag('d','e','v','3')};
+    static constexpr std::uint32_t beng[] = {make_tag('b','n','g','2'), make_tag('b','e','n','g'), make_tag('b','n','g','3')};
+    static constexpr std::uint32_t guru[] = {make_tag('g','u','r','2'), make_tag('g','u','r','u'), make_tag('g','u','r','3')};
+    static constexpr std::uint32_t gujr[] = {make_tag('g','j','r','2'), make_tag('g','u','j','r'), make_tag('g','j','r','3')};
+    static constexpr std::uint32_t taml[] = {make_tag('t','m','l','2'), make_tag('t','a','m','l'), make_tag('t','m','l','3')};
+    static constexpr std::uint32_t telu[] = {make_tag('t','e','l','2'), make_tag('t','e','l','u'), make_tag('t','e','l','3')};
+    static constexpr std::uint32_t knda[] = {make_tag('k','n','d','2'), make_tag('k','n','d','a'), make_tag('k','n','d','3')};
+    static constexpr std::uint32_t mlym[] = {make_tag('m','l','m','2'), make_tag('m','l','y','m'), make_tag('m','l','m','3')};
+    static constexpr std::uint32_t sinh[] = {make_tag('s','i','n','h')};
+    static constexpr std::uint32_t thai[] = {make_tag('t','h','a','i')};
+    static constexpr std::uint32_t lao[]  = {make_tag('l','a','o',' ')};
+    static constexpr std::uint32_t tibt[] = {make_tag('t','i','b','t')};
+    static constexpr std::uint32_t mymr[] = {make_tag('m','y','m','2'), make_tag('m','y','m','r')};
+    static constexpr std::uint32_t khmr[] = {make_tag('k','h','m','r')};
+    static constexpr std::uint32_t mong[] = {make_tag('m','o','n','g')};
+    switch (s) {
+        case Script::arabic: return arab;   case Script::syriac: return syrc;
+        case Script::thaana: return thaa;   case Script::hebrew: return hebr;
+        case Script::devanagari: return deva; case Script::bengali: return beng;
+        case Script::gurmukhi: return guru; case Script::gujarati: return gujr;
+        case Script::tamil: return taml;    case Script::telugu: return telu;
+        case Script::kannada: return knda;  case Script::malayalam: return mlym;
+        case Script::sinhala: return sinh;  case Script::thai: return thai;
+        case Script::lao: return lao;       case Script::tibetan: return tibt;
+        case Script::myanmar: return mymr;  case Script::khmer: return khmr;
+        case Script::mongolian: return mong;
+        default: return {};
+    }
+}
+
+/// The subset of `covered` this font can shape: scripts with no contextual
+/// shaping need only coverage; the rest need a GSUB or GPOS script record
+/// under one of their OpenType tags. (Thai and Hebrew shape acceptably
+/// with their fallbacks, but a face that encodes them in GSUB still wins.)
+[[nodiscard]] inline ScriptSet shapeable_scripts(const ot::FontFile& f, ScriptSet covered) {
+    std::vector<std::uint32_t> tags;
+    for (const std::uint32_t t : {ot::tags::gsub, ot::tags::gpos}) {
+        const auto data = f.table(t);
+        const ot::Reader r{data};
+        if (data.size() < 10) continue;
+        const std::size_t sl = r.u16_at(4);
+        const std::uint16_t n = r.u16_at(sl);
+        for (std::size_t i = 0; i < n; ++i) tags.push_back(r.u32_at(sl + 2 + i * 6));
+    }
+    ScriptSet out = 0;
+    for (std::size_t si = 0; si < script_count; ++si) {
+        const auto s = static_cast<Script>(si);
+        if (!(covered & script_bit(s))) continue;
+        const auto want = ot_tags_for(s);
+        bool ok = want.empty();
+        for (std::uint32_t w : want)
+            for (std::uint32_t t : tags) ok = ok || t == w;
+        if (ok) out |= script_bit(s);
+    }
+    return out;
+}
+
 /// A font file found on disk, described without having fully loaded it.
 struct FontEntry {
     std::string   path;
@@ -181,6 +246,14 @@ struct FontEntry {
     /// Which scripts this face covers, one bit per Script. This is the whole
     /// point of the rewrite: a complete answer instead of five booleans.
     ScriptSet     scripts = 0;
+    /// Scripts this face can SHAPE: it covers them and has OpenType layout
+    /// (GSUB/GPOS) for them, or they need none. A face with only Apple `morx`
+    /// tables (Al Bayan, Raanana) draws Arabic, Hebrew or Thai as isolated,
+    /// unjoined letters with mayag's OpenType shaper, so for scripts that
+    /// need contextual forms such a face must lose to one that has them.
+    ScriptSet     shapes = 0;
+
+    [[nodiscard]] bool can_shape(Script s) const noexcept { return (shapes & script_bit(s)) != 0; }
 
     [[nodiscard]] bool covers(Script s) const noexcept {
         return (scripts & script_bit(s)) != 0;
@@ -270,11 +343,10 @@ namespace detail {
         e.weight     = parsed->weight();
         e.italic     = parsed->is_italic();
         e.color      = parsed->has_color();
-        // Outlines THIS engine rasterises: glyf and CFF. CFF2 (macOS's
-        // SFIndia.ttc, variable CJK faces) parses but has no glyph source,
-        // so counting it made covering() pick a face Face::from_file then
-        // rejected -- and Bengali, Gurmukhi, Tamil... got no face at all.
-        e.outlines   = parsed->has_table(ot::tags::glyf) || parsed->has_table(ot::tags::cff);
+        // Outlines THIS engine rasterises: glyf, CFF and CFF2 (macOS's
+        // SFIndia.ttc, variable CJK faces). Only count what GlyphSource can
+        // load, or covering() picks a face Face::from_file then rejects.
+        e.outlines   = parsed->has_outlines();
         e.glyphs     = parsed->num_glyphs();
 
         // Probe one representative codepoint per script rather than
@@ -292,6 +364,7 @@ namespace detail {
         if (e.color && parsed->glyph_for(0x1F600) != 0) {
             e.scripts |= script_bit(Script::emoji);
         }
+        e.shapes = shapeable_scripts(*parsed, e.scripts);
 
         // Monospace: compare a wide glyph against a narrow one. `post`'s
         // isFixedPitch flag exists but is wrong often enough to be useless.
@@ -324,7 +397,7 @@ namespace detail {
 // directory's mtime is unchanged. MAYAG_FONT_CACHE=0 turns it off.
 
 inline constexpr std::uint32_t kCacheMagic = 0x4D464331;   // "MFC1"
-inline constexpr std::uint32_t kCacheVersion = 1;
+inline constexpr std::uint32_t kCacheVersion = 2;          // 2: + shapes
 
 [[nodiscard]] inline std::int64_t mtime_ns(const std::filesystem::path& p) {
     std::error_code ec;
@@ -416,6 +489,7 @@ class CacheReader {
         e.outlines = (packed >> 19) & 1;
         e.glyphs = static_cast<std::uint16_t>(r.u32());
         e.scripts = r.u64();
+        e.shapes = r.u64();
         entries.push_back(std::move(e));
     }
     if (!r.ok()) return false;
@@ -437,6 +511,7 @@ inline void save_cache(const std::string& path,
               std::uint32_t{e.color} << 18 | std::uint32_t{e.outlines} << 19);
         w.u32(e.glyphs);
         w.u64(e.scripts);
+        w.u64(e.shapes);
     }
     // Write to a temp file and rename, so a crash or a parallel launch never
     // leaves a half-written cache behind.
@@ -538,6 +613,7 @@ class Database {
                 if (e.color) score += 1000;                 // colour emoji wins
             } else {
                 if (e.outlines) score += 1000;              // must be drawable
+                if (e.can_shape(s)) score += 500;           // and shapeable (joins, reorders)
                 // Prefer a focused face: fewer scripts covered = more
                 // specialised. A dedicated face beats a pan-Unicode one.
                 score += 64 - static_cast<int>(popcount(e.scripts));
@@ -563,6 +639,7 @@ class Database {
             const bool ea = (s == Script::emoji);
             if (ea && a->color != b->color) return a->color;           // colour first for emoji
             if (!ea && a->outlines != b->outlines) return a->outlines; // drawable first
+            if (!ea && a->can_shape(s) != b->can_shape(s)) return a->can_shape(s);   // shapeable first
             return popcount(a->scripts) < popcount(b->scripts);        // specialised first
         });
         return out;

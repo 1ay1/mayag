@@ -200,8 +200,10 @@ jobs:
                 -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.san }}"
           # Every suite that touches the runtime: the tiled renderer's
           # fork-join (jaal::parallel_for), tasks and streams under
-          # contention, the host, inline handlers, and simulation.
-          suites="mayag_tests mayag_concurrency_tests mayag_app_tests mayag_handler_tests mayag_simulate_tests"
+          # contention, the host, inline handlers, and simulation. Plus the
+          # text stack, which parses untrusted font bytes: UCD/bidi, the
+          # OpenType layout engine and shapers, and the font engine.
+          suites="mayag_tests mayag_concurrency_tests mayag_app_tests mayag_handler_tests mayag_simulate_tests mayag_unicode_tests mayag_shaping_tests mayag_font_tests"
           cmake --build build -j --target $suites
           for t in $suites; do
             echo "== $t"

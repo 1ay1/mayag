@@ -1531,10 +1531,100 @@ void test_smoothing() {
     }
 }
 
+void test_cff2() {
+    std::printf("\n-- CFF2 outlines --\n");
+    const std::string path = "/System/Library/Fonts/SFIndia.ttc";
+    if (!std::filesystem::exists(path)) { std::printf("  (SFIndia.ttc absent, skipped)\n"); return; }
+    auto face = typo::Face::from_file(path, 0);
+    check(face != nullptr, "SFIndia (CFF2) opens");
+    if (!face) return;
+    check(face->has_outlines(), "CFF2 face reports outlines");
+    int inked = 0;
+    for (std::uint16_t g = 1; g < 200; ++g) inked += face->outline(g).empty() ? 0 : 1;
+    check(inked > 150, "CFF2 glyphs have outlines (" + std::to_string(inked) + "/199)");
+    // Reference values captured from HarfBuzz hb_font_draw_glyph (face 0, gid 10).
+    const auto o = face->outline(10);
+    const bool exact = !o.empty() && o.contours[0].start.x == 376.0f &&
+        o.contours[0].start.y == 616.0f && o.contours[0].segments.size() > 1 &&
+        o.contours[0].segments[0].to.x == 449.0f && o.contours[0].segments[0].to.y == 616.0f &&
+        o.contours[0].segments[1].c0.x == 449.0f && o.contours[0].segments[1].c0.y == 628.0f;
+    check(exact, "CFF2 gid 10 control points match HarfBuzz");
+    const Rect b0 = o.control_bounds();
+    face->set_variation(typo::var::tag_wght, 900.0f);
+    const Rect b1 = face->outline(10).control_bounds();
+    check(b0.min().x != b1.min().x || b0.max().x != b1.max().x || b0.max().y != b1.max().y,
+          "CFF2 outline changes with wght (blend)");
+    face->reset_variations();
+}
+
+/// FontStack end to end: itemisation into bidi/script/face runs, OpenType
+/// shaping per run, logical storage with levels for visual painting.
+void test_complex_text() {
+    section("complex scripts and bidi through FontStack");
+    auto stack = typo::system::default_stack();
+    if (stack == nullptr) return;
+    TextStyle st;
+    st.size = 16.0f;
+    const auto sp = typo::detail::shape_params_of(st);
+
+    // Mixed direction: "abc " LTR, Arabic RTL, " (12) xyz". Levels follow
+    // UAX #9 with the paragraph level from the first strong char (L).
+    const std::string mixed = "abc \xd8\xb9\xd8\xb1\xd8\xa8\xd9\x8a 12 xyz";   // abc عربي 12 xyz
+    const auto run = stack->shaped(mixed, sp);
+    check(run->has_rtl, "mixed text is flagged RTL");
+    bool saw_odd = false, saw_even = false, logical = true;
+    std::uint32_t last_cluster = 0;
+    for (const auto& g : run->glyphs) {
+        saw_odd |= (g.level & 1) != 0;
+        saw_even |= (g.level & 1) == 0;
+        // Storage is logical: clusters never decrease across the string
+        // (within an RTL run glyphs are stored logically too).
+        if (g.cluster + 3 < last_cluster) logical = false;
+        last_cluster = std::max(last_cluster, g.cluster);
+    }
+    check(saw_odd && saw_even, "Arabic runs carry odd levels, Latin even");
+    check(logical, "glyphs are stored in logical order");
+
+    // Arabic joins: the four letters of عربي shape to contextual forms, so
+    // their glyph ids differ from the isolated forms of the same letters.
+    const auto word = stack->shaped("\xd8\xb9\xd8\xb1\xd8\xa8\xd9\x8a", sp);
+    int changed = 0, letters = 0;
+    for (const char* iso : {"\xd8\xb9", "\xd8\xb1", "\xd8\xa8", "\xd9\x8a"}) {
+        const auto one = stack->shaped(iso, sp);
+        if (letters < static_cast<int>(word->glyphs.size()) && !one->glyphs.empty() &&
+            word->glyphs[static_cast<std::size_t>(letters)].glyph_id != one->glyphs[0].glyph_id)
+            ++changed;
+        ++letters;
+    }
+    check(changed >= 2, "Arabic letters take joining forms in a word (" + std::to_string(changed) + " of 4 changed)");
+
+    // Devanagari: क + ि (pre-base matra) is reordered so the matra glyph
+    // comes FIRST in visual (= logical, LTR) order.
+    const auto ki = stack->shaped("\xe0\xa4\x95\xe0\xa4\xbf", sp);
+    if (ki->glyphs.size() == 2) {
+        const auto ka = stack->shaped("\xe0\xa4\x95", sp);
+        check(!ka->glyphs.empty() && ki->glyphs[1].glyph_id == ka->glyphs[0].glyph_id,
+              "Devanagari pre-base matra is reordered before the consonant");
+    }
+    // A conjunct forms: क्ष shapes to fewer glyphs than its 3 characters.
+    const auto ksa = stack->shaped("\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\xb7", sp);
+    check(!ksa->glyphs.empty() && ksa->glyphs.size() < 3, "Devanagari conjunct क्ष forms a ligature");
+
+    // Combining marks attach: ễ as e + U+0302 + U+0303 has the marks at
+    // zero advance on the base's cluster.
+    const auto mk = stack->shaped("e\xcc\x82\xcc\x83", sp);
+    float adv = 0.0f;
+    for (const auto& g : mk->glyphs) adv += g.advance;
+    const auto e = stack->shaped("e", sp);
+    check(!e->glyphs.empty() && std::abs(adv - e->glyphs[0].advance) < 0.01f,
+          "stacked combining marks add no advance");
+}
+
 int main() {
     std::printf("mayag font engine\n=================");
 
     test_robustness();
+    test_cff2();
     test_all_system_fonts();
     test_cmap();
     test_outlines();
@@ -1558,6 +1648,7 @@ int main() {
     test_color_glyphs();
     test_coretext_parity();
     test_smoothing();
+    test_complex_text();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);

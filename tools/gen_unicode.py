@@ -436,7 +436,10 @@ inline constexpr char32_t n_count = v_count * t_count, s_count = l_count * n_cou
 } // namespace mayag::typo::ucd
 '''
 
-CHUNK_BLOCKS = 256  # 256 blocks * 128 entries * 2 bytes = 64 KiB per literal
+# 128 blocks * 128 entries * 2 bytes = 32 KiB per literal. MSVC rejects a
+# string literal of 65535 bytes or more INCLUDING its terminating NUL (C2026),
+# so a 64 KiB chunk is one byte too many there; 32 KiB leaves wide margin.
+CHUNK_BLOCKS = 128
 
 
 def emit(d, out_path):

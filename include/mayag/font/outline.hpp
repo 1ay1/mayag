@@ -583,7 +583,10 @@ using Dict = std::vector<std::pair<std::uint16_t, std::vector<float>>>;
     for (std::size_t i = 0; i < d.size();) {
         const std::uint8_t b0 = d[i];
 
-        if (b0 <= 21) {                       // operator
+        if (b0 == 23) {                       // CFF2 blend: keep defaults+deltas;
+            ++i;                              // only unblended keys are consumed
+        }
+        else if (b0 <= 24) {                  // operator (22 vsindex, 24 vstore: CFF2)
             std::uint16_t op = b0;
             ++i;
             if (b0 == 12 && i < d.size()) { op = static_cast<std::uint16_t>(0x0C00 | d[i]); ++i; }
@@ -1143,6 +1146,371 @@ class CffSource {
 };
 
 // ════════════════════════════════════════════════════════════════════════
+// Cff2Source — CFF2 (variable PostScript) outlines
+// ════════════════════════════════════════════════════════════════════════
+
+/// Reads CFF2 outlines. Differences from CFF1 per the OpenType spec: a
+/// fixed header + Top DICT (no Name/String INDEX), 32-bit INDEX counts, no
+/// width operand, no endchar/return (a charstring ends at its last byte),
+/// and `vsindex`/`blend` operators that interpolate operands with region
+/// scalars from the ItemVariationStore at the current normalised coords.
+class Cff2Source {
+  public:
+    Cff2Source() = default;
+
+    explicit Cff2Source(const ot::FontFile& f) {
+        const auto data = f.table(ot::tags::cff2);
+        if (!data.empty()) parse(data);
+    }
+
+    [[nodiscard]] bool valid() const noexcept { return charstrings_.count() > 0; }
+    [[nodiscard]] bool is_variable() const noexcept { return region_count_ > 0; }
+    void set_coords(const var::Coords* c) noexcept { coords_ = c; }
+
+    [[nodiscard]] Outline load(std::uint16_t gid) const {
+        Outline out;
+        if (!valid() || gid >= charstrings_.count()) return out;
+        Interp st{};
+        const std::uint32_t fd = fd_for(gid);
+        if (fd < fds_.size()) {
+            st.local   = &fds_[fd].subrs;
+            st.vsindex = fds_[fd].vsindex;
+        }
+        run(charstrings_.at(gid), st, out, 0);
+        close_contour(st, out);
+        return out;
+    }
+
+  private:
+    static constexpr int max_stack = 513;
+
+    struct FontDict { cff::Index subrs{}; std::uint16_t vsindex = 0; };
+
+    struct Interp {
+        float stack[max_stack]{};
+        int   sp = 0;
+        Vec2  pos{};
+        bool  open = false;
+        Contour current{};
+        int   n_stems = 0;
+        std::uint16_t vsindex = 0;
+        int   scalars_for = -1;          // vsindex the cached scalars belong to
+        std::vector<float> scalars;
+        const cff::Index* local = nullptr;
+        void push(float v) noexcept { if (sp < max_stack) stack[sp++] = v; }
+        void clear() noexcept { sp = 0; }
+    };
+
+    static void close_contour(Interp& st, Outline& out) {
+        if (st.open && !st.current.empty()) {
+            if (st.current.segments.back().to != st.current.start) {
+                st.current.segments.push_back(
+                    Segment{Segment::Kind::line, {}, {}, st.current.start});
+            }
+            out.contours.push_back(std::move(st.current));
+        }
+        st.current = Contour{};
+        st.open = false;
+    }
+    static void move_to(Interp& st, Outline& out, Vec2 p) {
+        close_contour(st, out);
+        st.current.start = p;
+        st.pos = p;
+        st.open = true;
+    }
+    static void line_to(Interp& st, Vec2 p) {
+        if (st.open) st.current.segments.push_back(Segment{Segment::Kind::line, {}, {}, p});
+        st.pos = p;
+    }
+    static void curve_to(Interp& st, Vec2 c1, Vec2 c2, Vec2 p) {
+        if (st.open) st.current.segments.push_back(Segment{Segment::Kind::cubic, c1, c2, p});
+        st.pos = p;
+    }
+    static void rrcurve(Interp& st, const float* a) {
+        const Vec2 c1 = st.pos + Vec2{a[0], a[1]};
+        const Vec2 c2 = c1 + Vec2{a[2], a[3]};
+        curve_to(st, c1, c2, c2 + Vec2{a[4], a[5]});
+    }
+
+    /// Region scalars for ItemVariationData `vsi` at the live coords.
+    void compute_scalars(Interp& st) const {
+        st.scalars.clear();
+        st.scalars_for = st.vsindex;
+        if (st.vsindex >= ivd_offsets_.size()) return;
+        const auto d = vstore_;
+        const std::size_t ivd = ivd_offsets_[st.vsindex];
+        const std::uint16_t n = var::detail::u16(d, ivd + 4);
+        st.scalars.resize(n, 0.0f);
+        if (coords_ == nullptr || coords_->empty()) return;
+        for (std::uint16_t j = 0; j < n; ++j) {
+            const std::uint16_t ri = var::detail::u16(d, ivd + 6 + 2u * j);
+            if (ri >= region_count_) continue;
+            const std::size_t roff = region_list_ + 4 +
+                static_cast<std::size_t>(ri) * axis_count_ * 6;
+            st.scalars[j] = var::detail::region_scalar(d, roff, axis_count_, *coords_);
+        }
+    }
+
+    void blend(Interp& st) const {
+        if (st.sp < 1) { st.clear(); return; }
+        if (st.scalars_for != st.vsindex) compute_scalars(st);
+        const int n = static_cast<int>(st.stack[st.sp - 1]);
+        const int k = static_cast<int>(st.scalars.size());
+        --st.sp;
+        if (n < 0 || n * (k + 1) > st.sp) { st.clear(); return; }
+        const int base = st.sp - n * (k + 1);
+        const int deltas = base + n;
+        for (int i = 0; i < n; ++i) {
+            float v = st.stack[base + i];
+            for (int j = 0; j < k; ++j) {
+                v += st.stack[deltas + i * k + j] * st.scalars[static_cast<std::size_t>(j)];
+            }
+            st.stack[base + i] = v;
+        }
+        st.sp = base + n;
+    }
+
+    void call(const cff::Index* idx, Interp& st, Outline& out, int depth) const {
+        if (st.sp <= 0 || idx == nullptr) { st.clear(); return; }
+        const int i = static_cast<int>(st.stack[--st.sp]) + cff::subr_bias(idx->count());
+        if (i >= 0 && static_cast<std::uint32_t>(i) < idx->count()) {
+            run(idx->at(static_cast<std::uint32_t>(i)), st, out, depth + 1);
+        }
+    }
+
+    void run(std::span<const std::uint8_t> code, Interp& st, Outline& out, int depth) const {
+        if (depth > 10) return;
+        float* s = st.stack;
+        for (std::size_t i = 0; i < code.size();) {
+            const std::uint8_t b0 = code[i];
+            if (b0 >= 32 || b0 == 28) {
+                if (b0 == 28) {
+                    if (i + 2 >= code.size()) return;
+                    st.push(static_cast<std::int16_t>((code[i + 1] << 8) | code[i + 2]));
+                    i += 3;
+                } else if (b0 <= 246) {
+                    st.push(static_cast<float>(static_cast<int>(b0) - 139)); ++i;
+                } else if (b0 <= 250) {
+                    if (i + 1 >= code.size()) return;
+                    st.push(static_cast<float>((b0 - 247) * 256 + code[i + 1] + 108)); i += 2;
+                } else if (b0 <= 254) {
+                    if (i + 1 >= code.size()) return;
+                    st.push(static_cast<float>(-(b0 - 251) * 256 - code[i + 1] - 108)); i += 2;
+                } else {
+                    if (i + 4 >= code.size()) return;
+                    const auto v = static_cast<std::int32_t>(
+                        (static_cast<std::uint32_t>(code[i + 1]) << 24) |
+                        (static_cast<std::uint32_t>(code[i + 2]) << 16) |
+                        (static_cast<std::uint32_t>(code[i + 3]) << 8) | code[i + 4]);
+                    st.push(static_cast<float>(v) / 65536.0f); i += 5;
+                }
+                continue;
+            }
+            ++i;
+            const int n = st.sp;
+            switch (b0) {
+                case 1: case 3: case 18: case 23:
+                    st.n_stems += n / 2; st.clear(); break;
+                case 19: case 20:
+                    st.n_stems += n / 2; st.clear();
+                    i += static_cast<std::size_t>((st.n_stems + 7) / 8);
+                    break;
+                case 15:                                            // vsindex
+                    if (n > 0 && s[n - 1] >= 0.0f) st.vsindex = static_cast<std::uint16_t>(s[n - 1]);
+                    st.clear(); break;
+                case 16: blend(st); break;                          // blend
+                case 21: if (n >= 2) move_to(st, out, st.pos + Vec2{s[n - 2], s[n - 1]}); st.clear(); break;
+                case 22: if (n >= 1) move_to(st, out, st.pos + Vec2{s[n - 1], 0.0f}); st.clear(); break;
+                case 4:  if (n >= 1) move_to(st, out, st.pos + Vec2{0.0f, s[n - 1]}); st.clear(); break;
+                case 5:
+                    for (int k = 0; k + 1 < n; k += 2) line_to(st, st.pos + Vec2{s[k], s[k + 1]});
+                    st.clear(); break;
+                case 6: case 7: {
+                    bool h = (b0 == 6);
+                    for (int k = 0; k < n; ++k) {
+                        line_to(st, st.pos + (h ? Vec2{s[k], 0.0f} : Vec2{0.0f, s[k]}));
+                        h = !h;
+                    }
+                    st.clear(); break;
+                }
+                case 8: for (int k = 0; k + 5 < n; k += 6) rrcurve(st, &s[k]); st.clear(); break;
+                case 24: {
+                    int k = 0;
+                    for (; k + 5 < n - 2; k += 6) rrcurve(st, &s[k]);
+                    if (k + 1 < n) line_to(st, st.pos + Vec2{s[k], s[k + 1]});
+                    st.clear(); break;
+                }
+                case 25: {
+                    int k = 0;
+                    for (; k + 1 < n - 6; k += 2) line_to(st, st.pos + Vec2{s[k], s[k + 1]});
+                    if (k + 5 < n) rrcurve(st, &s[k]);
+                    st.clear(); break;
+                }
+                case 26: case 27: {
+                    int k = 0; float d1 = 0.0f;
+                    if (n % 4 == 1) { d1 = s[0]; k = 1; }
+                    const bool v = (b0 == 26);
+                    for (; k + 3 < n; k += 4) {
+                        const Vec2 c1 = st.pos + (v ? Vec2{d1, s[k]} : Vec2{s[k], d1});
+                        const Vec2 c2 = c1 + Vec2{s[k + 1], s[k + 2]};
+                        curve_to(st, c1, c2, c2 + (v ? Vec2{0.0f, s[k + 3]} : Vec2{s[k + 3], 0.0f}));
+                        d1 = 0.0f;
+                    }
+                    st.clear(); break;
+                }
+                case 30: case 31: {
+                    bool h = (b0 == 31);
+                    for (int k = 0; k + 3 < n; k += 4) {
+                        const float last = (n - k == 5) ? s[k + 4] : 0.0f;
+                        const Vec2 c1 = st.pos + (h ? Vec2{s[k], 0.0f} : Vec2{0.0f, s[k]});
+                        const Vec2 c2 = c1 + Vec2{s[k + 1], s[k + 2]};
+                        curve_to(st, c1, c2, c2 + (h ? Vec2{last, s[k + 3]} : Vec2{s[k + 3], last}));
+                        h = !h;
+                    }
+                    st.clear(); break;
+                }
+                case 10: call(st.local, st, out, depth); break;
+                case 29: call(&global_subrs_, st, out, depth); break;
+                case 12: {
+                    if (i >= code.size()) return;
+                    escape(code[i++], st);
+                    break;
+                }
+                default: st.clear(); break;                     // incl. 11/14: invalid in CFF2
+            }
+        }
+    }
+
+    static void escape(std::uint8_t op, Interp& st) {
+        const float* s = st.stack;
+        switch (op) {
+            case 35:
+                if (st.sp >= 13) { rrcurve(st, &s[0]); rrcurve(st, &s[6]); }
+                break;
+            case 34:
+                if (st.sp >= 7) {
+                    const float y = st.pos.y;
+                    const Vec2 c1 = st.pos + Vec2{s[0], 0.0f};
+                    const Vec2 c2 = c1 + Vec2{s[1], s[2]};
+                    curve_to(st, c1, c2, c2 + Vec2{s[3], 0.0f});
+                    const Vec2 c3 = st.pos + Vec2{s[4], 0.0f};
+                    const Vec2 c4 = Vec2{c3.x + s[5], y};
+                    curve_to(st, c3, c4, Vec2{c4.x + s[6], y});
+                }
+                break;
+            case 36:
+                if (st.sp >= 9) {
+                    const float y = st.pos.y;
+                    const Vec2 c1 = st.pos + Vec2{s[0], s[1]};
+                    const Vec2 c2 = c1 + Vec2{s[2], s[3]};
+                    curve_to(st, c1, c2, c2 + Vec2{s[4], 0.0f});
+                    const Vec2 c3 = st.pos + Vec2{s[5], 0.0f};
+                    const Vec2 c4 = c3 + Vec2{s[6], s[7]};
+                    curve_to(st, c3, c4, Vec2{c4.x + s[8], y});
+                }
+                break;
+            case 37:
+                if (st.sp >= 11) {
+                    const Vec2 start = st.pos;
+                    float dx = 0.0f, dy = 0.0f;
+                    for (int k = 0; k < 10; k += 2) { dx += s[k]; dy += s[k + 1]; }
+                    rrcurve(st, &s[0]);
+                    const Vec2 c3 = st.pos + Vec2{s[6], s[7]};
+                    const Vec2 c4 = c3 + Vec2{s[8], s[9]};
+                    Vec2 to = c4;
+                    if (std::fabs(dx) > std::fabs(dy)) { to.x += s[10]; to.y = start.y; }
+                    else                               { to.y += s[10]; to.x = start.x; }
+                    curve_to(st, c3, c4, to);
+                }
+                break;
+            default: break;
+        }
+        st.clear();
+    }
+
+    void parse(std::span<const std::uint8_t> data) {
+        ot::Reader r{data};
+        if (r.u8_at(0) != 2) return;                         // majorVersion
+        const std::size_t hdr = r.u8_at(2);
+        const std::size_t top_len = r.u16_at(3);
+        const auto top = cff::parse_dict(r.slice(hdr, top_len));
+        global_subrs_ = cff::parse_index(r, hdr + top_len, true);
+        const auto off = [&](std::uint16_t op) -> std::size_t {
+            const auto* v = cff::dict_get(top, op);
+            return (v && !v->empty() && v->back() > 0.0f) ? static_cast<std::size_t>(v->back()) : 0;
+        };
+        if (const std::size_t cs = off(17); cs) charstrings_ = cff::parse_index(r, cs, true);
+        if (const std::size_t fda = off(0x0C24); fda) {
+            const cff::Index fd_index = cff::parse_index(r, fda, true);
+            fds_.resize(fd_index.count());
+            for (std::uint32_t k = 0; k < fd_index.count(); ++k) {
+                const auto fd = cff::parse_dict(fd_index.at(k));
+                const auto* pv = cff::dict_get(fd, 18);
+                if (!pv || pv->size() < 2) continue;
+                const auto sz = static_cast<std::size_t>((*pv)[pv->size() - 2]);
+                const auto of = static_cast<std::size_t>((*pv)[pv->size() - 1]);
+                const auto priv = cff::parse_dict(r.slice(of, sz));
+                if (const auto* ls = cff::dict_get(priv, 19); ls && !ls->empty() && ls->back() > 0.0f) {
+                    fds_[k].subrs = cff::parse_index(r, of + static_cast<std::size_t>(ls->back()), true);
+                }
+                if (const auto* vi = cff::dict_get(priv, 22); vi && !vi->empty() && vi->back() >= 0.0f) {
+                    fds_[k].vsindex = static_cast<std::uint16_t>(vi->back());
+                }
+            }
+        }
+        fd_select_ = off(0x0C25);
+        reader_ = r;
+        if (const std::size_t vs = off(24); vs) {
+            const std::size_t len = r.u16_at(vs);
+            vstore_ = r.slice(vs + 2, len);
+            const auto d = vstore_;
+            if (var::detail::u16(d, 0) == 1) {
+                region_list_ = var::detail::u32(d, 2);
+                axis_count_   = var::detail::u16(d, region_list_);
+                region_count_ = var::detail::u16(d, region_list_ + 2);
+                const std::uint16_t nivd = var::detail::u16(d, 6);
+                for (std::uint16_t k = 0; k < nivd; ++k) {
+                    ivd_offsets_.push_back(var::detail::u32(d, 8 + 4u * k));
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] std::uint32_t fd_for(std::uint16_t gid) const {
+        if (fds_.size() <= 1 || fd_select_ == 0) return 0;
+        const std::size_t p = fd_select_;
+        const std::uint8_t fmt = reader_.u8_at(p);
+        if (fmt == 0) return reader_.u8_at(p + 1 + gid);
+        if (fmt == 3) {
+            const std::uint16_t nr = reader_.u16_at(p + 1);
+            for (std::uint16_t k = 0; k < nr; ++k) {
+                const std::size_t rec = p + 3 + k * 3u;
+                if (gid >= reader_.u16_at(rec) && gid < reader_.u16_at(rec + 3)) return reader_.u8_at(rec + 2);
+            }
+        } else if (fmt == 4) {
+            const std::uint32_t nr = reader_.u32_at(p + 1);
+            for (std::uint32_t k = 0; k < nr && k < 65536; ++k) {
+                const std::size_t rec = p + 5 + k * 6u;
+                if (gid >= reader_.u32_at(rec) && gid < reader_.u32_at(rec + 6)) return reader_.u16_at(rec + 4);
+            }
+        }
+        return 0;
+    }
+
+    ot::Reader               reader_{};
+    cff::Index               charstrings_{};
+    cff::Index               global_subrs_{};
+    std::vector<FontDict>    fds_;
+    std::size_t              fd_select_ = 0;
+    std::span<const std::uint8_t> vstore_{};
+    std::size_t              region_list_ = 0;
+    std::uint16_t            axis_count_ = 0;
+    std::uint16_t            region_count_ = 0;
+    std::vector<std::size_t> ivd_offsets_;
+    const var::Coords*       coords_ = nullptr;
+};
+
+// ════════════════════════════════════════════════════════════════════════
 // GlyphSource — the format-agnostic front door
 // ════════════════════════════════════════════════════════════════════════
 
@@ -1154,7 +1522,10 @@ class GlyphSource {
     GlyphSource() = default;
 
     explicit GlyphSource(const ot::FontFile& f) : upem_{f.units_per_em()} {
-        if (f.is_cff()) {
+        if (f.has_table(ot::tags::cff2) && !f.has_table(ot::tags::glyf)) {
+            cff2_ = Cff2Source{f};
+            kind_ = cff2_.valid() ? Kind::cff2 : Kind::none;
+        } else if (f.is_cff()) {
             cff_ = CffSource{f};
             kind_ = cff_.valid() ? Kind::cff : Kind::none;
         } else {
@@ -1170,29 +1541,33 @@ class GlyphSource {
         switch (kind_) {
             case Kind::glyf: return glyf_.load(gid);
             case Kind::cff:  return cff_.load(gid);
+            case Kind::cff2: return cff2_.load(gid);
             case Kind::none: break;
         }
         return {};
     }
 
     /// Point this source at a set of normalized axis coordinates. Only the
-    /// glyf/gvar path varies today; CFF2 is a future extension. The pointer
-    /// must outlive every subsequent load() call.
+    /// glyf/gvar and CFF2 (blend) paths vary. The pointer must outlive every
+    /// subsequent load() call.
     void set_coords(const var::Coords* c) noexcept {
         if (kind_ == Kind::glyf) glyf_.set_coords(c);
+        if (kind_ == Kind::cff2) cff2_.set_coords(c);
     }
 
-    /// True when the face carries gvar variation data we can apply.
+    /// True when the face carries gvar / CFF2 variation data we can apply.
     [[nodiscard]] bool is_variable() const noexcept {
-        return kind_ == Kind::glyf && glyf_.is_variable();
+        return (kind_ == Kind::glyf && glyf_.is_variable()) ||
+               (kind_ == Kind::cff2 && cff2_.is_variable());
     }
 
   private:
-    enum class Kind : std::uint8_t { none, glyf, cff };
+    enum class Kind : std::uint8_t { none, glyf, cff, cff2 };
 
     Kind          kind_ = Kind::none;
     GlyfSource    glyf_;
     CffSource     cff_;
+    Cff2Source    cff2_;
     std::uint16_t upem_ = 1000;
 };
 

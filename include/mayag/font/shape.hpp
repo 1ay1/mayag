@@ -1,24 +1,22 @@
 #pragma once
-// mayag::typo::shape — text to positioned glyphs
+// mayag::typo::shape — text to positioned glyphs: the shared vocabulary
 //
-// Shaping answers: given a string and a face, WHICH glyphs, and WHERE?
+// Shaping answers: given a string and a face, WHICH glyphs, and WHERE? The
+// answer is mayag's own OpenType shaping stack, a rule-for-rule port of
+// HarfBuzz verified glyph for glyph against hb-shape (tests/test_shaping.cpp):
 //
-// mayag ships a correct, fast shaper for the scripts that need no reordering
-// — Latin, Greek, Cyrillic, CJK, and anything else whose glyphs run in
-// logical order. That covers the overwhelming majority of UI text, and it
-// includes the parts people actually notice: real kerning from `kern` and
-// `GPOS`, ligatures, cluster-correct cursor movement, and grapheme
-// boundaries so an emoji with a skin-tone modifier is one cursor stop.
+//   bidi.hpp          UAX #9, 100% of BidiTest and BidiCharacterTest
+//   ot_layout.hpp     GSUB/GPOS/GDEF: every lookup type, variations
+//   ot_shape.hpp      the pipeline: normalisation, masks, fallbacks
+//   ot_shapers.hpp    Arabic/Syriac joining, Hebrew, Thai/Lao, Hangul,
+//                     Indic (all nine scripts), Khmer, Myanmar, USE
+//   FontStack         itemisation into (bidi level, script, face) runs
 //
-// It does NOT implement Arabic joining, Indic reordering, or BiDi. Those are
-// not "more of the same" — each is a distinct algorithm with a decade of
-// conformance work behind it, and a half-implementation is worse than none
-// because it fails silently on text the developer cannot read.
-//
-// So this file defines a `Shaper` interface, provides `SimpleShaper` as the
-// dependency-free default, and lets `MAYAG_WITH_HARFBUZZ` swap in HarfBuzz
-// for complex scripts. The atlas, the SDF pipeline, and the draw path are
-// identical either way.
+// This file holds the types those share (ShapedGlyph, ShapeResult,
+// ShapeParams, the Shaper interface), UTF-8 decoding, the line-break
+// classes, and the `kern`/`trak` table readers. KernTable's GPOS path is
+// the CoreText-exact pair-kerning reader that Face::kern() exposes for
+// measurement outside the full pipeline.
 
 #include "opentype.hpp"
 #include "variations.hpp"
@@ -196,20 +194,18 @@ namespace uni {
            (cp >= 0x2000 && cp <= 0x200A) || cp == 0x202F || cp == 0x205F || cp == 0x3000;
 }
 
-/// Right-to-left scripts. mayag detects them so it can WARN rather than
-/// silently render them in the wrong order — see `ShapeResult::has_rtl`.
+/// Strong right-to-left characters (rough block test, for the ShapeResult
+/// flag; the bidi algorithm itself uses the UCD's exact classes).
 [[nodiscard]] constexpr bool is_rtl(std::uint32_t cp) noexcept {
-    return (cp >= 0x0590 && cp <= 0x05FF) ||   // Hebrew
-           (cp >= 0x0600 && cp <= 0x06FF) ||   // Arabic
-           (cp >= 0x0700 && cp <= 0x074F) ||   // Syriac
-           (cp >= 0x0780 && cp <= 0x07BF) ||   // Thaana
-           (cp >= 0x08A0 && cp <= 0x08FF) ||   // Arabic Ext-A
+    return (cp >= 0x0590 && cp <= 0x08FF) ||   // Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic
            (cp >= 0xFB1D && cp <= 0xFDFF) ||   // Hebrew/Arabic presentation
-           (cp >= 0xFE70 && cp <= 0xFEFF);
+           (cp >= 0xFE70 && cp <= 0xFEFF) ||
+           (cp >= 0x10800 && cp <= 0x10FFF) || // historic RTL scripts
+           (cp >= 0x1E800 && cp <= 0x1EFFF);   // Mende Kikakui, Adlam, Arabic math
 }
 
-/// Scripts requiring contextual reordering or joining — the ones the simple
-/// shaper cannot render correctly.
+/// Scripts needing contextual shaping (informational; every script is
+/// shaped by the full OpenType pipeline regardless).
 [[nodiscard]] constexpr bool needs_complex_shaping(std::uint32_t cp) noexcept {
     return (cp >= 0x0600 && cp <= 0x06FF) ||   // Arabic
            (cp >= 0x0900 && cp <= 0x0DFF) ||   // Indic
@@ -242,6 +238,19 @@ class KernTable {
     explicit KernTable(const ot::FontFile& f) {
         find_gpos(f);
         if (lookups_.empty()) kern_ = find_kern(f);
+    }
+
+    /// Only the legacy `kern` table, never GPOS: the OpenType pipeline runs
+    /// GPOS itself and falls back to this when the font has no GPOS kern
+    /// feature (hb_ot_layout_kern).
+    [[nodiscard]] static KernTable legacy(const ot::FontFile& f) {
+        KernTable t;
+        t.kern_ = find_kern(f);
+        return t;
+    }
+    [[nodiscard]] bool has_legacy() const noexcept { return !kern_.empty(); }
+    [[nodiscard]] std::int16_t legacy_lookup(std::uint16_t left, std::uint16_t right) const noexcept {
+        return kern_.empty() ? std::int16_t{0} : lookup_kern(left, right);
     }
 
     [[nodiscard]] bool empty() const noexcept { return kern_.empty() && lookups_.empty(); }
@@ -517,43 +526,68 @@ class TrackTable {
         const std::uint16_t n_sizes  = r.u16_at(horiz + 2);
         const std::size_t   sizes    = r.u32_at(horiz + 4);
         if (n_sizes == 0 || sizes + std::size_t{n_sizes} * 4 > data.size()) return;
+        for (std::uint16_t s = 0; s < n_sizes; ++s)
+            sizes_.push_back(static_cast<float>(static_cast<std::int32_t>(r.u32_at(sizes + std::size_t{s} * 4))) / 65536.0f);
         for (std::uint16_t t = 0; t < n_tracks; ++t) {
             const std::size_t rec = horiz + 8 + std::size_t{t} * 8;
-            if (rec + 8 > data.size() || r.u32_at(rec) != 0) continue;   // the NORMAL track (0.0)
             const std::size_t vals = r.u16_at(rec + 6);
-            if (vals + std::size_t{n_sizes} * 2 > data.size()) return;
-            for (std::uint16_t s = 0; s < n_sizes; ++s) {
-                const auto fixed = static_cast<std::int32_t>(r.u32_at(sizes + std::size_t{s} * 4));
-                points_.push_back({static_cast<float>(fixed) / 65536.0f,
-                                   static_cast<float>(r.i16_at(vals + std::size_t{s} * 2))});
-            }
-            return;
+            if (rec + 8 > data.size() || vals + std::size_t{n_sizes} * 2 > data.size()) { sizes_.clear(); tracks_.clear(); return; }
+            Track tr;
+            tr.track = static_cast<float>(static_cast<std::int32_t>(r.u32_at(rec))) / 65536.0f;
+            for (std::uint16_t s = 0; s < n_sizes; ++s) tr.values.push_back(static_cast<float>(r.i16_at(vals + std::size_t{s} * 2)));
+            tracks_.push_back(std::move(tr));
         }
+        if (tracks_.empty()) sizes_.clear();
     }
 
-    [[nodiscard]] bool empty() const noexcept { return points_.empty(); }
+    [[nodiscard]] bool empty() const noexcept { return tracks_.empty(); }
 
-    /// Tracking in font units per glyph at `point_size`: linear between the
-    /// table's sizes, held flat past either end, and FLOORED to whole font
-    /// units. CoreText floors (measured: 67.3 -> 67, 52.7 -> 52, 3.5 -> 3),
-    /// and matching it is what makes a line's width agree to the 1/1000 px.
+    /// The tracking value for the NORMAL track (0.0) at `point_size`, by
+    /// HarfBuzz's rules: a font with one track uses it whatever its value;
+    /// otherwise the bracketing tracks are interpolated.
+    [[nodiscard]] float at_exact(float point_size) const noexcept {
+        if (tracks_.empty()) return 0.0f;
+        if (tracks_.size() == 1) return value(tracks_[0], point_size);
+        std::size_t i = 0, j = tracks_.size() - 1;
+        while (i + 1 < tracks_.size() && tracks_[i + 1].track <= 0.0f) ++i;
+        while (j > 0 && tracks_[j - 1].track >= 0.0f) --j;
+        if (i == j) return value(tracks_[i], point_size);
+        const float t = (0.0f - tracks_[i].track) / (tracks_[j].track - tracks_[i].track);
+        const float a = value(tracks_[i], point_size), b = value(tracks_[j], point_size);
+        return a + t * (b - a);
+    }
+
+    /// Tracking in font units per glyph at `point_size`, FLOORED to whole
+    /// font units. CoreText floors (measured: 67.3 -> 67, 52.7 -> 52,
+    /// 3.5 -> 3), and matching it is what makes a line's width agree to the
+    /// 1/1000 px.
     [[nodiscard]] float at(float point_size) const noexcept {
-        if (points_.empty()) return 0.0f;
-        if (point_size <= points_.front().size) return points_.front().value;
-        for (std::size_t i = 1; i < points_.size(); ++i) {
-            const Point& a = points_[i - 1];
-            const Point& b = points_[i];
-            if (point_size <= b.size) {
-                const float t = (point_size - a.size) / (b.size - a.size);
-                return std::floor(a.value + (b.value - a.value) * t + 1e-4f);
-            }
-        }
-        return points_.back().value;
+        return std::floor(at_exact(point_size) + 1e-4f);
     }
 
   private:
-    struct Point { float size = 0.0f; float value = 0.0f; };
-    std::vector<Point> points_;
+    struct Track { float track = 0.0f; std::vector<float> values; };
+
+    /// One track's value at a size (hb TrackTableEntry::get_value).
+    [[nodiscard]] float value(const Track& tr, float pt) const noexcept {
+        const std::size_t n = sizes_.size();
+        if (n == 0) return 0.0f;
+        if (n == 1) return tr.values[0];
+        std::size_t i = 0;
+        while (i < n && sizes_[i] < pt) ++i;
+        if (i == 0) return tr.values[0];
+        if (i == n) return tr.values[n - 1];
+        if (sizes_[i] == pt) return tr.values[i];
+        float s0 = sizes_[i - 1], s1 = sizes_[i], v0 = tr.values[i - 1], v1 = tr.values[i];
+        if (s1 < s0) { std::swap(s0, s1); std::swap(v0, v1); }
+        if (pt < s0) return v0;
+        if (pt > s1) return v1;
+        if (s0 == s1) return (v0 + v1) * 0.5f;
+        return v0 + (pt - s0) / (s1 - s0) * (v1 - v0);
+    }
+
+    std::vector<float> sizes_;
+    std::vector<Track> tracks_;
 };
 
 // ══ GSUB ligatures ════════════════════════════════════════════════
@@ -722,15 +756,24 @@ struct ShapedGlyph {
     std::uint8_t  face_index = 0;
     /// True when no face in the chain had this codepoint — drawn as .notdef.
     bool          missing = false;
+    /// Bidi embedding level of the run this glyph belongs to (odd = RTL).
+    /// Glyphs are stored in LOGICAL order, right-to-left runs included (the
+    /// shaper's visual output is reversed back), so line breaking and cursor
+    /// logic walk the text in reading order. Painting reverses each RTL run
+    /// and reorders the runs of a line visually (UAX #9 L2) by these levels;
+    /// offsets stay valid because each is relative to its own glyph's pen.
+    std::uint8_t  level = 0;
+    /// Index of the shaping run (consecutive glyphs with the same run id
+    /// were shaped together and must not be split by reordering).
+    std::uint16_t run = 0;
 };
 
 struct ShapeResult {
     std::vector<ShapedGlyph> glyphs;
     /// Total advance width in pixels.
     float width = 0.0f;
-    /// True when the text contains right-to-left characters. The simple
-    /// shaper renders these in LOGICAL order, which is wrong — this flag lets
-    /// a caller detect the situation and enable the HarfBuzz path.
+    /// True when the text contains right-to-left characters (it was laid
+    /// out with the bidi algorithm; runs of glyphs carry odd levels).
     bool  has_rtl = false;
     /// True when the text contains scripts needing contextual shaping.
     bool  needs_complex = false;

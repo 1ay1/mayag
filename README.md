@@ -17,7 +17,7 @@
 
 - **Invalid UI does not compile.** `box() | border_color(red)` is a compile error that says *"it requires a border (add `| border(width, color)` first)"* — not a silent no-op you find three days later.
 - **Colour spaces are types.** `Color<Srgb>` and `Color<Linear>` are different types. Alpha blending is only *defined* on `Linear`. You cannot gamma-blend by accident because there is no overload for it.
-- **A real font engine, from scratch.** TrueType and CFF parsing, colour/bitmap faces (CBDT/sbix/COLR), composite glyphs, kerning from `kern` and `GPOS`, per-codepoint script fallback across 30+ scripts, analytic-coverage rasterisation, and a Euclidean-SDF atlas. No FreeType, no HarfBuzz, no stb, no fontconfig.
+- **A real font engine, from scratch.** TrueType, CFF and CFF2 parsing, colour/bitmap faces (CBDT/sbix/COLR), composite glyphs, a full OpenType shaping stack (GSUB/GPOS, every complex script, UAX #9 bidi) that matches HarfBuzz output exactly, per-codepoint script fallback across 30+ scripts, analytic-coverage rasterisation, and a Euclidean-SDF atlas. No FreeType, no HarfBuzz, no ICU, no stb, no fontconfig.
 - **One shape kernel.** Buttons, cards, dividers, circles, rings, arcs, capsules, shadows, glyphs — every one is a signed distance field on the same instanced quad. A whole app frame is **1–3 draw calls**, text included.
 - **Analytic antialiasing.** No MSAA, no supersampling. The SDF has unit gradient, so coverage is exact at any zoom on any backend.
 - **Runs everywhere, immediately.** A pure-CPU reference rasteriser ships in the box, font discovery finds the platform's typefaces with no configuration, and a synthesized last-resort face keeps text legible even on a machine with no fonts at all. `git clone && cmake --build` renders a PNG.
@@ -467,9 +467,43 @@ mayag_typography.png  1800x1760
   atlas 125 glyphs, 18.3% of 1024x1024
 ```
 
-### What it does not do
+### Every script, shaped like HarfBuzz shapes it
 
-No Arabic joining, no Indic reordering, no BiDi. Those are not "more of the same" — each is a distinct algorithm with a decade of conformance work behind it, and a half-implementation fails silently on text the developer cannot read. So mayag *detects* them (`ShapeResult::has_rtl`, `needs_complex`) and defines a `Shaper` interface for HarfBuzz to slot into. The atlas, SDF pipeline, and draw path are unchanged either way.
+mayag carries its own OpenType shaping stack, a rule-for-rule port of
+HarfBuzz 11.2.1, and it is held to HarfBuzz's output exactly:
+
+- **Bidi:** UAX #9 in full (explicit embeddings, isolates, bracket pairs, L1/L2).
+  It passes **770,241 / 770,241** of `BidiTest.txt` and **91,707 / 91,707** of
+  `BidiCharacterTest.txt` (Unicode 18).
+- **OpenType layout:** GSUB lookup types 1–8 and GPOS types 1–9, including
+  context and chaining, mark-to-base/ligature/mark, cursive attachment,
+  FeatureVariations, and GDEF variation deltas at the face's instance.
+- **Script shapers:** Arabic and Syriac joining (with stretching), Hebrew
+  presentation forms, Thai and Lao (Sara Am), Hangul jamo composition, all
+  nine Indic scripts with v2 and old-spec tags, Khmer, Myanmar, and the
+  Universal Shaping Engine for about 60 more scripts (Balinese, Javanese,
+  Tibetan, Mongolian, Sinhala...).
+- **The pipeline around them:** normalisation that decomposes only as far as
+  the font needs, mark reordering, right-to-left mirroring, fractions, dotted
+  circles for broken clusters, fallback mark positioning for fonts without
+  GPOS, and HarfBuzz's GDEF blocklist.
+- **CFF2 outlines** with `blend`/`vsindex`: SFIndia's 8,883 glyphs match
+  HarfBuzz's outlines exactly.
+- **Itemisation:** each string splits into (bidi level, script, face) runs.
+  For complex scripts the fallback chain prefers faces that carry OpenType
+  layout for that script. Glyphs are stored in logical order, and each line
+  is painted in visual order.
+
+`tests/test_shaping.cpp` replays **500 hb-shape outputs** over about 200 system
+fonts and every script family. All 500 match, glyph for glyph and font unit
+for font unit. A fuzzer has shaped 100,000 strings on corrupted GSUB/GPOS/GDEF
+tables under ASan and UBSan with no failures. Shaping runs at about 290
+ns/char for Latin and 470 ns/char for Devanagari, and results are cached per
+string.
+
+The one thing left to HarfBuzz-on-macOS is Apple's `morx` (AAT) tables. Fonts
+that have only `morx` are passed over for complex scripts in favour of an
+OpenType face for the same script.
 
 ### Untrusted input
 
@@ -1447,7 +1481,7 @@ To see a *live* window remotely, either point it at a headless compositor
 
 Real flexbox, ~400 lines, no Yoga dependency: `grow`/`shrink` with spec-correct weighting, six `justify` modes, five `align` modes, gap, padding, margin, min/max clamping applied where the spec says, absolute/fixed children resolved out of flow, and percentage lengths.
 
-Layout depends on a narrow `TextMeasurer` interface, never a font backend — so it is testable with no fonts, deterministic across machines, and swapping in HarfBuzz later touches exactly one class.
+Layout depends on a narrow `TextMeasurer` interface, never a font backend, so it can be tested with no fonts and gives the same result on every machine.
 
 ## Project layout
 

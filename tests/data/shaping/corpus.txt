@@ -1,0 +1,500 @@
+/System/Library/Fonts/SFNS.ttf|Hello, World! AVATAR Typography fi ffl|
+/System/Library/Fonts/SFNS.ttf|à é ñ ụ́ q̃ á|
+/System/Library/Fonts/SFNS.ttf|ẹ́ ǭ Ṩ ḍ̇ x̣̂|
+/System/Library/Fonts/SFNS.ttf|1/2 3⁄4 file office|
+/System/Library/Fonts/SFNS.ttf|Hello AVATAR|--variations=wght=700
+/System/Library/Fonts/SFNS.ttf|Hello AVATAR|--variations=wght=200,opsz=40
+/System/Library/Fonts/SFNS.ttf|ẹ́ ǭ q̃|--variations=wght=850
+/System/Library/Fonts/SFNS.ttf|$12 ¢5|--variations=wght=900
+/System/Library/Fonts/Supplemental/Times New Roman.ttf|Ta Te To AV Wa ẹ́ q̃ ǭ|
+/System/Library/Fonts/Supplemental/Arial.ttf|Ta Te To AV Wa ẹ́ q̃ ǭ fi|
+/System/Library/Fonts/SFNS.ttf|Ελληνικά Кириллица ǅ|
+/System/Library/Fonts/SFHebrew.ttf|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/Supplemental/Arial.ttf|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/SFNS.ttf|a‍b a‌b e︀ x͏y|
+/System/Library/Fonts/SFNS.ttf|smcp test 0123|--features=+smcp,+onum
+/System/Library/Fonts/SFNS.ttf|Hello World|--features=-kern,-liga
+/System/Library/Fonts/SFNS.ttf|(a) [b] {c}|--direction=rtl
+/System/Library/Fonts/NewYork.ttf|Typography offline Æsop ẹ́|
+/System/Library/Fonts/NewYork.ttf|1/2 Th ft|--features=+frac,+dlig
+/System/Library/Fonts/SFArabic.ttf|مرحبا بالعالم|
+/System/Library/Fonts/SFArabic.ttf|لا إله إلا الله|
+/System/Library/Fonts/SFArabic.ttf|بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ|
+/System/Library/Fonts/SFArabic.ttf|العربية ١٢٣ (نص)|
+/System/Library/Fonts/SFArabic.ttf|ـبـ ب‍ ‍ب ب‌ب|
+/System/Library/Fonts/SFArabic.ttf|مرحبا بالعالم|--variations=wght=700
+/System/Library/Fonts/Supplemental/Arial.ttf|مرحبا بالعالم لا|
+/System/Library/Fonts/Supplemental/Arial.ttf|بِسْمِ اللَّهِ الرَّحْمَٰنِ|
+/System/Library/Fonts/Supplemental/Times New Roman.ttf|مرحبا بالعالم لاَ|
+/System/Library/Fonts/Supplemental/Times New Roman.ttf|بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ|
+/System/Library/Fonts/Supplemental/Courier New.ttf|مرحبا بالعالم|
+/System/Library/Fonts/Supplemental/Tahoma.ttf|مرحبا بالعالم لاَ|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|مرحبا بالعالم|
+/System/Library/Fonts/DecoTypeNastaleeqUrdu.ttc|اردو زبان میں خوش آمدید|
+/System/Library/Fonts/NotoNastaliq.ttc|اردو زبان میں خوش آمدید|
+/System/Library/Fonts/NotoNastaliq.ttc|پاکستان کی قومی زبان اردو ہے|
+/System/Library/Fonts/SFArabic.ttf|فارسی: سلام دنیا گچپژ|
+/System/Library/Fonts/Supplemental/NotoSansSyriac-Regular.ttf|ܫܠܡܐ ܥܠܡܐ ܐܠܦ|
+/System/Library/Fonts/SFHebrew.ttf|שָׁלוֹם עוֹלָם בְּרֵאשִׁית|
+/System/Library/Fonts/SFHebrew.ttf|ספר 123 (מילה) "ציטוט"|
+/System/Library/Fonts/SFHebrewRounded.ttf|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/Supplemental/Times New Roman.ttf|בְּרֵאשִׁית בָּרָא אֱלֹהִים|
+/System/Library/Fonts/Supplemental/Arial.ttf|בְּרֵאשִׁית בָּרָא אֱלֹהִים|
+/System/Library/Fonts/Supplemental/Courier New.ttf|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/Supplemental/Tahoma.ttf|בְּרֵאשִׁית ภาษาไทย|
+/System/Library/Fonts/Supplemental/Corsiva.ttc|שָׁלוֹם בְּרֵאשִׁית|
+/System/Library/Fonts/Supplemental/Tahoma.ttf|ภาษาไทย น้ำ ปั้น ฎีกา ญี่ปุ่น|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|ภาษาไทย น้ำ ปั้น|
+/System/Library/Fonts/AppleSDGothicNeo.ttc|한국어 안녕하세요 각 〮가|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|한국어 안녕하세요 각 ᄒᆞᆫ|
+/System/Library/Fonts/Supplemental/Tahoma.ttf|ภาษาไทย น้ำ ปั้น ฎีกา ญี่ปุ่น ฐ ฎุ|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|ภาษาไทย น้ำ ปั้น ฎีกา|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|한국어 ᄒᆞᆫ 〮가|
+/System/Library/Fonts/NotoSansMyanmar.ttc|မြန်မာ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကျွန်ုပ်|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ကြိုး|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|သင်္ချိုင်း|
+/System/Library/Fonts/NotoSansMyanmar.ttc|မြန်မာစာ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကျွန်တော်|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ပြည်ထောင်စု|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ရှိသည်|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ကွ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကှ|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ကျွှ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကြွ|
+/System/Library/Fonts/NotoSansMyanmar.ttc|အင်္ဂလိပ်|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကေ|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ကြေ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကျေး|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ပေါ်|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကော်|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ို|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ေ|
+/System/Library/Fonts/NotoSansMyanmar.ttc|်|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|က္ခ|
+/System/Library/Fonts/NotoSansMyanmar.ttc|မင်္ဂလာပါ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ဥ|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ဿ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကံ့|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ကိုး|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ဤ|
+/System/Library/Fonts/NotoSansMyanmar.ttc|န‍ြ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကျ‌|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ကေေ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ကြိိ|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ဗုဒ္ဓ|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ရက္ခိုင်|
+/System/Library/Fonts/NotoSansMyanmar.ttc|ဧည့်|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|ထိုး|
+/System/Library/Fonts/NotoSansMyanmar.ttc|၁၂၃|
+/System/Library/Fonts/NotoSerifMyanmar.ttc|abcမြ|
+/System/Library/Fonts/NotoSansMyanmar.ttc:3|ကြိုး|
+/System/Library/Fonts/Supplemental/NotoSansBatak-Regular.ttf|ᯔᯨᯙᯃᯧ|
+/System/Library/Fonts/Supplemental/NotoSansBatak-Regular.ttf|ᯢᯆᯫᯥ᯦ᯮ|
+/System/Library/Fonts/Supplemental/NotoSansBatak-Regular.ttf|ᯩᯂᯧ|
+/System/Library/Fonts/Supplemental/NotoSansBatak-Regular.ttf|ᯛᯬᯧ ᯏᯅᯣᯬ|
+/System/Library/Fonts/Supplemental/NotoSansBatak-Regular.ttf|ᯃ‍ᯤ‌ᯇᯩ|
+/System/Library/Fonts/Supplemental/NotoSansBatak-Regular.ttf|ᯥᯃᯤᯥᯙ|
+/System/Library/Fonts/Supplemental/NotoSansBatak-Regular.ttf|ᯃᯎᯂᯮ᯳ᯈᯪ|
+/System/Library/Fonts/Supplemental/NotoSansBhaiksuki-Regular.ttf|𑰛𑰳𑰣𑰇𑰹|
+/System/Library/Fonts/Supplemental/NotoSansBhaiksuki-Regular.ttf|𑰤𑰿𑰆𑰵𑰘𑰲𑰱|
+/System/Library/Fonts/Supplemental/NotoSansBhaiksuki-Regular.ttf|𑰰𑰨𑰵|
+/System/Library/Fonts/Supplemental/NotoSansBhaiksuki-Regular.ttf|𑰠𑰽𑰺 𑰞𑰿𑰘𑰿𑰐𑰴|
+/System/Library/Fonts/Supplemental/NotoSansBhaiksuki-Regular.ttf|𑰭‍𑰿𑰅‌𑰥𑰹|
+/System/Library/Fonts/Supplemental/NotoSansBhaiksuki-Regular.ttf|𑰢𑰠𑰖𑱀𑰝|
+/System/Library/Fonts/Supplemental/NotoSansBhaiksuki-Regular.ttf|𑰓𑰿𑰇𑰿𑰋𑰺𑰳𑰠𑰽|
+/System/Library/Fonts/Supplemental/NotoSansBuginese-Regular.ttf|ᨁᨗᨑᨒᨙ|
+/System/Library/Fonts/Supplemental/NotoSansBuginese-Regular.ttf|ᨊᨖᨙᨓᨚᨛ|
+/System/Library/Fonts/Supplemental/NotoSansBuginese-Regular.ttf|ᨚᨂᨗ|
+/System/Library/Fonts/Supplemental/NotoSansBuginese-Regular.ttf|ᨈᨚᨗ ᨁᨖᨉᨛ|
+/System/Library/Fonts/Supplemental/NotoSansBuginese-Regular.ttf|ᨕ‍ᨎ‌ᨉᨚ|
+/System/Library/Fonts/Supplemental/NotoSansBuginese-Regular.ttf|ᨕᨋᨀᨎᨋ|
+/System/Library/Fonts/Supplemental/NotoSansBuginese-Regular.ttf|ᨅᨓᨃᨚᨗᨆᨙ|
+/System/Library/Fonts/Supplemental/NotoSansBuhid-Regular.ttf|ᝄᝒᝌᝌᝓ|
+/System/Library/Fonts/Supplemental/NotoSansBuhid-Regular.ttf|ᝂᝅᝓᝌᝓᝒ|
+/System/Library/Fonts/Supplemental/NotoSansBuhid-Regular.ttf|ᝓᝑᝓ|
+/System/Library/Fonts/Supplemental/NotoSansBuhid-Regular.ttf|ᝍᝓᝓ ᝇᝄᝂᝒ|
+/System/Library/Fonts/Supplemental/NotoSansBuhid-Regular.ttf|ᝄ‍ᝇ‌ᝇᝒ|
+/System/Library/Fonts/Supplemental/NotoSansBuhid-Regular.ttf|ᝏᝅᝈᝉᝀ|
+/System/Library/Fonts/Supplemental/NotoSansBuhid-Regular.ttf|ᝄᝍᝑᝓᝓᝄᝒ|
+/System/Library/Fonts/Supplemental/NotoSansChakma-Regular.ttf|𑄠𑅅𑄜𑄜𑄰|
+/System/Library/Fonts/Supplemental/NotoSansChakma-Regular.ttf|𑄜𑄳𑄡𑄰𑄆𑄪𑄂|
+/System/Library/Fonts/Supplemental/NotoSansChakma-Regular.ttf|𑄪𑄟𑄩|
+/System/Library/Fonts/Supplemental/NotoSansChakma-Regular.ttf|𑄊𑄮𑄁 𑄉𑄳𑅄𑄳𑄥𑄧|
+/System/Library/Fonts/Supplemental/NotoSansChakma-Regular.ttf|𑄚‍𑄳𑄇‌𑄐𑄰|
+/System/Library/Fonts/Supplemental/NotoSansChakma-Regular.ttf|𑄌𑄓𑄙𑄚𑄡|
+/System/Library/Fonts/Supplemental/NotoSansChakma-Regular.ttf|𑄊𑄳𑄢𑄳𑄡𑄳𑄭𑄈𑄨|
+/System/Library/Fonts/Supplemental/NotoSansCham-Regular.ttf|ꨆꨳꩇꨐꩌ|
+/System/Library/Fonts/Supplemental/NotoSansCham-Regular.ttf|ꩄꨊꩍꨁꨯꩍ|
+/System/Library/Fonts/Supplemental/NotoSansCham-Regular.ttf|ꨴꨉꨩ|
+/System/Library/Fonts/Supplemental/NotoSansCham-Regular.ttf|ꩈꩍꨲ ꩀꨅꩄꨱ|
+/System/Library/Fonts/Supplemental/NotoSansCham-Regular.ttf|ꨡ‍ꨗ‌ꨊꨴ|
+/System/Library/Fonts/Supplemental/NotoSansCham-Regular.ttf|ꩉꨎꨢꨢꩉ|
+/System/Library/Fonts/Supplemental/NotoSansCham-Regular.ttf|ꨠꨕꨨꨰꨯꩋꨰ|
+/System/Library/Fonts/Supplemental/NotoSansGunjalaGondi-Regular.otf|𑵻𑶗𑵰𑵮𑶔|
+/System/Library/Fonts/Supplemental/NotoSansGunjalaGondi-Regular.otf|𑶁𑶗𑵡𑶊𑵳𑶓𑶎|
+/System/Library/Fonts/Supplemental/NotoSansGunjalaGondi-Regular.otf|𑶍𑶈𑶐|
+/System/Library/Fonts/Supplemental/NotoSansGunjalaGondi-Regular.otf|𑵾𑶗𑶐 𑵹𑶗𑵰𑶗𑵰𑶓|
+/System/Library/Fonts/Supplemental/NotoSansGunjalaGondi-Regular.otf|𑵮‍𑶗𑵯‌𑶀𑶕|
+/System/Library/Fonts/Supplemental/NotoSansGunjalaGondi-Regular.otf|𑶉𑵠𑶀𑵸𑵥|
+/System/Library/Fonts/Supplemental/NotoSansGunjalaGondi-Regular.otf|𑵨𑶗𑵮𑶗𑵭𑶑𑶖𑵷𑶋|
+/System/Library/Fonts/Supplemental/NotoSansHanifiRohingya-Regular.ttf|𐴙𐴧𐴙𐴅𐴥|
+/System/Library/Fonts/Supplemental/NotoSansHanifiRohingya-Regular.ttf|𐴊𐴈𐴤𐴉𐴧𐴥|
+/System/Library/Fonts/Supplemental/NotoSansHanifiRohingya-Regular.ttf|𐴧𐴖𐴥|
+/System/Library/Fonts/Supplemental/NotoSansHanifiRohingya-Regular.ttf|𐴣𐴥𐴤 𐴀𐴆𐴡𐴥|
+/System/Library/Fonts/Supplemental/NotoSansHanifiRohingya-Regular.ttf|𐴛‍𐴌‌𐴍𐴤|
+/System/Library/Fonts/Supplemental/NotoSansHanifiRohingya-Regular.ttf|𐴐𐴍𐴒𐴠𐴏|
+/System/Library/Fonts/Supplemental/NotoSansHanifiRohingya-Regular.ttf|𐴔𐴐𐴢𐴧𐴥𐴃𐴦|
+/System/Library/Fonts/Supplemental/NotoSansHanunoo-Regular.ttf|ᜮ᜴ᜰᜭ᜴|
+/System/Library/Fonts/Supplemental/NotoSansHanunoo-Regular.ttf|ᜤᜱᜲᜰ᜴ᜲ|
+/System/Library/Fonts/Supplemental/NotoSansHanunoo-Regular.ttf|ᜳᜥ᜴|
+/System/Library/Fonts/Supplemental/NotoSansHanunoo-Regular.ttf|ᜠᜲᜲ ᜤᜯᜣ᜴|
+/System/Library/Fonts/Supplemental/NotoSansHanunoo-Regular.ttf|ᜡ‍ᜪ‌ᜰ᜴|
+/System/Library/Fonts/Supplemental/NotoSansHanunoo-Regular.ttf|ᜱᜯᜣᜱᜡ|
+/System/Library/Fonts/Supplemental/NotoSansHanunoo-Regular.ttf|ᜧᜦᜨᜲᜲᜰᜳ|
+/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf|ꦧꦀꦈꦠꦹ|
+/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf|ꦫ꧀ꦰꦷꦠꦿ꧀|
+/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf|ꦾꦤꦶ|
+/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf|ꦰꦿꦷ ꦧ꧀ꦠ꧀ꦞꦃ|
+/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf|ꦝ‍꧀ꦘ‌ꦈꦶ|
+/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf|ꦟꦈꦑꦮꦗ|
+/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf|ꦋ꧀ꦱ꧀ꦍꦷ꦳ꦡꦶ|
+/System/Library/Fonts/Supplemental/NotoSansKaithi-Regular.ttf|𑂉𑂳𑂢𑂍𑂷|
+/System/Library/Fonts/Supplemental/NotoSansKaithi-Regular.ttf|𑂑𑂹𑂞𑂵𑂜𑂲𑂳|
+/System/Library/Fonts/Supplemental/NotoSansKaithi-Regular.ttf|𑂰𑂙𑂲|
+/System/Library/Fonts/Supplemental/NotoSansKaithi-Regular.ttf|𑂈𑂸𑂲 𑂄𑂹𑂦𑂹𑂟𑂸|
+/System/Library/Fonts/Supplemental/NotoSansKaithi-Regular.ttf|𑂄‍𑂹𑂘‌𑂤𑂶|
+/System/Library/Fonts/Supplemental/NotoSansKaithi-Regular.ttf|𑂕𑂣𑂇𑂊𑂑|
+/System/Library/Fonts/Supplemental/NotoSansKaithi-Regular.ttf|𑂉𑂹𑂓𑂹𑂅𑂹𑂂𑂔𑂹|
+/System/Library/Fonts/Supplemental/NotoSansKayahLi-Regular.ttf|ꤎ꤬ꤥꤟꤪ|
+/System/Library/Fonts/Supplemental/NotoSansKayahLi-Regular.ttf|ꤖꤎ꤭ꤠ꤫ꤧ|
+/System/Library/Fonts/Supplemental/NotoSansKayahLi-Regular.ttf|ꤪꤋꤨ|
+/System/Library/Fonts/Supplemental/NotoSansKayahLi-Regular.ttf|ꤗꤧꤪ ꤊꤞꤌꤪ|
+/System/Library/Fonts/Supplemental/NotoSansKayahLi-Regular.ttf|ꤌ‍ꤝ‌ꤥꤩ|
+/System/Library/Fonts/Supplemental/NotoSansKayahLi-Regular.ttf|ꤌꤒꤥꤍꤘ|
+/System/Library/Fonts/Supplemental/NotoSansKayahLi-Regular.ttf|ꤊꤔꤛ꤬ꤪꤝꤨ|
+/System/Library/Fonts/Supplemental/NotoSansKharoshthi-Regular.ttf|𐨑𐨏𐨠𐨗𐨃|
+/System/Library/Fonts/Supplemental/NotoSansKharoshthi-Regular.ttf|𐨡𐨿𐨜𐨅𐨤𐨹𐨆|
+/System/Library/Fonts/Supplemental/NotoSansKharoshthi-Regular.ttf|𐨏𐨞𐨆|
+/System/Library/Fonts/Supplemental/NotoSansKharoshthi-Regular.ttf|𐨭𐨹𐨏 𐨜𐨿𐨧𐨿𐨡𐨁|
+/System/Library/Fonts/Supplemental/NotoSansKharoshthi-Regular.ttf|𐨀‍𐨿𐨱‌𐨝𐨏|
+/System/Library/Fonts/Supplemental/NotoSansKharoshthi-Regular.ttf|𐨯𐨠𐨭𐨖𐨬|
+/System/Library/Fonts/Supplemental/NotoSansKharoshthi-Regular.ttf|𐨰𐨿𐨱𐨿𐨞𐨅𐨌𐨝𐨺|
+/System/Library/Fonts/Supplemental/NotoSansKhojki-Regular.ttf|𑈩𑈮𑈚𑈗𑈬|
+/System/Library/Fonts/Supplemental/NotoSansKhojki-Regular.ttf|𑈈𑈵𑈄𑈶𑈐𑈲𑈮|
+/System/Library/Fonts/Supplemental/NotoSansKhojki-Regular.ttf|𑈬𑈅𑈶|
+/System/Library/Fonts/Supplemental/NotoSansKhojki-Regular.ttf|𑈙𑈴𑈶 𑈓𑈵𑈓𑈵𑈞𑈮|
+/System/Library/Fonts/Supplemental/NotoSansKhojki-Regular.ttf|𑈊‍𑈾𑈝‌𑈀𑈰|
+/System/Library/Fonts/Supplemental/NotoSansKhojki-Regular.ttf|𑈘𑈖𑈤𑈕𑈏|
+/System/Library/Fonts/Supplemental/NotoSansKhojki-Regular.ttf|𑈂𑈾𑈍𑈾𑈋𑈬𑈱𑈙𑈭|
+/System/Library/Fonts/Supplemental/NotoSansKhudawadi-Regular.ttf|𑋎𑋣𑋐𑋙𑋢|
+/System/Library/Fonts/Supplemental/NotoSansKhudawadi-Regular.ttf|𑊿𑋪𑊵𑋣𑊵𑋡𑋥|
+/System/Library/Fonts/Supplemental/NotoSansKhudawadi-Regular.ttf|𑋨𑊲𑋥|
+/System/Library/Fonts/Supplemental/NotoSansKhudawadi-Regular.ttf|𑊱𑋣𑋣 𑋘𑋪𑊵𑋪𑋚𑋪|
+/System/Library/Fonts/Supplemental/NotoSansKhudawadi-Regular.ttf|𑋖‍𑋪𑋄‌𑋞𑋦|
+/System/Library/Fonts/Supplemental/NotoSansKhudawadi-Regular.ttf|𑊹𑋂𑋞𑋗𑋙|
+/System/Library/Fonts/Supplemental/NotoSansKhudawadi-Regular.ttf|𑊹𑋪𑋝𑋪𑋞𑋪𑋧𑊸𑋧|
+/System/Library/Fonts/Supplemental/NotoSansLepcha-Regular.ttf|ᰠᰶᰁᱎᰫ|
+/System/Library/Fonts/Supplemental/NotoSansLepcha-Regular.ttf|ᰅᰁᰥᰈᰯᰧ|
+/System/Library/Fonts/Supplemental/NotoSansLepcha-Regular.ttf|ᰰᰜᰵ|
+/System/Library/Fonts/Supplemental/NotoSansLepcha-Regular.ttf|ᰃᰤᰵ ᰏᰟᰐᰤ|
+/System/Library/Fonts/Supplemental/NotoSansLepcha-Regular.ttf|ᰝ‍ᰄ‌ᰠᰵ|
+/System/Library/Fonts/Supplemental/NotoSansLepcha-Regular.ttf|ᰅᰡᰄᰞᰐ|
+/System/Library/Fonts/Supplemental/NotoSansLepcha-Regular.ttf|ᰄᰐᰏᰪᰫᰝᰳ|
+/System/Library/Fonts/Supplemental/NotoSansLimbu-Regular.ttf|ᤛᤰᤂᤏ᤹|
+/System/Library/Fonts/Supplemental/NotoSansLimbu-Regular.ttf|ᤉᤘᤡᤓᤸᤸ|
+/System/Library/Fonts/Supplemental/NotoSansLimbu-Regular.ttf|ᤦᤂᤷ|
+/System/Library/Fonts/Supplemental/NotoSansLimbu-Regular.ttf|ᤄᤪᤨ ᤔᤗᤖᤩ|
+/System/Library/Fonts/Supplemental/NotoSansLimbu-Regular.ttf|ᤓ‍ᤒ‌ᤄᤠ|
+/System/Library/Fonts/Supplemental/NotoSansLimbu-Regular.ttf|ᤏᤁᤏᤈᤕ|
+/System/Library/Fonts/Supplemental/NotoSansLimbu-Regular.ttf|ᤃᤖᤆ᤹ᤳᤉ᤺|
+/System/Library/Fonts/Supplemental/NotoSansMahajani-Regular.ttf|𑅱𑅳𑅭𑅭𑅳|
+/System/Library/Fonts/Supplemental/NotoSansMahajani-Regular.ttf|𑅗𑅶𑅳𑅣𑅳𑅳|
+/System/Library/Fonts/Supplemental/NotoSansMahajani-Regular.ttf|𑅳𑅢𑅳|
+/System/Library/Fonts/Supplemental/NotoSansMahajani-Regular.ttf|𑅔𑅳𑅳 𑅨𑅝𑅝𑅳|
+/System/Library/Fonts/Supplemental/NotoSansMahajani-Regular.ttf|𑅕‍𑅙‌𑅱𑅳|
+/System/Library/Fonts/Supplemental/NotoSansMahajani-Regular.ttf|𑅧𑅘𑅰𑅡𑅗|
+/System/Library/Fonts/Supplemental/NotoSansMahajani-Regular.ttf|𑅧𑅞𑅯𑅳𑅳𑅑𑅳|
+/System/Library/Fonts/Supplemental/NotoSansMandaic-Regular.ttf|ࡀ࡚ࡕࡎ࡚|
+/System/Library/Fonts/Supplemental/NotoSansMandaic-Regular.ttf|ࡉࡗ࡙ࡍ࡚࡚|
+/System/Library/Fonts/Supplemental/NotoSansMandaic-Regular.ttf|࡚ࡃ࡚|
+/System/Library/Fonts/Supplemental/NotoSansMandaic-Regular.ttf|ࡀ࡚࡚ ࡌࡃࡆ࡛|
+/System/Library/Fonts/Supplemental/NotoSansMandaic-Regular.ttf|ࡀ‍ࡗ‌ࡉ࡚|
+/System/Library/Fonts/Supplemental/NotoSansMandaic-Regular.ttf|ࡋࡂࡌࡌࡒ|
+/System/Library/Fonts/Supplemental/NotoSansMandaic-Regular.ttf|ࡂࡋࡍ࡚࡙ࡈ࡙|
+/System/Library/Fonts/Supplemental/NotoSansManichaean-Regular.ttf|𐫃𐫦𐫓𐫊︀|
+/System/Library/Fonts/Supplemental/NotoSansManichaean-Regular.ttf|𐫒𐫜𐫦𐫕︀𐫥|
+/System/Library/Fonts/Supplemental/NotoSansManichaean-Regular.ttf|𐫥𐫁𐫦|
+/System/Library/Fonts/Supplemental/NotoSansManichaean-Regular.ttf|𐫚𐫦𐫦 𐫎𐫅𐫃𐫦|
+/System/Library/Fonts/Supplemental/NotoSansManichaean-Regular.ttf|𐫛‍𐫝‌𐫉𐫦|
+/System/Library/Fonts/Supplemental/NotoSansManichaean-Regular.ttf|𐫓𐫠𐫃𐫤𐫉|
+/System/Library/Fonts/Supplemental/NotoSansManichaean-Regular.ttf|𐫋𐫟𐫛𐫥𐫥𐫔𐫥|
+/System/Library/Fonts/Supplemental/NotoSansMarchen-Regular.ttf|𑲉𑲢𑱾𑲆𑲡|
+/System/Library/Fonts/Supplemental/NotoSansMarchen-Regular.ttf|𑱻𑲁𑲶𑲇𑲬𑲙|
+/System/Library/Fonts/Supplemental/NotoSansMarchen-Regular.ttf|𑲜𑲆𑲜|
+/System/Library/Fonts/Supplemental/NotoSansMarchen-Regular.ttf|𑱴𑲟𑲳 𑲎𑲋𑲁𑲶|
+/System/Library/Fonts/Supplemental/NotoSansMarchen-Regular.ttf|𑱹‍𑲀‌𑲏𑲧|
+/System/Library/Fonts/Supplemental/NotoSansMarchen-Regular.ttf|𑲊𑲀𑱿𑱶𑲃|
+/System/Library/Fonts/Supplemental/NotoSansMarchen-Regular.ttf|𑱸𑱹𑱴𑲝𑲧𑲃𑲗|
+/System/Library/Fonts/Supplemental/NotoSansMasaramGondi-Regular.otf|𑴖𑴼𑴙𑴒𑴺|
+/System/Library/Fonts/Supplemental/NotoSansMasaramGondi-Regular.otf|𑴁𑵅𑴚𑵃𑵆𑵇𑴺|
+/System/Library/Fonts/Supplemental/NotoSansMasaramGondi-Regular.otf|𑵂𑴓𑵀|
+/System/Library/Fonts/Supplemental/NotoSansMasaramGondi-Regular.otf|𑴃𑵅𑴽 𑴦𑵅𑴉𑵄𑴅𑴽|
+/System/Library/Fonts/Supplemental/NotoSansMasaramGondi-Regular.otf|𑴑‍𑵅𑴛‌𑴫𑵄|
+/System/Library/Fonts/Supplemental/NotoSansMasaramGondi-Regular.otf|𑴝𑴕𑴁𑴉𑴂|
+/System/Library/Fonts/Supplemental/NotoSansMasaramGondi-Regular.otf|𑴝𑵅𑴧𑵅𑴀𑴳𑵂𑴣𑵄|
+/System/Library/Fonts/Supplemental/NotoSansMeeteiMayek-Regular.ttf|ꯐꯣꫦꯂꫯ|
+/System/Library/Fonts/Supplemental/NotoSansMeeteiMayek-Regular.ttf|ꫩ꫶ꯢꯪꫥꫬꫫ|
+/System/Library/Fonts/Supplemental/NotoSansMeeteiMayek-Regular.ttf|ꫯꯂꫬ|
+/System/Library/Fonts/Supplemental/NotoSansMeeteiMayek-Regular.ttf|ꯝꯥꫯ ꯜ꫶ꯕ꫶ꯠꫮ|
+/System/Library/Fonts/Supplemental/NotoSansMeeteiMayek-Regular.ttf|ꫦ‍꫶ꯇ‌ꯕ꫶|
+/System/Library/Fonts/Supplemental/NotoSansMeeteiMayek-Regular.ttf|ꯌꯄꯂꯚꫠ|
+/System/Library/Fonts/Supplemental/NotoSansMeeteiMayek-Regular.ttf|ꫠ꫶ꯑ꫶ꯈꯣ꯬ꯕꯣ|
+/System/Library/Fonts/Supplemental/NotoSansMiao-Regular.ttf|𖽆𖽟𖼃𖼴𖽽|
+/System/Library/Fonts/Supplemental/NotoSansMiao-Regular.ttf|𖼧𖼇𖽑𖼘𖽯𖾏|
+/System/Library/Fonts/Supplemental/NotoSansMiao-Regular.ttf|𖽻𖼵𖽕|
+/System/Library/Fonts/Supplemental/NotoSansMiao-Regular.ttf|𖼠𖽞𖽺 𖼶𖼯𖼝𖽯|
+/System/Library/Fonts/Supplemental/NotoSansMiao-Regular.ttf|𖼄‍𖼫‌𖼵𖽧|
+/System/Library/Fonts/Supplemental/NotoSansMiao-Regular.ttf|𖼲𖼙𖼀𖼥𖽀|
+/System/Library/Fonts/Supplemental/NotoSansMiao-Regular.ttf|𖼈𖼚𖼿𖽜𖽣𖼘𖽞|
+/System/Library/Fonts/Supplemental/NotoSansModi-Regular.ttf|𑘝𑘷𑘐𑙄𑘹|
+/System/Library/Fonts/Supplemental/NotoSansModi-Regular.ttf|𑘆𑘿𑘧𑘵𑘎𑘿𑘽|
+/System/Library/Fonts/Supplemental/NotoSansModi-Regular.ttf|𑘱𑘦𑘴|
+/System/Library/Fonts/Supplemental/NotoSansModi-Regular.ttf|𑘙𑘱𑘶 𑘁𑘿𑘚𑘿𑘭𑘱|
+/System/Library/Fonts/Supplemental/NotoSansModi-Regular.ttf|𑘋‍𑘿𑘜‌𑘭𑘺|
+/System/Library/Fonts/Supplemental/NotoSansModi-Regular.ttf|𑘮𑘇𑘅𑘊𑘕|
+/System/Library/Fonts/Supplemental/NotoSansModi-Regular.ttf|𑘌𑘿𑘩𑘿𑘂𑘹𑘼𑘗𑘺|
+/System/Library/Fonts/Supplemental/NotoSansMongolian-Regular.ttf|ᢛ᠌ᠻᠠ᠋|
+/System/Library/Fonts/Supplemental/NotoSansMongolian-Regular.ttf|ᡨᠴ᠍ᢕ᠋ᢅ|
+/System/Library/Fonts/Supplemental/NotoSansMongolian-Regular.ttf|ᢩᡖ᠏|
+/System/Library/Fonts/Supplemental/NotoSansMongolian-Regular.ttf|ᢃᢩᢩ ᡰᢘᠶ᠋|
+/System/Library/Fonts/Supplemental/NotoSansMongolian-Regular.ttf|ᢣ‍ᡓ‌ᢉᢅ|
+/System/Library/Fonts/Supplemental/NotoSansMongolian-Regular.ttf|ᢜᡒᡳᢇᢣ|
+/System/Library/Fonts/Supplemental/NotoSansMongolian-Regular.ttf|ᠧᢓᡠᢩᢆᢑ᠋|
+/System/Library/Fonts/Supplemental/NotoSansNewa-Regular.ttf|𑐘𑐵𑐝𑐄𑐵|
+/System/Library/Fonts/Supplemental/NotoSansNewa-Regular.ttf|𑐐𑑂𑐯𑐶𑑟𑑞𑐾|
+/System/Library/Fonts/Supplemental/NotoSansNewa-Regular.ttf|𑐿𑐑𑐾|
+/System/Library/Fonts/Supplemental/NotoSansNewa-Regular.ttf|𑐧𑐵𑐼 𑐯𑑂𑐑𑑂𑐀𑑞|
+/System/Library/Fonts/Supplemental/NotoSansNewa-Regular.ttf|𑐳‍𑑂𑐁‌𑐴𑐻|
+/System/Library/Fonts/Supplemental/NotoSansNewa-Regular.ttf|𑐆𑐞𑐭𑐝𑐱|
+/System/Library/Fonts/Supplemental/NotoSansNewa-Regular.ttf|𑐘𑑂𑐛𑑂𑐈𑑃𑐹𑐀𑐽|
+/System/Library/Fonts/Supplemental/NotoSansNKo-Regular.ttf|ߓ߽ߙߞ߰|
+/System/Library/Fonts/Supplemental/NotoSansNKo-Regular.ttf|ߧߡ߽ߏ߳߮|
+/System/Library/Fonts/Supplemental/NotoSansNKo-Regular.ttf|߱ߔ߮|
+/System/Library/Fonts/Supplemental/NotoSansNKo-Regular.ttf|ߤ߬߫ ߨߞߔ߱|
+/System/Library/Fonts/Supplemental/NotoSansNKo-Regular.ttf|ߐ‍ߎ‌ߚ߽|
+/System/Library/Fonts/Supplemental/NotoSansNKo-Regular.ttf|ߏߗߐߤߩ|
+/System/Library/Fonts/Supplemental/NotoSansNKo-Regular.ttf|ߦߕߘ߭߱ߧ߽|
+/System/Library/Fonts/Supplemental/NotoSansPahawhHmong-Regular.ttf|𖮎𖬱𖭷𖮍𖬶|
+/System/Library/Fonts/Supplemental/NotoSansPahawhHmong-Regular.ttf|𖬏𖬥𖬲𖬣𖬴𖬲|
+/System/Library/Fonts/Supplemental/NotoSansPahawhHmong-Regular.ttf|𖬲𖬠𖬵|
+/System/Library/Fonts/Supplemental/NotoSansPahawhHmong-Regular.ttf|𖬡𖬱𖬳 𖬟𖬗𖬟𖬱|
+/System/Library/Fonts/Supplemental/NotoSansPahawhHmong-Regular.ttf|𖬓‍𖬤‌𖮂𖬱|
+/System/Library/Fonts/Supplemental/NotoSansPahawhHmong-Regular.ttf|𖬩𖬈𖭥𖬠𖬟|
+/System/Library/Fonts/Supplemental/NotoSansPahawhHmong-Regular.ttf|𖭳𖭶𖬝𖬵𖬶𖬌𖬵|
+/System/Library/Fonts/Supplemental/NotoSansPhagsPa-Regular.ttf|ꡝ︀ꡆꡀ︀|
+/System/Library/Fonts/Supplemental/NotoSansPhagsPa-Regular.ttf|ꡎꡜ︀ꡂ︀︀|
+/System/Library/Fonts/Supplemental/NotoSansPhagsPa-Regular.ttf|︀ꡃ︀|
+/System/Library/Fonts/Supplemental/NotoSansPhagsPa-Regular.ttf|ꡦ︀︀ ꡗꡠꡋ︀|
+/System/Library/Fonts/Supplemental/NotoSansPhagsPa-Regular.ttf|ꡦ‍ꡐ‌ꡱ︀|
+/System/Library/Fonts/Supplemental/NotoSansPhagsPa-Regular.ttf|ꡆꡨꡦꡭꡧ|
+/System/Library/Fonts/Supplemental/NotoSansPhagsPa-Regular.ttf|ꡖꡍꡂ︀︀ꡉ︀|
+/System/Library/Fonts/Supplemental/NotoSansPsalterPahlavi-Regular.ttf|𐮆𐮈𐮁|
+/System/Library/Fonts/Supplemental/NotoSansPsalterPahlavi-Regular.ttf|𐮆𐮀𐮊|
+/System/Library/Fonts/Supplemental/NotoSansPsalterPahlavi-Regular.ttf|𐮍|
+/System/Library/Fonts/Supplemental/NotoSansPsalterPahlavi-Regular.ttf|𐮋 𐮅𐮉𐮂|
+/System/Library/Fonts/Supplemental/NotoSansPsalterPahlavi-Regular.ttf|𐮆‍𐮁‌𐮏|
+/System/Library/Fonts/Supplemental/NotoSansPsalterPahlavi-Regular.ttf|𐮑𐮏𐮂𐮍𐮃|
+/System/Library/Fonts/Supplemental/NotoSansPsalterPahlavi-Regular.ttf|𐮌𐮑𐮄𐮑|
+/System/Library/Fonts/Supplemental/NotoSansRejang-Regular.ttf|ꤲꥑꤵꤼꥒ|
+/System/Library/Fonts/Supplemental/NotoSansRejang-Regular.ttf|ꤸ꥓ꤹꥑꤹꥍꥇ|
+/System/Library/Fonts/Supplemental/NotoSansRejang-Regular.ttf|ꥋꥂꥌ|
+/System/Library/Fonts/Supplemental/NotoSansRejang-Regular.ttf|ꤽꥍꥇ ꤻ꥓ꤼ꥓ꤶꥇ|
+/System/Library/Fonts/Supplemental/NotoSansRejang-Regular.ttf|ꤽ‍꥓ꤽ‌ꤳꥈ|
+/System/Library/Fonts/Supplemental/NotoSansRejang-Regular.ttf|ꤼꥂꤻꤾꤵ|
+/System/Library/Fonts/Supplemental/NotoSansRejang-Regular.ttf|ꤴ꥓ꤱ꥓ꥄ꥓ꥍꤲꥐ|
+/System/Library/Fonts/Supplemental/NotoSansSaurashtra-Regular.ttf|ꢩꢽꢱꢢꢷ|
+/System/Library/Fonts/Supplemental/NotoSansSaurashtra-Regular.ttf|ꢋ꣄ꢔꢷꢣꢷꢴ|
+/System/Library/Fonts/Supplemental/NotoSansSaurashtra-Regular.ttf|ꢵꢚꣁ|
+/System/Library/Fonts/Supplemental/NotoSansSaurashtra-Regular.ttf|ꢲꢸꢻ ꢊ꣄ꢠ꣄ꢅꣅ|
+/System/Library/Fonts/Supplemental/NotoSansSaurashtra-Regular.ttf|ꢪ‍꣄ꢇ‌ꢯꣅ|
+/System/Library/Fonts/Supplemental/NotoSansSaurashtra-Regular.ttf|ꢮꢌꢪꢐꢩ|
+/System/Library/Fonts/Supplemental/NotoSansSaurashtra-Regular.ttf|ꢛ꣄ꢠ꣄ꢦꢸꢁꢛꣂ|
+/System/Library/Fonts/Supplemental/NotoSansSharada-Regular.ttf|𑆍𑆶𑆙𑆊᳝|
+/System/Library/Fonts/Supplemental/NotoSansSharada-Regular.ttf|𑆒𑇀𑆅𑆻𑇜𑇊𑆿|
+/System/Library/Fonts/Supplemental/NotoSansSharada-Regular.ttf|᳗𑆭𑇌|
+/System/Library/Fonts/Supplemental/NotoSansSharada-Regular.ttf|𑆗᳜𑆶 𑆩𑇀𑆦𑇀𑆬𑆷|
+/System/Library/Fonts/Supplemental/NotoSansSharada-Regular.ttf|𑆖‍𑇀𑆞‌𑆛𑆿|
+/System/Library/Fonts/Supplemental/NotoSansSharada-Regular.ttf|𑆚𑆟𑆣𑆟𑆎|
+/System/Library/Fonts/Supplemental/NotoSansSharada-Regular.ttf|𑆄𑇀𑆪𑇀𑆠𑆁𑆸𑇁𑆽|
+/System/Library/Fonts/Supplemental/NotoSansSiddham-Regular.otf|𑗚𑖿𑖋𑖞𑖽|
+/System/Library/Fonts/Supplemental/NotoSansSiddham-Regular.otf|𑖆𑖿𑖈𑖼𑖛𑖼𑖱|
+/System/Library/Fonts/Supplemental/NotoSansSiddham-Regular.otf|𑖿𑖠𑗜|
+/System/Library/Fonts/Supplemental/NotoSansSiddham-Regular.otf|𑖪𑖰𑖰 𑖨𑖿𑖅𑖿𑗚𑗜|
+/System/Library/Fonts/Supplemental/NotoSansSiddham-Regular.otf|𑖅‍𑖿𑗙‌𑖠𑖽|
+/System/Library/Fonts/Supplemental/NotoSansSiddham-Regular.otf|𑖩𑗛𑖈𑖁𑖄|
+/System/Library/Fonts/Supplemental/NotoSansSiddham-Regular.otf|𑖧𑖿𑖌𑖿𑖟𑖺𑖴𑖫𑖸|
+/System/Library/Fonts/Supplemental/NotoSansSundanese-Regular.ttf|ᮗᮢᮜᮆᮂ|
+/System/Library/Fonts/Supplemental/NotoSansSundanese-Regular.ttf|ᮼ᮪ᮚᮁᮺᮤᮁ|
+/System/Library/Fonts/Supplemental/NotoSansSundanese-Regular.ttf|ᮂᮞ᮫|
+/System/Library/Fonts/Supplemental/NotoSansSundanese-Regular.ttf|ᮇᮥᮂ ᮽ᮫ᮆ᮪ᮑᮁ|
+/System/Library/Fonts/Supplemental/NotoSansSundanese-Regular.ttf|ᮾ‍᮫ᮆ‌ᮑᮁ|
+/System/Library/Fonts/Supplemental/NotoSansSundanese-Regular.ttf|ᮽᮋᮕᮝᮌ|
+/System/Library/Fonts/Supplemental/NotoSansSundanese-Regular.ttf|ᮼ᮪ᮾ᮫ᮽᮣᮡᮿᮤ|
+/System/Library/Fonts/Supplemental/NotoSansSylotiNagri-Regular.ttf|ꠚ꠆ꠅꠄꠣ|
+/System/Library/Fonts/Supplemental/NotoSansSylotiNagri-Regular.ttf|ꠢꠞꠥꠠꠧꠥ|
+/System/Library/Fonts/Supplemental/NotoSansSylotiNagri-Regular.ttf|ꠤꠒꠋ|
+/System/Library/Fonts/Supplemental/NotoSansSylotiNagri-Regular.ttf|ꠒ꠆ꠤ ꠢꠘꠟꠤ|
+/System/Library/Fonts/Supplemental/NotoSansSylotiNagri-Regular.ttf|ꠅ‍ꠉ‌ꠝꠋ|
+/System/Library/Fonts/Supplemental/NotoSansSylotiNagri-Regular.ttf|ꠘꠌꠢꠝꠃ|
+/System/Library/Fonts/Supplemental/NotoSansSylotiNagri-Regular.ttf|ꠅꠗꠘꠥꠧꠠ꠆|
+/System/Library/Fonts/Supplemental/NotoSansTagbanwa-Regular.ttf|ᝢᝳᝰᝢᝲ|
+/System/Library/Fonts/Supplemental/NotoSansTagbanwa-Regular.ttf|ᝩᝯᝳᝬᝳᝲ|
+/System/Library/Fonts/Supplemental/NotoSansTagbanwa-Regular.ttf|ᝳᝫᝲ|
+/System/Library/Fonts/Supplemental/NotoSansTagbanwa-Regular.ttf|ᝣᝳᝲ ᝦᝩᝤᝲ|
+/System/Library/Fonts/Supplemental/NotoSansTagbanwa-Regular.ttf|ᝬ‍ᝬ‌ᝰᝲ|
+/System/Library/Fonts/Supplemental/NotoSansTagbanwa-Regular.ttf|ᝥᝯᝬᝨᝤ|
+/System/Library/Fonts/Supplemental/NotoSansTagbanwa-Regular.ttf|ᝮᝨᝮᝳᝳᝧᝲ|
+/System/Library/Fonts/Supplemental/NotoSansTaiLe-Regular.ttf|ᥕ́ᥙᥞ́|
+/System/Library/Fonts/Supplemental/NotoSansTaiLe-Regular.ttf|ᥐᥱ̌ᥛ̇̇|
+/System/Library/Fonts/Supplemental/NotoSansTaiLe-Regular.ttf|̀ᥙ̈|
+/System/Library/Fonts/Supplemental/NotoSansTaiLe-Regular.ttf|ᥴ̇̌ ᥤᥘᥲ̌|
+/System/Library/Fonts/Supplemental/NotoSansTaiLe-Regular.ttf|ᥓ‍ᥭ‌ᥩ̈|
+/System/Library/Fonts/Supplemental/NotoSansTaiLe-Regular.ttf|ᥩᥩᥖᥰᥩ|
+/System/Library/Fonts/Supplemental/NotoSansTaiLe-Regular.ttf|ᥓᥜᥔ́̈ᥚ̀|
+/System/Library/Fonts/Supplemental/NotoSansTaiTham-Regular.ttf|ᨵ᩼ᨣᨦᩕ|
+/System/Library/Fonts/Supplemental/NotoSansTaiTham-Regular.ttf|ᩄᨩ᩸ᨦᩭ᩿|
+/System/Library/Fonts/Supplemental/NotoSansTaiTham-Regular.ttf|ᩖᨤᩣ|
+/System/Library/Fonts/Supplemental/NotoSansTaiTham-Regular.ttf|ᩇᩮᩞ ᩈᨰᨶ᩼|
+/System/Library/Fonts/Supplemental/NotoSansTaiTham-Regular.ttf|ᨷ‍ᨾ‌ᨧᩜ|
+/System/Library/Fonts/Supplemental/NotoSansTaiTham-Regular.ttf|ᨿᨽᨾᨾᨳ|
+/System/Library/Fonts/Supplemental/NotoSansTaiTham-Regular.ttf|ᨥᨩᨦᩫᩦᨾ᩠|
+/System/Library/Fonts/Supplemental/NotoSansTaiViet-Regular.ttf|ꪡꪰꪍꪡꪸ|
+/System/Library/Fonts/Supplemental/NotoSansTaiViet-Regular.ttf|ꪉꪬ꫁ꫛꪰ꫁|
+/System/Library/Fonts/Supplemental/NotoSansTaiViet-Regular.ttf|ꪷꪩꪲ|
+/System/Library/Fonts/Supplemental/NotoSansTaiViet-Regular.ttf|ꪬꪷ꫁ ꪗꫛꪊꪸ|
+/System/Library/Fonts/Supplemental/NotoSansTaiViet-Regular.ttf|ꪵ‍ꪎ‌ꪢ꫁|
+/System/Library/Fonts/Supplemental/NotoSansTaiViet-Regular.ttf|ꪵꪠꪕꪨꪎ|
+/System/Library/Fonts/Supplemental/NotoSansTaiViet-Regular.ttf|ꪧꪹꪶꪴꪴꪺꪾ|
+/System/Library/Fonts/Supplemental/NotoSansTakri-Regular.ttf|𑚎𑚮𑚡𑚟𑚰|
+/System/Library/Fonts/Supplemental/NotoSansTakri-Regular.ttf|𑚁𑚶𑚑𑚲𑚐𑚮𑚶|
+/System/Library/Fonts/Supplemental/NotoSansTakri-Regular.ttf|𑚴𑚖𑚲|
+/System/Library/Fonts/Supplemental/NotoSansTakri-Regular.ttf|𑚖𑚰𑚬 𑚎𑚶𑚎𑚶𑚌𑚰|
+/System/Library/Fonts/Supplemental/NotoSansTakri-Regular.ttf|𑚍‍𑚶𑚧‌𑚧𑚫|
+/System/Library/Fonts/Supplemental/NotoSansTakri-Regular.ttf|𑚞𑚩𑚖𑚩𑚅|
+/System/Library/Fonts/Supplemental/NotoSansTakri-Regular.ttf|𑚪𑚶𑚘𑚶𑚞𑚭𑚱𑚨𑚰|
+/System/Library/Fonts/Supplemental/NotoSansTifinagh-Regular.otf|ⴵ̉ⵍⵉ̂|
+/System/Library/Fonts/Supplemental/NotoSansTifinagh-Regular.otf|ⵞⴺ̄ⴸ́̄|
+/System/Library/Fonts/Supplemental/NotoSansTifinagh-Regular.otf|⵿ⵍ̄|
+/System/Library/Fonts/Supplemental/NotoSansTifinagh-Regular.otf|ⵗ⵿̣ ⵚⵆⴹ̱|
+/System/Library/Fonts/Supplemental/NotoSansTifinagh-Regular.otf|ⵓ‍ⴸ‌ⴱ́|
+/System/Library/Fonts/Supplemental/NotoSansTifinagh-Regular.otf|ⵣⵞⵙⴶⵑ|
+/System/Library/Fonts/Supplemental/NotoSansTifinagh-Regular.otf|ⵟⴸⵋ̆̆ⴱ̇|
+/System/Library/Fonts/Supplemental/NotoSansTirhuta-Regular.ttf|𑒌𑒷𑒟𑒎𑓀|
+/System/Library/Fonts/Supplemental/NotoSansTirhuta-Regular.ttf|𑒓𑓂𑒡𑒻𑒇॒𑒹|
+/System/Library/Fonts/Supplemental/NotoSansTirhuta-Regular.ttf|𑒼𑒩𑓀|
+/System/Library/Fonts/Supplemental/NotoSansTirhuta-Regular.ttf|𑒠𑒻𑒾 𑒇𑓂𑒠𑓂𑒛𑒳|
+/System/Library/Fonts/Supplemental/NotoSansTirhuta-Regular.ttf|𑒥‍𑓂𑓄‌𑓇𑒲|
+/System/Library/Fonts/Supplemental/NotoSansTirhuta-Regular.ttf|𑒊𑒈𑒝𑒦𑒭|
+/System/Library/Fonts/Supplemental/NotoSansTirhuta-Regular.ttf|𑒆𑓂𑒓𑓂𑓅𑒱𑒿𑒂𑒵|
+/System/Library/Fonts/Supplemental/NotoSansWancho-Regular.ttf|𞋌𞋮𞋂𞋆𞋯|
+/System/Library/Fonts/Supplemental/NotoSansWancho-Regular.ttf|𞋣𞋁𞋬𞋜𞋮𞋭|
+/System/Library/Fonts/Supplemental/NotoSansWancho-Regular.ttf|𞋮𞋜𞋯|
+/System/Library/Fonts/Supplemental/NotoSansWancho-Regular.ttf|𞋠𞋭𞋮 𞋣𞋌𞋜𞋭|
+/System/Library/Fonts/Supplemental/NotoSansWancho-Regular.ttf|𞋚‍𞋇‌𞋙𞋯|
+/System/Library/Fonts/Supplemental/NotoSansWancho-Regular.ttf|𞋔𞋄𞋪𞋏𞋛|
+/System/Library/Fonts/Supplemental/NotoSansWancho-Regular.ttf|𞋄𞋍𞋪𞋮𞋬𞋉𞋮|
+/System/Library/Fonts/Supplemental/NotoSerifAhom-Regular.ttf|𑜄𑜡𑜄𑜎𑜠|
+/System/Library/Fonts/Supplemental/NotoSerifAhom-Regular.ttf|𑜗𑜫𑜌𑜫𑜏𑜟𑜧|
+/System/Library/Fonts/Supplemental/NotoSerifAhom-Regular.ttf|𑜪𑜇𑜟|
+/System/Library/Fonts/Supplemental/NotoSerifAhom-Regular.ttf|𑜖𑜣𑜥 𑜌𑜫𑜍𑜫𑜋𑜢|
+/System/Library/Fonts/Supplemental/NotoSerifAhom-Regular.ttf|𑜂‍𑜫𑜀‌𑜊𑜥|
+/System/Library/Fonts/Supplemental/NotoSerifAhom-Regular.ttf|𑜎𑜎𑜖𑜀𑜌|
+/System/Library/Fonts/Supplemental/NotoSerifAhom-Regular.ttf|𑜊𑜫𑜐𑜫𑜃𑜫𑜩𑜇𑜫|
+/System/Library/Fonts/Supplemental/NotoSerifBalinese-Regular.ttf|ᬋᬂᬕᬖᬁ|
+/System/Library/Fonts/Supplemental/NotoSerifBalinese-Regular.ttf|ᭇᬐᬷᭆᬄ᭯|
+/System/Library/Fonts/Supplemental/NotoSerifBalinese-Regular.ttf|ᬼᬰ᭯|
+/System/Library/Fonts/Supplemental/NotoSerifBalinese-Regular.ttf|ᬕᬻᬄ ᬧᬥᬩᬾ|
+/System/Library/Fonts/Supplemental/NotoSerifBalinese-Regular.ttf|ᬱ‍ᬙ‌ᬊᬷ|
+/System/Library/Fonts/Supplemental/NotoSerifBalinese-Regular.ttf|ᬈᭉᬱᬐᬠ|
+/System/Library/Fonts/Supplemental/NotoSerifBalinese-Regular.ttf|ᬉᬖᬆᭃᬂᭉᬷ|
+/System/Library/Fonts/Kohinoor.ttc|क्ष त्र ज्ञ श्र द्ध|
+/System/Library/Fonts/Kohinoor.ttc|र्क र्क्ष र्कि र्की|
+/System/Library/Fonts/Kohinoor.ttc|कि क्कि स्त्रि|
+/System/Library/Fonts/Kohinoor.ttc|क्‍ष क्‌ष र्‍ र्‍क|
+/System/Library/Fonts/Kohinoor.ttc|क़ ड़ कँ कं कः|
+/System/Library/Fonts/Kohinoor.ttc|ि क्ि ं|
+/System/Library/Fonts/Kohinoor.ttc|हिन्दी 123 abc नमस्ते|
+/System/Library/Fonts/Kohinoor.ttc:1|क्ष त्र र्कि द्ध्य|
+/System/Library/Fonts/Kohinoor.ttc:2|श्र र्क्ष कि र्‍क|
+/System/Library/Fonts/Kohinoor.ttc|सभी मनुष्यों को गौरव और अधिकारों के मामले में जन्मजात स्वतन्त्रता प्राप्त है।|
+/System/Library/Fonts/Kohinoor.ttc|अ॒ ऋ ॠ कृ क्र प्र ट्र|
+/System/Library/Fonts/KohinoorBangla.ttc|কি কো কৌ ক্ষ|
+/System/Library/Fonts/KohinoorBangla.ttc|র্ক র্কি ক্র ক্য|
+/System/Library/Fonts/KohinoorBangla.ttc|য় ড় ঢ় ক্‌ষ ক্‍ষ|
+/System/Library/Fonts/KohinoorBangla.ttc|ি ক্ি ৎ|
+/System/Library/Fonts/KohinoorBangla.ttc|সকল মানুষ স্বাধীনভাবে সমান মর্যাদা এবং অধিকার নিয়ে জন্মগ্রহণ করে।|
+/System/Library/Fonts/KohinoorBangla.ttc:1|স্ত্র র্ক্ষ কৌ ২০২৪|
+/System/Library/Fonts/KohinoorGujarati.ttc|ક્ષ ત્ર જ્ઞ શ્ર|
+/System/Library/Fonts/KohinoorGujarati.ttc|ર્ક ર્કિ કિ ક્‍ષ|
+/System/Library/Fonts/KohinoorGujarati.ttc|પ્રતિષ્ઠા અને અધિકારોની દૃષ્ટિએ સમાન છે.|
+/System/Library/Fonts/KohinoorTelugu.ttc|ర్క క్ర క్క క్ష|
+/System/Library/Fonts/KohinoorTelugu.ttc|కి కీ కొ కై ర్‍క|
+/System/Library/Fonts/KohinoorTelugu.ttc|మనుష్యులందరూ జన్మతః స్వతంత్రులు|
+/System/Library/Fonts/KohinoorTelugu.ttc:2|స్త్ర ర్క్ష ౧౨౩|
+/System/Library/Fonts/MuktaMahee.ttc|ਪੰਜਾਬੀ ਕ੍ਰ ਕ੍ਹ|
+/System/Library/Fonts/MuktaMahee.ttc|ਕਿ ਖ਼ ਸ਼ ਕੁੰ ਕੱਲ|
+/System/Library/Fonts/MuktaMahee.ttc|ਸਾਰਾ ਮਨੁੱਖੀ ਪਰਿਵਾਰ ਆਪਣੀ ਮਹਿਮਾ ਸ਼ਾਨ ਅਤੇ ਹੱਕਾਂ ਦੇ ਪੱਖੋਂ ਜਨਮ ਤੋਂ ਹੀ ਆਜ਼ਾਦ ਹੈ|
+/System/Library/Fonts/NotoSansKannada.ttc|ರ್ಕ ಕ್ರ ಕ್ಕ ಕ್ಷ|
+/System/Library/Fonts/NotoSansKannada.ttc|ಕಿ ಕೊ ಕೋ ಕೈ ರ್‍ಕ|
+/System/Library/Fonts/NotoSansKannada.ttc|ಎಲ್ಲಾ ಮಾನವರೂ ಸ್ವತಂತ್ರರಾಗಿಯೇ ಜನಿಸಿದ್ದಾರೆ.|
+/System/Library/Fonts/NotoSansKannada.ttc:3|ಸ್ತ್ರೀ ರ್ಕ್ಷ ೧೨|
+/System/Library/Fonts/NotoSansOriya.ttc|ଓଡ଼ିଆ କ୍ଷ|
+/System/Library/Fonts/NotoSansOriya.ttc|ର୍କ କି କୋ କୌ କ୍ର|
+/System/Library/Fonts/NotoSansOriya.ttc|ସମସ୍ତ ମଣିଷ ଜନ୍ମକାଳରୁ ସ୍ୱାଧୀନ|
+/System/Library/Fonts/Supplemental/ITFDevanagari.ttc|क्ष त्र ज्ञ र्कि|
+/System/Library/Fonts/Supplemental/ITFDevanagari.ttc|क्‍ष क्‌ष र्‍क ि|
+/System/Library/Fonts/Supplemental/ITFDevanagari.ttc:1|स्त्री द्ध्य र्क्ष्य|
+/System/Library/Fonts/Supplemental/ITFDevanagari.ttc|सभी मनुष्यों को गौरव और अधिकारों के मामले में जन्मजात स्वतन्त्रता प्राप्त है।|
+/System/Library/Fonts/Supplemental/Shree714.ttc|क्ष त्र ज्ञ श्र द्ध|
+/System/Library/Fonts/Supplemental/Shree714.ttc|र्क र्कि कि र्‍क|
+/System/Library/Fonts/Supplemental/Shree714.ttc|क्‍ष क्‌ष ि क्ि|
+/System/Library/Fonts/Supplemental/Shree714.ttc|हिन्दी 123 नमस्ते प्राप्त|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|क्ष त्र र्कि कि|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|हिन्दी नमस्ते र्‍क|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|ક્ષ ર્કિ કિ|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|ਪੰਜਾਬੀ ਕ੍ਰ ਕਿ|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|ರ್ಕ ಕ್ರ ಕಿ ಕೊ|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|கொ கோ கை க்ஷ|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|தமிழ் மனிதப் பிறவியினர்|
+/System/Library/Fonts/Supplemental/Tamil Sangam MN.ttc|கொ கோ கௌ க்ஷ|
+/System/Library/Fonts/Supplemental/Tamil Sangam MN.ttc|ஸ்ரீ கி க்‌ஷ|
+/System/Library/Fonts/Supplemental/Tamil Sangam MN.ttc|மனிதப் பிறவியினர் சகலரும் சுதந்திரமாகவே பிறக்கின்றனர்|
+/System/Library/Fonts/Kohinoor.ttc|क्क्ष ङ्क्ष्व ह्म ह्य|
+/System/Library/Fonts/Kohinoor.ttc|र्य र्र्य रु रू ॐ ।॥|
+/System/Library/Fonts/Kohinoor.ttc|क्ष्म्य द्व्य ट्ठ ड्ढ|
+/System/Library/Fonts/KohinoorBangla.ttc|ক্ক্ষ র্ক্য ঙ্গ ঞ্জ|
+/System/Library/Fonts/KohinoorBangla.ttc|শ্রী ব্রা ত্ম্য ক্ত|
+/System/Library/Fonts/KohinoorGujarati.ttc|દ્ધ હ્ય ક્ષ્મ શ્રી ૧૨૩|
+/System/Library/Fonts/KohinoorTelugu.ttc|ర్కి క్త్ర శ్రీ ఙ్క|
+/System/Library/Fonts/NotoSansKannada.ttc|ರ್ಕಿ ಕ್ತ್ರ ಶ್ರೀ ಙ್ಕ|
+/System/Library/Fonts/NotoSansOriya.ttc|ର୍କି କ୍ତ୍ର ଶ୍ରୀ ୟ ୱ|
+/System/Library/Fonts/MuktaMahee.ttc|ਸ੍ਵ ਕ੍ਯ ਗੁਰਮੁਖੀ ੴ|
+/System/Library/Fonts/Supplemental/Shree714.ttc|र्य क्र्य द्व्य ह्म|
+/System/Library/Fonts/Supplemental/Arial Unicode.ttf|ಸ್ತ್ರೀ ರ್ಕಿ ಕ್ಷ|
+/System/Library/Fonts/Supplemental/Tamil Sangam MN.ttc|க்ஷ்ம ஶ்ரீ கெ கே|
+/System/Library/Fonts/SFIndia.ttc:0|বাংলা ভাষা কো কৌ র্ক ক্ষ জ্ঞ স্ত্র কি ৎ ক্‍ষ|
+/System/Library/Fonts/SFIndia.ttc:0|আমার সোনার বাংলা, আমি তোমায় ভালোবাসি।|
+/System/Library/Fonts/SFIndia.ttc:1|हिन्दी क्ष त्र ज्ञ श्र र्क र्क्ष कि क़ ँ ं ः क्‍ष क्‌ष|
+/System/Library/Fonts/SFIndia.ttc:1|सभी मनुष्यों को गौरव और अधिकारों के मामले में जन्मजात स्वतन्त्रता प्राप्त है।|
+/System/Library/Fonts/SFIndia.ttc:1|हिन्दी|--variations=wght=700
+/System/Library/Fonts/SFIndia.ttc:2|ગુજરાતી ક્ષ જ્ઞ ર્ક કિ શ્ર|
+/System/Library/Fonts/SFIndia.ttc:3|ਪੰਜਾਬੀ ਕ੍ਰ ਸ੍ਵ ਕਿ ਖ਼ ਗੁਰਮੁਖੀ|
+/System/Library/Fonts/SFIndia.ttc:4|ಕನ್ನಡ ರ್ಕ ಕ್ರ ಕ್ಷ ಕೊ ಕೋ ಕೈ|
+/System/Library/Fonts/SFIndia.ttc:5|മലയാളം ക്ഷ ന്റ ര്‍ ല്‍ ള്‍ കൊ കോ കൌ ക്ക സ്ത്രീ|
+/System/Library/Fonts/SFIndia.ttc:5|എല്ലാ മനുഷ്യരും തുല്യാവകാശങ്ങളോടും അന്തസ്സോടും സ്വാതന്ത്ര്യത്തോടുംകൂടി ജനിച്ചിട്ടുള്ളവരാണ്.|
+/System/Library/Fonts/SFIndia.ttc:5|ക്‌ക ക്‍ക ര്‍ക ൻ ൺ ൾ|
+/System/Library/Fonts/SFIndia.ttc:6|ଓଡ଼ିଆ କ୍ଷ ର୍କ କି କୋ|
+/System/Library/Fonts/SFIndia.ttc:7|தமிழ் கொ கோ கௌ க்ஷ ஸ்ரீ|
+/System/Library/Fonts/SFIndia.ttc:8|తెలుగు ర్క క్ర క్ష కొ కై|
+/System/Library/Fonts/SFIndia.ttc:8|తెలుగు|--variations=wght=300

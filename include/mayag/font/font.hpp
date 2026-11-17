@@ -14,10 +14,12 @@
 // Those three interfaces already existed; the font engine just implements them.
 
 #include "atlas.hpp"
+#include "bidi.hpp"
 #include "color_bitmap.hpp"
 #include "colr.hpp"
 #include "mapped_file.hpp"
 #include "opentype.hpp"
+#include "ot_shapers.hpp"
 #include "outline.hpp"
 #include "raster.hpp"
 #include "shape.hpp"
@@ -100,8 +102,10 @@ class Face {
         face->file_    = std::move(*parsed);
         face->glyphs_  = GlyphSource{face->file_};
         face->kerning_ = KernTable{face->file_};
+        face->legacy_kern_ = KernTable::legacy(face->file_);
         face->tracking_ = TrackTable{face->file_};
         face->ligatures_ = LigatureTable{face->file_};
+        face->layout_ = std::make_unique<ot::Layout>(face->file_);
         face->id_      = next_id();
         face->base_id_ = face->id_;
 
@@ -216,12 +220,22 @@ class Face {
     /// the HVAR advance-width delta at the current axis position, so heavy and
     /// light instances space text correctly rather than reusing the default.
     [[nodiscard]] float advance(std::uint16_t gid, float size_px) const noexcept {
-        float units = static_cast<float>(file_.advance(gid));
-        if (hvar_.ok) {
-            std::lock_guard lock{mutex_};
-            units += var::hvar_advance_delta(hvar_, gid, coords_);
-        }
-        return units * scale_for(size_px);
+        return advance_units(gid) * scale_for(size_px);
+    }
+
+    /// Advance in font units at the current instance (hmtx + HVAR). The HVAR
+    /// delta walks the whole item variation store (~300 ns), and shaping asks
+    /// for every glyph of every run, so variable faces cache per glyph; the
+    /// cache is dropped whenever the instance moves.
+    [[nodiscard]] float advance_units(std::uint16_t gid) const noexcept {
+        const float base = static_cast<float>(file_.advance(gid));
+        if (!hvar_.ok) return base;
+        std::lock_guard lock{mutex_};
+        if (adv_cache_.empty()) adv_cache_.assign(file_.num_glyphs(), std::numeric_limits<float>::quiet_NaN());
+        if (gid >= adv_cache_.size()) return base;
+        float& slot = adv_cache_[gid];
+        if (slot != slot) slot = base + var::hvar_advance_delta(hvar_, gid, coords_);   // NaN = not yet
+        return slot;
     }
 
     /// Kerning between two glyphs in pixels, at the face's current
@@ -232,6 +246,11 @@ class Face {
     }
 
     [[nodiscard]] bool has_kerning() const noexcept { return !kerning_.empty(); }
+
+    /// The OpenType layout tables (GSUB/GPOS/GDEF) of this face.
+    [[nodiscard]] const ot::Layout& layout() const noexcept { return *layout_; }
+    [[nodiscard]] const KernTable& legacy_kern() const noexcept { return legacy_kern_; }
+    [[nodiscard]] const TrackTable& track_table() const noexcept { return tracking_; }
 
     /// Extra advance per glyph, in pixels at `size_px`, that the font's
     /// `trak` table asks for at `point_size` (the LOGICAL size: 13 pt type on
@@ -290,6 +309,8 @@ class Face {
 
     /// The design axes (tag + min/def/max in user units); empty if static.
     [[nodiscard]] const std::vector<var::Axis>& axes() const noexcept { return axes_; }
+    /// The current normalised variation coordinates (empty for static faces).
+    [[nodiscard]] const var::Coords& coords() const noexcept { return coords_; }
 
     /// True when this face can express italic through its OWN design space (a
     /// slnt or ital axis). If false, `italic` must be synthesised by shearing.
@@ -373,6 +394,7 @@ class Face {
         // to a weight we've drawn before reuses its atlas entries instead of
         // re-rasterising every glyph again.
         id_ = variation_id(base_id_, coords_);
+        adv_cache_.clear();
     }
 
     // Stable id for a base face at a given normalised position. FNV-1a over
@@ -402,8 +424,10 @@ class Face {
     ot::FontFile              file_;
     GlyphSource               glyphs_;
     KernTable                 kerning_;
+    KernTable                 legacy_kern_;   // `kern` only, for the OpenType pipeline
     TrackTable                tracking_;
     LigatureTable             ligatures_;
+    std::unique_ptr<ot::Layout> layout_;      // GSUB/GPOS/GDEF, read in place
     std::uint32_t             id_ = 0;
     std::uint32_t             base_id_ = 0;   // stable id ignoring variation
 
@@ -419,6 +443,7 @@ class Face {
 
     mutable std::mutex                                 mutex_;
     mutable std::unordered_map<std::uint16_t, Outline> outline_cache_;
+    mutable std::vector<float>                         adv_cache_;   // per gid, NaN = unknown
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -630,82 +655,227 @@ class FontStack : public Shaper {
                                              const ShapeParams& params) const {
         ShapeResult out;
         if (faces_.empty() || text.empty()) return out;
-
         out.glyphs.reserve(text.size());
 
-        std::size_t   i = 0;
-        std::size_t   prev_face = 0;
-        std::uint16_t prev_gid  = 0;
-        bool          have_prev = false;
-
-        while (i < text.size()) {
-            const auto cluster = static_cast<std::uint32_t>(i);
-            const std::uint32_t cp = utf8::decode(text, i);
-
-            if (uni::is_rtl(cp))                out.has_rtl = true;
-            if (uni::needs_complex_shaping(cp)) out.needs_complex = true;
-
-            // Newlines are layout's business, not the shaper's; emit a
-            // zero-width glyph so cluster indices stay aligned with the
-            // source string.
-            if (cp == '\n' || cp == '\r') {
-                out.glyphs.push_back(ShapedGlyph{0, cluster, 0.0f, {}, 0, false});
-                have_prev = false;
-                continue;
-            }
-
-            auto [face_idx, gid] = resolve(cp);
-            if (gid != 0) {
-                // A real Bold beats an emboldened Regular. Same family, so the
-                // codepoint maps through the sibling's own cmap.
-                if (const std::size_t w = face_for_weight(face_idx, params.weight, params.italic); w != face_idx) {
-                    if (const std::uint16_t g2 = faces_[w]->glyph_for(cp); g2 != 0) { face_idx = w; gid = g2; }
-                }
-            }
-            const bool missing = (gid == 0);
-            const Face& face = *faces_[face_idx];
-            pin_variations(faces_[face_idx].get(), params.weight,
-                           {params.axes.data(), params.axis_count}, params.italic);
-
-            ShapedGlyph g;
-            g.glyph_id   = gid;
-            g.cluster    = cluster;
-            g.face_index = static_cast<std::uint8_t>(num::min<std::size_t>(face_idx, 255));
-            g.missing    = missing;
-            g.advance    = face.advance(gid, params.size_px);
-
-            // Combining marks have zero advance and stack on the base glyph.
-            if (uni::is_combining_mark(cp) || uni::is_variation_selector(cp) ||
-                uni::is_zwj(cp)) {
-                g.advance = 0.0f;
-                // Inherit the previous cluster so the pair is one cursor stop.
-                if (!out.glyphs.empty()) g.cluster = out.glyphs.back().cluster;
-            }
-
-            // Kerning applies only WITHIN a face — kern pairs are glyph ids,
-            // and a glyph id from one font means nothing in another.
-            if (params.kerning && have_prev && face_idx == prev_face && !missing) {
-                const float k = face.kern(prev_gid, gid, params.size_px);
-                if (k != 0.0f && !out.glyphs.empty()) {
-                    out.glyphs.back().advance += k;
-                    out.width += k;
-                }
-            }
-
-            g.advance += params.letter_spacing;
-            if (g.advance != 0.0f) g.advance += tracking_px(face, params);
-            out.width += g.advance;
-            out.glyphs.push_back(g);
-
-            prev_face = face_idx;
-            prev_gid  = gid;
-            have_prev = true;
+        // ── decode ──
+        std::vector<char32_t> cps;
+        std::vector<std::uint32_t> at;   // byte offset of each codepoint
+        cps.reserve(text.size());
+        at.reserve(text.size());
+        for (std::size_t i = 0; i < text.size();) {
+            at.push_back(static_cast<std::uint32_t>(i));
+            cps.push_back(utf8::decode(text, i));
+        }
+        const std::size_t n = cps.size();
+        for (char32_t c : cps) {
+            if (uni::is_rtl(c)) out.has_rtl = true;
+            if (uni::needs_complex_shaping(c)) out.needs_complex = true;
         }
 
-        if (params.ligatures) apply_ligatures(out, params);
+        // ── bidi levels, per paragraph (UAX #9) ──
+        std::vector<std::uint8_t> levels(n, 0);
+        if (!bidi::is_trivially_ltr(cps)) {
+            std::size_t p0 = 0;
+            for (std::size_t i = 0; i <= n; ++i) {
+                const bool end = i == n || ucd::bidi_class(cps[i]) == ucd::BidiClass::B;
+                if (!end) continue;
+                const std::size_t p1 = std::min(n, i + 1);
+                const std::span<const char32_t> para{cps.data() + p0, p1 - p0};
+                const bidi::Paragraph p = bidi::resolve(para, bidi::Direction::auto_detect);
+                // L1 over the whole paragraph (lines are not known yet; trailing
+                // whitespace and separators reset to the paragraph level).
+                const auto lv = bidi::line_levels(para, p, 0, para.size());
+                for (std::size_t k = 0; k < lv.size(); ++k) levels[p0 + k] = lv[k];
+                p0 = p1;
+            }
+        }
 
+        // ── scripts: Common/Inherited take their neighbour's script ──
+        std::vector<ucd::Script> scripts(n, ucd::Script::Common);
+        {
+            ucd::Script last = ucd::Script::Common;
+            // Paired brackets take the script of their opening partner.
+            std::vector<std::pair<char32_t, ucd::Script>> open;
+            for (std::size_t i = 0; i < n; ++i) {
+                ucd::Script s = ucd::script(cps[i]);
+                const bool weak = s == ucd::Script::Common || s == ucd::Script::Inherited || s == ucd::Script::Unknown;
+                if (weak) {
+                    const ucd::Bracket br = ucd::bidi_bracket(cps[i]);
+                    if (br.type == ucd::BracketType::open) {
+                        open.push_back({br.pair, last});
+                        if (open.size() > 64) open.erase(open.begin());
+                    } else if (br.type == ucd::BracketType::close) {
+                        for (std::size_t k = open.size(); k > 0; --k)
+                            if (open[k - 1].first == cps[i]) { last = open[k - 1].second; open.resize(k - 1); break; }
+                    }
+                    s = last;
+                } else {
+                    last = s;
+                }
+                scripts[i] = s;
+            }
+            // Leading weak characters take the first strong script.
+            std::size_t first = 0;
+            while (first < n && (ucd::script(cps[first]) == ucd::Script::Common ||
+                                 ucd::script(cps[first]) == ucd::Script::Inherited ||
+                                 ucd::script(cps[first]) == ucd::Script::Unknown)) ++first;
+            if (first < n) for (std::size_t i = 0; i < first; ++i) scripts[i] = scripts[first];
+        }
+
+        // ── faces: per grapheme, so a base and its marks stay in one font ──
+        std::vector<std::uint16_t> face_of(n, 0);
+        {
+            std::size_t i = 0;
+            while (i < n) {
+                std::size_t j = i + 1;
+                while (j < n && (ucd::is_mark(cps[j]) || cps[j] == 0x200D || ucd::is_default_ignorable(cps[j]) ||
+                                 (cps[j - 1] == 0x200D && ucd::is_extended_pictographic(cps[j])) ||
+                                 (cps[j] >= 0x1F3FB && cps[j] <= 0x1F3FF)))
+                    ++j;
+                // The face that covers the whole grapheme, else the base's face.
+                std::size_t fi = resolve(cps[i]).first;
+                if (j > i + 1) {
+                    for (std::size_t f = 0; f < faces_.size(); ++f) {
+                        if (!siblings_.empty() && is_sibling(f)) continue;
+                        bool all = true;
+                        for (std::size_t k = i; k < j && all; ++k)
+                            all = ucd::is_default_ignorable(cps[k]) || faces_[f]->glyph_for(cps[k]) != 0;
+                        if (all) { fi = f; break; }
+                    }
+                }
+                if (cps[i] == '\n' || cps[i] == '\r') fi = 0;
+                for (std::size_t k = i; k < j; ++k) face_of[k] = static_cast<std::uint16_t>(fi);
+                i = j;
+            }
+        }
+
+        // ── runs: maximal (face, script, level) spans, newlines alone ──
+        std::uint16_t run_id = 0;
+        for (std::size_t i = 0; i < n;) {
+            if (cps[i] == '\n' || cps[i] == '\r') {
+                // Layout's business, not the shaper's: a zero-width marker so
+                // cluster indices stay aligned with the source string.
+                ShapedGlyph g{0, at[i], 0.0f, {}, 0, false};
+                g.level = levels[i];
+                g.run = run_id++;
+                out.glyphs.push_back(g);
+                ++i;
+                continue;
+            }
+            std::size_t j = i + 1;
+            while (j < n && cps[j] != '\n' && cps[j] != '\r' && face_of[j] == face_of[i] &&
+                   scripts[j] == scripts[i] && levels[j] == levels[i])
+                ++j;
+            shape_run(text, cps, at, i, j, face_of[i], scripts[i], levels[i], params, run_id++, out);
+            i = j;
+        }
         return out;
     }
+
+  private:
+    /// Shape cps[begin, end) with one face through the OpenType pipeline and
+    /// append the glyphs in LOGICAL order.
+    void shape_run(std::string_view text, const std::vector<char32_t>& cps, const std::vector<std::uint32_t>& at,
+                   std::size_t begin, std::size_t end, std::size_t face_idx0, ucd::Script script,
+                   std::uint8_t level, const ShapeParams& params, std::uint16_t run_id, ShapeResult& out) const {
+        (void)text;
+        // A real Bold beats an emboldened Regular, if it covers the run.
+        std::size_t face_idx = face_idx0;
+        if (const std::size_t w = face_for_weight(face_idx, params.weight, params.italic); w != face_idx) {
+            bool covers = true;
+            for (std::size_t k = begin; k < end && covers; ++k)
+                covers = ucd::is_default_ignorable(cps[k]) || faces_[w]->glyph_for(cps[k]) != 0;
+            if (covers) face_idx = w;
+        }
+        Face& face = *faces_[face_idx];
+        pin_variations(&face, params.weight, {params.axes.data(), params.axis_count}, params.italic);
+
+        const ot::Layout& layout = face.layout();
+        const ot::FontFile& file = face.file();
+        ot::FontFuncs ff;
+        ff.nominal = [&](char32_t c, std::uint16_t& g) { g = file.glyph_for(c); return g != 0; };
+        ff.advance = [&](std::uint16_t g) { return face.advance_units(g); };
+        ff.upem = file.units_per_em();
+        ff.coords = face.coords();
+        const KernTable& legacy = face.legacy_kern();
+        if (params.kerning && legacy.has_legacy())
+            ff.legacy_kern = [&](std::uint16_t a, std::uint16_t b) { return int(legacy.legacy_lookup(a, b)); };
+        ff.extents = [&](std::uint16_t g, ot::FontFuncs::Extents& e) {
+            const Outline o = face.outline(g);
+            if (o.empty()) { e = {}; return true; }
+            const Rect r = o.control_bounds();
+            e.x_bearing = static_cast<int>(std::lround(r.origin.x));
+            e.width = static_cast<int>(std::lround(r.origin.x + r.size.x)) - e.x_bearing;
+            e.y_bearing = static_cast<int>(std::lround(r.origin.y + r.size.y));
+            e.height = static_cast<int>(std::lround(r.origin.y)) - e.y_bearing;
+            return true;
+        };
+
+        const ot::Direction dir = (level & 1) ? ot::Direction::rtl : ot::Direction::ltr;
+        std::vector<ot::Feature> feats;
+        if (!params.kerning) feats.push_back({ot::make_tag('k', 'e', 'r', 'n'), 0});
+        if (!params.ligatures) {
+            feats.push_back({ot::make_tag('l', 'i', 'g', 'a'), 0});
+            feats.push_back({ot::make_tag('c', 'l', 'i', 'g'), 0});
+        }
+        const auto& plan = plan_for(face, layout, script, dir, feats, ff, legacy.has_legacy());
+
+        ot::Buffer b;
+        b.info.reserve((end - begin) + 8);
+        b.direction = dir;
+        for (std::size_t k = begin; k < end; ++k) {
+            ot::GlyphInfo gi;
+            gi.codepoint = cps[k];
+            gi.cluster = at[k];
+            b.info.push_back(gi);
+        }
+        ot::shape(*plan, layout, ff, b, feats, begin == 0);
+
+        // Shaped output is visual; store logically (reverse RTL runs back).
+        if (dir == ot::Direction::rtl) b.reverse();
+        const float scale = face.scale_for(params.size_px);
+        const float track = tracking_px(face, params);
+        const auto fi8 = static_cast<std::uint8_t>(num::min<std::size_t>(face_idx, 255));
+        for (std::size_t k = 0; k < b.len(); ++k) {
+            const auto& gi = b.info[k];
+            const auto& gp = b.pos[k];
+            ShapedGlyph g;
+            g.glyph_id = gi.gid;
+            g.cluster = gi.cluster;
+            g.face_index = fi8;
+            g.missing = gi.gid == 0 && !ot::is_default_ignorable(gi);
+            g.advance = gp.x_advance * scale;
+            g.offset = Vec2{gp.x_offset * scale, -gp.y_offset * scale};   // y-up font units -> y-down px
+            if (g.advance != 0.0f) g.advance += params.letter_spacing + track;
+            g.level = level;
+            g.run = run_id;
+            out.width += g.advance;
+            out.glyphs.push_back(g);
+        }
+    }
+
+    /// Plans are cached per (face instance, script, direction, features).
+    std::shared_ptr<const ot::ShapePlan> plan_for(const Face& face, const ot::Layout& layout, ucd::Script script,
+                                                  ot::Direction dir, const std::vector<ot::Feature>& feats,
+                                                  const ot::FontFuncs& ff, bool has_kern) const {
+        std::uint64_t key = face.id();
+        key = key * 1000003u + static_cast<std::uint64_t>(script);
+        key = key * 31u + static_cast<std::uint64_t>(dir);
+        for (const auto& f : feats) key = key * 1000003u + (std::uint64_t{f.tag} << 8 | f.value);
+        {
+            std::lock_guard lock{plan_mutex_};
+            if (auto it = plans_.find(key); it != plans_.end()) return it->second;
+        }
+        auto plan = std::make_shared<const ot::ShapePlan>(
+            ot::compile_plan(layout, script, dir, 0, feats, ff, has_kern, face.file().has_table(ot::tag("kerx"))));
+        std::lock_guard lock{plan_mutex_};
+        if (plans_.size() > 512) plans_.clear();
+        return plans_.emplace(key, std::move(plan)).first->second;
+    }
+    mutable std::mutex plan_mutex_;
+    mutable std::unordered_map<std::uint64_t, std::shared_ptr<const ot::ShapePlan>> plans_;
+
+  public:
 
     // ── glyph rasterisation and caching ─────────────────────────────────
 
@@ -879,58 +1049,6 @@ class FontStack : public Shaper {
             r.offset -= Vec2{static_cast<float>(pad), static_cast<float>(pad)};
         }
         return atlas_.insert(key, r.bitmap, r.offset, advance, scale, 0.0f, false);
-    }
-
-    // Greedy longest-match ligature substitution over the shaped run. Merges
-    // a component sequence (same face, contiguous) into one ligature glyph,
-    // keeping the first component's cluster so cursor hit-testing still maps
-    // the ligature back to its start. Advance becomes the ligature glyph's own
-    // advance at the run's variation. Runs per face so mixed-font text is safe.
-    void apply_ligatures(ShapeResult& out, const ShapeParams& params) const {
-        bool any = false;
-        for (const auto& g : out.glyphs)
-            if (g.face_index < faces_.size() && faces_[g.face_index]->has_ligatures()) {
-                any = true; break;
-            }
-        if (!any) return;
-
-        std::vector<ShapedGlyph> merged;
-        merged.reserve(out.glyphs.size());
-        std::vector<std::uint16_t> gids;
-        gids.reserve(out.glyphs.size());
-        for (const auto& g : out.glyphs) gids.push_back(g.glyph_id);
-
-        for (std::size_t i = 0; i < out.glyphs.size();) {
-            const ShapedGlyph& g = out.glyphs[i];
-            const std::size_t fi = g.face_index;
-            std::size_t consumed = 0;
-            std::uint16_t lig = 0;
-            if (fi < faces_.size() && faces_[fi]->has_ligatures()) {
-                // Only fold a run whose every component shares this face.
-                lig = faces_[fi]->ligature_at(gids, i, consumed);
-                if (lig != 0) {
-                    for (std::size_t k = 1; k < consumed; ++k)
-                        if (i + k >= out.glyphs.size() || out.glyphs[i + k].face_index != fi) {
-                            lig = 0; break;
-                        }
-                }
-            }
-            if (lig != 0 && consumed >= 2) {
-                ShapedGlyph m = g;                 // keep first component's cluster/offset
-                m.glyph_id = lig;
-                m.advance  = faces_[fi]->advance(lig, params.size_px) + params.letter_spacing
-                           + tracking_px(*faces_[fi], params);
-                merged.push_back(m);
-                i += consumed;
-            } else {
-                merged.push_back(g);
-                ++i;
-            }
-        }
-
-        out.glyphs = std::move(merged);
-        out.width = 0.0f;
-        for (const auto& g : out.glyphs) out.width += g.advance;
     }
 
     // Pin a variable face to a run's axis position before we shape or
@@ -1414,7 +1532,10 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                 show_ellipsis = true;
             }
 
-            for (std::size_t i = line.begin; i < draw_end && i < shaped.glyphs.size(); ++i) {
+            const std::size_t line_end = std::min(draw_end, shaped.glyphs.size());
+            std::vector<std::size_t> order;
+            visual_order(shaped, line.begin, line_end, order);
+            for (const std::size_t i : order) {
                 const auto& g = shaped.glyphs[i];
                 if (g.glyph_id == 0 && g.advance == 0.0f) continue;   // newline marker
 
@@ -1450,6 +1571,41 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
     }
 
   private:
+    /// The glyphs [begin, end) of one line in VISUAL order. Glyphs are stored
+    /// logically, run by run; a right-to-left run's glyphs are reversed and
+    /// the runs are reordered by UAX #9 L2 (reverse every maximal sequence
+    /// at or above each odd level, from the highest level down).
+    static void visual_order(const ShapeResult& shaped, std::size_t begin, std::size_t end,
+                             std::vector<std::size_t>& out) {
+        out.clear();
+        if (begin >= end) return;
+        bool any_rtl = false;
+        for (std::size_t i = begin; i < end; ++i) any_rtl |= (shaped.glyphs[i].level & 1) != 0;
+        if (!any_rtl) {
+            for (std::size_t i = begin; i < end; ++i) out.push_back(i);
+            return;
+        }
+        // Segments of one run each: [first, last) with the run's level.
+        struct Seg { std::size_t first, last; std::uint8_t level; };
+        std::vector<Seg> segs;
+        for (std::size_t i = begin; i < end;) {
+            std::size_t j = i + 1;
+            while (j < end && shaped.glyphs[j].run == shaped.glyphs[i].run &&
+                   shaped.glyphs[j].level == shaped.glyphs[i].level) ++j;
+            segs.push_back({i, j, shaped.glyphs[i].level});
+            i = j;
+        }
+        std::vector<std::uint8_t> levels(segs.size());
+        for (std::size_t k = 0; k < segs.size(); ++k) levels[k] = segs[k].level;
+        for (const std::uint32_t k : bidi::visual_order(levels)) {
+            const Seg& sg = segs[k];
+            if (sg.level & 1)
+                for (std::size_t i = sg.last; i > sg.first; --i) out.push_back(i - 1);
+            else
+                for (std::size_t i = sg.first; i < sg.last; ++i) out.push_back(i);
+        }
+    }
+
     /// Fetch and emit one glyph whose origin the shaper put at `pen`.
     ///
     /// A coverage glyph is drawn at the pen's whole pixel with the fraction
