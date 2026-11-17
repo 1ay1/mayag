@@ -20,11 +20,52 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace mayag {
+
+[[nodiscard]] inline std::uint64_t memo_mix(std::uint64_t h, std::uint64_t v) noexcept {
+    h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    return h * 0xff51afd7ed558ccdull;
+}
+
+/// Builds a memo() key from the values a subtree depends on.
+///
+///     MemoKey k; k.add(m.sel).add(m.scroll.offset).add(rows);  memo(k, ...)
+class MemoKey {
+  public:
+    MemoKey& add(std::uint64_t v) noexcept { h_ = memo_mix(h_, v); return *this; }
+    MemoKey& add(std::int64_t v) noexcept { return add(static_cast<std::uint64_t>(v)); }
+    MemoKey& add(int v) noexcept { return add(static_cast<std::uint64_t>(static_cast<std::int64_t>(v))); }
+    MemoKey& add(unsigned v) noexcept { return add(std::uint64_t{v}); }
+    MemoKey& add(bool v) noexcept { return add(std::uint64_t{v}); }
+    MemoKey& add(char v) noexcept { return add(static_cast<std::uint64_t>(static_cast<unsigned char>(v))); }
+    MemoKey& add(float v) noexcept { std::uint32_t u; std::memcpy(&u, &v, 4); return add(std::uint64_t{u}); }
+    MemoKey& add(double v) noexcept { std::uint64_t u; std::memcpy(&u, &v, 8); return add(u); }
+    MemoKey& add(Vec2 v) noexcept { return add(v.x).add(v.y); }
+    MemoKey& add(Color<Srgb> c) noexcept { return add(c.c0).add(c.c1).add(c.c2).add(c.a); }
+    MemoKey& add(std::string_view s) noexcept {
+        std::uint64_t x = 0xcbf29ce484222325ull ^ s.size();
+        for (unsigned char ch : s) x = (x ^ ch) * 0x100000001b3ull;
+        return add(x);
+    }
+    MemoKey& add(const std::string& s) noexcept { return add(std::string_view{s}); }
+    MemoKey& add(const char* s) noexcept { return add(std::string_view{s}); }
+    template <class T>
+    MemoKey& add(const std::vector<T>& v) {
+        add(std::uint64_t{v.size()});
+        for (const auto& x : v) add(x);
+        return *this;
+    }
+    [[nodiscard]] operator std::uint64_t() const noexcept { return h_; }
+
+  private:
+    std::uint64_t h_ = 0x51ED27A1u;
+};
 
 class MemoCache {
   public:

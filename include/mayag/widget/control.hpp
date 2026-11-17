@@ -19,6 +19,7 @@
 // part_id("font", i), matched in update() with `is(e, "font", i)`.
 
 #include "../dsl/dsl.hpp"
+#include "../scene/memo.hpp"
 #include "../style/theme.hpp"
 
 #include <concepts>
@@ -36,6 +37,17 @@ concept ControlContext = requires(const C& c, std::uint64_t id) {
     { c.pressed(id) } -> std::same_as<bool>;
     { c.focused(id) } -> std::same_as<bool>;
 };
+
+/// Build through the context's memo cache when it has one (a live window's
+/// Ctx), so a heavy widget reuses last frame's subtree while its inputs
+/// (folded into `key`) are unchanged. Any other context just builds.
+template <class C, class F>
+[[nodiscard]] Node memo_widget(const C& c, std::uint64_t key, F&& build) {
+    if constexpr (requires { { c.memoize(key, build) } -> std::convertible_to<Node>; })
+        return c.memoize(key, std::forward<F>(build));
+    else
+        return Node(build());
+}
 
 /// The part ids of a compound control: `part_id("theme", 2)` is the third
 /// segment of the "theme" segmented control, the third row of a radio group,

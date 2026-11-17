@@ -59,6 +59,7 @@ namespace {
 /// Where the project comes from. Set in main() before the app starts.
 std::string g_root;
 bool        g_builtin = false;
+bool        g_headless = false;   // --headless: a scripted, reproducible run
 
 struct File { std::string path; std::string text; };
 
@@ -1082,7 +1083,9 @@ struct Editor {
     }
     static Cmd update(Model& m, Blink) {
         m.idle += 0.53;
-        m.blink_on = m.idle >= 15.0 ? true : !m.blink_on;   // solid (and the clock stops) after 15 s idle
+        // Solid (and the clock stops) after 15 s idle. Scripted runs keep it
+        // solid: the blink runs on a real timer, so its phase isn't reproducible.
+        m.blink_on = (g_headless || m.idle >= 15.0) ? true : !m.blink_on;
         for (auto& t : m.toast_ttl) t -= 0.53;
         for (std::size_t i = m.toast_ttl.size(); i-- > 0;)
             if (m.toast_ttl[i] <= 0) { m.toast_ttl.erase(m.toast_ttl.begin() + static_cast<long>(i)); m.toast_list.erase(m.toast_list.begin() + static_cast<long>(i)); }
@@ -1297,15 +1300,7 @@ struct Editor {
                                 .active = b && b->path == n.path, .git = g, .errors = e});
             }
             const std::string root_name = g_builtin ? std::string{"demo"} : std::filesystem::path(g_root).filename().string();
-            // The tree only changes with its rows, selection, scroll and focus;
-            // everything it asks about hover is tracked by memo() itself.
-            MemoKey tree_key;
-            tree_key.add(m.tree_sel).add(m.tree_scroll.offset).add(m.focus == Focus::tree).add(rows.size());
-            for (const auto& r : rows)
-                tree_key.add(r.name).add(r.depth).add(r.dir).add(r.open).add(r.active).add(r.git).add(r.errors);
-            Node tree = memo(tree_key, [&] {
-                return file_tree(look, "tree", rows, m.tree_sel, m.tree_scroll, m.focus == Focus::tree);
-            });
+            Node tree = file_tree(look, "tree", rows, m.tree_sel, m.tree_scroll, m.focus == Focus::tree);
             side = (h(v(h(text_owned(root_name) | font(11) | semibold | tracking(0.6f) | fg(t.text_secondary),
                           spacer(),
                           text_owned(std::to_string(m.project.size()) + " files") | font(10.5f) | fg(t.text_disabled))
@@ -1342,7 +1337,10 @@ struct Editor {
                 right.push_back({std::string{ed.language->name}, "", T::accent, false});
             }
             char perf[48] = "";
-            if (c.latency != nullptr && c.latency->mean_cpu_ms() > 0.0) std::snprintf(perf, sizeof perf, "%.2fms", c.latency->mean_cpu_ms());
+            // Measured time differs every run; scripted runs leave it out so
+            // their frames are reproducible.
+            if (!g_headless && c.latency != nullptr && c.latency->mean_cpu_ms() > 0.0)
+                std::snprintf(perf, sizeof perf, "%.2fms", c.latency->mean_cpu_ms());
             right.push_back({perf, "", T::dim, false});
         }
 
@@ -1506,7 +1504,8 @@ int main(int argc, char** argv) {
             break;
         }
     const auto opts = demo::parse_args(static_cast<int>(args.size()), args.data(), Vec2{1440, 900});
-    g_builtin = opts.mode == demo::Options::Mode::headless || std::getenv("ED_DEMO") != nullptr;
+    g_headless = opts.mode == demo::Options::Mode::headless;
+    g_builtin = g_headless || std::getenv("ED_DEMO") != nullptr;
     if (g_root.empty()) g_root = std::filesystem::current_path().string();
 
     std::shared_ptr<typo::FontStack> fonts;

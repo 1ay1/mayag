@@ -505,7 +505,9 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
 
 inline void arrange(Node& node, const Rect& frame, const TextMeasurer& tm) {
     // A reused memo subtree at the same size only needs moving; at a new
-    // size it's relaid out from its resolved (pre-layout) copy.
+    // size it's relaid out from its resolved (pre-layout) copy. Moving adds
+    // the offset to every frame, which can round 1 ulp away from a fresh
+    // layout: at most 1/255 on an antialiased edge.
     if (node.memo_reused()) {
         const Rect old = node.frame();
         if (old.size.x == frame.size.x && old.size.y == frame.size.y) {

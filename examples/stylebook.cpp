@@ -444,8 +444,11 @@ struct Stylebook {
             | when(state::narrower(760), direction(Axis::vertical), align(Align::start));
 
         const Node page = v(header,
-                            h(inheritance(), states(m), tokens(), groups(m), switches(m),
-                              disclosure(m), fields(m), entries(m), environment(), looks(m))
+                            // Sections that don't read the model are built once and reused.
+                            h(memo(1, [] { return Node(inheritance()); }), states(m),
+                              memo(2, [] { return Node(tokens()); }), groups(m), switches(m),
+                              disclosure(m), fields(m), entries(m),
+                              memo(3, [] { return Node(environment()); }), looks(m))
                                 | wrap | gap(16))
                         | pad(24) | gap(20);
         return v(scroll_view(ctx(), "page", m.page, node(page)) | grow() | min_size(0, 0))

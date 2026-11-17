@@ -110,6 +110,11 @@ struct Ctx {
     std::uint64_t* interaction_reads = nullptr;
     void note_read() const noexcept { if (interaction_reads != nullptr) ++*interaction_reads; }
     [[nodiscard]] std::uint64_t reads() const noexcept { return interaction_reads != nullptr ? *interaction_reads : 0; }
+
+    /// memo() against this context (its theme, its cache): what a widget
+    /// calls on the context it was handed. See mayag::memo below.
+    template <class F>
+    [[nodiscard]] Node memoize(std::uint64_t key, F&& build) const;
     template <dsl::fixed_string Name>
     [[nodiscard]] bool hovered() const noexcept { return hovered(dsl::node_id(Name.view())); }
     template <dsl::fixed_string Name>
@@ -186,10 +191,7 @@ template <class F>
 }
 
 namespace detail {
-[[nodiscard]] inline std::uint64_t memo_mix(std::uint64_t h, std::uint64_t v) noexcept {
-    h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-    return h * 0xff51afd7ed558ccdull;
-}
+using mayag::memo_mix;
 /// The Ctx facts a subtree can read without them being in its key.
 [[nodiscard]] inline std::uint64_t ctx_fingerprint(const Ctx& c) noexcept {
     std::uint64_t h = 0;
@@ -205,39 +207,6 @@ namespace detail {
 }
 }  // namespace detail
 
-/// Builds a memo() key from the values a subtree depends on.
-///
-///     MemoKey k; k.add(m.sel).add(m.scroll.offset).add(rows);  memo(k, ...)
-class MemoKey {
-  public:
-    MemoKey& add(std::uint64_t v) noexcept { h_ = detail::memo_mix(h_, v); return *this; }
-    MemoKey& add(std::int64_t v) noexcept { return add(static_cast<std::uint64_t>(v)); }
-    MemoKey& add(int v) noexcept { return add(static_cast<std::uint64_t>(static_cast<std::int64_t>(v))); }
-    MemoKey& add(unsigned v) noexcept { return add(std::uint64_t{v}); }
-    MemoKey& add(bool v) noexcept { return add(std::uint64_t{v}); }
-    MemoKey& add(char v) noexcept { return add(static_cast<std::uint64_t>(static_cast<unsigned char>(v))); }
-    MemoKey& add(float v) noexcept { std::uint32_t u; std::memcpy(&u, &v, 4); return add(std::uint64_t{u}); }
-    MemoKey& add(double v) noexcept { std::uint64_t u; std::memcpy(&u, &v, 8); return add(u); }
-    MemoKey& add(Vec2 v) noexcept { return add(v.x).add(v.y); }
-    MemoKey& add(Color<Srgb> c) noexcept { return add(c.c0).add(c.c1).add(c.c2).add(c.a); }
-    MemoKey& add(std::string_view s) noexcept {
-        std::uint64_t x = 0xcbf29ce484222325ull ^ s.size();
-        for (unsigned char ch : s) x = (x ^ ch) * 0x100000001b3ull;
-        return add(x);
-    }
-    MemoKey& add(const std::string& s) noexcept { return add(std::string_view{s}); }
-    MemoKey& add(const char* s) noexcept { return add(std::string_view{s}); }
-    template <class T>
-    MemoKey& add(const std::vector<T>& v) {
-        add(std::uint64_t{v.size()});
-        for (const auto& x : v) add(x);
-        return *this;
-    }
-    [[nodiscard]] operator std::uint64_t() const noexcept { return h_; }
-
-  private:
-    std::uint64_t h_ = 0x51ED27A1u;
-};
 
 /// Reuse a subtree across frames while `key` is unchanged.
 ///
@@ -257,7 +226,12 @@ class MemoKey {
 /// Outside a live window (one-shot renders, tests) it just calls `build`.
 template <class F>
 [[nodiscard]] Node memo(std::uint64_t key, F&& build) {
-    const Ctx& c = ctx();
+    return ctx().memoize(key, std::forward<F>(build));
+}
+
+template <class F>
+Node Ctx::memoize(std::uint64_t key, F&& build) const {
+    const Ctx& c = *this;
     const std::uint64_t k = detail::memo_mix(detail::memo_mix(key, detail::ctx_fingerprint(c)), 1) | 1u;
     MemoCache* cache = c.memos;
     // A subtree that asked about hover/press/focus while building depends on

@@ -47,9 +47,29 @@ struct TreeRow {
 inline constexpr float kTreeRowH = 24.0f;
 inline constexpr std::size_t kTreeAction = 1u << 21;   ///< clear of part_dec/inc/menu
 
+namespace detail {
+template <ControlContext C>
+[[nodiscard]] inline Node file_tree_build(const C& c, std::string_view id, const std::vector<TreeRow>& rows,
+                                          int chosen, const ScrollState& list_scroll, bool focused);
+}
+
+/// Memoised: rebuilt only when its rows, selection, focus or scroll change
+/// (hover inside it is tracked by the cache).
 template <ControlContext C>
 [[nodiscard]] inline Node file_tree(const C& c, std::string_view id, const std::vector<TreeRow>& rows,
                                     int chosen, const ScrollState& list_scroll, bool focused = true) {
+    MemoKey k;
+    k.add(std::string_view{"file_tree"}).add(id).add(chosen).add(focused)
+     .add(list_scroll.offset).add(list_scroll.viewport).add(rows.size());
+    for (const auto& r : rows)
+        k.add(r.name).add(r.depth).add(r.dir).add(r.open).add(r.active).add(r.git).add(r.errors)
+         .add(r.tabs).add(r.here).add(r.here_hue).add(r.action);
+    return memo_widget(c, k, [&] { return detail::file_tree_build(c, id, rows, chosen, list_scroll, focused); });
+}
+
+template <ControlContext C>
+[[nodiscard]] inline Node detail::file_tree_build(const C& c, std::string_view id, const std::vector<TreeRow>& rows,
+                                                  int chosen, const ScrollState& list_scroll, bool focused) {
     const Theme& t = c.theme;
     const auto git_colour = [&](char g) {
         switch (g) { case 'M': return t.warning; case 'A': case 'U': return t.success; case 'D': return t.danger; default: return t.text_secondary; }
