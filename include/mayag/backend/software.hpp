@@ -380,13 +380,18 @@ class Software {
             kind == ShapeKind::rounded_box &&
             (inst.flags & (instance_flags::stroke_only | instance_flags::gradient)) == 0 &&
             simple_blend;
+        // A drop shadow is fully covered wherever its distance <= -blur, so
+        // its middle is a flat fill too (and usually sits under a card).
+        const bool plain_shadow =
+            kind == ShapeKind::shadow && (inst.flags & instance_flags::inset) == 0u &&
+            (inst.flags & instance_flags::gradient) == 0 && simple_blend;
 
         Rect interior{};
-        if (plain_fill) {
+        if (plain_fill || plain_shadow) {
             const float r = num::max(num::max(inst.radii.x, inst.radii.y),
                                      num::max(inst.radii.z, inst.radii.w));
             // 1 px inset keeps the antialiased edge on the slow path.
-            const float inset = r + 1.0f;
+            const float inset = r + 1.0f + (plain_shadow ? num::max(inst.params.x, 0.01f) : 0.0f);
             if (shape.width() > inset * 2.0f && shape.height() > inset * 2.0f) {
                 interior = shape.inset(inset).intersect(bounds);
             }
@@ -662,32 +667,28 @@ class Software {
         // Separable box blur, run twice — two box passes approximate a Gaussian
         // closely and cheaply. Clamped at the region edge (the panel is small
         // relative to the frame, so edge bias is invisible under the fill).
+        // Each pass is a running sum, O(1) per pixel instead of O(radius).
         if (radius > 0) {
             std::vector<Vec4> tmp(buf.size());
             const float norm = 1.0f / static_cast<float>(2 * radius + 1);
+            // One clamped box pass over `n` samples at stride `step`.
+            const auto box = [radius, norm](const Vec4* src, Vec4* dst, int n, std::size_t step) {
+                Vec4 s{};
+                for (int k = -radius; k <= radius; ++k)
+                    s = s + src[static_cast<std::size_t>(num::clamp(k, 0, n - 1)) * step];
+                for (int i = 0; i < n; ++i) {
+                    dst[static_cast<std::size_t>(i) * step] = s * norm;
+                    const int out = num::clamp(i - radius, 0, n - 1);
+                    const int in  = num::clamp(i + radius + 1, 0, n - 1);
+                    s = s + src[static_cast<std::size_t>(in) * step] - src[static_cast<std::size_t>(out) * step];
+                }
+            };
             for (int pass = 0; pass < 2; ++pass) {
-                // Horizontal.
                 for (int y = 0; y < rh; ++y) {
-                    for (int x = 0; x < rw; ++x) {
-                        Vec4 s{};
-                        for (int k = -radius; k <= radius; ++k) {
-                            const int sx = num::clamp(x + k, 0, rw - 1);
-                            s = s + buf[static_cast<std::size_t>(y) * rw + sx];
-                        }
-                        tmp[static_cast<std::size_t>(y) * rw + x] = s * norm;
-                    }
+                    const std::size_t row = static_cast<std::size_t>(y) * rw;
+                    box(&buf[row], &tmp[row], rw, 1);
                 }
-                // Vertical.
-                for (int y = 0; y < rh; ++y) {
-                    for (int x = 0; x < rw; ++x) {
-                        Vec4 s{};
-                        for (int k = -radius; k <= radius; ++k) {
-                            const int sy = num::clamp(y + k, 0, rh - 1);
-                            s = s + tmp[static_cast<std::size_t>(sy) * rw + x];
-                        }
-                        buf[static_cast<std::size_t>(y) * rw + x] = s * norm;
-                    }
-                }
+                for (int x = 0; x < rw; ++x) box(&tmp[x], &buf[x], rh, static_cast<std::size_t>(rw));
             }
         }
 

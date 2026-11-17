@@ -1043,7 +1043,11 @@ class window_host {
         frame.instances  = static_cast<std::uint32_t>(draws_.size());
         frame.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
         { ScopedTimer t{frame.render_ms}; window_.present(draws_, theme_.background); }
-        if (frame_counter_ == 1) startup::mark("first frame presented");
+        if (frame_counter_ == 1 && startup::enabled()) {
+            std::fprintf(stderr, "mayag: startup first frame: view %.1f cascade %.1f layout %.1f paint %.1f render %.1f ms\n",
+                         frame.view_ms, frame.cascade_ms, frame.layout_ms, frame.paint_ms, frame.render_ms);
+            startup::mark("first frame presented");
+        }
         latency_.record(frame);
         if (framestats_) report_frames();
         // Frames nobody asked for. Frames the user is driving (moving the
