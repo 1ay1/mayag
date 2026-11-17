@@ -49,9 +49,13 @@
 #include "../backend/software.hpp"
 #include "../backend/tiled.hpp"
 #include "../core/geometry.hpp"
+#include "../core/startup.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
 #include "wayland_protocol.hpp"
+
+#include <jaal/core/capability.hpp>
+#include <jaal/kernel/pool.hpp>
 
 // The Vulkan backend is the default renderer on Linux; it self-loads at
 // runtime and falls back to the shm path if the GPU is unavailable. Compiled
@@ -308,6 +312,24 @@ class WaylandWindow {
         const wl::Lib& L = wl::lib();
         if (!L.ok) return false;                 // no libwayland: fall back
 
+#ifdef MAYAG_WITH_VULKAN
+        // Driver init (instance + device) takes tens of ms and needs no
+        // window, so it runs on a worker while we talk to the compositor.
+        const char* forced_backend = ::getenv("MAYAG_BACKEND");
+        const bool allow_gpu = forced_backend == nullptr ||
+                               std::string_view{forced_backend} == "vulkan" ||
+                               std::string_view{forced_backend} == "gpu";
+        std::optional<jaal::kernel::pool> prep_pool;
+        jaal::kernel::job_result<std::unique_ptr<backend::VulkanDevice>> prep;
+        if (allow_gpu) {
+            prep_pool.emplace(1);
+            prep = prep_pool->submit([](std::stop_token, std::unique_ptr<backend::VulkanDevice> d) {
+                if (!d->prepare()) d.reset();
+                return d;
+            }, std::move(gpu_));
+        }
+#endif
+
         display_ = L.display_connect(nullptr);
         if (display_ == nullptr) return false;            // no compositor
 
@@ -325,6 +347,7 @@ class WaylandWindow {
         // capabilities, shm formats, output scale).
         L.display_roundtrip(display_);
         L.display_roundtrip(display_);
+        startup::mark("wayland connected (registry)");
 
         if (compositor_ == nullptr || shm_ == nullptr || wm_base_ == nullptr) {
             // A compositor with no xdg-shell is not one we can put a window on.
@@ -400,6 +423,7 @@ class WaylandWindow {
         // first configure to arrive before the first buffer is attached.
         wl::request(surface_, wl::surface_commit);
         L.display_roundtrip(display_);
+        startup::mark("wayland surface configured");
 
         // The compositor may not have sized us; fall back to the requested size.
         if (logical_.x < 1.0f || logical_.y < 1.0f) logical_ = cfg.size;
@@ -413,19 +437,18 @@ class WaylandWindow {
         // libvulkan, no device, a headless VM, MAYAG_BACKEND=software — the
         // shm surfaces below are created and the CPU path takes over. The
         // choice is silent by design; the runtime logs the winner once.
-        const char* forced = ::getenv("MAYAG_BACKEND");
-        const bool allow_gpu = forced == nullptr ||
-                               std::string_view{forced} == "vulkan" ||
-                               std::string_view{forced} == "gpu";
-        if (allow_gpu && gpu_.attach_wayland(display_, surface_, logical_, scale_)) {
-            gpu_active_ = true;
+        if (allow_gpu) {
+            gpu_ = prep.get_at_root();
+            if (gpu_ && gpu_->attach_wayland(display_, surface_, logical_, scale_)) gpu_active_ = true;
         }
+        if (!gpu_) gpu_ = std::make_unique<backend::VulkanDevice>();
+        startup::mark("vulkan ready");
 #endif
 
-        // The shm path is still initialised even when the GPU is active: it is
-        // the read_pixels() fallback and the resize target if the GPU is later
-        // lost. It costs one framebuffer allocation, which is cheap insurance.
-        resize_surfaces();
+        // The shm buffers (a float framebuffer plus three encoded copies,
+        // ~80 MB at 2x) are only needed when the CPU path presents, so with
+        // the GPU up they're made on first use instead.
+        if (!gpu_on()) resize_surfaces();
         return true;
     }
 
@@ -452,7 +475,7 @@ class WaylandWindow {
     [[nodiscard]] Vec2 pixel_size() const noexcept {
 #ifdef MAYAG_WITH_VULKAN
         if (gpu_active_) {
-            const auto e = gpu_.swapchain_extent();
+            const auto e = gpu_->swapchain_extent();
             if (e.x > 0.0f && e.y > 0.0f) return e;
         }
 #endif
@@ -511,9 +534,9 @@ class WaylandWindow {
         }
 
         if (resize_needed_) {
-            resize_surfaces();
+            if (!gpu_on() || shm_made_) resize_surfaces();
 #ifdef MAYAG_WITH_VULKAN
-            if (gpu_active_) gpu_.resize(logical_, scale_);
+            if (gpu_active_) gpu_->resize(logical_, scale_);
 #endif
             resize_needed_ = false;
             pending_.push_back(ResizeEvent{logical_, scale_});
@@ -533,11 +556,11 @@ class WaylandWindow {
         // there is no shm buffer, no CPU encode, and no damage bookkeeping
         // here — the driver presents directly. This is the default on Linux;
         // it is only inactive when the GPU could not be brought up, in which
-        // case gpu_.valid() is false and control falls through to shm.
+        // case gpu_->valid() is false and control falls through to shm.
         if (gpu_active_) {
             if (atlas_ != nullptr) sync_atlas_to_gpu();
             request_feedback();   // before the commit vkQueuePresentKHR makes
-            gpu_.submit(dl, clear);
+            gpu_->submit(dl, clear);
             last_list_ = dl; last_clear_ = clear; last_had_frame_ = true;
             // Still ask for a frame callback, same as the shm path.
             if (!frame_pending_) {
@@ -555,6 +578,7 @@ class WaylandWindow {
         }
 #endif
 
+        if (!shm_made_) resize_surfaces();   // first CPU present (GPU lost or off)
         wldetail::ShmBuffer* buf = acquire_buffer();
         if (buf == nullptr) {
             // Every buffer is still held by the compositor. Dropping is the
@@ -700,7 +724,7 @@ class WaylandWindow {
             // case where a window shows something other than what the renderer
             // produced. A screenshot facility that cannot see that class of bug
             // is worse than none, because it actively reassures you.
-            if (gpu_.read_swapchain(out)) return out;
+            if (gpu_->read_swapchain(out)) return out;
 
             // FALLBACK: re-render the last draw list offscreen. Used when
             // nothing has been presented yet, or the driver refused the
@@ -716,6 +740,7 @@ class WaylandWindow {
             }
         }
 #endif
+        if (!shm_made_) return {};
         return fb_.to_rgba8();
     }
 
@@ -737,7 +762,7 @@ class WaylandWindow {
         if (!img) return;
 #ifdef MAYAG_WITH_VULKAN
         if (gpu_active_) {
-            (void)gpu_.upload_texture(img->rgba.data(), img->width, img->height);
+            (void)gpu_->upload_texture(img->rgba.data(), img->width, img->height);
         }
 #endif
         images_.upload(id, std::move(img));
@@ -746,7 +771,7 @@ class WaylandWindow {
     void release_image(std::uint32_t id) {
         images_.release(id);
 #ifdef MAYAG_WITH_VULKAN
-        if (gpu_active_ && images_.empty()) gpu_.release_texture();
+        if (gpu_active_ && images_.empty()) gpu_->release_texture();
 #endif
     }
 
@@ -755,9 +780,17 @@ class WaylandWindow {
     /// uses them. Cheap in steady state — the atlas reports an empty dirty
     /// region and the upload is skipped.
     void sync_atlas_to_gpu() {
-        if (atlas_sync_) atlas_sync_(gpu_);
+        if (atlas_sync_) atlas_sync_(*gpu_);
     }
 #endif
+
+    [[nodiscard]] bool gpu_on() const noexcept {
+#ifdef MAYAG_WITH_VULKAN
+        return gpu_active_;
+#else
+        return false;
+#endif
+    }
 
     /// The atlas source. On the shm path the atlas is read through the CPU
     /// coverage sampler, so nothing to upload; on the GPU path the atlas is a
@@ -815,6 +848,7 @@ class WaylandWindow {
     /// (Re)allocate the framebuffer and the shm pool for the current size.
     void resize_surfaces() {
         const wl::Lib& L = wl::lib();
+        shm_made_ = true;
 
         pixel_w_ = static_cast<int>(logical_.x * scale_ + 0.5f);
         pixel_h_ = static_cast<int>(logical_.y * scale_ + 0.5f);
@@ -1680,7 +1714,7 @@ class WaylandWindow {
         // both are still alive — before the surface is destroyed and the
         // display disconnected below. Doing it in the VulkanDevice destructor
         // instead runs it after ~Impl and crashes in the driver.
-        if (gpu_active_) { gpu_.destroy(); gpu_active_ = false; }
+        if (gpu_active_) { gpu_->destroy(); gpu_active_ = false; }
         readback_gpu_.destroy();
 #endif
 
@@ -1769,6 +1803,7 @@ class WaylandWindow {
 
     wldetail::ShmBuffer buffers_[buffer_count]{};
     backend::Framebuffer fb_{1, 1};
+    bool shm_made_ = false;   ///< buffers_ and fb_ exist (made on first CPU present)
 
     WindowConfig       cfg_{};
     std::string        title_{};
@@ -1808,7 +1843,7 @@ class WaylandWindow {
 #ifdef MAYAG_WITH_VULKAN
     // GPU renderer. `gpu_active_` gates every GPU code path; when false the
     // window is on the shm path and `gpu_` is an inert, unattached device.
-    backend::VulkanDevice gpu_{};
+    std::unique_ptr<backend::VulkanDevice> gpu_ = std::make_unique<backend::VulkanDevice>();
     bool gpu_active_ = false;
     const void* atlas_ = nullptr;
     std::function<void(backend::VulkanDevice&)> atlas_sync_;

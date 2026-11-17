@@ -18,6 +18,7 @@
 //   render_offscreen(...)     render to a Framebuffer (for tests)
 
 #include "../render/draw_list.hpp"
+#include "../core/startup.hpp"
 #include "../render/shader_generated.hpp"
 #include "backend.hpp"   // AtlasView / view_of
 #include "reclaim.hpp"
@@ -73,10 +74,28 @@ class VulkanDevice {
         return true;
     }
 
-    /// Device + swapchain on a live Wayland surface.
+    /// Everything that doesn't need a window: instance, device, queues,
+    /// command buffers, sampler. Slow (driver init, ~80 ms on some), so a
+    /// window can run it on a worker while it connects, then attach.
+    [[nodiscard]] bool prepare() {
+        if (prepared_) return true;
+        if (!create_instance(/*want_surface=*/true)) return false;
+        startup::mark("  vulkan instance");
+        if (!pick_device_and_queue(nullptr)) return false;
+        startup::mark("  vulkan device picked");
+        if (!create_device()) return false;
+        startup::mark("  vulkan device created");
+        if (!create_command_infra()) return false;
+        if (!create_sampler_and_atlas()) return false;
+        prepared_ = true;
+        return true;
+    }
+
+    /// Device + swapchain on a live Wayland surface. Calls prepare() first if
+    /// nobody did.
     [[nodiscard]] bool attach_wayland(void* display, void* surface,
                                       Vec2 logical, float dpi) {
-        if (!create_instance(/*want_surface=*/true)) return false;
+        if (!prepare()) return false;
         if (api_->CreateWaylandSurfaceKHR == nullptr) return false;
 
         vk::VkWaylandSurfaceCreateInfoKHR sci{};
@@ -86,15 +105,18 @@ class VulkanDevice {
         if (api_->CreateWaylandSurfaceKHR(instance_, &sci, nullptr, &surface_) != vk::VK_SUCCESS) {
             return false;
         }
-        if (!pick_device_and_queue(surface_)) return false;
-        if (!create_device()) return false;
-        if (!create_command_infra()) return false;
-        if (!create_sampler_and_atlas()) return false;
+        // The device was picked without a surface; make sure its queue can
+        // present to this one.
+        vk::Bool32 present = 0;
+        api_->GetPhysicalDeviceSurfaceSupportKHR(phys_, queue_family_, surface_, &present);
+        if (!present) return false;
 
         dpi_ = dpi;
         viewport_ = logical;
         if (!create_swapchain()) return false;
+        startup::mark("  vulkan swapchain");
         if (!create_pipeline(swap_format_, /*for_present=*/true)) return false;
+        startup::mark("  vulkan pipeline");
         // Framebuffers reference the render pass, so they must be built AFTER
         // the pipeline creates it — not inside create_swapchain(), which runs
         // first to discover the surface format the pipeline needs.
@@ -2165,6 +2187,7 @@ class VulkanDevice {
     }
 
     const A* api_ = nullptr;
+    bool prepared_ = false;
     A local_api_{};
     bool have_local_api_ = false;
 
@@ -2252,5 +2275,9 @@ class VulkanDevice {
 };
 
 }  // namespace mayag::backend
+
+// A device owns its handles outright; moving it to the worker that prepares
+// it (and back) leaves nothing the sender can still reach.
+template <> inline constexpr bool jaal::sendable_opt_in<mayag::backend::VulkanDevice> = true;
 
 #endif  // platform guard

@@ -225,237 +225,175 @@ namespace uni {
 /// Pair kerning from `kern` (format 0) and `GPOS` (lookup type 2).
 ///
 /// Kerning is what separates typeset text from a monospaced grid: without it
-/// "AV" and "To" have visibly wrong gaps. Both table formats are read into
-/// one sorted flat map, so lookup is a single binary search regardless of
-/// which the font shipped.
+/// "AV" and "To" have visibly wrong gaps. Lookups read the font's own tables
+/// in place (binary searches over its sorted arrays), so a face costs nothing
+/// to open: class kerning used to be expanded into a million sorted pairs.
+/// The table bytes belong to the Face, which outlives this.
 class KernTable {
   public:
     KernTable() = default;
 
     explicit KernTable(const ot::FontFile& f) {
-        parse_kern(f);
-        if (pairs_.empty()) parse_gpos(f);
-        std::sort(pairs_.begin(), pairs_.end(),
-                  [](const Pair& a, const Pair& b) { return a.key() < b.key(); });
-        pairs_.shrink_to_fit();
+        kern_ = find_kern(f);
+        if (kern_.empty()) find_gpos(f);
     }
 
-    [[nodiscard]] bool empty() const noexcept { return pairs_.empty(); }
-    [[nodiscard]] std::size_t size() const noexcept { return pairs_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return kern_.empty() && subs_.empty(); }
 
     /// Kerning adjustment in font units, applied after `left`'s advance.
     [[nodiscard]] float lookup(std::uint16_t left, std::uint16_t right) const noexcept {
-        if (pairs_.empty()) return 0.0f;
-        const std::uint32_t key = (static_cast<std::uint32_t>(left) << 16) | right;
-        auto it = std::lower_bound(pairs_.begin(), pairs_.end(), key,
-                                   [](const Pair& p, std::uint32_t k) { return p.key() < k; });
-        return (it != pairs_.end() && it->key() == key) ? static_cast<float>(it->value) : 0.0f;
+        if (!kern_.empty()) return static_cast<float>(lookup_kern(left, right));
+        const ot::Reader r{gpos_};
+        // The first subtable that covers `left` decides, per OpenType.
+        for (const std::size_t off : subs_) {
+            const auto ci = coverage_index(r, off + r.u16_at(off + 2), left);
+            if (ci < 0) continue;
+            if (r.u16_at(off) == 1) {
+                if (auto v = pair_set_value(r, off, static_cast<std::uint16_t>(ci), right)) return *v;
+                continue;
+            }
+            const std::uint16_t n1 = r.u16_at(off + 12), n2 = r.u16_at(off + 14);
+            const std::uint16_t c1 = class_of(r, off + r.u16_at(off + 8), left);
+            const std::uint16_t c2 = class_of(r, off + r.u16_at(off + 10), right);
+            if (c1 >= n1 || c2 >= n2) return 0.0f;
+            return static_cast<float>(r.i16_at(off + 16 + (static_cast<std::size_t>(c1) * n2 + c2) * 2));
+        }
+        return 0.0f;
     }
 
   private:
-    // Split key halves keep this at 6 bytes (a u32 key would pad it to 8);
-    // big fonts expand class kerning to a million pairs.
-    struct Pair {
-        std::uint16_t hi, lo;   ///< left, right
-        std::int16_t  value;    ///< font units, as stored in the font
-        Pair(std::uint32_t key, std::int16_t v) noexcept
-            : hi{static_cast<std::uint16_t>(key >> 16)}, lo{static_cast<std::uint16_t>(key)}, value{v} {}
-        [[nodiscard]] std::uint32_t key() const noexcept { return std::uint32_t{hi} << 16 | lo; }
-    };
-    static_assert(sizeof(Pair) == 6);
+    // `kern` format 0: pairs are sorted by (left, right) per the spec.
+    std::span<const std::uint8_t> kern_;      ///< the pair array, 6 bytes each
+    std::span<const std::uint8_t> gpos_;      ///< the whole GPOS table
+    std::vector<std::size_t>      subs_;      ///< usable PairPos subtable offsets, in order
 
-    void parse_kern(const ot::FontFile& f) {
+    [[nodiscard]] static std::span<const std::uint8_t> find_kern(const ot::FontFile& f) {
         const auto data = f.table(ot::tags::kern);
-        if (data.size() < 4) return;
-
-        ot::Reader r{data};
-        // Two incompatible headers share this tag: Microsoft's (version 0,
-        // u16 counts) and Apple's (version 1.0 as 32-bit fixed). Distinguish
-        // by the first u16.
+        if (data.size() < 4) return {};
+        const ot::Reader r{data};
+        // Microsoft's header (version 0, u16 counts) or Apple's (32-bit 1.0).
         const std::uint16_t version = r.u16_at(0);
-        std::size_t pos;
-        std::uint32_t n_tables;
-
-        if (version == 0) {
-            n_tables = r.u16_at(2);
-            pos = 4;
-        } else {
-            n_tables = r.u32_at(4);
-            pos = 8;
-        }
-
+        std::size_t pos = version == 0 ? 4 : 8;
+        const std::uint32_t n_tables = version == 0 ? r.u16_at(2) : r.u32_at(4);
         for (std::uint32_t t = 0; t < n_tables && pos + 6 <= data.size(); ++t) {
-            const std::uint32_t length = (version == 0) ? r.u16_at(pos + 2) : r.u32_at(pos + 4);
-            const std::uint16_t coverage = (version == 0) ? r.u16_at(pos + 4) : r.u16_at(pos + 8);
-            const std::size_t   sub = (version == 0) ? pos + 6 : pos + 8;
-
-            // Format 0 (in the low byte for MS, high byte for Apple) is the
-            // only one worth supporting; formats 1-3 are Apple state machines.
-            const bool horizontal = (version == 0) ? ((coverage & 0x0001) != 0) : true;
-            const std::uint8_t format = (version == 0) ? static_cast<std::uint8_t>(coverage >> 8)
-                                                       : static_cast<std::uint8_t>(coverage & 0xFF);
-
-            if (horizontal && format == 0) {
-                const std::uint16_t n_pairs = r.u16_at(sub);
-                pairs_.reserve(pairs_.size() + n_pairs);
-                for (std::uint16_t i = 0; i < n_pairs; ++i) {
-                    const std::size_t p = sub + 8 + static_cast<std::size_t>(i) * 6;
-                    if (p + 6 > data.size()) break;
-                    pairs_.push_back(Pair{
-                        (static_cast<std::uint32_t>(r.u16_at(p)) << 16) | r.u16_at(p + 2),
-                        r.i16_at(p + 4)});
-                }
+            const std::uint32_t length = version == 0 ? r.u16_at(pos + 2) : r.u32_at(pos + 4);
+            const std::uint16_t coverage = version == 0 ? r.u16_at(pos + 4) : r.u16_at(pos + 8);
+            const std::size_t sub = version == 0 ? pos + 6 : pos + 8;
+            const bool horizontal = version == 0 ? (coverage & 0x0001) != 0 : true;
+            const std::uint8_t format = version == 0 ? static_cast<std::uint8_t>(coverage >> 8)
+                                                     : static_cast<std::uint8_t>(coverage & 0xFF);
+            // Format 0 is the only one worth supporting; 1-3 are Apple state machines.
+            if (horizontal && format == 0 && sub + 8 <= data.size()) {
+                const std::size_t n = r.u16_at(sub);
+                const std::size_t first = sub + 8;
+                const std::size_t avail = (data.size() - first) / 6;
+                return data.subspan(first, std::min(n, avail) * 6);
             }
-
             if (length == 0) break;
             pos += length;
         }
+        return {};
     }
 
-    /// `GPOS` lookup type 2 — the modern kerning path. Handles both format 1
-    /// (explicit glyph pairs) and format 2 (class-based, which is how a font
-    /// kerns 400 glyph pairs with 20 classes).
-    void parse_gpos(const ot::FontFile& f) {
+    [[nodiscard]] std::int16_t lookup_kern(std::uint16_t left, std::uint16_t right) const noexcept {
+        const ot::Reader r{kern_};
+        const std::uint32_t key = std::uint32_t{left} << 16 | right;
+        std::size_t lo = 0, hi = kern_.size() / 6;
+        while (lo < hi) {
+            const std::size_t mid = (lo + hi) / 2;
+            const std::uint32_t k = std::uint32_t{r.u16_at(mid * 6)} << 16 | r.u16_at(mid * 6 + 2);
+            if (k == key) return r.i16_at(mid * 6 + 4);
+            if (k < key) lo = mid + 1; else hi = mid;
+        }
+        return 0;
+    }
+
+    /// Collect GPOS lookup type 2 subtables this shaper can apply: X advance
+    /// on the first glyph and nothing on the second. Anything else is
+    /// vertical or mark positioning, which this shaper does not do.
+    void find_gpos(const ot::FontFile& f) {
         const auto data = f.table(ot::tags::gpos);
         if (data.size() < 10) return;
-
-        ot::Reader r{data};
-        const std::uint16_t lookup_list_off = r.u16_at(8);
-        if (lookup_list_off == 0 || lookup_list_off >= data.size()) return;
-
-        const std::uint16_t n_lookups = r.u16_at(lookup_list_off);
+        const ot::Reader r{data};
+        const std::size_t list = r.u16_at(8);
+        if (list == 0 || list >= data.size()) return;
+        const std::uint16_t n_lookups = r.u16_at(list);
         for (std::uint16_t i = 0; i < n_lookups; ++i) {
-            const std::size_t off = lookup_list_off + r.u16_at(lookup_list_off + 2 + i * 2);
-            if (off + 6 > data.size()) continue;
-            if (r.u16_at(off) != 2) continue;         // not a pair adjustment
-
+            const std::size_t off = list + r.u16_at(list + 2 + i * 2);
+            if (off + 6 > data.size() || r.u16_at(off) != 2) continue;   // pair adjustment only
             const std::uint16_t n_subs = r.u16_at(off + 4);
             for (std::uint16_t s = 0; s < n_subs; ++s) {
-                parse_gpos_pair(r, off + r.u16_at(off + 6 + s * 2), data.size());
+                const std::size_t sub = off + r.u16_at(off + 6 + s * 2);
+                if (sub + 16 > data.size()) continue;
+                const std::uint16_t format = r.u16_at(sub);
+                if (format != 1 && format != 2) continue;
+                if (r.u16_at(sub + 4) != 0x0004 || r.u16_at(sub + 6) != 0) continue;
+                subs_.push_back(sub);
             }
         }
+        if (!subs_.empty()) gpos_ = data;
     }
 
-    void parse_gpos_pair(ot::Reader& r, std::size_t off, std::size_t limit) {
-        if (off + 10 > limit) return;
-
-        const std::uint16_t format      = r.u16_at(off);
-        const std::uint16_t coverage_off = r.u16_at(off + 2);
-        const std::uint16_t value1 = r.u16_at(off + 4);
-        const std::uint16_t value2 = r.u16_at(off + 6);
-
-        // We only handle the common case: X advance on the first glyph, and
-        // nothing on the second. Anything else is vertical or mark
-        // positioning, which this shaper does not do.
-        if (value1 != 0x0004 || value2 != 0) return;
-
-        const auto coverage = read_coverage(r, off + coverage_off, limit);
-        if (coverage.empty()) return;
-
+    /// Index of `g` in a Coverage table, or -1.
+    [[nodiscard]] static int coverage_index(const ot::Reader& r, std::size_t off, std::uint16_t g) noexcept {
+        const std::uint16_t format = r.u16_at(off), count = r.u16_at(off + 2);
+        std::size_t lo = 0, hi = count;
         if (format == 1) {
-            const std::uint16_t n_sets = r.u16_at(off + 8);
-            for (std::uint16_t i = 0; i < n_sets && i < coverage.size(); ++i) {
-                const std::size_t set = off + r.u16_at(off + 10 + i * 2);
-                if (set + 2 > limit) continue;
-                const std::uint16_t n_pairs = r.u16_at(set);
-                for (std::uint16_t k = 0; k < n_pairs; ++k) {
-                    const std::size_t rec = set + 2 + static_cast<std::size_t>(k) * 4;
-                    if (rec + 4 > limit) break;
-                    pairs_.push_back(Pair{
-                        (static_cast<std::uint32_t>(coverage[i]) << 16) | r.u16_at(rec),
-                        r.i16_at(rec + 2)});
-                }
-            }
-        }
-        else if (format == 2) {
-            const std::uint16_t class1_off = r.u16_at(off + 8);
-            const std::uint16_t class2_off = r.u16_at(off + 10);
-            const std::uint16_t n_class1   = r.u16_at(off + 12);
-            const std::uint16_t n_class2   = r.u16_at(off + 14);
-            if (n_class1 == 0 || n_class2 == 0) return;
-
-            const auto class1 = read_class_def(r, off + class1_off, limit);
-            const auto class2 = read_class_def(r, off + class2_off, limit);
-
-            // Class-based kerning expands to (glyphs in class1) x (class2)
-            // pairs. Guard against a font whose classes would produce
-            // millions of entries.
-            if (static_cast<std::size_t>(n_class1) * n_class2 > 65536) return;
-
-            for (std::uint16_t g : coverage) {
-                const auto c1 = class1.count(g) ? class1.at(g) : 0;
-                if (c1 >= n_class1) continue;
-                for (const auto& [g2, c2] : class2) {
-                    if (c2 >= n_class2) continue;
-                    const std::size_t rec = off + 16 +
-                        (static_cast<std::size_t>(c1) * n_class2 + c2) * 2;
-                    if (rec + 2 > limit) continue;
-                    const std::int16_t v = r.i16_at(rec);
-                    if (v != 0) {
-                        pairs_.push_back(Pair{
-                            (static_cast<std::uint32_t>(g) << 16) | g2, v});
-                    }
-                }
-            }
-        }
-    }
-
-    [[nodiscard]] static std::vector<std::uint16_t> read_coverage(const ot::Reader& r,
-                                                                  std::size_t off,
-                                                                  std::size_t limit) {
-        std::vector<std::uint16_t> out;
-        if (off + 4 > limit) return out;
-
-        const std::uint16_t format = r.u16_at(off);
-        const std::uint16_t count  = r.u16_at(off + 2);
-
-        if (format == 1) {
-            out.reserve(count);
-            for (std::uint16_t i = 0; i < count; ++i) out.push_back(r.u16_at(off + 4 + i * 2));
-        } else if (format == 2) {
-            for (std::uint16_t i = 0; i < count; ++i) {
-                const std::size_t rec = off + 4 + static_cast<std::size_t>(i) * 6;
-                const std::uint16_t start = r.u16_at(rec);
-                const std::uint16_t end   = r.u16_at(rec + 2);
-                if (end < start || static_cast<std::size_t>(end - start) > 0xFFFF) continue;
-                for (std::uint32_t g = start; g <= end; ++g) {
-                    out.push_back(static_cast<std::uint16_t>(g));
-                }
-            }
-        }
-        return out;
-    }
-
-    [[nodiscard]] static std::unordered_map<std::uint16_t, std::uint16_t>
-    read_class_def(const ot::Reader& r, std::size_t off, std::size_t limit) {
-        std::unordered_map<std::uint16_t, std::uint16_t> out;
-        if (off + 4 > limit) return out;
-
-        const std::uint16_t format = r.u16_at(off);
-        if (format == 1) {
-            const std::uint16_t start = r.u16_at(off + 2);
-            const std::uint16_t count = r.u16_at(off + 4);
-            for (std::uint16_t i = 0; i < count; ++i) {
-                const std::uint16_t c = r.u16_at(off + 6 + i * 2);
-                if (c != 0) out[static_cast<std::uint16_t>(start + i)] = c;
+            while (lo < hi) {
+                const std::size_t mid = (lo + hi) / 2;
+                const std::uint16_t v = r.u16_at(off + 4 + mid * 2);
+                if (v == g) return static_cast<int>(mid);
+                if (v < g) lo = mid + 1; else hi = mid;
             }
         } else if (format == 2) {
-            const std::uint16_t n_ranges = r.u16_at(off + 2);
-            for (std::uint16_t i = 0; i < n_ranges; ++i) {
-                const std::size_t rec = off + 4 + static_cast<std::size_t>(i) * 6;
-                const std::uint16_t start = r.u16_at(rec);
-                const std::uint16_t end   = r.u16_at(rec + 2);
-                const std::uint16_t c     = r.u16_at(rec + 4);
-                if (c == 0 || end < start) continue;
-                for (std::uint32_t g = start; g <= end; ++g) {
-                    out[static_cast<std::uint16_t>(g)] = c;
-                }
+            while (lo < hi) {
+                const std::size_t mid = (lo + hi) / 2;
+                const std::size_t rec = off + 4 + mid * 6;
+                const std::uint16_t start = r.u16_at(rec), end = r.u16_at(rec + 2);
+                if (g < start) hi = mid;
+                else if (g > end) lo = mid + 1;
+                else return r.u16_at(rec + 4) + (g - start);
             }
         }
-        return out;
+        return -1;
     }
 
-    std::vector<Pair> pairs_;
+    /// Class of `g` in a ClassDef table; 0 when unlisted.
+    [[nodiscard]] static std::uint16_t class_of(const ot::Reader& r, std::size_t off, std::uint16_t g) noexcept {
+        const std::uint16_t format = r.u16_at(off);
+        if (format == 1) {
+            const std::uint16_t start = r.u16_at(off + 2), count = r.u16_at(off + 4);
+            return g >= start && g - start < count ? r.u16_at(off + 6 + (g - start) * 2) : 0;
+        }
+        if (format == 2) {
+            std::size_t lo = 0, hi = r.u16_at(off + 2);
+            while (lo < hi) {
+                const std::size_t mid = (lo + hi) / 2;
+                const std::size_t rec = off + 4 + mid * 6;
+                const std::uint16_t start = r.u16_at(rec), end = r.u16_at(rec + 2);
+                if (g < start) hi = mid;
+                else if (g > end) lo = mid + 1;
+                else return r.u16_at(rec + 4);
+            }
+        }
+        return 0;
+    }
+
+    /// Format 1: the PairSet for coverage index `ci`, searched for `right`.
+    [[nodiscard]] static std::optional<float> pair_set_value(const ot::Reader& r, std::size_t off,
+                                                             std::uint16_t ci, std::uint16_t right) noexcept {
+        if (ci >= r.u16_at(off + 8)) return std::nullopt;
+        const std::size_t set = off + r.u16_at(off + 10 + ci * 2);
+        std::size_t lo = 0, hi = r.u16_at(set);
+        while (lo < hi) {
+            const std::size_t mid = (lo + hi) / 2;
+            const std::size_t rec = set + 2 + mid * 4;
+            const std::uint16_t g = r.u16_at(rec);
+            if (g == right) return static_cast<float>(r.i16_at(rec + 2));
+            if (g < right) lo = mid + 1; else hi = mid;
+        }
+        return std::nullopt;
+    }
 };
 
 // ══ GSUB ligatures ════════════════════════════════════════════════

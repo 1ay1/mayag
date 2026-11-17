@@ -19,10 +19,16 @@
 #include "mapped_file.hpp"
 #include "last_resort.hpp"
 
+#include <jaal/kernel/pool.hpp>
+
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -310,6 +316,146 @@ namespace detail {
 // Database
 // ════════════════════════════════════════════════════════════════════════
 
+namespace detail {
+
+// ── discovery cache ───────────────────────────────────────────────────────
+// Parsing every installed font's header and cmap costs tens of ms per launch
+// (1000 files here). The result is saved and reused while every font
+// directory's mtime is unchanged. MAYAG_FONT_CACHE=0 turns it off.
+
+inline constexpr std::uint32_t kCacheMagic = 0x4D464331;   // "MFC1"
+inline constexpr std::uint32_t kCacheVersion = 1;
+
+[[nodiscard]] inline std::int64_t mtime_ns(const std::filesystem::path& p) {
+    std::error_code ec;
+    const auto t = std::filesystem::last_write_time(p, ec);
+    if (ec) return 0;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
+}
+
+[[nodiscard]] inline std::string cache_path() {
+    if (const char* off = std::getenv("MAYAG_FONT_CACHE"); off != nullptr && std::string_view{off} == "0") return {};
+    std::filesystem::path base;
+#if defined(_WIN32)
+    if (const char* a = std::getenv("LOCALAPPDATA")) base = std::filesystem::path{a} / "mayag";
+#elif defined(__APPLE__)
+    if (const char* h = std::getenv("HOME")) base = std::filesystem::path{h} / "Library/Caches/mayag";
+#else
+    if (const char* x = std::getenv("XDG_CACHE_HOME"); x != nullptr && *x != '\0') base = std::filesystem::path{x} / "mayag";
+    else if (const char* h = std::getenv("HOME")) base = std::filesystem::path{h} / ".cache/mayag";
+#endif
+    if (base.empty()) return {};
+    return (base / "fonts.cache").string();
+}
+
+class CacheWriter {
+  public:
+    void u32(std::uint32_t v) { raw(&v, 4); }
+    void u64(std::uint64_t v) { raw(&v, 8); }
+    void str(std::string_view s) { u32(static_cast<std::uint32_t>(s.size())); raw(s.data(), s.size()); }
+    void raw(const void* p, std::size_t n) {
+        const auto* b = static_cast<const char*>(p);
+        buf_.insert(buf_.end(), b, b + n);
+    }
+    [[nodiscard]] const std::vector<char>& bytes() const noexcept { return buf_; }
+  private:
+    std::vector<char> buf_;
+};
+
+class CacheReader {
+  public:
+    explicit CacheReader(std::span<const std::uint8_t> d) noexcept : d_{d} {}
+    [[nodiscard]] bool ok() const noexcept { return ok_; }
+    std::uint32_t u32() { std::uint32_t v = 0; raw(&v, 4); return v; }
+    std::uint64_t u64() { std::uint64_t v = 0; raw(&v, 8); return v; }
+    std::string str() {
+        const std::uint32_t n = u32();
+        if (!ok_ || n > d_.size() - pos_) { ok_ = false; return {}; }
+        std::string s(reinterpret_cast<const char*>(d_.data() + pos_), n);
+        pos_ += n;
+        return s;
+    }
+    void raw(void* p, std::size_t n) {
+        if (!ok_ || n > d_.size() - pos_) { ok_ = false; return; }
+        std::memcpy(p, d_.data() + pos_, n);
+        pos_ += n;
+    }
+  private:
+    std::span<const std::uint8_t> d_;
+    std::size_t pos_ = 0;
+    bool ok_ = true;
+};
+
+[[nodiscard]] inline bool load_cache(const std::string& path,
+                                     const std::vector<std::pair<std::string, std::int64_t>>& dirs,
+                                     std::vector<FontEntry>& out) {
+    const MappedFile file{path};
+    CacheReader r{file.data()};
+    if (file.data().size() < 8 || r.u32() != kCacheMagic || r.u32() != kCacheVersion) return false;
+    if (r.u32() != static_cast<std::uint32_t>(script_count)) return false;
+    const std::uint32_t nd = r.u32();
+    if (!r.ok() || nd != dirs.size()) return false;
+    for (const auto& [dir, mt] : dirs) {
+        if (r.str() != dir || static_cast<std::int64_t>(r.u64()) != mt) return false;
+    }
+    const std::uint32_t ne = r.u32();
+    if (!r.ok() || ne > 1'000'000) return false;
+    std::vector<FontEntry> entries;
+    entries.reserve(ne);
+    for (std::uint32_t i = 0; i < ne && r.ok(); ++i) {
+        FontEntry e;
+        e.path = r.str();
+        e.face_index = r.u32();
+        e.family = r.str();
+        e.subfamily = r.str();
+        const std::uint32_t packed = r.u32();
+        e.weight = static_cast<std::uint16_t>(packed & 0xFFFF);
+        e.italic = (packed >> 16) & 1;
+        e.monospace = (packed >> 17) & 1;
+        e.color = (packed >> 18) & 1;
+        e.outlines = (packed >> 19) & 1;
+        e.glyphs = static_cast<std::uint16_t>(r.u32());
+        e.scripts = r.u64();
+        entries.push_back(std::move(e));
+    }
+    if (!r.ok()) return false;
+    out = std::move(entries);
+    return true;
+}
+
+inline void save_cache(const std::string& path,
+                       const std::vector<std::pair<std::string, std::int64_t>>& dirs,
+                       const std::vector<FontEntry>& entries) {
+    CacheWriter w;
+    w.u32(kCacheMagic); w.u32(kCacheVersion); w.u32(static_cast<std::uint32_t>(script_count));
+    w.u32(static_cast<std::uint32_t>(dirs.size()));
+    for (const auto& [dir, mt] : dirs) { w.str(dir); w.u64(static_cast<std::uint64_t>(mt)); }
+    w.u32(static_cast<std::uint32_t>(entries.size()));
+    for (const auto& e : entries) {
+        w.str(e.path); w.u32(e.face_index); w.str(e.family); w.str(e.subfamily);
+        w.u32(std::uint32_t{e.weight} | std::uint32_t{e.italic} << 16 | std::uint32_t{e.monospace} << 17 |
+              std::uint32_t{e.color} << 18 | std::uint32_t{e.outlines} << 19);
+        w.u32(e.glyphs);
+        w.u64(e.scripts);
+    }
+    // Write to a temp file and rename, so a crash or a parallel launch never
+    // leaves a half-written cache behind.
+    std::error_code ec;
+    const std::filesystem::path p{path};
+    std::filesystem::create_directories(p.parent_path(), ec);
+    const std::filesystem::path tmp = p.string() + ".tmp" + std::to_string(reinterpret_cast<std::uintptr_t>(&w));
+    {
+        std::ofstream f{tmp, std::ios::binary | std::ios::trunc};
+        if (!f) return;
+        f.write(w.bytes().data(), static_cast<std::streamsize>(w.bytes().size()));
+        if (!f) { f.close(); std::filesystem::remove(tmp, ec); return; }
+    }
+    std::filesystem::rename(tmp, p, ec);
+    if (ec) std::filesystem::remove(tmp, ec);
+}
+
+}  // namespace detail
+
 /// The enumerated system fonts. Built once, then queried.
 class Database {
   public:
@@ -427,10 +573,26 @@ class Database {
         namespace fs = std::filesystem;
         std::error_code ec;
 
-        for (const auto& dir : detail::font_directories()) {
-            if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) continue;
+        // Every directory under the font roots, with its mtime. Adding or
+        // removing a font changes its directory's mtime, so this list is the
+        // cache key (fontconfig's trick).
+        std::vector<std::pair<std::string, std::int64_t>> dirs;
+        for (const auto& root : detail::font_directories()) {
+            if (!fs::is_directory(root, ec)) continue;
+            dirs.emplace_back(root.string(), detail::mtime_ns(root));
+            for (fs::recursive_directory_iterator it{root, fs::directory_options::skip_permission_denied, ec},
+                 end; it != end; it.increment(ec)) {
+                if (ec) { ec.clear(); continue; }
+                if (it->is_directory(ec)) dirs.emplace_back(it->path().string(), detail::mtime_ns(it->path()));
+            }
+        }
+        const std::string cache = detail::cache_path();
+        if (!cache.empty() && detail::load_cache(cache, dirs, entries_)) return;
 
-            for (fs::recursive_directory_iterator it{dir, fs::directory_options::skip_permission_denied, ec},
+        for (const auto& root : detail::font_directories()) {
+            if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) continue;
+
+            for (fs::recursive_directory_iterator it{root, fs::directory_options::skip_permission_denied, ec},
                  end; it != end; it.increment(ec)) {
                 if (ec) { ec.clear(); continue; }
                 if (!it->is_regular_file(ec)) continue;
@@ -441,6 +603,7 @@ class Database {
                 }
             }
         }
+        if (!cache.empty()) detail::save_cache(cache, dirs, entries_);
     }
 
     [[nodiscard]] static bool iequals(std::string_view a, std::string_view b) noexcept {
@@ -603,6 +766,41 @@ class Database {
 
     return stack;
 }
+
+/// The default stack, built on a background thread.
+///
+/// Font discovery and the window/GPU bring-up don't depend on each other, so
+/// starting this first and collecting it after the window is up overlaps
+/// the two instead of paying for them back to back.
+class FontLoad {
+  public:
+    using Stack = std::shared_ptr<FontStack>;
+    // A shared_ptr is a shared owner, which jaal won't send between threads.
+    // This box is the one owner, moved out of the job exactly once.
+    struct Result { std::unique_ptr<Stack> stack; };
+
+    explicit FontLoad(FontConfig cfg = {}) : cfg_{cfg}, pool_{1} {
+        job_ = pool_.submit([](std::stop_token, FontConfig c) {
+            return Result{std::make_unique<Stack>(default_stack(c))};
+        }, cfg);
+    }
+    FontLoad(const FontLoad&) = delete;
+    FontLoad& operator=(const FontLoad&) = delete;
+
+    /// The stack: the worker's if it's done, otherwise built here (the
+    /// worker's copy is then dropped). Never blocks on the worker, so it needs
+    /// no lock capability; in practice the scan finishes long before the GPU.
+    [[nodiscard]] Stack get() {
+        if (auto r = job_.try_take(); r && r->stack) return std::move(*r->stack);
+        return default_stack(cfg_);
+    }
+
+  private:
+    FontConfig cfg_;
+    jaal::kernel::pool pool_;
+    jaal::kernel::job_result<Result> job_;
+};
+
 
 [[nodiscard]] inline std::shared_ptr<FontStack> monospace_stack(FontConfig cfg = {}) {
     auto stack = std::make_shared<FontStack>(cfg);

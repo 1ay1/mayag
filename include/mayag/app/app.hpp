@@ -448,12 +448,20 @@ void log_photon(W& window) {
 
 template <Program P>
 int run(AppConfig cfg) {
+    // Fonts and the window/GPU don't depend on each other: start the font
+    // scan on a worker, open the window here, then collect it.
+    std::optional<typo::system::FontLoad> fonts;
+    if (cfg.fonts == nullptr) fonts.emplace();
     auto opened = platform::Native::open(detail::window_config(cfg));
     if (!opened) {
         std::fprintf(stderr, "mayag: could not open a window\n");
         return 1;
     }
     platform::Native window = std::move(*opened);
+    if (fonts) {
+        cfg.fonts = fonts->get();
+        startup::mark("fonts ready");
+    }
     return run_on<P>(window, std::move(cfg));
 }
 

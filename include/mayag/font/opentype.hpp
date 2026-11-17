@@ -483,8 +483,10 @@ inline CharMap CharMap::parse_format12(Reader& r, std::size_t off) {
         }
     }
 
-    std::sort(m.ranges_.begin(), m.ranges_.end(),
-              [](const Range& a, const Range& b) { return a.start_code < b.start_code; });
+    // The spec requires groups sorted by start code; check rather than sort.
+    const auto by_start = [](const Range& a, const Range& b) { return a.start_code < b.start_code; };
+    if (!std::is_sorted(m.ranges_.begin(), m.ranges_.end(), by_start))
+        std::sort(m.ranges_.begin(), m.ranges_.end(), by_start);
     return m;
 }
 

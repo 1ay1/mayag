@@ -47,6 +47,7 @@ struct Options {
 };
 
 [[nodiscard]] inline Options parse_args(int argc, char** argv, Vec2 default_size) {
+    startup::mark("main");
     Options o;
     o.size = default_size;
 
@@ -258,7 +259,11 @@ template <Program P, typename Driver>
     // path, so a fix to the font configuration silently did not reach the live
     // window or the headless run — the three "same Program" modes were not
     // actually rendering the same way.
-    if (!cfg.fonts) cfg.fonts = make_fonts(o);
+    // A window with system fonts leaves cfg.fonts null: run() then scans
+    // fonts on a worker while the window and GPU come up.
+    const bool parallel_fonts = o.mode == Options::Mode::window && o.use_system_fonts;
+    if (!cfg.fonts && !parallel_fonts) cfg.fonts = make_fonts(o);
+    if (!parallel_fonts) startup::mark("fonts ready");
 
     switch (o.mode) {
         case Options::Mode::window:
