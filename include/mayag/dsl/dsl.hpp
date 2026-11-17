@@ -1606,6 +1606,21 @@ struct Tracking {
 };
 [[nodiscard]] constexpr Tracking tracking(float v) { return {v}; }
 
+/// `| lang("sr")`: the text's language (BCP 47), for the font's localized
+/// forms (Serbian Cyrillic, Turkish i, Romanian s-comma, Traditional Chinese
+/// punctuation). Inherited by every text node below; longer tags truncate
+/// at 15 characters.
+struct Lang {
+    MAYAG_TEXT_MODIFIER(Lang, "lang");
+    std::array<char, 16> tag{};
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::language; s.text.language = tag; }
+};
+[[nodiscard]] constexpr Lang lang(std::string_view bcp47) {
+    Lang l;
+    for (std::size_t i = 0; i < bcp47.size() && i + 1 < l.tag.size(); ++i) l.tag[i] = bcp47[i];
+    return l;
+}
+
 struct TextAlignMod {
     MAYAG_TEXT_MODIFIER(TextAlignMod, "text_align");
     TextAlign v;

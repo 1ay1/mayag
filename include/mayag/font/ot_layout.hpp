@@ -713,17 +713,22 @@ inline int select_script(const Layout::Table& t, std::span<const std::uint32_t> 
 
 /// The LangSys table for `language` in a script (its default LangSys when the
 /// language is absent, after trying 'dflt'); npos when there is none.
-inline std::size_t select_langsys(const Layout::Table& t, int script, std::uint32_t language) noexcept {
+inline std::size_t select_langsys(const Layout::Table& t, int script, std::span<const std::uint32_t> languages) noexcept {
     if (script < 0) return npos;
     const Reader r = t.reader();
     const std::size_t s = off16(r, t.script_list, t.script_list + 2 + std::size_t(script) * 6 + 4);
     if (s == npos) return npos;
     const std::uint16_t n = r.u16_at(s + 2);
-    for (std::uint32_t want : {language, tag_dflt}) {
-        if (want == 0) continue;
+    // The requested languages in priority order, then 'dflt' (hb
+    // hb_ot_layout_script_select_language), then the default LangSys.
+    const auto find = [&](std::uint32_t want) -> std::size_t {
         for (std::size_t i = 0; i < n; ++i)
             if (r.u32_at(s + 4 + i * 6) == want) return off16(r, s, s + 4 + i * 6 + 4);
-    }
+        return npos;
+    };
+    for (std::uint32_t want : languages)
+        if (want != 0) if (const std::size_t ls = find(want); ls != npos) return ls;
+    if (const std::size_t ls = find(tag_dflt); ls != npos) return ls;
     return off16(r, s, s);
 }
 
@@ -780,10 +785,13 @@ class PlanBuilder {
   public:
     PlanBuilder(const Layout& l, std::span<const std::uint32_t> scripts, std::uint32_t language,
                 Direction dir)
+        : PlanBuilder(l, scripts, std::span<const std::uint32_t>{&language, language ? 1u : 0u}, dir) {}
+    PlanBuilder(const Layout& l, std::span<const std::uint32_t> scripts, std::span<const std::uint32_t> languages,
+                Direction dir)
         : layout_(l), dir_(dir) {
         for (int ti = 0; ti < 2; ++ti) {
             script_[ti] = detail::select_script(l.tab(ti), scripts, chosen_[ti], found_[ti]);
-            langsys_[ti] = detail::select_langsys(l.tab(ti), script_[ti], language);
+            langsys_[ti] = detail::select_langsys(l.tab(ti), script_[ti], languages);
         }
     }
 

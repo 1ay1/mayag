@@ -20,7 +20,7 @@ namespace mayag::typo::hbcompat {
 }
 
 struct Options {
-    std::string script, direction;
+    std::string script, direction, language;
     std::vector<ot::Feature> features;
     std::vector<std::pair<std::uint32_t, float>> variations;
     bool bot = false;
@@ -35,6 +35,7 @@ inline Options parse_args(const std::vector<std::string>& args) {
         if (a == "--bot") { o.bot = true; continue; }
         if (auto v = val("--script="); !v.empty()) o.script = v;
         else if (auto d = val("--direction="); !d.empty()) o.direction = d;
+        else if (auto lg = val("--language="); !lg.empty()) o.language = lg;
         else if (auto fs = val("--features="); !fs.empty()) {
             std::size_t p = 0;
             while (p < fs.size()) {
@@ -115,7 +116,8 @@ inline std::string shape(Face& face, const std::string& text, const Options& o) 
         e.height = static_cast<int>(std::lround(r.origin.y)) - e.y_bearing;
         return true;
     };
-    const auto plan = ot::compile_plan(layout, script, b.direction, 0, o.features, ff, kern.has_legacy(),
+    const std::vector<std::uint32_t> langs = ot::ot_language_tags(o.language);
+    const auto plan = ot::compile_plan(layout, script, b.direction, langs, o.features, ff, kern.has_legacy(),
                                        file.has_table(ot::tag("kerx")));
     ot::shape(plan, layout, ff, b, o.features, o.bot);
 

@@ -32,12 +32,16 @@
 // THIRD_PARTY_NOTICES.md.
 
 #include "ot_layout.hpp"
+#include "ot_language_table.hpp"
 #include "unicode_data.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace mayag::typo::ot {
@@ -478,6 +482,47 @@ inline ShaperSelector& shaper_selector() {
     return sel;
 }
 
+// ── language ──────────────────────────────────────────────────────────────────────────
+
+/// OpenType language-system tags for a BCP 47 language tag ("sr", "tr-TR",
+/// "zh-Hant-HK"), in priority order (hb_ot_tags_from_language). Fonts
+/// key localized forms on these: Serbian and Macedonian italic Cyrillic,
+/// Turkish dotted i in smcp, Romanian comma-below, Dutch IJ, Polish kreska,
+/// Traditional Chinese punctuation position. Empty: no language system.
+inline std::vector<std::uint32_t> ot_language_tags(std::string_view bcp47) {
+    std::vector<std::uint32_t> out;
+    if (bcp47.empty()) return out;
+    std::string lc;
+    for (char ch : bcp47) lc += (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch - 'A' + 'a') : (ch == '_' ? '-' : ch);
+    const auto has_subtag = [&](std::string_view sub) {
+        for (std::size_t p = lc.find('-'); p != std::string::npos; p = lc.find('-', p + 1))
+            if (lc.compare(p + 1, sub.size(), sub) == 0 &&
+                (p + 1 + sub.size() == lc.size() || lc[p + 1 + sub.size()] == '-'))
+                return true;
+        return false;
+    };
+    std::string primary = lc.substr(0, lc.find('-'));
+    // The most common multi-subtag cases from hb_ot_tags_from_complex_language.
+    if (primary == "zh") {
+        if (has_subtag("hk")) return {make_tag('Z', 'H', 'H', ' '), make_tag('Z', 'H', 'T', ' ')};
+        if (has_subtag("mo")) return {make_tag('Z', 'H', 'T', 'M'), make_tag('Z', 'H', 'T', ' ')};
+        if (has_subtag("hant") || has_subtag("tw")) return {make_tag('Z', 'H', 'T', ' ')};
+        return {make_tag('Z', 'H', 'S', ' ')};
+    }
+    // An extended-language subtag ("zh-yue") stands in for the primary.
+    if (const std::size_t d = lc.find('-'); d != std::string::npos) {
+        const std::size_t e = lc.find('-', d + 1);
+        const std::string ext = lc.substr(d + 1, (e == std::string::npos ? lc.size() : e) - d - 1);
+        if (ext.size() == 3 && ext[0] >= 'a' && ext[0] <= 'z') primary = ext;
+    }
+    if (primary.size() < 2 || primary.size() > 3) return out;
+    const std::uint32_t key = make_tag(primary[0], primary[1], primary.size() > 2 ? primary[2] : ' ', ' ');
+    const auto* first = std::lower_bound(std::begin(langtags::table), std::end(langtags::table), key,
+                                         [](const langtags::Entry& e, std::uint32_t k) { return e.bcp47 < k; });
+    for (; first != std::end(langtags::table) && first->bcp47 == key; ++first) out.push_back(first->ot);
+    return out;
+}
+
 /// A user feature request: tag=value over [start, end) clusters (all text
 /// when start == 0 and end == ~0u).
 struct Feature {
@@ -488,11 +533,11 @@ struct Feature {
 };
 
 /// Compile a ShapePlan (hb_ot_shape_plan_t + hb_ot_shape_collect_features).
-inline ShapePlan compile_plan(const Layout& l, ucd::Script script, Direction dir, std::uint32_t language,
+inline ShapePlan compile_plan(const Layout& l, ucd::Script script, Direction dir, std::span<const std::uint32_t> languages,
                               std::span<const Feature> user, const FontFuncs& font,
                               bool has_kern_table = false, bool has_kerx_table = false) {
     const auto tags = ot_script_tags(script);
-    Planner p{PlanBuilder{l, tags, language, dir}, l, script, dir, {}};
+    Planner p{PlanBuilder{l, tags, languages, dir}, l, script, dir, {}};
     p.chosen_script[0] = p.map.chosen_script(table::gsub);
     p.chosen_script[1] = p.map.chosen_script(table::gpos);
 

@@ -437,6 +437,13 @@ if(MAYAG_BUILD_TESTS)
     target_compile_definitions(mayag_unicode_tests PRIVATE MAYAG_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME mayag_unicode_tests COMMAND mayag_unicode_tests)
 
+    # UAX #14 line breaking and UAX #29 graphemes: 100% of the official tests.
+    add_executable(mayag_segment_tests tests/test_segment.cpp)
+    target_link_libraries(mayag_segment_tests PRIVATE mayag)
+    target_compile_options(mayag_segment_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_segment_tests PRIVATE MAYAG_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME mayag_segment_tests COMMAND mayag_segment_tests)
+
     # OpenType shaping must match HarfBuzz exactly: 500 captured hb-shape
     # outputs across ~200 system fonts and every complex script family.
     add_executable(mayag_shaping_tests tests/test_shaping.cpp)

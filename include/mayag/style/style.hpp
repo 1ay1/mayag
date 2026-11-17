@@ -246,7 +246,8 @@ inline constexpr std::uint16_t tracking    = 1u << 7;
 inline constexpr std::uint16_t align       = 1u << 8;
 inline constexpr std::uint16_t ligatures   = 1u << 9;
 inline constexpr std::uint16_t variations  = 1u << 10;
-inline constexpr std::uint16_t all         = (1u << 11) - 1u;
+inline constexpr std::uint16_t language    = 1u << 11;
+inline constexpr std::uint16_t all         = (1u << 12) - 1u;
 }  // namespace text_bits
 
 struct TextStyle {
@@ -282,6 +283,13 @@ struct TextStyle {
     /// typographic default; turn off for code/monospace where each character
     /// must stay distinct.
     bool ligatures = true;
+
+    /// The text's language as a BCP 47 tag ("sr", "tr", "zh-Hant"), or
+    /// empty for the default. Selects the font's localized forms (OpenType
+    /// language systems): Serbian/Macedonian Cyrillic, Turkish dotted i,
+    /// Romanian comma-below, Traditional vs Simplified Chinese punctuation.
+    /// Inline and fixed-size so TextStyle stays a trivially copyable value.
+    std::array<char, 16> language{};
 
     /// Clamp wrapped text to at most this many lines, ellipsising the last one
     /// (CSS line-clamp). 0 = unlimited. Only meaningful with overflow == wrap.

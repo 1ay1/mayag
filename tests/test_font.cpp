@@ -1677,6 +1677,112 @@ void test_atlas_churn() {
     (void)frames;
 }
 
+/// Wrapping uses UAX #14: no break before closing punctuation or inside a
+/// number, a break after a hyphen, CJK breaks between ideographs but not
+/// before 。, and Thai (no spaces) wraps between syllables.
+void test_uax14_wrapping() {
+    section("UAX #14 wrapping");
+    auto stack = typo::system::default_stack();
+    if (stack == nullptr) return;
+    typo::StackMeasurer m{*stack};
+    (void)m;
+    TextStyle st;
+    st.size = 16.0f;
+    const auto lines_of = [&](std::string_view s, float w) {
+        const auto shaped = stack->shaped(s, typo::detail::shape_params_of(st));
+        const auto lines = typo::StackMeasurer::wrap_lines(s, *shaped, w);
+        std::vector<std::string> out;
+        for (const auto& l : lines) {
+            if (l.begin >= l.end) continue;
+            std::size_t b0 = s.size(), b1 = 0;
+            for (std::size_t i = l.begin; i < l.end; ++i) {
+                b0 = std::min<std::size_t>(b0, shaped->glyphs[i].cluster);
+                b1 = std::max<std::size_t>(b1, shaped->glyphs[i].cluster);
+            }
+            // extend b1 to the end of its code point
+            std::size_t e = b1 + 1;
+            while (e < s.size() && (static_cast<unsigned char>(s[e]) & 0xC0) == 0x80) ++e;
+            std::string t{s.substr(b0, e - b0)};
+            while (!t.empty() && t.front() == ' ') t.erase(t.begin());
+            out.push_back(t);
+        }
+        return out;
+    };
+    const auto thai = lines_of("\xe0\xb8\xa0\xe0\xb8\xb2\xe0\xb8\xa9\xe0\xb8\xb2\xe0\xb9\x84\xe0\xb8\x97\xe0\xb8\xa2"
+                               "\xe0\xb8\x99\xe0\xb8\xb1\xe0\xb9\x89\xe0\xb8\x99\xe0\xb8\xaa\xe0\xb8\xa7\xe0\xb8\xa2\xe0\xb8\x87\xe0\xb8\xb2\xe0\xb8\xa1"
+                               "\xe0\xb8\xa1\xe0\xb8\xb2\xe0\xb8\x81\xe0\xb8\x88\xe0\xb8\xa3\xe0\xb8\xb4\xe0\xb8\x87\xe0\xb9\x86", 60.0f);
+    check(thai.size() > 1, "a Thai line with no spaces still wraps (" + std::to_string(thai.size()) + " lines)");
+    const auto num = lines_of("total 1,234,567.89 USD", 110.0f);
+    bool number_whole = false;
+    for (const auto& l : num) number_whole |= l.find("1,234,567.89") != std::string::npos;
+    check(number_whole, "a number is never split across lines");
+    const auto paren = lines_of("aaaa bbbb (cccc) dddd!", 64.0f);
+    bool no_orphan = paren.size() > 1;
+    for (const auto& l : paren) no_orphan &= !(l.starts_with(")") || l.starts_with("!"));
+    check(no_orphan, "no line starts with closing punctuation");
+    const auto cjk = lines_of("\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xe3\x81\xae\xe6\x96\x87\xe7\xab\xa0\xe3\x80\x82\xe6\x94\xb9\xe8\xa1\x8c", 40.0f);
+    bool cjk_ok = cjk.size() > 1;
+    for (const auto& l : cjk) cjk_ok &= !l.starts_with("\xe3\x80\x82");
+    check(cjk_ok, "CJK wraps between ideographs, never before \xe3\x80\x82");
+}
+
+/// Carets, hits and selections are VISUAL: in RTL text the caret for the
+/// first character is at the RIGHT edge, a selection across a direction
+/// change is two rectangles, and a line's trailing space sits at its end.
+void test_bidi_editing() {
+    section("bidi editing geometry");
+    auto stack = typo::system::default_stack();
+    if (stack == nullptr) return;
+    typo::StackMeasurer m{*stack};
+    TextStyle st;
+    st.size = 16.0f;
+    const std::string ar = "\xd8\xb9\xd8\xb1\xd8\xa8\xd9\x8a";   // عربي (4 letters, 8 bytes)
+    const float w = m.advance(ar, st);
+    check(std::abs(m.caret_x(ar, st, 0) - w) < 0.5f, "RTL: the caret before the first letter is at the right edge");
+    check(std::abs(m.caret_x(ar, st, ar.size())) < 0.5f, "RTL: the caret at the end is at the left edge");
+    check(m.caret_x(ar, st, 2) < m.caret_x(ar, st, 0) && m.caret_x(ar, st, 4) < m.caret_x(ar, st, 2),
+          "RTL: carets move LEFT as the offset grows");
+    check(m.hit(ar, st, w - 0.5f) == 0 && m.hit(ar, st, 0.5f) == ar.size(), "RTL: clicking the right edge is offset 0");
+
+    // "abc عربي": select "c عر" logically -> two visual spans (LTR part, RTL part).
+    const std::string mixed = "abc " + ar;
+    const auto spans = m.selection_spans(mixed, st, 2, 4 + 4);
+    check(spans.size() == 2, "a selection across a direction change is two rectangles (" + std::to_string(spans.size()) + ")");
+    // LTR text: the default prefix-width behaviour still holds exactly.
+    const std::string en = "Hello";
+    check(std::abs(m.caret_x(en, st, 3) - m.advance("Hel", st)) < 0.6f, "LTR carets are prefix widths");
+    check(m.hit(en, st, m.caret_x(en, st, 2) + 0.2f) == 2, "LTR hit-test lands on the nearest caret");
+
+    // Per-line L1: in an LTR paragraph, the space after an RTL word that
+    // ends a line goes to the line's END (paragraph level), not between
+    // the Arabic glyphs and the line start.
+    const std::string line = "x " + ar + " ";
+    const auto shaped = stack->shaped(line, typo::detail::shape_params_of(st));
+    std::vector<std::size_t> order;
+    typo::detail::visual_glyph_order(line, *shaped, 0, shaped->glyphs.size(), order);
+    check(!order.empty() && shaped->glyphs[order.back()].cluster == line.size() - 1,
+          "L1: a line's trailing space is painted last (visual end)");
+}
+
+/// `| lang(...)` reaches the shaper: SF's Serbian language system swaps
+/// the Cyrillic б for its Serbian form (HarfBuzz agrees, see the corpus).
+void test_language() {
+    section("language-specific forms");
+    auto stack = typo::system::default_stack();
+    const typo::Face* f = stack ? stack->face_at(0) : nullptr;
+    if (f == nullptr || f->family() != "System Font") { std::printf("  (skipped: SF not primary)\n"); return; }
+    TextStyle ru, sr;
+    ru.size = sr.size = 16.0f;
+    sr.language = dsl::lang("sr").tag;
+    const auto a = stack->shaped("\xd0\xb1", typo::detail::shape_params_of(ru));
+    const auto b = stack->shaped("\xd0\xb1", typo::detail::shape_params_of(sr));
+    check(!a->glyphs.empty() && !b->glyphs.empty() && a->glyphs[0].glyph_id != b->glyphs[0].glyph_id,
+          "lang(\"sr\") selects the Serbian form of \xd0\xb1");
+    check(typo::ot::ot_language_tags("zh-Hant-HK").front() == typo::ot::make_tag('Z', 'H', 'H', ' '),
+          "zh-Hant-HK maps to ZHH");
+    check(typo::ot::ot_language_tags("tr-TR").front() == typo::ot::make_tag('T', 'R', 'K', ' '), "tr-TR maps to TRK");
+}
+
 int main() {
     std::printf("mayag font engine\n=================");
 
@@ -1707,6 +1813,9 @@ int main() {
     test_coretext_parity();
     test_smoothing();
     test_complex_text();
+    test_uax14_wrapping();
+    test_bidi_editing();
+    test_language();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);

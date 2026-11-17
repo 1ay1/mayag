@@ -498,3 +498,18 @@
 /System/Library/Fonts/SFIndia.ttc:7|தமிழ் கொ கோ கௌ க்ஷ ஸ்ரீ|
 /System/Library/Fonts/SFIndia.ttc:8|తెలుగు ర్క క్ర క్ష కొ కై|
 /System/Library/Fonts/SFIndia.ttc:8|తెలుగు|--variations=wght=300
+/System/Library/Fonts/SFNS.ttf|бгдпт ijsselmeer fi ﬁ|--language=sr
+/System/Library/Fonts/SFNS.ttf|бгдпт ijsselmeer fi|--language=bg
+/System/Library/Fonts/SFNS.ttf|бгдпт|--language=ru
+/System/Library/Fonts/SFNS.ttf|IJsselmeer ijs fi|--language=nl
+/System/Library/Fonts/SFNS.ttf|istanbul fi fl|--language=tr
+/System/Library/Fonts/SFNS.ttf|istanbul fi|--language=tr --features=+smcp
+/System/Library/Fonts/SFNS.ttf|col·legi l·l|--language=ca
+/System/Library/Fonts/SFNS.ttf|şţ ŞŢ|--language=ro
+/System/Library/Fonts/SFNS.ttf|şţ ŞŢ|--language=mo
+/System/Library/Fonts/SFNS.ttf|ijs fi|--language=nl-BE
+/System/Library/Fonts/SFNS.ttf|бгд|--language=sr-Cyrl-RS
+/System/Library/Fonts/SFNS.ttf|бгд|--language=mk
+/System/Library/Fonts/Avenir Next.ttc|IJsselmeer fi|--language=nl
+/System/Library/Fonts/Avenir Next.ttc|istanbul fi|--language=tr
+/System/Library/Fonts/NewYork.ttf|l·l IJ|--language=ca

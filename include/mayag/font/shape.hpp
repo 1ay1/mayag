@@ -766,6 +766,9 @@ struct ShapedGlyph {
     /// Index of the shaping run (consecutive glyphs with the same run id
     /// were shaped together and must not be split by reordering).
     std::uint16_t run = 0;
+    /// Base level of the glyph's paragraph: per-line rule L1 resets a
+    /// line's trailing whitespace (and whitespace before tabs) to it.
+    std::uint8_t  para_level = 0;
 };
 
 struct ShapeResult {
@@ -826,6 +829,9 @@ struct ShapeParams {
     static constexpr std::size_t max_axes = 4;
     std::array<Axis, max_axes> axes{};
     std::uint8_t axis_count = 0;
+    /// OpenType language-system tags, in priority order (from the text's
+    /// BCP 47 language); 0 entries are unused.
+    std::array<std::uint32_t, 3> languages{};
 };
 
 /// The seam. `SimpleShaper` below is the default; a HarfBuzz-backed

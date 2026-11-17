@@ -16,6 +16,8 @@
 #include "../core/geometry.hpp"
 
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace mayag::layout {
 
@@ -42,6 +44,39 @@ class TextMeasurer {
 
     /// Nonzero inside a layout_tree() pass: lets measure() memoise per node.
     [[nodiscard]] virtual std::uint32_t layout_pass() const noexcept { return 0; }
+
+    // ── editing: carets, hit-testing, selections on one unwrapped line ──
+    //
+    // Positions are byte offsets at grapheme boundaries. They are VISUAL
+    // questions: in right-to-left or mixed text the caret for offset k is not
+    // the width of the first k bytes, a click maps to whichever glyph is under
+    // it, and a logical selection can be several disjoint visual rectangles.
+    // The defaults are the left-to-right answers (prefix widths); a measurer
+    // that shapes text overrides them with the bidi-aware ones.
+
+    /// X of the caret before byte `offset` (0 = line start, size = end).
+    [[nodiscard]] virtual float caret_x(std::string_view s, const TextStyle& st, std::size_t offset) const {
+        return advance(s.substr(0, offset < s.size() ? offset : s.size()), st);
+    }
+    /// Byte offset (a caret position) nearest to x.
+    [[nodiscard]] virtual std::size_t hit(std::string_view s, const TextStyle& st, float x) const {
+        std::size_t best = 0;
+        float best_d = x < 0.0f ? -x : x;
+        for (std::size_t i = 1; i <= s.size(); ++i) {
+            if (i < s.size() && (static_cast<unsigned char>(s[i]) & 0xC0u) == 0x80u) continue;
+            const float d = caret_x(s, st, i) - x;
+            const float ad = d < 0.0f ? -d : d;
+            if (ad < best_d) { best_d = ad; best = i; }
+        }
+        return best;
+    }
+    /// The visual [x0, x1) spans covering the logical selection [a, b).
+    [[nodiscard]] virtual std::vector<std::pair<float, float>> selection_spans(std::string_view s, const TextStyle& st,
+                                                                               std::size_t a, std::size_t b) const {
+        if (b < a) { const std::size_t t = a; a = b; b = t; }
+        if (a == b) return {};
+        return {{caret_x(s, st, a), caret_x(s, st, b)}};
+    }
 };
 
 // ── default: metric-only monospace ──────────────────────────────────────

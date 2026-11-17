@@ -91,6 +91,13 @@ GC = ["Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No", "Pc", "P
 JT = ["U", "R", "L", "D", "C", "T"]
 GCB = ["Other", "CR", "LF", "Control", "Extend", "ZWJ", "Regional_Indicator", "Prepend",
        "SpacingMark", "L", "V", "T", "LV", "LVT"]
+LB = ["XX", "AI", "AK", "AL", "AP", "AS", "B2", "BA", "BB", "BK", "CB", "CJ", "CL", "CM", "CP",
+      "CR", "EB", "EM", "EX", "GL", "H2", "H3", "HH", "HL", "HY", "ID", "IN", "IS", "JL", "JT",
+      "JV", "LF", "NL", "NS", "NU", "OP", "PO", "PR", "QU", "RI", "SA", "SG", "SP", "SY", "VF",
+      "VI", "WJ", "ZW", "ZWJ"]
+EA = ["N", "A", "H", "W", "F", "Na"]
+INCB = ["None", "Linker", "Consonant", "Extend"]
+EA_LONG = ["Neutral", "Ambiguous", "Halfwidth", "Wide", "Fullwidth", "Narrow"]
 
 
 class Data:
@@ -238,7 +245,30 @@ def load(ucd):
             a, b = rng(f[0])
             for c in range(a, b + 1):
                 flags[c] |= 2
+        elif f[1] == "InCB":
+            a, b = rng(f[0])
+            for c in range(a, b + 1):
+                flags[c] |= INCB.index(f[2]) << 2
+    ea = bytearray(MAXCP)
+    path = P("EastAsianWidth.txt")
+    for a, b, v in missing_lines(path):
+        for c in range(a, b + 1):
+            ea[c] = EA.index(v)
+    for f in data_lines(path):
+        a, b = rng(f[0])
+        for c in range(a, b + 1):
+            ea[c] = EA.index(f[1])
+    for c in range(MAXCP):
+        flags[c] |= ea[c] << 4
     d.flags = flags
+    lb = bytearray(MAXCP)
+    path = P("LineBreak.txt")
+    for a, b, v in missing_lines(path):
+        lb[a:b + 1] = bytes([LB.index(v)]) * (b - a + 1)
+    for f in data_lines(path):
+        a, b = rng(f[0])
+        lb[a:b + 1] = bytes([LB.index(f[1])]) * (b - a + 1)
+    d.lb = lb
 
     fce = set()
     for f in data_lines(P("DerivedNormalizationProps.txt")):
@@ -255,7 +285,7 @@ def build_tables(d):
     rec_index = {}
     recs = []
     per_cp = [0] * MAXCP
-    cols = (d.script, d.bidi, d.gc, d.jt, d.jg, d.ccc, d.isc, d.ipc, d.gcb, d.flags)
+    cols = (d.script, d.bidi, d.gc, d.jt, d.jg, d.ccc, d.isc, d.ipc, d.gcb, d.flags, d.lb)
     for c in range(MAXCP):
         r = bytes(col[c] for col in cols)
         k = rec_index.get(r)
@@ -403,6 +433,14 @@ inline constexpr char32_t n_count = v_count * t_count, s_count = l_count * n_cou
 [[nodiscard]] constexpr GraphemeBreak grapheme_break(char32_t cp) noexcept { return GraphemeBreak(detail::prop(cp, 8)); }
 [[nodiscard]] constexpr bool is_extended_pictographic(char32_t cp) noexcept { return (detail::prop(cp, 9) & 1) != 0; }
 [[nodiscard]] constexpr bool is_default_ignorable(char32_t cp) noexcept { return (detail::prop(cp, 9) & 2) != 0; }
+[[nodiscard]] constexpr IndicConjunctBreak indic_conjunct_break(char32_t cp) noexcept {
+    return IndicConjunctBreak((detail::prop(cp, 9) >> 2) & 3);
+}
+[[nodiscard]] constexpr EastAsianWidth east_asian_width(char32_t cp) noexcept {
+    return EastAsianWidth(detail::prop(cp, 9) >> 4);
+}
+// Line_Break as in LineBreak.txt (unresolved: AI/SA/SG/XX/CJ/CB kept as is; @missing defaults applied).
+[[nodiscard]] constexpr LineBreak line_break(char32_t cp) noexcept { return LineBreak(detail::prop(cp, 10)); }
 
 [[nodiscard]] constexpr Decomposition canonical_decomposition(char32_t cp) noexcept {
     using namespace detail;
@@ -476,10 +514,13 @@ def emit(d, out_path):
     w("enum class IndicSyllabic : std::uint8_t {\n%s\n};\n\n" % enum_body(d.isc_names))
     w("enum class IndicPositional : std::uint8_t {\n%s\n};\n\n" % enum_body(d.ipc_names))
     w("enum class GraphemeBreak : std::uint8_t {\n%s\n};\n\n" % enum_body(GCB))
+    w("enum class LineBreak : std::uint8_t {\n%s\n};\n\n" % enum_body(LB))
+    w("enum class EastAsianWidth : std::uint8_t {\n%s\n};\n\n" % enum_body(EA))
+    w("enum class IndicConjunctBreak : std::uint8_t {\n%s\n};\n\n" % enum_body(INCB))
     w("struct Decomposition { char32_t a = 0, b = 0; };  // b==0 => singleton, a==0 => none\n\n")
 
     w("namespace detail {\n\n")
-    w("inline constexpr std::size_t record_size = 10;\n")
+    w("inline constexpr std::size_t record_size = 11;\n")
     w("inline constexpr std::size_t chunk_blocks = %d;\n\n" % CHUNK_BLOCKS)
     w("inline constexpr std::uint32_t script_tags[] = {\n")
     for i in range(0, len(d.scripts), 8):

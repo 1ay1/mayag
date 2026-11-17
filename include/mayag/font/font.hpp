@@ -22,6 +22,7 @@
 #include "ot_shapers.hpp"
 #include "outline.hpp"
 #include "raster.hpp"
+#include "segment.hpp"
 #include "shape.hpp"
 
 #include "../layout/text_metrics.hpp"
@@ -676,8 +677,11 @@ class FontStack : public Shaper {
             if (uni::needs_complex_shaping(c)) out.needs_complex = true;
         }
 
-        // ── bidi levels, per paragraph (UAX #9) ──
-        std::vector<std::uint8_t> levels(n, 0);
+        // ── bidi levels, per paragraph (UAX #9 up to I2) ──
+        // Shaping needs the resolved embedding levels; rule L1 (trailing
+        // whitespace) depends on where LINES end, which is not known yet, so
+        // it runs per line when the line is painted (visual_glyph_order).
+        std::vector<std::uint8_t> levels(n, 0), paras(n, 0);
         if (!bidi::is_trivially_ltr(cps)) {
             std::size_t p0 = 0;
             for (std::size_t i = 0; i <= n; ++i) {
@@ -686,10 +690,10 @@ class FontStack : public Shaper {
                 const std::size_t p1 = std::min(n, i + 1);
                 const std::span<const char32_t> para{cps.data() + p0, p1 - p0};
                 const bidi::Paragraph p = bidi::resolve(para, bidi::Direction::auto_detect);
-                // L1 over the whole paragraph (lines are not known yet; trailing
-                // whitespace and separators reset to the paragraph level).
-                const auto lv = bidi::line_levels(para, p, 0, para.size());
-                for (std::size_t k = 0; k < lv.size(); ++k) levels[p0 + k] = lv[k];
+                for (std::size_t k = 0; k < p.levels.size() && p0 + k < n; ++k) {
+                    levels[p0 + k] = p.levels[k];
+                    paras[p0 + k] = p.base_level;
+                }
                 p0 = p1;
             }
         }
@@ -761,6 +765,7 @@ class FontStack : public Shaper {
                 // cluster indices stay aligned with the source string.
                 ShapedGlyph g{0, at[i], 0.0f, {}, 0, false};
                 g.level = levels[i];
+                g.para_level = paras[i];
                 g.run = run_id++;
                 out.glyphs.push_back(g);
                 ++i;
@@ -771,6 +776,8 @@ class FontStack : public Shaper {
                    scripts[j] == scripts[i] && levels[j] == levels[i])
                 ++j;
             shape_run(text, cps, at, i, j, face_of[i], scripts[i], levels[i], params, run_id++, out);
+            for (std::size_t k = out.glyphs.size(); k-- > 0 && out.glyphs[k].run == run_id - 1;)
+                out.glyphs[k].para_level = paras[i];
             i = j;
         }
         return out;
@@ -822,7 +829,10 @@ class FontStack : public Shaper {
             feats.push_back({ot::make_tag('l', 'i', 'g', 'a'), 0});
             feats.push_back({ot::make_tag('c', 'l', 'i', 'g'), 0});
         }
-        const auto& plan = plan_for(face, layout, script, dir, feats, ff, legacy.has_legacy());
+        const auto plan_lang = std::span<const std::uint32_t>{params.languages.data(),
+            static_cast<std::size_t>(std::count_if(params.languages.begin(), params.languages.end(),
+                                                   [](std::uint32_t t) { return t != 0; }))};
+        const auto& plan = plan_for(face, layout, script, dir, feats, ff, legacy.has_legacy(), plan_lang);
 
         ot::Buffer b;
         b.info.reserve((end - begin) + 8);
@@ -861,17 +871,19 @@ class FontStack : public Shaper {
     /// Plans are cached per (face instance, script, direction, features).
     std::shared_ptr<const ot::ShapePlan> plan_for(const Face& face, const ot::Layout& layout, ucd::Script script,
                                                   ot::Direction dir, const std::vector<ot::Feature>& feats,
-                                                  const ot::FontFuncs& ff, bool has_kern) const {
+                                                  const ot::FontFuncs& ff, bool has_kern,
+                                                  std::span<const std::uint32_t> languages = {}) const {
         std::uint64_t key = face.id();
         key = key * 1000003u + static_cast<std::uint64_t>(script);
         key = key * 31u + static_cast<std::uint64_t>(dir);
+        for (std::uint32_t l : languages) key = key * 1000003u + l;
         for (const auto& f : feats) key = key * 1000003u + (std::uint64_t{f.tag} << 8 | f.value);
         {
             std::lock_guard lock{plan_mutex_};
             if (auto it = plans_.find(key); it != plans_.end()) return it->second;
         }
         auto plan = std::make_shared<const ot::ShapePlan>(
-            ot::compile_plan(layout, script, dir, 0, feats, ff, has_kern, face.file().has_table(ot::tag("kerx"))));
+            ot::compile_plan(layout, script, dir, languages, feats, ff, has_kern, face.file().has_table(ot::tag("kerx"))));
         std::lock_guard lock{plan_mutex_};
         if (plans_.size() > 512) plans_.clear();
         return plans_.emplace(key, std::move(plan)).first->second;
@@ -1152,7 +1164,7 @@ class FontStack : public Shaper {
     static bool same_params(const ShapeParams& a, const ShapeParams& b) noexcept {
         if (a.size_px != b.size_px || a.letter_spacing != b.letter_spacing || a.kerning != b.kerning ||
             a.ligatures != b.ligatures || a.weight != b.weight || a.italic != b.italic ||
-            a.axis_count != b.axis_count)
+            a.axis_count != b.axis_count || a.languages != b.languages)
             return false;
         for (std::uint8_t i = 0; i < a.axis_count; ++i)
             if (a.axes[i].tag != b.axes[i].tag || a.axes[i].value != b.axes[i].value) return false;
@@ -1186,6 +1198,7 @@ class FontStack : public Shaper {
         mix(bits(p.letter_spacing) | std::uint64_t{p.kerning} << 32 | std::uint64_t{p.ligatures} << 33 |
             std::uint64_t{p.italic} << 34 | std::uint64_t{p.axis_count} << 40);
         for (std::uint8_t a = 0; a < p.axis_count; ++a) mix(p.axes[a].tag | bits(p.axes[a].value) << 32);
+        for (const std::uint32_t l : p.languages) if (l) mix(l);
         return h;
     }
     // Drop runs not used since `before - ttl` (the whole cache when full).
@@ -1234,7 +1247,81 @@ namespace detail {
         const auto& a = vars.axes[i];
         p.axes[p.axis_count++] = ShapeParams::Axis{a.tag, a.value};
     }
+    if (st.language[0] != '\0') {
+        const std::string_view lang{st.language.data(), std::char_traits<char>::length(st.language.data())};
+        const auto tags = ot::ot_language_tags(lang);
+        for (std::size_t k = 0; k < tags.size() && k < p.languages.size(); ++k) p.languages[k] = tags[k];
+    }
     return p;
+}
+
+}  // namespace detail
+
+namespace detail {
+/// The glyphs [begin, end) of one line in VISUAL order (UAX #9 L1 + L2,
+/// per line). Glyphs are stored logically. L1: whitespace and isolate
+/// controls at the END of the line, and whitespace before a tab or
+/// segment separator, take the paragraph level, so a trailing space of
+/// an RTL run in an LTR paragraph sits at the line's end, not mid-line.
+/// L2: reverse every maximal sequence at or above each odd level, from
+/// the highest down. A right-to-left run's glyphs are reversed as a unit
+/// (the shaper's own visual order within it is preserved).
+inline void visual_glyph_order(std::string_view text, const ShapeResult& shaped, std::size_t begin, std::size_t end,
+                         std::vector<std::size_t>& out) {
+    out.clear();
+    if (begin >= end) return;
+    bool any_rtl = false;
+    for (std::size_t i = begin; i < end; ++i)
+        any_rtl |= ((shaped.glyphs[i].level | shaped.glyphs[i].para_level) & 1) != 0;
+    if (!any_rtl) {
+        for (std::size_t i = begin; i < end; ++i) out.push_back(i);
+        return;
+    }
+    // L1 levels for this line.
+    const auto ws_or_iso = [&](std::size_t i) {
+        const std::uint32_t c = shaped.glyphs[i].cluster;
+        if (c >= text.size()) return false;
+        std::size_t at = c;
+        const std::uint32_t cp = utf8::decode(text, at);
+        const auto bc = ucd::bidi_class(cp);
+        using B = ucd::BidiClass;
+        return bc == B::WS || bc == B::FSI || bc == B::LRI || bc == B::RLI || bc == B::PDI ||
+               bc == B::BN || bc == B::LRE || bc == B::RLE || bc == B::LRO || bc == B::RLO || bc == B::PDF;
+    };
+    const auto seg_sep = [&](std::size_t i) {
+        const std::uint32_t c = shaped.glyphs[i].cluster;
+        if (c >= text.size()) return false;
+        std::size_t at = c;
+        const auto bc = ucd::bidi_class(utf8::decode(text, at));
+        return bc == ucd::BidiClass::S || bc == ucd::BidiClass::B;
+    };
+    std::vector<std::uint8_t> lv(end - begin);
+    for (std::size_t i = begin; i < end; ++i) lv[i - begin] = shaped.glyphs[i].level;
+    bool trailing = true;   // walking backwards: still in the line's trailing whitespace
+    for (std::size_t i = end; i-- > begin;) {
+        const std::uint8_t para = shaped.glyphs[i].para_level;
+        if (seg_sep(i)) { lv[i - begin] = para; trailing = true; continue; }
+        if (trailing && ws_or_iso(i)) { lv[i - begin] = para; continue; }
+        trailing = false;
+    }
+    // Segments: same run AND same (line) level.
+    struct Seg { std::size_t first, last; std::uint8_t level; };
+    std::vector<Seg> segs;
+    for (std::size_t i = begin; i < end;) {
+        std::size_t j = i + 1;
+        while (j < end && shaped.glyphs[j].run == shaped.glyphs[i].run && lv[j - begin] == lv[i - begin]) ++j;
+        segs.push_back({i, j, lv[i - begin]});
+        i = j;
+    }
+    std::vector<std::uint8_t> levels(segs.size());
+    for (std::size_t k = 0; k < segs.size(); ++k) levels[k] = segs[k].level;
+    for (const std::uint32_t k : bidi::visual_order(levels)) {
+        const Seg& sg = segs[k];
+        if (sg.level & 1)
+            for (std::size_t i = sg.last; i > sg.first; --i) out.push_back(i - 1);
+        else
+            for (std::size_t i = sg.first; i < sg.last; ++i) out.push_back(i);
+    }
 }
 
 }  // namespace detail
@@ -1256,6 +1343,111 @@ class StackMeasurer final : public layout::TextMeasurer {
 
     [[nodiscard]] float advance(std::string_view s, const TextStyle& st) const override {
         return s.empty() ? 0.0f : stack_->shaped(s, detail::shape_params_of(st))->width;
+    }
+
+    // ── bidi-exact editing geometry ──
+    //
+    // The line is shaped ONCE (contextual forms and kerning included, unlike
+    // measuring a prefix, which reshapes "مرح" as if it ended the word) and
+    // laid out in visual order (L1 + L2, as it is painted). Each grapheme
+    // gets a visual span [x0, x1) and a direction; a glyph that covers
+    // several graphemes (a ligature) is split evenly between them, the
+    // fallback CoreText and HarfBuzz-based editors use without GDEF carets.
+    struct GraphemeBox { std::size_t begin = 0, end = 0; float x0 = 0, x1 = 0; bool rtl = false; };
+
+    [[nodiscard]] std::vector<GraphemeBox> grapheme_boxes(std::string_view s, const TextStyle& st) const {
+        std::vector<GraphemeBox> out;
+        if (s.empty()) return out;
+        const auto shaped = stack_->shaped(s, detail::shape_params_of(st));
+        std::vector<std::size_t> order;
+        detail::visual_glyph_order(s, *shaped, 0, shaped->glyphs.size(), order);
+        // Grapheme starts, to split clusters.
+        std::vector<std::size_t> gstarts;
+        for (std::size_t b = 0; b < s.size(); b = seg::next_grapheme(s, b)) gstarts.push_back(b);
+        gstarts.push_back(s.size());
+        const auto graphemes_in = [&](std::size_t lo, std::size_t hi) {
+            std::vector<std::size_t> v;
+            for (std::size_t k = 0; k + 1 < gstarts.size(); ++k)
+                if (gstarts[k] >= lo && gstarts[k] < hi) v.push_back(k);
+            return v;
+        };
+        // Cluster -> byte end: the next larger cluster value in the text.
+        std::vector<std::uint32_t> clusters;
+        for (const auto& g : shaped->glyphs) clusters.push_back(g.cluster);
+        std::sort(clusters.begin(), clusters.end());
+        clusters.erase(std::unique(clusters.begin(), clusters.end()), clusters.end());
+        const auto cluster_end = [&](std::uint32_t c) -> std::size_t {
+            const auto it = std::upper_bound(clusters.begin(), clusters.end(), c);
+            return it == clusters.end() ? s.size() : *it;
+        };
+        // Walk glyphs visually, merging consecutive glyphs of one cluster.
+        float x = 0.0f;
+        for (std::size_t k = 0; k < order.size();) {
+            const auto& g0 = shaped->glyphs[order[k]];
+            const std::uint32_t c = g0.cluster;
+            float w = 0.0f;
+            std::size_t j = k;
+            while (j < order.size() && shaped->glyphs[order[j]].cluster == c) { w += shaped->glyphs[order[j]].advance; ++j; }
+            const bool rtl = (g0.level & 1) != 0;
+            const auto gs = graphemes_in(c, cluster_end(c));
+            const std::size_t m = gs.empty() ? 1 : gs.size();
+            for (std::size_t q = 0; q < m; ++q) {
+                // In an RTL cluster the first grapheme is on the RIGHT.
+                const std::size_t slot = rtl ? m - 1 - q : q;
+                GraphemeBox gb;
+                gb.begin = gs.empty() ? c : gstarts[gs[q]];
+                gb.end = gs.empty() ? cluster_end(c) : gstarts[gs[q] + 1];
+                gb.x0 = x + w * static_cast<float>(slot) / static_cast<float>(m);
+                gb.x1 = x + w * static_cast<float>(slot + 1) / static_cast<float>(m);
+                gb.rtl = rtl;
+                out.push_back(gb);
+            }
+            x += w;
+            k = j;
+        }
+        return out;
+    }
+
+    [[nodiscard]] float caret_x(std::string_view s, const TextStyle& st, std::size_t offset) const override {
+        const auto boxes = grapheme_boxes(s, st);
+        if (boxes.empty()) return 0.0f;
+        // The caret before `offset` hugs the grapheme that STARTS there, on
+        // its leading edge (left for LTR, right for RTL). At the end of the
+        // text, the trailing edge of the last logical grapheme.
+        for (const auto& b : boxes)
+            if (b.begin == offset) return b.rtl ? b.x1 : b.x0;
+        for (const auto& b : boxes)
+            if (b.end == offset) return b.rtl ? b.x0 : b.x1;
+        return 0.0f;
+    }
+
+    [[nodiscard]] std::size_t hit(std::string_view s, const TextStyle& st, float x) const override {
+        const auto boxes = grapheme_boxes(s, st);
+        if (boxes.empty()) return 0;
+        // Left of everything / right of everything: the visual extremes.
+        if (x <= boxes.front().x0) return boxes.front().rtl ? boxes.front().end : boxes.front().begin;
+        for (const auto& b : boxes) {
+            if (x >= b.x1) continue;
+            const bool left_half = x < (b.x0 + b.x1) * 0.5f;
+            // Left half of an LTR grapheme = before it; of an RTL one = after.
+            return (left_half != b.rtl) ? b.begin : b.end;
+        }
+        return boxes.back().rtl ? boxes.back().begin : boxes.back().end;
+    }
+
+    [[nodiscard]] std::vector<std::pair<float, float>> selection_spans(std::string_view s, const TextStyle& st,
+                                                                       std::size_t a, std::size_t b) const override {
+        if (b < a) std::swap(a, b);
+        std::vector<std::pair<float, float>> spans;
+        if (a == b) return spans;
+        // Every grapheme inside [a, b), merged where visually adjacent: a
+        // logical selection across a direction change is 2+ rectangles.
+        for (const auto& g : grapheme_boxes(s, st)) {
+            if (g.begin < a || g.end > b) continue;
+            if (!spans.empty() && std::abs(spans.back().second - g.x0) < 0.01f) spans.back().second = g.x1;
+            else spans.push_back({g.x0, g.x1});
+        }
+        return spans;
     }
 
     [[nodiscard]] float ascent(const TextStyle& st) const override {
@@ -1367,6 +1559,19 @@ class StackMeasurer final : public layout::TextMeasurer {
         float       width = 0.0f;
         float       width_at_break = 0.0f;
 
+        // UAX #14 opportunities, by byte offset. A glyph can start a line
+        // when it is the first glyph of its cluster and the cluster's
+        // offset is an opportunity (mandatory ones are newlines, handled
+        // below). Thai/Lao/Khmer/Myanmar break between syllables, so long
+        // lines in them wrap at all.
+        std::vector<std::uint8_t> opportunity(text.size() + 1, 0);
+        for (std::size_t o : seg::line_break_offsets(text, seg::Tailoring::sea_syllables))
+            if (o < opportunity.size()) opportunity[o] = 1;
+        const auto can_break_before = [&](std::size_t i) {
+            const std::uint32_t c = shaped.glyphs[i].cluster;
+            return c < opportunity.size() && opportunity[c] && shaped.glyphs[i - 1].cluster != c;
+        };
+
         for (std::size_t i = 0; i < shaped.glyphs.size(); ++i) {
             const auto& g = shaped.glyphs[i];
 
@@ -1378,10 +1583,8 @@ class StackMeasurer final : public layout::TextMeasurer {
                 continue;
             }
 
-            const std::uint32_t cp = codepoint_at(text, g.cluster);
-
             // Record a break opportunity BEFORE adding this glyph.
-            if (i > line_start && can_break_before(text, shaped, i, cp)) {
+            if (i > line_start && can_break_before(i)) {
                 last_break = i;
                 width_at_break = width;
             }
@@ -1427,24 +1630,6 @@ class StackMeasurer final : public layout::TextMeasurer {
     }
 
   private:
-    [[nodiscard]] static bool can_break_before(std::string_view text, const ShapeResult& shaped,
-                                               std::size_t i, std::uint32_t cp) noexcept {
-        if (uni::is_no_break_before(cp)) return false;
-
-        const std::uint32_t prev = codepoint_at(text, shaped.glyphs[i - 1].cluster);
-        if (uni::is_no_break_after(prev)) return false;
-
-        // After any space.
-        if (uni::is_space(prev)) return true;
-        // Between ideographs — CJK wraps without spaces.
-        if (uni::is_ideographic(cp) && uni::is_ideographic(prev)) return true;
-        if (uni::is_ideographic(prev) && !uni::is_no_break_before(cp)) return true;
-        // After a hyphen.
-        if (prev == '-' || prev == 0x2010 || prev == 0x2013) return true;
-
-        return false;
-    }
-
     const FontStack* stack_;
 };
 
@@ -1538,7 +1723,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
 
             const std::size_t line_end = std::min(draw_end, shaped.glyphs.size());
             std::vector<std::size_t> order;
-            visual_order(shaped, line.begin, line_end, order);
+            detail::visual_glyph_order(s, shaped, line.begin, line_end, order);
             for (const std::size_t i : order) {
                 const auto& g = shaped.glyphs[i];
                 if (g.glyph_id == 0 && g.advance == 0.0f) continue;   // newline marker
@@ -1575,41 +1760,6 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
     }
 
   private:
-    /// The glyphs [begin, end) of one line in VISUAL order. Glyphs are stored
-    /// logically, run by run; a right-to-left run's glyphs are reversed and
-    /// the runs are reordered by UAX #9 L2 (reverse every maximal sequence
-    /// at or above each odd level, from the highest level down).
-    static void visual_order(const ShapeResult& shaped, std::size_t begin, std::size_t end,
-                             std::vector<std::size_t>& out) {
-        out.clear();
-        if (begin >= end) return;
-        bool any_rtl = false;
-        for (std::size_t i = begin; i < end; ++i) any_rtl |= (shaped.glyphs[i].level & 1) != 0;
-        if (!any_rtl) {
-            for (std::size_t i = begin; i < end; ++i) out.push_back(i);
-            return;
-        }
-        // Segments of one run each: [first, last) with the run's level.
-        struct Seg { std::size_t first, last; std::uint8_t level; };
-        std::vector<Seg> segs;
-        for (std::size_t i = begin; i < end;) {
-            std::size_t j = i + 1;
-            while (j < end && shaped.glyphs[j].run == shaped.glyphs[i].run &&
-                   shaped.glyphs[j].level == shaped.glyphs[i].level) ++j;
-            segs.push_back({i, j, shaped.glyphs[i].level});
-            i = j;
-        }
-        std::vector<std::uint8_t> levels(segs.size());
-        for (std::size_t k = 0; k < segs.size(); ++k) levels[k] = segs[k].level;
-        for (const std::uint32_t k : bidi::visual_order(levels)) {
-            const Seg& sg = segs[k];
-            if (sg.level & 1)
-                for (std::size_t i = sg.last; i > sg.first; --i) out.push_back(i - 1);
-            else
-                for (std::size_t i = sg.first; i < sg.last; ++i) out.push_back(i);
-        }
-    }
-
     /// Fetch and emit one glyph whose origin the shaper put at `pen`.
     ///
     /// A coverage glyph is drawn at the pen's whole pixel with the fraction

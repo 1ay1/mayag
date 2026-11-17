@@ -1,6 +1,7 @@
 #pragma once
 // mayag::widget text_field — a single-line text field with caret and selection
 
+#include "../app/host.hpp"
 #include "../dsl/dsl.hpp"
 #include "../core/text_edit.hpp"
 #include "../style/theme.hpp"
@@ -9,6 +10,8 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace mayag::dsl {
 
@@ -67,35 +70,45 @@ namespace mayag::dsl {
     const float font_size = text_size > 0.0f ? text_size : t.font_size;
     const bool showing_placeholder = state.text.empty() && !placeholder.empty();
 
-    // Caret and selection track the text. When a measurer is supplied the
-    // positions are the exact advance of the substring before each boundary
-    // (correct for any font); otherwise a monospace estimate keeps it close.
-    const float approx_w = font_size * 0.55f;
+    // Caret and selection are VISUAL positions on the shaped line: the
+    // frame's measurer (the font stack's in a window) answers them with
+    // bidi and contextual shaping, so an Arabic caret moves right-to-left,
+    // a mixed selection is several rectangles, and a ligature's caret
+    // splits it. An explicit `measure` (prefix widths) is still honoured
+    // for callers that pass one, for left-to-right text.
+    const layout::TextMeasurer& mm = ctx().measurer();
+    TextStyle ts{};
+    ts.size = font_size;
+    const std::string_view text = state.text;
     const auto x_at = [&](std::size_t byte) -> float {
-        if (byte == 0) return 0.0f;
-        const std::string_view upto{state.text.data(), num::min(byte, state.text.size())};
-        if (measure) return measure(upto);
-        return static_cast<float>(byte) * approx_w;
+        if (byte == 0 && text.empty()) return 0.0f;
+        if (measure) return byte == 0 ? 0.0f : measure(text.substr(0, num::min(byte, text.size())));
+        return mm.caret_x(text, ts, num::min(byte, text.size()));
     };
     const float caret_x = x_at(state.caret);
-    const float sel_x0  = x_at(state.selection_start());
-    const float sel_x1  = x_at(state.selection_end());
-    const float sel_w   = num::max(sel_x1 - sel_x0, 0.0f);
+    std::vector<std::pair<float, float>> spans;
+    if (state.has_selection()) {
+        if (measure) spans.push_back({x_at(state.selection_start()), x_at(state.selection_end())});
+        else spans = mm.selection_spans(text, ts, state.selection_start(), state.selection_end());
+    }
+    std::vector<Node> layers;
+    layers.push_back((text_owned(showing_placeholder ? std::string{placeholder} : state.text)
+                        | font(font_size)
+                        | fg(showing_placeholder ? t.text_disabled : t.text_primary)
+                        | ellipsis
+                        | width(pct(100))).build());
+    for (const auto& [x0, x1] : spans)
+        layers.push_back((box() | size(num::max(x1 - x0, 0.0f), font_size * 1.25f)
+                                | bg(t.accent.fade(0.30f))
+                                | radius(t.rounded(2))
+                                | absolute(x0, 0)).build());
+    layers.push_back((box() | size(1.5f, font_size * 1.2f)
+                            | bg(t.accent.fade(focused ? 1.0f : 0.0f))
+                            | absolute(caret_x, 0)).build());
 
-    return z(// FIRST child is in flow and therefore sizes the field.
-             text_owned(showing_placeholder ? std::string{placeholder} : state.text)
-               | font(font_size)
-               | fg(showing_placeholder ? t.text_disabled : t.text_primary)
-               | ellipsis
-               | width(pct(100)),
-             // Selection highlight and caret float over it.
-             node((box() | size(num::max(sel_w, 0.0f), font_size * 1.25f)
-                         | bg(t.accent.fade(state.has_selection() ? 0.30f : 0.0f))
-                         | radius(t.rounded(2))
-                         | absolute(sel_x0, 0)).build()),
-             node((box() | size(1.5f, font_size * 1.2f)
-                         | bg(t.accent.fade(focused ? 1.0f : 0.0f))
-                         | absolute(caret_x, 0)).build()))
+    // FIRST child is in flow and therefore sizes the field; the selection
+    // highlight(s) and caret float over it.
+    return z(std::move(layers))
          | pad(t.spaced(9), t.spaced(11))
          | bg(var::surface)
          | border(t.stroke(1), focused ? t.accent : t.border)
