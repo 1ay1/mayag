@@ -56,6 +56,8 @@ class MemoCache {
         bool                       has_path = false;
         Env                        env{};
         std::vector<std::uint64_t> ids;                ///< every node id inside, sorted
+        std::vector<std::uint64_t> starting_ids;       ///< ids with `starting` rules
+        bool                       animating = false;  ///< a spring under it moved last frame
         bool                       reads_interaction = false;   ///< build() asked about hover etc.
         std::uint64_t              interaction = 0;             ///< what it saw
     };
@@ -133,6 +135,13 @@ class MemoCache {
         auto it = entries_.find(key);
         return it == entries_.end() ? nullptr : &it->second;
     }
+    [[nodiscard]] const Entry* find(std::uint64_t key) const noexcept {
+        auto it = entries_.find(key);
+        return it == entries_.end() ? nullptr : &it->second;
+    }
+    void set_animating(std::uint64_t key, bool on) noexcept {
+        if (Entry* e = find(key)) e->animating = on;
+    }
 
     /// The memo node at `n` is part of this frame's tree.
     void live(Node* n) { live_.emplace_back(n, n->memo_key()); }
@@ -145,7 +154,8 @@ class MemoCache {
         Entry* e = find(n.memo_key());
         if (e == nullptr) return;
         e->ids.clear();
-        collect_ids(n, e->ids);
+        e->starting_ids.clear();
+        collect_ids(n, e->ids, e->starting_ids);
         std::sort(e->ids.begin(), e->ids.end());
         interaction_inside(e->ids, hovered, pressed, focused, press_inside, focus_visible, env);
         e->cascaded = n;
@@ -170,9 +180,13 @@ class MemoCache {
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
 
   private:
-    static void collect_ids(const Node& n, std::vector<std::uint64_t>& out) {
-        if (const std::uint64_t id = n.style().id; id != 0) out.push_back(id);
-        for (const auto& k : n.children()) collect_ids(k, out);
+    static void collect_ids(const Node& n, std::vector<std::uint64_t>& out, std::vector<std::uint64_t>& starting) {
+        if (const std::uint64_t id = n.style().id; id != 0) {
+            out.push_back(id);
+            const Cascade* cc = n.cascade().get();
+            if (cc != nullptr && (cc->uses & state::bit::starting) != 0) starting.push_back(id);
+        }
+        for (const auto& k : n.children()) collect_ids(k, out, starting);
     }
 
     std::unordered_map<std::uint64_t, Entry> entries_;

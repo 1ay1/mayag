@@ -251,17 +251,12 @@ class MemoKey {
 /// are tracked: a subtree that asks about hover is rebuilt when it moves).
 /// A subtree that posts overlays, tracks a spring or asks for animation
 /// frames while building isn't kept.
+/// The result is the subtree itself, so it lays out exactly as `build()`'s
+/// root would. Styles piped onto it (`node(memo(...)) | width(300)`) go on a
+/// plain box around it, never on the cached root.
 /// Outside a live window (one-shot renders, tests) it just calls `build`.
 template <class F>
 [[nodiscard]] Node memo(std::uint64_t key, F&& build) {
-    // The cached subtree sits inside a plain wrapper, so whatever the caller
-    // pipes onto the result (`node(memo(...)) | width(300)`) styles the
-    // wrapper, never the cached root.
-    const auto wrap = [](Node inner) {
-        Node w{NodeKind::box};
-        w.add_child(std::move(inner));
-        return w;
-    };
     const Ctx& c = ctx();
     const std::uint64_t k = detail::memo_mix(detail::memo_mix(key, detail::ctx_fingerprint(c)), 1) | 1u;
     MemoCache* cache = c.memos;
@@ -272,7 +267,7 @@ template <class F>
                                             c.input->focused()), c.input->press_inside())
         : 0;
     if (cache != nullptr) {
-        if (auto hit = cache->take(k, interaction)) return wrap(std::move(*hit));
+        if (auto hit = cache->take(k, interaction)) { hit->set_memo_result(true); return std::move(*hit); }
     }
     const std::uint64_t reads0 = c.reads();
     const std::size_t overlays0 = c.overlays != nullptr ? c.overlays->size() : 0;
@@ -285,7 +280,8 @@ template <class F>
     if (anim0) request_animation_frame();
     const bool reads_interaction = c.reads() != reads0;
     if (cache != nullptr && !side_effects && cache->store_built(k, n, reads_interaction, interaction)) n.set_memo_key(k);
-    return wrap(std::move(n));
+    n.set_memo_result(true);
+    return n;
 }
 
 /// The theme a program renders in for `m`: its `static Theme theme(const
@@ -1048,7 +1044,7 @@ class window_host {
         if constexpr (requires { window_.photon_stats(); }) ctx.photon = window_.photon_stats();
         // Pull last frame's memo() subtrees out of the tree view() replaces.
         memos_.begin_frame(frame_counter_);
-        ctx.memos = &memos_;
+        ctx.memos = memo_on_ ? &memos_ : nullptr;
         interaction_reads_ = 0;
         ctx.interaction_reads = &interaction_reads_;
         {
@@ -1075,7 +1071,7 @@ class window_host {
             ci.focused       = input_.focused();
             ci.focus_visible = input_.focus_visible();
             ci.previous_ids  = seen_ids_valid_ ? &seen_ids_ : nullptr;
-            ci.memos         = &memos_;
+            ci.memos         = memo_on_ ? &memos_ : nullptr;
             CascadeResult cr = cascade(tree_, ci);
             ci.memos = nullptr;   // overlays are rebuilt into a fresh list each frame
             for (auto& o : overlays_.items()) {
@@ -1087,7 +1083,7 @@ class window_host {
             starting_pending_ = cr.starting;
 
             seen_ids_.clear();
-            collect_starting_ids(tree_, seen_ids_);
+            collect_starting_ids(tree_, seen_ids_, &memos_);
             for (const auto& o : overlays_.items()) collect_starting_ids(o.content, seen_ids_);
             seen_ids_valid_ = true;
 
@@ -1110,6 +1106,7 @@ class window_host {
         // already clamped radii to the real box: a pill that becomes a square
         // springs from its true radius (11 px), not from `radius_full`'s 1e9.
         motion_.begin_frame();
+        motion_.set_memos(&memos_);
         if (springs_ || motion_.size() > 0) {
             const double dt = std::exchange(motion_dt_, 0.0);
             motion_.visit_root(tree_, dt);
@@ -1266,6 +1263,8 @@ class window_host {
     int                 coalesced_moves_ = 0;
     LatencyStats        latency_{};
     MemoCache           memos_{};
+    // MAYAG_MEMO=0 turns memo() off (to check it changes nothing).
+    bool memo_on_ = [] { const char* e = std::getenv("MAYAG_MEMO"); return e == nullptr || *e != '0'; }();
     std::uint64_t       interaction_reads_ = 0;
     BusyLoopDetector    busy_{};
     bool                busy_warned_ = false;

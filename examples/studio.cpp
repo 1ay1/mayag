@@ -487,14 +487,23 @@ struct Studio {
              | width(pct(100)) | height(pct(100)) | absolute(0, 0);
     }
 
+    // What a panel reads from the model, for memo(). The clock and progress
+    // aren't in these, so playback only rebuilds the panels that show them.
+    static std::uint64_t knobs_key(const Knobs& k) {
+        return MemoKey{}.add(static_cast<int>(k.skin)).add(k.hue).add(k.chroma).add(k.lum).add(k.roundness)
+            .add(k.density).add(k.type).add(k.depth).add(k.motion).add(k.lines).add(k.dark);
+    }
+
     static Node view(const Model& m) {
-        const Node app = v(header(m), stats(m),
-                           h(tracks(m), now_playing(m)) | gap(var::space(2)),
-                           worlds(m))
-                       | gap(var::space(2)) | pad(var::space(0.5f), var::space(1), var::space(3), var::space(0.5f));
+        Node app = v(memo(MemoKey{}.add(m.nav), [&] { return header(m); }),
+                     stats(m),
+                     h(memo(MemoKey{}.add(m.track).add(m.playing), [&] { return tracks(m); }), now_playing(m))
+                         | gap(var::space(2)),
+                     worlds(m))
+                 | gap(var::space(2)) | pad(var::space(0.5f), var::space(1), var::space(3), var::space(0.5f));
         return h(glows(),
-                 designer(m),
-                 v(scroll_view(ctx(), "main", m.page, node(app)) | grow() | min_size(0, 0))
+                 memo(MemoKey{}.add(m.preset).add(knobs_key(m.knobs)), [&] { return designer(m); }),
+                 v(scroll_view(ctx(), "main", m.page, node(std::move(app))) | grow() | min_size(0, 0))
                      | grow() | min_size(0, 0))
              | gap(var::space(2.5f)) | pad(var::space(2.5f))
              | width(pct(100)) | height(pct(100)) | clip

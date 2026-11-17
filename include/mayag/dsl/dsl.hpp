@@ -820,9 +820,21 @@ struct NodeElem {
 /// Without this, a runtime-built subtree could not be styled or sized, which
 /// defeats the point of having an escape hatch: real UIs need `list(...) |
 /// scroll(state) | size(...)`.
+namespace detail {
+/// A memo() root is shared with last frame's cache, so styles piped onto it
+/// go on a plain box around it instead.
+inline void wrap_memo_root(NodeElem& e) {
+    if (!e.payload.memo_result()) return;
+    Node w{NodeKind::box};
+    w.add_child(std::move(e.payload));
+    e.payload = std::move(w);
+}
+}  // namespace detail
+
 template <Modifier M>
 [[nodiscard]] inline NodeElem operator|(NodeElem e, M m) {
     check_modifier<NodeElem::capabilities, M>();
+    detail::wrap_memo_root(e);
     // Onto the PAYLOAD, exactly as piping onto the element that built it
     // would. (This used to collect into a separate Style that build() then
     // swapped in wholesale, so `node(card) | grow()` erased the card's fill,
@@ -834,6 +846,7 @@ template <Modifier M>
 template <Responder R>
 [[nodiscard]] inline NodeElem operator|(NodeElem e, R r) {
     check_responder<NodeElem::capabilities, R>();
+    detail::wrap_memo_root(e);
     r.on_pipe(e.payload.style());
     detail::add_responder(e.cascade, r);
     return e;

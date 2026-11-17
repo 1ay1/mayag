@@ -238,6 +238,10 @@ class Node {
     /// for relaying it out at a new size.
     [[nodiscard]] const Node* memo_cascaded() const noexcept { return memo_state_.cascaded; }
     void set_memo_cascaded(const Node* n) noexcept { memo_state_.cascaded = n; }
+    /// Returned by memo() (cached or not): styles piped onto it go on a box
+    /// around it, so the tree is the same with or without the cache.
+    [[nodiscard]] bool memo_result() const noexcept { return memo_state_.result; }
+    void set_memo_result(bool on) noexcept { memo_state_.result = on; }
     /// The hit-id path this memo root was given this frame.
     [[nodiscard]] std::uint64_t memo_path() const noexcept { return memo_state_.path; }
     void set_memo_path(std::uint64_t p) noexcept { memo_state_.path = p; }
@@ -281,6 +285,7 @@ class Node {
         std::uint64_t key = 0;
         std::uint64_t path = 0;
         bool          reused = false;
+        bool          result = false;
         const Node*   cascaded = nullptr;
         mutable MemoSize      sizes[4]{};
         mutable std::uint8_t  n = 0, next = 0;

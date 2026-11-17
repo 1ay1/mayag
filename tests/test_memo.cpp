@@ -57,7 +57,8 @@ struct App {
         for (int i = 0; i < 12; ++i)
             rs.push_back((h(text_owned("row " + std::to_string(i) + " v" + std::to_string(m.version)) | fg(var::text_primary))
                          | pad(6) | bg(var::surface) | id_of("row", static_cast<std::size_t>(i))
-                         | when(state::hover, bg(var::accent)) | when(state::pressed, bg(var::danger)))
+                         | when(state::hover, bg(var::accent)) | when(state::pressed, bg(var::danger))
+                         | transition())
                             .build());
         return (v(std::move(rs)) | gap(2) | radius(6) | bg(var::surface_raised)).build();
     }
@@ -68,15 +69,15 @@ struct App {
         return (box() | size(60, 24) | bg(hot ? colors::red : colors::blue) | id_of("badge")).build();
     }
     static Node view(const Model& m) {
-        // memo() wraps its subtree in a plain box; the plain path does the same.
+        // Piping onto a memo result wraps it in a plain box; the plain path
+        // does the same so the two trees match.
         Node list = g_memo ? memo(static_cast<std::uint64_t>(m.version), [&] { return rows(m); })
                            : [&] { Node w{NodeKind::box}; w.add_child(rows(m)); return w; }();
-        Node b = g_memo ? memo(7, [] { return badge(); }) : [] { Node w{NodeKind::box}; w.add_child(badge()); return w; }();
+        Node b = g_memo ? memo(7, [] { return badge(); }) : badge();
         // The same key twice in one frame: the second is simply built.
         const auto tag = [] { return (text<"tag"> | fg(var::text_secondary)).build(); };
-        const auto plain_wrap = [&] { Node w{NodeKind::box}; w.add_child(tag()); return w; };
-        Node t1 = g_memo ? memo(11, tag) : plain_wrap();
-        Node t2 = g_memo ? memo(11, tag) : plain_wrap();
+        Node t1 = g_memo ? memo(11, tag) : tag();
+        Node t2 = g_memo ? memo(11, tag) : tag();
         return (v(box() | height(m.shift ? 60.0f : 10.0f), node(std::move(b)), h(node(std::move(t1)), node(std::move(t2))),
                   text_owned("count " + std::to_string(m.counter)) | fg(var::text_secondary),
                   scroll_view(ctx(), "sv", m.scroll, node(std::move(list)) | width(300)) | height(300))
@@ -95,6 +96,9 @@ std::vector<std::vector<std::uint8_t>> run_script() {
         shot();                                         // a steady frame: reused
         rt.window().move_to(rt.center_of(node_id("badge"))); shot();    // a ctx().hovered() reader
         rt.window().move_to(rt.center_of(node_id("row", 3))); shot();   // hover into
+        rt.window().drive_frames(true);
+        for (int i = 0; i < 6; ++i) shot();             // the hover transition plays
+        rt.window().drive_frames(false);
         rt.window().move_to(rt.center_of(node_id("row", 5))); shot();   // hover within
         shot();                                         // still hovered: reused hovered
         rt.send(App::Count{}); shot();                  // hovered, outside changed
@@ -127,6 +131,8 @@ int main() {
     g_memo = true;
     const auto memo = run_script();
     check(plain.size() == memo.size(), "both runs drew the same number of frames");
+    // The hover transition really animated (frames 4..9 are its steps).
+    if (memo.size() > 9) check(memo[4] != memo[9] && memo[5] != memo[6], "the hover transition animated");
     // The script must actually exercise something: scrolling moved the list.
     if (memo.size() >= 3) check(memo[memo.size() - 3] != memo[memo.size() - 4], "the scroll moved the memoised list");
     for (std::size_t i = 0; i < plain.size() && i < memo.size(); ++i) {

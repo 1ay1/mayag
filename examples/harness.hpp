@@ -44,6 +44,7 @@ struct Options {
     bool        debug_bounds = false;
     int         bench_frames = 600;
     bool        bench_raster = false;
+    std::string record_dir;   ///< --headless: write every frame here as PNG
 };
 
 [[nodiscard]] inline Options parse_args(int argc, char** argv, Vec2 default_size) {
@@ -68,6 +69,7 @@ struct Options {
             if (i + 1 < argc && argv[i + 1][0] != '-') o.bench_frames = std::atoi(argv[++i]);
         }
         else if (a == "--bench-raster") { o.bench_raster = true; }
+        else if (a == "--record" && i + 1 < argc) { o.record_dir = argv[++i]; }
         else if (a == "--window")   { o.mode = Options::Mode::window; }
         else if (a == "--last-resort") { o.use_system_fonts = false; }
         else if (a == "--debug")    { o.debug_bounds = true; }
@@ -85,6 +87,7 @@ struct Options {
                 "  --headless        run scripted, assert, and exit (CI)\n"
                 "  --bench [N]       redraw N frames headless, print per-stage CPU time\n"
                 "  --bench-raster    include software rasterising in --bench\n"
+                "  --record DIR      with --headless, write every frame to DIR as PNG\n"
                 "  --size W H        viewport size in logical pixels\n"
                 "  --dpi SCALE       device pixel ratio (default 2.0)\n"
                 "  --last-resort     force the synthesized last-resort face\n"
@@ -270,6 +273,12 @@ template <Program P, typename Driver>
             return mayag::run<P>(std::move(cfg));
 
         case Options::Mode::headless:
+            if (!o.record_dir.empty()) {
+                return run_headless<P>(std::move(cfg), [&](auto& app) {
+                    app.window().record_to(o.record_dir);
+                    return drive(app);
+                });
+            }
             return run_headless<P>(std::move(cfg), std::forward<Driver>(drive));
 
         case Options::Mode::bench:

@@ -389,7 +389,7 @@ struct Walk {
             if (e != nullptr && memo_depth == 0 && e->has_cascaded) {
                 MemoCache::interaction_inside(e->ids, in.hovered, in.pressed, in.focused, in.press_inside,
                                               in.focus_visible, env);
-                if (env == e->env) { cache->live(&n); return; }   // reuse as is
+                if (env == e->env && !e->animating) { cache->live(&n); return; }   // reuse as is
             }
             // The outside changed (or it's nested): start over from the
             // subtree as built, with the hit ids it would have had.
@@ -403,8 +403,10 @@ struct Walk {
             (void)subtree_state(n, in, deep);
         }
 
-        // Nested memos, and subtrees that animate or start, are cascaded but
-        // not kept: reusing them would freeze the motion.
+        // Nested memos are cascaded but not kept, and so is a subtree on a
+        // frame where something in it is starting (its enter look is
+        // momentary). Transitions are fine: the motion pass flags a subtree
+        // whose springs are moving, and it's re-resolved while they do.
         if (cache == nullptr || e == nullptr || memo_depth > 0) {
             if (memo_depth > 0) n.set_memo_key(0);
             visit_plain(n, parent_text, scope, group_state, has_group, parent_disabled);
@@ -415,10 +417,10 @@ struct Walk {
         ++memo_depth;
         visit_plain(n, parent_text, scope, group_state, has_group, parent_disabled);
         --memo_depth;
-        const bool moving = any_transition || any_starting;
+        const bool starting = any_starting;
         any_transition = any_transition || t0;
         any_starting = any_starting || s0;
-        if (moving) { cache->forget(n.memo_key()); n.set_memo_key(0); return; }
+        if (starting) { cache->forget(n.memo_key()); n.set_memo_key(0); return; }
         cache->cascaded(n, env, in.hovered, in.pressed, in.focused, in.press_inside, in.focus_visible);
     }
 
@@ -596,6 +598,8 @@ class StyleMotion {
 
     [[nodiscard]] bool animating() const noexcept { return moving_; }
     [[nodiscard]] std::size_t size() const noexcept { return springs_.size(); }
+    /// Where memo roots report their motion (the host's cache).
+    void set_memos(MemoCache* c) noexcept { memos_ = c; }
     void clear() { springs_.clear(); moving_ = false; }
 
     /// The animatable state of a style, flattened to floats. Colours in
@@ -752,7 +756,20 @@ class StyleMotion {
     // structural path. Every transitioning node animates, named or not: a
     // chevron that brightens on group hover needs no id to fade.
     void visit(Node& n, double dt, std::uint64_t path) {
-        if (n.memo_reused()) return;   // cached only when nothing in it transitions
+        // A memo root: tell the cache whether anything under it is moving, so
+        // next frame it's re-resolved (springs need true targets, and a
+        // reused subtree holds last frame's in-between values).
+        if (n.memo_key() != 0 && memos_ != nullptr) {
+            const bool before = moving_now_;
+            moving_now_ = false;
+            visit_node(n, dt, path);
+            memos_->set_animating(n.memo_key(), moving_now_);
+            moving_now_ = moving_now_ || before;
+            return;
+        }
+        visit_node(n, dt, path);
+    }
+    void visit_node(Node& n, double dt, std::uint64_t path) {
         const Style& cs = std::as_const(n).style();
         const std::uint64_t key = (cs.id != 0 && !cs.hit_only) ? cs.id : path;
         if (cs.transition.on()) {
@@ -878,18 +895,25 @@ class StyleMotion {
     std::uint32_t frame_ = 0;
     bool moving_ = false;
     bool moving_now_ = false;
+    MemoCache* memos_ = nullptr;
 };
 
 /// Every node that styles its first frame (`starting(...)`), for
 /// `CascadeInput::previous_ids`. Only those: a node without a starting rule
 /// never needs to know whether it is new, so the set stays tiny.
-inline void collect_starting_ids(const Node& n, std::unordered_set<std::uint64_t>& out) {
-    // A reused memo subtree has no `starting` rules (it wouldn't be cached).
-    if (n.memo_reused()) return;
+inline void collect_starting_ids(const Node& n, std::unordered_set<std::uint64_t>& out,
+                                 const MemoCache* memos = nullptr) {
+    // A reused memo subtree: its ids were recorded when it was cascaded.
+    if (n.memo_reused() && memos != nullptr) {
+        if (const auto* e = memos->find(n.memo_key()); e != nullptr && e->has_cascaded) {
+            out.insert(e->starting_ids.begin(), e->starting_ids.end());
+            return;
+        }
+    }
     const Cascade* cc = n.cascade().get();
     if (n.style().id != 0 && cc != nullptr && (cc->uses & state::bit::starting) != 0)
         out.insert(n.style().id);
-    for (const auto& k : n.children()) collect_starting_ids(k, out);
+    for (const auto& k : n.children()) collect_starting_ids(k, out, memos);
 }
 
 }  // namespace mayag
