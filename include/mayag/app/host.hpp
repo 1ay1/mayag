@@ -440,6 +440,7 @@ class window_host {
     /// moving, or presentation state (hover, focus) changed under the model.
     [[nodiscard]] bool owes_frame() const noexcept {
         const auto now = now_();
+        if (window_wants_redraw()) return true;
         if (external_loop_ && tick_pending_) return true;   // a display-link frame draws now
         if ((dirty_ || draw_owed_) && now >= next_draw_at(now)) return true;
         if (!external_loop_ && animating() && now >= next_frame_) return true;
@@ -456,6 +457,9 @@ class window_host {
         if (dirty_ || draw_owed_) {
             return std::max(std::chrono::duration_cast<ns>(next_draw_at(now) - now), ns{0});
         }
+        // The window is waiting on something (the GPU coming up) and will
+        // want a redraw when it lands; look again soon.
+        if (window_redraw_pending()) return ns{2'000'000};
         // A foreign loop's display link drives animation frames.
         if (external_loop_) return std::nullopt;
         if (!animating()) {
@@ -466,6 +470,19 @@ class window_host {
         }
         // Nanoseconds, so a late-latch wake lands on time, not up to 1 ms late.
         return std::max(std::chrono::duration_cast<ns>(next_frame_ - now), ns{0});
+    }
+
+    // Optional window hooks: wants_redraw() (redraw now: its renderer
+    // changed) and redraw_pending() (it will want one soon).
+    [[nodiscard]] bool window_wants_redraw() const noexcept {
+        if constexpr (requires(const W& w) { { w.wants_redraw() } -> std::convertible_to<bool>; })
+            return window_.wants_redraw();
+        return false;
+    }
+    [[nodiscard]] bool window_redraw_pending() const noexcept {
+        if constexpr (requires(const W& w) { { w.redraw_pending() } -> std::convertible_to<bool>; })
+            return window_.redraw_pending();
+        return false;
     }
 
     // The frame clock. One per program; jaal starts it when subscribe()

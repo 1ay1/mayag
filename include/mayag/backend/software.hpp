@@ -258,6 +258,11 @@ class ImageStore final : public CoverageSampler {
     void bind(std::uint32_t id) noexcept { bound_ = id; }
 
     [[nodiscard]] bool empty() const noexcept { return images_.empty(); }
+    /// The image texture slot samples now, or null.
+    [[nodiscard]] std::shared_ptr<const ImageData> bound_image() const {
+        const auto it = images_.find(bound_);
+        return it != images_.end() ? it->second : nullptr;
+    }
 
     // ── CoverageSampler ─────────────────────────────────────────────
     [[nodiscard]] float sample(std::uint32_t slot, float u, float v) const override {

@@ -319,8 +319,8 @@ class WaylandWindow {
         const bool allow_gpu = forced_backend == nullptr ||
                                std::string_view{forced_backend} == "vulkan" ||
                                std::string_view{forced_backend} == "gpu";
-        std::optional<jaal::kernel::pool> prep_pool;
-        jaal::kernel::job_result<std::unique_ptr<backend::VulkanDevice>> prep;
+        std::optional<jaal::kernel::pool>& prep_pool = prep_pool_;
+        auto& prep = prep_;
         if (allow_gpu) {
             prep_pool.emplace(1);
             prep = prep_pool->submit([](std::stop_token, std::unique_ptr<backend::VulkanDevice> d) {
@@ -438,11 +438,17 @@ class WaylandWindow {
         // shm surfaces below are created and the CPU path takes over. The
         // choice is silent by design; the runtime logs the winner once.
         if (allow_gpu) {
-            gpu_ = prep.get_at_root();
-            if (gpu_ && gpu_->attach_wayland(display_, surface_, logical_, scale_)) gpu_active_ = true;
+            // MAYAG_GPU_ASYNC=0 waits for the GPU before the first frame.
+            // Otherwise, if the driver isn't ready yet, the first frames go
+            // out on the CPU path (~10 ms) and the window switches to the
+            // GPU on the first frame after it is.
+            const char* async = ::getenv("MAYAG_GPU_ASYNC");
+            const bool wait = async != nullptr && std::string_view{async} == "0";
+            if (wait || prep.ready()) adopt_gpu(prep.get_at_root());
+            else gpu_pending_ = true;
         }
         if (!gpu_) gpu_ = std::make_unique<backend::VulkanDevice>();
-        startup::mark("vulkan ready");
+        startup::mark(gpu_pending_ ? "vulkan pending (cpu first)" : "vulkan ready");
 #endif
 
         // The shm buffers (a float framebuffer plus three encoded copies,
@@ -552,6 +558,12 @@ class WaylandWindow {
         if (!open_ || surface_ == nullptr) return;
 
 #ifdef MAYAG_WITH_VULKAN
+        if (gpu_pending_ && prep_.ready()) {
+            adopt_gpu(prep_.get_at_root());
+            gpu_pending_ = false;
+            prep_pool_.reset();
+            startup::mark("vulkan took over");
+        }
         // GPU path: the Vulkan swapchain owns the wl_surface's buffers, so
         // there is no shm buffer, no CPU encode, and no damage bookkeeping
         // here — the driver presents directly. This is the default on Linux;
@@ -782,6 +794,29 @@ class WaylandWindow {
     void sync_atlas_to_gpu() {
         if (atlas_sync_) atlas_sync_(*gpu_);
     }
+
+    /// Attach a prepared device to the surface and make it the renderer. The
+    /// atlas uploads in full on its first sync (a fresh device holds a 1x1
+    /// placeholder); the bound image is re-uploaded here.
+    void adopt_gpu(std::unique_ptr<backend::VulkanDevice> d) {
+        if (!d || !d->attach_wayland(display_, surface_, logical_, scale_)) {
+            if (d) d->destroy();
+            if (!gpu_) gpu_ = std::make_unique<backend::VulkanDevice>();
+            return;
+        }
+        gpu_ = std::move(d);
+        gpu_active_ = true;
+        if (auto img = images_.bound_image())
+            (void)gpu_->upload_texture(img->rgba.data(), img->width, img->height);
+        // The shm buffers are done with; give them back.
+        if (shm_made_) {
+            for (auto& b : buffers_) b.unmap();
+            if (pool_ != nullptr) { wl::request_destroy(pool_, wl::shm_pool_destroy); pool_ = nullptr; }
+            if (pool_fd_ >= 0) { ::close(pool_fd_); pool_fd_ = -1; }
+            fb_ = backend::Framebuffer{1, 1};
+            shm_made_ = false;
+        }
+    }
 #endif
 
     [[nodiscard]] bool gpu_on() const noexcept {
@@ -810,12 +845,27 @@ class WaylandWindow {
     [[nodiscard]] std::string_view renderer_name() const noexcept {
 #ifdef MAYAG_WITH_VULKAN
         if (gpu_active_) return "vulkan (wayland)";
+        if (gpu_pending_) return "vulkan (wayland; first frames on cpu)";
 #endif
         return "software (wayland/shm)";
     }
     [[nodiscard]] bool gpu_active() const noexcept {
 #ifdef MAYAG_WITH_VULKAN
         return gpu_active_;
+#else
+        return false;
+#endif
+    }
+    [[nodiscard]] bool gpu_pending() const noexcept {
+#ifdef MAYAG_WITH_VULKAN
+        return gpu_pending_;
+#else
+        return false;
+#endif
+    }
+    [[nodiscard]] bool gpu_ready_to_adopt() const {
+#ifdef MAYAG_WITH_VULKAN
+        return gpu_pending_ && prep_.ready();
 #else
         return false;
 #endif
@@ -1859,6 +1909,9 @@ class WaylandWindow {
     // window is on the shm path and `gpu_` is an inert, unattached device.
     std::unique_ptr<backend::VulkanDevice> gpu_ = std::make_unique<backend::VulkanDevice>();
     bool gpu_active_ = false;
+    bool gpu_pending_ = false;   ///< prepared on a worker; adopt on the first frame after
+    std::optional<jaal::kernel::pool> prep_pool_;
+    jaal::kernel::job_result<std::unique_ptr<backend::VulkanDevice>> prep_;
     const void* atlas_ = nullptr;
     std::function<void(backend::VulkanDevice&)> atlas_sync_;
     // A second, offscreen device just for read_pixels()/screenshots on the GPU
@@ -1947,6 +2000,10 @@ class WaylandWindow {
         return p_->renderer_name();
     }
     [[nodiscard]] bool gpu_active() const noexcept { return p_->gpu_active(); }
+    /// The GPU finished coming up after the first CPU frames: redraw now so
+    /// the switch happens at once, not at the next input.
+    [[nodiscard]] bool wants_redraw() const noexcept { return p_ && p_->gpu_ready_to_adopt(); }
+    [[nodiscard]] bool redraw_pending() const noexcept { return p_ && p_->gpu_pending(); }
 
     [[nodiscard]] std::uint64_t frames_presented() const noexcept {
         return p_->frames_presented();
