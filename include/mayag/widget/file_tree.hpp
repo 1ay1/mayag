@@ -15,7 +15,9 @@
 //   Clicked on part_id(id, kTreeAction + i) -> the row's hover action (a terminal
 //                                 uses it for "new tab here" / "open in $EDITOR")
 //   Scrolled on node_id(id)    -> scroll.scroll_by(delta)
-//   keyboard (app): up/down select, left collapse/parent, right expand, enter open
+//   keyboard: tree_key(key, selected, scroll, rows) does the standard keys
+//   and returns a TreeIntent; tree_click(row, count, selected, rows) the same
+//   for clicks. The app applies the intent (open the file, flip expanded).
 //
 // Terminal use: `tabs` puts one dot per tab whose working directory is that
 // folder (in the tab's colour), and `here` marks the folder the focused tab
@@ -46,6 +48,86 @@ struct TreeRow {
 
 inline constexpr float kTreeRowH = 24.0f;
 inline constexpr std::size_t kTreeAction = 1u << 21;   ///< clear of part_dec/inc/menu
+
+// ── behaviour ───────────────────────────────────────────────────────────
+//
+// The tree's keyboard and click handling, so apps don't each rewrite it.
+// They move the selection and scroll themselves and return what the app
+// should do with the result (open a file, toggle a folder, give up focus).
+
+/// What a key or click on the tree asks the app to do.
+struct TreeIntent {
+    enum class Act : std::uint8_t {
+        none,
+        moved,      ///< selection moved (already applied)
+        toggle,     ///< folder at `row`: flip expanded
+        expand,     ///< folder at `row`: expand (it is collapsed)
+        collapse,   ///< folder at `row`: collapse (it is expanded)
+        open,       ///< file at `row`: open and keep it
+        preview,    ///< file at `row`: open as a preview, keep focus here
+        leave,      ///< hand focus back (Escape)
+    };
+    Act act = Act::none;
+    int row = -1;
+};
+
+/// Scroll the tree so `row` is in view.
+inline void tree_reveal(ScrollState& scroll, int row) {
+    const float y = static_cast<float>(row) * kTreeRowH;
+    if (y < scroll.offset.y) scroll.scroll_to({scroll.offset.x, y});
+    else if (y + kTreeRowH > scroll.offset.y + scroll.viewport.y)
+        scroll.scroll_to({scroll.offset.x, y + kTreeRowH - scroll.viewport.y});
+}
+
+/// The row of `row`'s parent folder, or -1 at the top level.
+[[nodiscard]] inline int tree_parent(const std::vector<TreeRow>& rows, int row) {
+    if (row <= 0 || row >= static_cast<int>(rows.size())) return -1;
+    const int depth = rows[static_cast<std::size_t>(row)].depth;
+    for (int r = row - 1; r >= 0; --r)
+        if (rows[static_cast<std::size_t>(r)].depth < depth) return r;
+    return -1;
+}
+
+/// Up/down (or j/k) move, right/l expand, left/h collapse or go to the
+/// parent, Enter opens (or toggles a folder), Space previews, Escape leaves.
+[[nodiscard]] inline TreeIntent tree_key(Key key, int& selected, ScrollState& scroll,
+                                         const std::vector<TreeRow>& rows) {
+    using A = TreeIntent::Act;
+    if (rows.empty()) return {};
+    const int last = static_cast<int>(rows.size()) - 1;
+    selected = selected < 0 ? 0 : (selected > last ? last : selected);
+    const TreeRow& r = rows[static_cast<std::size_t>(selected)];
+    const auto move = [&](int to) {
+        selected = to < 0 ? 0 : (to > last ? last : to);
+        tree_reveal(scroll, selected);
+        return TreeIntent{A::moved, selected};
+    };
+    switch (key) {
+        case Key::up: case Key::k: return move(selected - 1);
+        case Key::down: case Key::j: return move(selected + 1);
+        case Key::right: case Key::l:
+            return r.dir && !r.open ? TreeIntent{A::expand, selected} : TreeIntent{};
+        case Key::left: case Key::h:
+            if (r.dir && r.open) return {A::collapse, selected};
+            if (const int p = tree_parent(rows, selected); p >= 0) return move(p);
+            return {};
+        case Key::enter: return {r.dir ? A::toggle : A::open, selected};
+        case Key::space: return {r.dir ? A::toggle : A::preview, selected};
+        case Key::escape: return {A::leave, selected};
+        default: return {};
+    }
+}
+
+/// A click on row `row` (`count` 2 for a double click): selects it; a folder
+/// toggles, a file previews on a single click and opens on a double.
+[[nodiscard]] inline TreeIntent tree_click(int row, int count, int& selected,
+                                           const std::vector<TreeRow>& rows) {
+    using A = TreeIntent::Act;
+    if (row < 0 || row >= static_cast<int>(rows.size())) return {};
+    selected = row;
+    if (rows[static_cast<std::size_t>(row)].dir) return {A::toggle, row};
+    return {count >= 2 ? A::open : A::preview, row};
+}
 
 namespace detail {
 template <ControlContext C>

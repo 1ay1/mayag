@@ -13,8 +13,8 @@
 // Interaction:
 //   Clicked on part_id(id, i)          -> choose item i
 //   Left on part_id(id, part_menu)     -> dismissed by a click outside
-//   keys (app): up/down/ctrl-n/ctrl-p move, enter choose, esc close, the
-//               rest go to the query's TextEditState
+//   keys: picker_key(query, key, mods, selected, count) moves, edits the
+//         query and returns a PickerIntent (choose / close) for the app
 
 #include "control.hpp"
 #include "file_icon.hpp"
@@ -29,6 +29,32 @@
 #include <vector>
 
 namespace mayag::dsl {
+
+/// What a key in the picker asks the app to do.
+struct PickerIntent {
+    enum class Act : std::uint8_t { none, moved, edited, choose, close };
+    Act act = Act::none;
+    int index = -1;   ///< choose: the selected item
+};
+
+/// Up/down and ctrl-n/ctrl-p move the selection (clamped to `count` items
+/// when it's known, >= 0), Enter chooses, Escape closes, and everything else
+/// edits the query (which puts the selection back on the first item).
+[[nodiscard]] inline PickerIntent picker_key(TextEditState& query, Key key, Mods mods, int& selected,
+                                             int count = -1) {
+    using A = PickerIntent::Act;
+    const auto clamp = [&](int v) {
+        if (v < 0) return 0;
+        if (count >= 0 && v > count - 1) return count > 0 ? count - 1 : 0;
+        return v;
+    };
+    if (key == Key::escape) return {A::close};
+    if (key == Key::enter) return {A::choose, clamp(selected)};
+    if (key == Key::down || (mods.ctrl && key == Key::n)) { selected = clamp(selected + 1); return {A::moved, selected}; }
+    if (key == Key::up || (mods.ctrl && key == Key::p)) { selected = clamp(selected - 1); return {A::moved, selected}; }
+    if (query.handle_key(key, mods)) { selected = 0; return {A::edited, 0}; }
+    return {};
+}
 
 struct PickerItem {
     std::string label;

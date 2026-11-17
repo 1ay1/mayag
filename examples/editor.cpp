@@ -896,57 +896,49 @@ struct Editor {
     static Cmd update(Model& m, Fold e) { if (Buffer* b = cur(m)) b->ed.toggle_fold(e.line); return {}; }
     static Cmd update(Model& m, OpenTab e) { activate(m, e.i); return SetTitle{title_of(m)}; }
     static Cmd update(Model& m, CloseTab e) { close(m, e.i); return SetTitle{title_of(m)}; }
+    // The tree's rows as the widget sees them, and what to do with an intent.
+    static std::vector<TreeRow> tree_widget_rows(const Model& m, const std::vector<int>& rows) {
+        std::vector<TreeRow> out;
+        out.reserve(rows.size());
+        for (int i : rows) {
+            const TreeNode& n = m.tree[static_cast<std::size_t>(i)];
+            out.push_back({.name = n.name, .depth = n.depth, .dir = n.dir, .open = n.dir && m.expanded.contains(n.path)});
+        }
+        return out;
+    }
+    static Cmd apply_tree(Model& m, const std::vector<int>& rows, TreeIntent in) {
+        using A = TreeIntent::Act;
+        if (in.act == A::none || in.act == A::moved) return {};
+        if (in.act == A::leave) { m.focus = Focus::editor; return {}; }
+        const TreeNode& n = m.tree[static_cast<std::size_t>(rows[static_cast<std::size_t>(in.row)])];
+        switch (in.act) {
+            case A::toggle: if (!m.expanded.erase(n.path)) m.expanded.insert(n.path); return {};
+            case A::expand: m.expanded.insert(n.path); return {};
+            case A::collapse: m.expanded.erase(n.path); return {};
+            case A::open: open(m, n.path, false); return SetTitle{title_of(m)};
+            case A::preview: open(m, n.path, true); m.focus = Focus::tree; return SetTitle{title_of(m)};
+            default: return {};
+        }
+    }
     static Cmd update(Model& m, TreeClick e) {
         const auto rows = tree_rows(m);
-        if (e.row < 0 || e.row >= static_cast<int>(rows.size())) return {};
-        m.tree_sel = e.row;
         m.focus = Focus::tree;
-        const TreeNode& n = m.tree[static_cast<std::size_t>(rows[static_cast<std::size_t>(e.row)])];
-        if (n.dir) { if (!m.expanded.erase(n.path)) m.expanded.insert(n.path); return {}; }
-        open(m, n.path, e.count < 2);
-        m.focus = e.count >= 2 ? Focus::editor : Focus::tree;
-        return SetTitle{title_of(m)};
+        const TreeIntent in = tree_click(e.row, e.count, m.tree_sel, tree_widget_rows(m, rows));
+        Cmd c = apply_tree(m, rows, in);
+        if (in.act == TreeIntent::Act::open) m.focus = Focus::editor;   // a double click moves to the file
+        return c;
     }
     static Cmd update(Model& m, TreeKey e) {
         const auto rows = tree_rows(m);
-        if (rows.empty()) return {};
-        const auto node_at = [&](int r) -> const TreeNode& { return m.tree[static_cast<std::size_t>(rows[static_cast<std::size_t>(r)])]; };
-        const auto reveal = [&] {
-            const float y = static_cast<float>(m.tree_sel) * kTreeRowH;
-            if (y < m.tree_scroll.offset.y) m.tree_scroll.scroll_to({0, y});
-            else if (y + kTreeRowH > m.tree_scroll.offset.y + m.tree_scroll.viewport.y)
-                m.tree_scroll.scroll_to({0, y + kTreeRowH - m.tree_scroll.viewport.y});
-        };
-        const TreeNode& n = node_at(std::clamp(m.tree_sel, 0, static_cast<int>(rows.size()) - 1));
-        switch (e.k.key) {
-            case Key::up: case Key::k: m.tree_sel = std::max(0, m.tree_sel - 1); reveal(); break;
-            case Key::down: case Key::j: m.tree_sel = std::min(static_cast<int>(rows.size()) - 1, m.tree_sel + 1); reveal(); break;
-            case Key::right: case Key::l: if (n.dir) m.expanded.insert(n.path); break;
-            case Key::left: case Key::h:
-                if (n.dir && m.expanded.contains(n.path)) m.expanded.erase(n.path);
-                else {   // to the parent folder
-                    const std::string parent = dirname_of(n.path);
-                    for (std::size_t r = 0; r < rows.size(); ++r) if (node_at(static_cast<int>(r)).path == parent) m.tree_sel = static_cast<int>(r);
-                    reveal();
-                }
-                break;
-            case Key::enter: case Key::space:
-                if (n.dir) { if (!m.expanded.erase(n.path)) m.expanded.insert(n.path); }
-                else { open(m, n.path, e.k.key == Key::space); if (e.k.key == Key::space) m.focus = Focus::tree; return SetTitle{title_of(m)}; }
-                break;
-            case Key::escape: m.focus = Focus::editor; break;
-            default: break;
-        }
-        return {};
+        return apply_tree(m, rows, tree_key(e.k.key, m.tree_sel, m.tree_scroll, tree_widget_rows(m, rows)));
     }
     static Cmd update(Model& m, TreeWheel e) { m.tree_scroll.scroll_by(e.delta); return {}; }
     static Cmd update(Model& m, PickKey e) {
         const auto& k = e.k;
-        if (k.key == Key::escape) { m.pick = PickMode::none; return {}; }
-        if (k.key == Key::enter) return run_pick(m, m.pick_sel);
-        if (k.key == Key::down || (k.mods.ctrl && k.key == Key::n)) { ++m.pick_sel; return {}; }
-        if (k.key == Key::up || (k.mods.ctrl && k.key == Key::p)) { m.pick_sel = std::max(0, m.pick_sel - 1); return {}; }
-        if (m.pick_q.handle_key(k.key, k.mods)) m.pick_sel = 0;
+        const PickerIntent in = picker_key(m.pick_q, k.key, k.mods, m.pick_sel);
+        if (in.act == PickerIntent::Act::close) m.pick = PickMode::none;
+        if (in.act == PickerIntent::Act::choose) return run_pick(m, in.index);
+        // Backspace that leaves go-to-line empty closes it (editor specific).
         if (m.pick_q.text.empty() && k.key == Key::backspace && m.pick == PickMode::line) m.pick = PickMode::none;
         return {};
     }
@@ -1529,8 +1521,8 @@ int main(int argc, char** argv) {
         };
         const auto& M = [&]() -> const Editor::Model& { return rt.model(); };
         const auto B = [&]() -> const Editor::Buffer& { return M().bufs[static_cast<std::size_t>(M().active)]; };
-        const Mods cmd = Mods{.super = true};
-        const Mods cmd_sh = Mods{.shift = true, .super = true};
+        const Mods cmd = Mods::cmd();
+        const Mods cmd_sh = Mods::cmd(true);
         // ED_SHOT=<dir>: screenshots of the REAL runtime (overlays included)
         // at interesting points of the script.
         const char* shot_dir = std::getenv("ED_SHOT");
@@ -1551,7 +1543,7 @@ int main(int argc, char** argv) {
         ok(!main_errors.empty() && main_errors[0].header, "the linter reports problems (the TODO)");
 
         // typing
-        rt.press_key(Key::down, cmd);
+        rt.press_key(Key::end, cmd);   // end of document on every platform
         rt.press_key(Key::enter);
         rt.type("int x = 4");
         ok(B().ed.dirty() && B().ed.line(B().ed.cursor().line) == "int x = 4", "typing into the editor");
