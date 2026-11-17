@@ -232,6 +232,70 @@ int main() {
         }
     }
 
+    // ── text pixels, not just ink counts ────────────────────────────────────
+    //
+    // The section above counts lit pixels with a generous ratio, which is
+    // the right test for "did the atlas upload" and the wrong one for "is
+    // the GPU drawing the same text": the MSL kernel went without the text
+    // coverage correction AND the SDF smoothing growth, every window drew
+    // text lighter and bolder than the CPU reference, and the ratio passed.
+    // Compare actual edge pixels, for bitmap and SDF glyphs, light-on-dark
+    // and dark-on-light (the correction depends on the text's luminance).
+    section("GPU text matches the CPU reference pixel for pixel");
+    {
+        auto fonts = typo::system::default_stack(typo::FontConfig{
+            .mode = typo::RenderMode::hybrid,
+            .sdf_threshold = 40.0f,
+            .atlas_size = 1024,
+        });
+        if (fonts == nullptr || fonts->empty()) {
+            std::printf("       (no system fonts; skipping)\n");
+        } else {
+            typo::StackGlyphRenderer glyphs{*fonts};
+            typo::StackSampler       cpu_sampler{*fonts};
+            struct Pol { const char* name; Color<Srgb> fg, bg; };
+            for (const Pol& p : {Pol{"light on dark", rgb<0xE6E8EB>, rgb<0x15181E>},
+                                 Pol{"dark on light", rgb<0x1C1F24>, rgb<0xFAFAFA>}}) {
+                DrawList tdl;
+                tdl.fill_rect(Rect{0, 0, static_cast<float>(w), static_cast<float>(h)}, p.bg);
+                TextStyle ts{};
+                ts.color = p.fg;
+                ts.size = 14.0f;   // bitmap glyphs at subpixel phases
+                glyphs.draw_text(tdl, "Hamburgefonstiv wavy 0123", Rect{12, 20, 380, 30}, ts);
+                ts.size = 64.0f;   // distance-field glyphs with smoothing growth
+                glyphs.draw_text(tdl, "Rag &", Rect{12, 80, 380, 90}, ts);
+
+                gpu.sync_atlas(fonts->atlas());
+                const auto g = gpu.render_offscreen(tdl, p.bg, w, h);
+                backend::Framebuffer tfb{w, h};
+                backend::Tiled::render(tdl, tfb, &cpu_sampler, &backend::shared_pool(), p.bg);
+                const auto c = tfb.to_rgba8();
+                if (const char* dump = std::getenv("MAYAG_DUMP")) {
+                    const std::string tag = p.fg.c1 > 0.5f ? "light" : "dark";
+                    (void)imageio::write_png(std::string{dump} + "/gpu_" + tag + ".png", g, w, h);
+                    (void)imageio::write_png(std::string{dump} + "/cpu_" + tag + ".png", c, w, h);
+                }
+                const int bgv = static_cast<int>(p.bg.c1 * 255.0f + 0.5f);
+                double sum = 0.0, abs_sum = 0.0;
+                std::size_t n = 0;
+                for (std::size_t i = 0; i + 3 < g.size() && i + 3 < c.size(); i += 4) {
+                    if (std::abs(g[i + 1] - bgv) < 3 && std::abs(c[i + 1] - bgv) < 3) continue;
+                    const double d = static_cast<double>(g[i + 1]) - static_cast<double>(c[i + 1]);
+                    sum += d; abs_sum += std::abs(d); ++n;
+                }
+                const double mean = n ? sum / static_cast<double>(n) : 0.0;
+                const double mad  = n ? abs_sum / static_cast<double>(n) : 0.0;
+                std::printf("       %s: %zu edge px, mean %+.2f, mean |d| %.2f (of 255)\n",
+                            p.name, n, mean, mad);
+                check(n > 500, "the text inked pixels");
+                // Bilinear vs analytic sampling of the SDF legitimately moves
+                // edge values a little; a missing correction moves them ~20.
+                check(std::abs(mean) < 2.5 && mad < 6.0,
+                      "GPU and CPU text agree per pixel (no missing coverage correction)");
+            }
+        }
+    }
+
     // ── the rest of the primitive set ────────────────────────────────
     //
     // Boxes, circles and text cover most of a UI but not the parts most

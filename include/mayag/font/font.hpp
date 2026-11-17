@@ -100,6 +100,7 @@ class Face {
         face->file_    = std::move(*parsed);
         face->glyphs_  = GlyphSource{face->file_};
         face->kerning_ = KernTable{face->file_};
+        face->tracking_ = TrackTable{face->file_};
         face->ligatures_ = LigatureTable{face->file_};
         face->id_      = next_id();
         face->base_id_ = face->id_;
@@ -223,12 +224,21 @@ class Face {
         return units * scale_for(size_px);
     }
 
-    /// Kerning between two glyphs in pixels.
+    /// Kerning between two glyphs in pixels, at the face's current
+    /// variation instance (weight, optical size, ...).
     [[nodiscard]] float kern(std::uint16_t left, std::uint16_t right, float size_px) const noexcept {
-        return kerning_.lookup(left, right) * scale_for(size_px);
+        std::lock_guard lock{mutex_};
+        return kerning_.lookup(left, right, coords_) * scale_for(size_px);
     }
 
     [[nodiscard]] bool has_kerning() const noexcept { return !kerning_.empty(); }
+
+    /// Extra advance per glyph, in pixels at `size_px`, that the font's
+    /// `trak` table asks for at `point_size` (the LOGICAL size: 13 pt type on
+    /// a 2x display is spaced as 13 pt, not 26 pt). 0 for fonts without one.
+    [[nodiscard]] float tracking(float point_size, float size_px) const noexcept {
+        return tracking_.at(point_size) * scale_for(size_px);
+    }
 
     /// Whether this face carries GSUB ligatures we can apply.
     [[nodiscard]] bool has_ligatures() const noexcept { return !ligatures_.empty(); }
@@ -392,6 +402,7 @@ class Face {
     ot::FontFile              file_;
     GlyphSource               glyphs_;
     KernTable                 kerning_;
+    TrackTable                tracking_;
     LigatureTable             ligatures_;
     std::uint32_t             id_ = 0;
     std::uint32_t             base_id_ = 0;   // stable id ignoring variation
@@ -450,6 +461,21 @@ struct FontConfig {
     float      sdf_raster_size = 48.0f;
     float      sdf_spread      = 6.0f;
     int        atlas_size      = 1024;
+    /// Font smoothing: grow every glyph outline by this many DEVICE pixels
+    /// on each side, ramping up from 0 linearly until `smoothing_full_px`
+    /// (light text) or `smoothing_full_px_dark` (dark text).
+    ///
+    /// This is the "weight" macOS text has and FreeType-style text lacks.
+    /// CoreGraphics font smoothing (on by default, Retina included) offsets
+    /// glyph edges outward; measured gamma-independently on SF with straight
+    /// stems at 64 subpixel offsets each, the growth is 0.30 px per side,
+    /// reached at ~20 device px for white-on-black and ~51 px for
+    /// black-on-white, proportionally less below. Without it, mayag's stems
+    /// came out 0.6 px thinner than every native Mac app's and body text read
+    /// thin and grey beside them. 0 turns it off.
+    float      smoothing              = 0.30f;
+    float      smoothing_full_px      = 20.0f;
+    float      smoothing_full_px_dark = 51.0f;
     /// Glyphs untouched for this many frames become eviction candidates.
     std::uint64_t glyph_ttl_frames = 600;
 };
@@ -667,6 +693,7 @@ class FontStack : public Shaper {
             }
 
             g.advance += params.letter_spacing;
+            if (g.advance != 0.0f) g.advance += tracking_px(face, params);
             out.width += g.advance;
             out.glyphs.push_back(g);
 
@@ -685,15 +712,43 @@ class FontStack : public Shaper {
     /// Fetch (rasterising on demand) the atlas entry for a glyph. `weight`
     /// drives the wght axis; `axes` carries any further variable-font axis
     /// overrides (opsz, wdth, ...) so the raster matches the shaped run.
+    /// Horizontal positions a coverage glyph is rasterised at, per pixel.
+    /// A bitmap glyph must land on the integer grid to stay sharp (a
+    /// fractional destination makes every texel straddle two pixels and the
+    /// bilinear fetch blurs it), but snapping the PEN to whole pixels moves
+    /// each glyph up to half a pixel from where the shaper put it, and the
+    /// eye reads that as uneven spacing ("rn" crowding, "il" gaps). So the
+    /// glyph is rasterised with the pen's fraction baked into its outline,
+    /// quantised to quarters, and drawn at the integer part: sharp texels AND
+    /// placement within 1/8 px. Four phases is what Skia/Chrome use.
+    static constexpr int subpixel_phases = 4;
+
+    /// Split a pen x into the integer pixel a coverage glyph is drawn at and
+    /// the phase (0..subpixel_phases-1) it must be rasterised with.
+    struct PenSplit { float pixel; int phase; };
+    [[nodiscard]] static PenSplit split_pen(float x) noexcept {
+        const float q = std::floor(x * subpixel_phases + 0.5f);
+        const float pixel = std::floor(q / subpixel_phases);
+        return {pixel, static_cast<int>(q - pixel * subpixel_phases)};
+    }
+
     [[nodiscard]] const CachedGlyph* glyph(std::size_t face_index, std::uint16_t gid,
                                            float size_px, float weight = 400.0f,
                                            std::span<const ShapeParams::Axis> axes = {},
-                                           bool italic = false) {
+                                           bool italic = false, int x_phase = 0,
+                                           bool dark_text = false) {
         if (face_index >= faces_.size()) return nullptr;
         const Face& face = *faces_[face_index];
         pin_variations(faces_[face_index].get(), weight, axes, italic);
 
         const bool use_sdf = should_use_sdf(size_px);
+        // Phases only mean something for outline coverage: an SDF is resampled
+        // anyway, and colour bitmaps are scaled images.
+        if (use_sdf || face.is_color() || face.has_colr(gid)) x_phase = 0;
+        x_phase = std::clamp(x_phase, 0, subpixel_phases - 1);
+        // Polarity only changes coverage rasters (SDF growth is per draw).
+        if (use_sdf || face.is_color() || face.has_colr(gid) || config_.smoothing <= 0.0f)
+            dark_text = false;
 
         GlyphKey key;
         key.face_id  = face.id();
@@ -723,6 +778,8 @@ class FontStack : public Shaper {
         key.flags = use_sdf ? glyph_flags::sdf : glyph_flags::none;
         if (synth_italic) key.flags |= glyph_flags::synthetic_italic;
         if (synth_bold)   key.flags |= glyph_flags::synthetic_bold;
+        key.flags |= static_cast<std::uint8_t>(x_phase << glyph_flags::phase_shift);
+        if (dark_text) key.flags |= glyph_flags::dark_text;
 
         if (const CachedGlyph* hit = atlas_.find(key)) return hit;
 
@@ -803,6 +860,15 @@ class FontStack : public Shaper {
         // two calls that share a cache slot also share identical pixels.
         const float quantised = static_cast<float>(key.size_bucket) * 0.25f;
         const float scale = face.scale_for(quantised);
+        if (const float grow = smoothing_px(quantised, dark_text); grow > 0.0f) o.embolden(grow / scale);
+        if (x_phase != 0) {
+            // Bake the pen's fraction into the outline (font units, so divide
+            // the pixel shift by the scale). rasterize() floors the bounds, so
+            // the bitmap's offset stays integral and the shift lands in the
+            // coverage, where it belongs.
+            const float dx = static_cast<float>(x_phase) / static_cast<float>(subpixel_phases) / scale;
+            o.transform(Affine{1.0f, 0.0f, 0.0f, 1.0f, dx, 0.0f});
+        }
         auto r = rasterize(o, scale, 1);
         if (synth_bold) {
             // Emboldening grows the bitmap by `pad` on every side; keep the
@@ -852,7 +918,8 @@ class FontStack : public Shaper {
             if (lig != 0 && consumed >= 2) {
                 ShapedGlyph m = g;                 // keep first component's cluster/offset
                 m.glyph_id = lig;
-                m.advance  = faces_[fi]->advance(lig, params.size_px) + params.letter_spacing;
+                m.advance  = faces_[fi]->advance(lig, params.size_px) + params.letter_spacing
+                           + tracking_px(*faces_[fi], params);
                 merged.push_back(m);
                 i += consumed;
             } else {
@@ -903,6 +970,32 @@ class FontStack : public Shaper {
             if (!merged) vals[n++] = {a.tag, a.value};
         }
         face->set_variations({vals.data(), n});
+    }
+
+    /// The `trak` tracking for one glyph of `face` at these params. Tracking
+    /// is chosen by POINT size, i.e. the logical size, which the shaper only
+    /// sees as the optical-size axis: shape_params_of and the painter both pin
+    /// opsz to the logical size before scaling to device pixels. Without an
+    /// opsz pin, size_px is the best guess (the 1x case).
+    [[nodiscard]] static float tracking_px(const Face& face, const ShapeParams& params) noexcept {
+        float pt = params.size_px;
+        for (std::uint8_t a = 0; a < params.axis_count; ++a)
+            if (params.axes[a].tag == ot::tag("opsz")) pt = params.axes[a].value;
+        return face.tracking(pt, params.size_px);
+    }
+
+    /// Font-smoothing growth per side, in device pixels, for a glyph drawn
+    /// at `size_px` in light or dark text. See FontConfig::smoothing.
+    [[nodiscard]] float smoothing_px(float size_px, bool dark_text = false) const noexcept {
+        const float full = dark_text ? config_.smoothing_full_px_dark : config_.smoothing_full_px;
+        if (config_.smoothing <= 0.0f || full <= 0.0f) return 0.0f;
+        return config_.smoothing * num::clamp(size_px / full, 0.0f, 1.0f);
+    }
+
+    /// Whether text in `c` counts as dark for font smoothing: encoded
+    /// luminance below the midpoint, the same split apply_text_gamma uses.
+    [[nodiscard]] static bool is_dark_text(Color<Srgb> c) noexcept {
+        return 0.2126f * c.c0 + 0.7152f * c.c1 + 0.0722f * c.c2 < 0.5f;
     }
 
     [[nodiscard]] bool should_use_sdf(float size_px) const noexcept {
@@ -1297,13 +1390,14 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             bool show_ellipsis = false;
             float ellipsis_x = 0.0f;
             const CachedGlyph* ell_glyph = nullptr;
+            std::uint16_t ell_gid = 0;
             // Ellipsis when: a non-wrapping line overflows, OR this is the last
             // line of a clamped block that hides further lines.
             const bool last_clamped_line = clamped && (li + 1 == line_count);
             const bool overflow_line = st.overflow == TextOverflow::ellipsis &&
                                        !wrapping && line.width > box.width() + 0.5f;
             if ((overflow_line || last_clamped_line) && box.width() > 0.0f) {
-                const std::uint16_t ell_gid = stack_->ellipsis_glyph();
+                ell_gid = stack_->ellipsis_glyph();
                 ell_glyph = stack_->glyph(0, ell_gid, st.size, st.effective_weight(),
                                           {sp.axes.data(), sp.axis_count}, sp.italic);
                 const float ell_w = ell_glyph ? ell_glyph->advance : st.size * 0.5f;
@@ -1324,13 +1418,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                 const auto& g = shaped.glyphs[i];
                 if (g.glyph_id == 0 && g.advance == 0.0f) continue;   // newline marker
 
-                const CachedGlyph* cached = stack_->glyph(g.face_index, g.glyph_id, st.size,
-                                                           st.effective_weight(),
-                                                           {sp.axes.data(), sp.axis_count},
-                                                           sp.italic);
-                if (cached != nullptr && cached->size.x > 0.0f) {
-                    emit(dl, *cached, Vec2{pen_x, baseline_y} + g.offset, st);
-                }
+                place(dl, g.face_index, g.glyph_id, Vec2{pen_x, baseline_y} + g.offset, st, sp);
                 pen_x += g.advance;
                 if (word_gap > 0.0f && g.cluster < s.size() &&
                     (s[g.cluster] == ' ' || s[g.cluster] == '\t')) {
@@ -1340,7 +1428,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
 
             // Draw the ellipsis glyph after the truncated run.
             if (show_ellipsis && ell_glyph != nullptr && ell_glyph->size.x > 0.0f) {
-                emit(dl, *ell_glyph, Vec2{ellipsis_x, baseline_y}, st);
+                place(dl, 0, ell_gid, Vec2{ellipsis_x, baseline_y}, st, sp);
             }
 
             const float line_end_x = (st.align == TextAlign::justify && word_gap > 0.0f)
@@ -1362,6 +1450,23 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
     }
 
   private:
+    /// Fetch and emit one glyph whose origin the shaper put at `pen`.
+    ///
+    /// A coverage glyph is drawn at the pen's whole pixel with the fraction
+    /// rasterised into its bitmap (FontStack::subpixel_phases), so it is
+    /// sharp AND where the shaper put it. SDF and colour glyphs are resampled
+    /// images with no phases; they take the pen as is.
+    void place(DrawList& dl, std::size_t face_index, std::uint16_t gid, Vec2 pen,
+               const TextStyle& st, const ShapeParams& sp) const {
+        const auto split = FontStack::split_pen(pen.x);
+        const CachedGlyph* cached = stack_->glyph(face_index, gid, st.size, st.effective_weight(),
+                                                   {sp.axes.data(), sp.axis_count}, sp.italic,
+                                                   split.phase, FontStack::is_dark_text(st.color));
+        if (cached == nullptr || cached->size.x <= 0.0f) return;
+        const bool phased = !cached->is_sdf && !cached->is_color;
+        emit(dl, *cached, phased ? Vec2{split.pixel, pen.y} : pen, st);
+    }
+
     void emit(DrawList& dl, const CachedGlyph& g, Vec2 pen, const TextStyle& st) const {
         // An SDF entry was rasterised at one size and is reused at every
         // other, so its bearing and extent scale by the ratio between them.
@@ -1387,10 +1492,11 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
         // glyph comes out blurred, and no amount of rasteriser quality can
         // recover it. Measured on the real UI, EVERY glyph was fractional.
         //
-        // So round the origin to the pixel grid and keep the integer size.
-        // Horizontal position quantises to whole pixels (which is what makes
-        // stems crisp); the accumulated sub-pixel error stays in the pen, not
-        // in the glyph, so advances and kerning are unaffected.
+        // So the origin lands on the pixel grid and the size stays integral.
+        // Horizontally that is exact: place() passes the pen's whole pixel
+        // and the glyph's bitmap carries the fraction (a subpixel phase), and
+        // the bearing of a coverage bitmap is integral, so the round() below
+        // changes nothing in x. Vertically the baseline rounds to the grid.
         //
         // SDF entries are resampled by design and must NOT be snapped —
         // that is the whole point of a scale-free field.
@@ -1413,7 +1519,11 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             const float spread = g.spread > 0.0f ? g.spread : 4.0f;
             const float per_px = 1.0f / (2.0f * spread * num::max(k, 0.01f));
             const float edge = num::clamp(per_px * 0.75f, 0.01f, 0.25f);
-            dl.glyph(dst, g.uv, st.color, true, edge);
+            // Font smoothing: the same per-side growth the bitmap path bakes
+            // into its outlines, as a threshold shift (per_px field units per
+            // display pixel), so text keeps its weight across the threshold.
+            const float grow = stack_->smoothing_px(st.size, FontStack::is_dark_text(st.color)) * per_px;
+            dl.glyph(dst, g.uv, st.color, true, edge, grow);
         } else {
             dl.glyph(dst, g.uv, st.color, false);
         }

@@ -64,6 +64,13 @@ inline constexpr std::uint8_t sdf       = 1 << 0;   ///< distance field, not cov
 inline constexpr std::uint8_t subpixel  = 1 << 1;   ///< RGB subpixel positioned
 inline constexpr std::uint8_t synthetic_bold   = 1 << 2;
 inline constexpr std::uint8_t synthetic_italic = 1 << 3;
+/// Bits 4-5: the horizontal subpixel phase (0..3, in quarter pixels) a
+/// coverage bitmap was rasterised at. See FontStack::subpixel_phases.
+inline constexpr std::uint8_t phase_shift = 4;
+inline constexpr std::uint8_t phase_mask  = 0x3 << phase_shift;
+/// Rasterised for DARK text: font smoothing grows dark glyphs less than
+/// light ones at small sizes (see FontConfig::smoothing).
+inline constexpr std::uint8_t dark_text   = 1 << 6;
 }  // namespace glyph_flags
 
 }  // namespace mayag::typo

@@ -263,32 +263,56 @@ inline constexpr u32 FLAG_GLYPH_SDF = 128u;
     return mg::pow((c + 0.055f) / 1.055f, 2.4f);
 }
 
-// ── text ────────────────────────────────────────────────────────────────
-//
-// Stem darkening. Coverage-antialiased glyphs look too THIN when light text
-// sits on a dark background, because the eye integrates a light stroke on
-// dark more generously than the linear coverage says. FreeType calls this
-// stem darkening; Apple and Skia apply a comparable gamma. Applied to
-// COVERAGE, not colour, so it can never shift hue.
-//
-// This lives in the kernel — not in one backend — precisely because it is a
-// LOOK decision. It used to exist only in the software rasteriser, which is
-// why GPU text could never match the reference at any tolerance.
-inline constexpr f32 text_gamma_light = 0.80f;
-inline constexpr f32 text_gamma_dark  = 1.05f;
+/// linear -> sRGB, the exact piecewise transfer. Only text coverage needs
+/// it: see apply_text_gamma.
+[[nodiscard]] inline f32 linear_to_srgb(f32 c) noexcept {
+    if (c <= 0.0031308f) return c * 12.92f;
+    return 1.055f * mg::pow(c, 1.0f / 2.4f) - 0.055f;
+}
 
+// ── text ────────────────────────────────────────────────────────────────────────
+//
+// Glyph coverage is composited as if in GAMMA space, the way CoreText,
+// DirectWrite and Skia composite text, while everything else blends in
+// linear light.
+//
+// Linear blending is right for shapes and wrong for text. Fonts are drawn,
+// hinted and tuned on renderers that blend antialiased edges in sRGB-encoded
+// space, so their stems were designed for that weight. Blended in linear
+// light, a partially covered pixel of light text on dark comes out much
+// brighter, and of dark text on light much paler, so light-on-dark text
+// reads bold and blobby and dark-on-light reads thin and washed out: the
+// same font changes weight with the theme.
+//
+// The blend happens in fixed-function hardware against a backdrop the shader
+// cannot see, so the encoded-space result is reproduced by reshaping the
+// coverage against the backdrop the text is designed against (black under
+// light text, white under dark), exactly:
+//
+//   light on black:  c' = dec(c * enc(L)) / L
+//   dark on white:   c' = (1 - dec(1 - c * (1 - enc(L)))) / (1 - L)
+//
+// with L the text's linear luminance. Mid-grey text cross-fades between the
+// two. Against the real backdrop the result is within a few percent of true
+// gamma-space blending for any reasonably contrasting pair, and it is a
+// function of coverage only, so it cannot shift hue.
+//
+// This lives in the kernel, not in one backend, because it is a LOOK
+// decision; it used to exist only in the software rasteriser, which is why
+// GPU text could never match the reference at any tolerance.
 [[nodiscard]] inline f32 apply_text_gamma(f32 cov, vec4 premul_color) noexcept {
     if (cov <= 0.0f) return cov;
     if (cov >= 1.0f) return cov;
     const f32 a = premul_color.w > 1e-4f ? premul_color.w : 1.0f;
-    const f32 lum = (0.2126f * premul_color.x +
-                     0.7152f * premul_color.y +
-                     0.0722f * premul_color.z) / a;
-    // Blend between the two exponents by how light the text is, so a mid-grey
-    // label does not jump discontinuously between regimes.
-    const f32 t = mg::clamp(lum * 2.0f, 0.0f, 1.0f);
-    const f32 gamma = mg::mix(text_gamma_dark, text_gamma_light, t);
-    return mg::pow(cov, gamma);
+    const f32 lum = mg::clamp((0.2126f * premul_color.x +
+                               0.7152f * premul_color.y +
+                               0.0722f * premul_color.z) / a, 0.0f, 1.0f);
+    const f32 enc = linear_to_srgb(lum);
+    const f32 on_black = lum > 1e-4f ? srgb_to_linear(cov * enc) / lum : cov;
+    const f32 on_white = lum < 0.9999f
+        ? (1.0f - srgb_to_linear(1.0f - cov * (1.0f - enc))) / (1.0f - lum) : cov;
+    const f32 t = mg::smoothstep(0.35f, 0.65f, enc);
+    return mg::clamp(mg::mix(on_white, on_black, t), 0.0f, 1.0f);
 }
 
 /// Fallback half-width of the SDF threshold band, in normalised field units,
@@ -474,7 +498,8 @@ struct Env {
             // instead would over-estimate the ramp on a magnified, bilinearly
             // sampled field and bloom every glyph into a grey halo.
             const f32 band = f.params.x > 0.0f ? f.params.x : sdf_edge_fallback;
-            cov = mg::smoothstep(0.5f - band, 0.5f + band, raw);
+            const f32 edge = 0.5f - f.params.y;   // params.y: font-smoothing growth
+            cov = mg::smoothstep(edge - band, edge + band, raw);
         } else {
             cov = raw;   // bitmap entry: already coverage
         }

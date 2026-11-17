@@ -550,26 +550,19 @@ class Software {
                 // glyph (so magnified text stays crisp); fall back to the
                 // constant when it wasn't set.
                 const float band = inst.params.x > 0.0f ? inst.params.x : sdf_edge;
+                const float edge = 0.5f - inst.params.y;   // font-smoothing growth
                 const float cov = (inst.flags & instance_flags::glyph_sdf) == 0
                     ? raw
-                    : num::smoothstep(0.5f - band, 0.5f + band, raw);
+                    : num::smoothstep(edge - band, edge + band, raw);
 
-                // ── stem darkening ──────────────────────────────────────
+                // ── text coverage ─────────────────────────────────────
                 //
-                // Compositing in linear light is physically correct, but for
-                // TEXT it is perceptually wrong in a specific, measurable
-                // way: a 50%-covered pixel of white-on-dark lands ~0.19 L*
-                // lighter than a human reads as "half", so light text on a
-                // dark background looks thin and washed out. (Measured with
-                // Oklch against the linear blend.) Dark-on-light has the
-                // opposite, milder error.
-                //
-                // Every serious text renderer corrects for this — FreeType
-                // calls it stem darkening, Apple and Skia apply a
-                // contrast-dependent gamma. mayag raises coverage to a power
-                // chosen by the text/background polarity, which thickens
-                // light-on-dark and leaves dark-on-light essentially alone.
-                //
+                // Linear-light compositing is right for shapes and wrong for
+                // text: fonts are designed on renderers that blend glyph
+                // edges in gamma space. kernel::apply_text_gamma reshapes the
+                // coverage so the linear blend reproduces the gamma-space
+                // result, which is what CoreText and DirectWrite draw. One
+                // definition, shared with every GPU backend.
                 // Applied to COVERAGE, not colour, so it cannot shift hue.
                 return apply_text_gamma(cov, inst.color);
             }

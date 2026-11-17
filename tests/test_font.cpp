@@ -1430,6 +1430,107 @@ void test_variations() {
     vf->reset_variations();
 }
 
+/// SF (the macOS system font) is the hardest Latin font a UI meets: a
+/// variable font whose kerning lives in GPOS extension lookups with
+/// per-instance variation deltas, and whose spacing comes from Apple's `trak`
+/// table. Three separate bugs each moved glyphs by up to 7 px from where
+/// CoreText puts them; nothing failed, the text just looked subtly off.
+/// The reference positions are CoreText's own (CTRunGetPositions, system UI
+/// font), captured on macOS 26; mayag must agree to 1/100 px.
+void test_coretext_parity() {
+    section("CoreText parity (SF)");
+    auto stack = typo::system::default_stack();
+    const typo::Face* f = stack ? stack->face_at(0) : nullptr;
+    // SF names itself "System Font" (SFNS.ttf); newer builds may say "SF Pro".
+    const bool is_sf = f != nullptr && f->is_variable() &&
+                       (f->family() == "System Font" || f->family().starts_with("SF Pro"));
+    if (!is_sf) {
+        std::printf("  (skipped: SF is not the primary UI face here)\n");
+        return;
+    }
+    // Exercises the comma-space pair (a format-1 PairPos whose variation
+    // delta is addressed from the PairSet), AV/LA/VA class kerning, and the
+    // size-dependent trak tracking (13 pt loosens, 26 pt tightens).
+    const char* s = "Typography: Yes, LAVA";
+    const float at13[] = {0.000f, 7.338f, 14.320f, 22.179f, 29.783f, 37.629f, 42.504f, 49.601f,
+                          57.459f, 64.778f, 71.760f, 75.543f, 79.124f, 86.487f, 93.837f,
+                          100.566f, 104.349f, 107.929f, 115.235f, 123.094f, 130.952f};
+    const float at26[] = {0.000f, 12.528f, 25.522f, 40.164f, 54.322f, 68.950f, 77.118f, 90.502f,
+                          105.144f, 119.446f, 132.441f, 138.436f, 144.164f, 158.012f, 171.685f,
+                          184.137f, 188.978f, 194.706f, 208.659f, 223.486f, 238.209f};
+    for (const auto& [size, want] : {std::pair{13.0f, at13}, std::pair{26.0f, at26}}) {
+        TextStyle st;
+        st.size = size;
+        const auto run = stack->shaped(s, typo::detail::shape_params_of(st));
+        float x = 0.0f, worst = 0.0f;
+        for (std::size_t i = 0; i < run->glyphs.size() && i < 21; ++i) {
+            worst = num::max(worst, num::abs(x - want[i]));
+            x += run->glyphs[i].advance;
+        }
+        check(run->glyphs.size() == 21 && worst < 0.01f,
+              std::to_string(static_cast<int>(size)) + " px glyph positions match CoreText (worst " +
+              std::to_string(worst) + " px)");
+    }
+    TextStyle bold;
+    bold.size = 13.0f;
+    bold.weight = FontWeight::bold;
+    near(stack->shaped(s, typo::detail::shape_params_of(bold))->width, 149.963f, 0.01f,
+         "bold kerning deltas follow the weight axis (line width matches CoreText)");
+}
+
+/// Font smoothing and subpixel positioning: what makes the rasteriser draw
+/// what CoreText draws instead of a thin, grid-snapped approximation.
+void test_smoothing() {
+    section("smoothing and subpixel phases");
+    auto stack = typo::system::default_stack();
+    if (stack == nullptr || stack->face_count() == 0) return;
+    const std::uint16_t gid = stack->face_at(0)->glyph_for('l');
+    if (gid == 0) return;
+
+    const auto ink = [](const typo::CachedGlyph* g, const typo::FontStack& fs) {
+        double sum = 0.0;
+        const auto& plane = fs.atlas();
+        const int x0 = static_cast<int>(g->atlas_rect.left());
+        const int y0 = static_cast<int>(g->atlas_rect.top());
+        for (int y = 0; y < static_cast<int>(g->size.y); ++y)
+            for (int x = 0; x < static_cast<int>(g->size.x); ++x)
+                sum += plane.pixels()[static_cast<std::size_t>(y0 + y) * static_cast<std::size_t>(plane.width()) +
+                                      static_cast<std::size_t>(x0 + x)];
+        return sum / 255.0;
+    };
+
+    // Smoothing grows the outline: a light 'l' carries more ink than with
+    // smoothing off, and a dark one (which macOS grows less at text sizes)
+    // sits between the two.
+    typo::FontConfig off = stack->config();
+    off.smoothing = 0.0f;
+    auto plain = typo::system::default_stack(off);
+    const double light = ink(stack->glyph(0, gid, 13.0f), *stack);
+    const double dark  = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, true), *stack);
+    const double none  = ink(plain->glyph(0, gid, 13.0f), *plain);
+    check(light > none * 1.05, "smoothing thickens light text (" + std::to_string(light) +
+                                   " vs " + std::to_string(none) + ")");
+    check(dark > none && dark < light, "dark text is grown less than light at 13 px");
+
+    // Subpixel phases: every quarter-pixel position is its own raster, and
+    // the ink is the same at each (the glyph moved, it did not change).
+    const double p0 = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0), *stack);
+    const double p2 = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 2), *stack);
+    check(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 2) !=
+              stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0),
+          "each subpixel phase is a separate atlas entry");
+    near(static_cast<float>(p2), static_cast<float>(p0), static_cast<float>(p0) * 0.02f,
+         "a phase shift moves the glyph without changing its ink");
+
+    // split_pen: pixel + phase reassemble the pen to within 1/8 px.
+    for (float x : {0.0f, 0.12f, 0.13f, 0.5f, 0.88f, 3.37f, -1.3f}) {
+        const auto sp = typo::FontStack::split_pen(x);
+        check(sp.phase >= 0 && sp.phase < typo::FontStack::subpixel_phases &&
+                  num::abs(sp.pixel + static_cast<float>(sp.phase) / 4.0f - x) <= 0.125f + 1e-5f,
+              "split_pen(" + std::to_string(x) + ") reassembles");
+    }
+}
+
 int main() {
     std::printf("mayag font engine\n=================");
 
@@ -1455,6 +1556,8 @@ int main() {
     test_justify();
     test_ligatures();
     test_color_glyphs();
+    test_coretext_parity();
+    test_smoothing();
 
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);

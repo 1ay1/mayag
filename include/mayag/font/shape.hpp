@@ -21,8 +21,11 @@
 // identical either way.
 
 #include "opentype.hpp"
+#include "variations.hpp"
 #include "../core/geometry.hpp"
 
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <array>
 #include <string_view>
@@ -233,39 +236,71 @@ class KernTable {
   public:
     KernTable() = default;
 
+    /// GPOS wins over `kern` when it has pair kerning, as in HarfBuzz and
+    /// CoreText: modern fonts carry a legacy `kern` only for old software,
+    /// and it lacks class pairs and variation deltas.
     explicit KernTable(const ot::FontFile& f) {
-        kern_ = find_kern(f);
-        if (kern_.empty()) find_gpos(f);
+        find_gpos(f);
+        if (lookups_.empty()) kern_ = find_kern(f);
     }
 
-    [[nodiscard]] bool empty() const noexcept { return kern_.empty() && subs_.empty(); }
+    [[nodiscard]] bool empty() const noexcept { return kern_.empty() && lookups_.empty(); }
 
     /// Kerning adjustment in font units, applied after `left`'s advance.
-    [[nodiscard]] float lookup(std::uint16_t left, std::uint16_t right) const noexcept {
+    /// `coords` (normalised axis position) selects a variable font's
+    /// instance: SF and its kin store kerning as a default value plus a
+    /// per-instance delta, so the same pair kerns differently at 13 pt and
+    /// at 28 pt, and at Regular and at Bold.
+    [[nodiscard]] float lookup(std::uint16_t left, std::uint16_t right,
+                               const std::vector<float>& coords = {}) const noexcept {
         if (!kern_.empty()) return static_cast<float>(lookup_kern(left, right));
         const ot::Reader r{gpos_};
-        // The first subtable that covers `left` decides, per OpenType.
-        for (const std::size_t off : subs_) {
-            const auto ci = coverage_index(r, off + r.u16_at(off + 2), left);
-            if (ci < 0) continue;
-            if (r.u16_at(off) == 1) {
-                if (auto v = pair_set_value(r, off, static_cast<std::uint16_t>(ci), right)) return *v;
-                continue;
+        float total = 0.0f;
+        // Every kern lookup applies; within one, the first subtable that
+        // covers the pair decides.
+        for (const auto& subs : lookups_) {
+            for (const Sub& s : subs) {
+                const auto ci = coverage_index(r, s.off + r.u16_at(s.off + 2), left);
+                if (ci < 0) continue;
+                std::size_t rec  = 0;       // byte offset of value1, 0 = no pair here
+                std::size_t base = s.off;   // what the record's device offsets count from
+                if (r.u16_at(s.off) == 1) {
+                    rec = pair_set_record(r, s, static_cast<std::uint16_t>(ci), right, base);
+                    if (rec == 0) continue;   // covered, but not this pair: next subtable
+                } else {
+                    const std::uint16_t n1 = r.u16_at(s.off + 12), n2 = r.u16_at(s.off + 14);
+                    const std::uint16_t c1 = class_of(r, s.off + r.u16_at(s.off + 8), left);
+                    const std::uint16_t c2 = class_of(r, s.off + r.u16_at(s.off + 10), right);
+                    if (c1 >= n1 || c2 >= n2) break;
+                    rec = s.off + 16 + (static_cast<std::size_t>(c1) * n2 + c2) * (s.size1 + s.size2);
+                }
+                total += static_cast<float>(r.i16_at(rec + s.x_adv));
+                if (s.x_adv_dev != 0 && !coords.empty()) {
+                    const std::uint16_t dev = r.u16_at(rec + s.x_adv_dev);
+                    if (dev != 0) total += device_delta(r, base + dev, coords);
+                }
+                break;
             }
-            const std::uint16_t n1 = r.u16_at(off + 12), n2 = r.u16_at(off + 14);
-            const std::uint16_t c1 = class_of(r, off + r.u16_at(off + 8), left);
-            const std::uint16_t c2 = class_of(r, off + r.u16_at(off + 10), right);
-            if (c1 >= n1 || c2 >= n2) return 0.0f;
-            return static_cast<float>(r.i16_at(off + 16 + (static_cast<std::size_t>(c1) * n2 + c2) * 2));
         }
-        return 0.0f;
+        return total;
     }
 
   private:
+    /// One usable PairPos subtable and where XAdvance sits in its records.
+    struct Sub {
+        std::size_t   off = 0;        ///< subtable offset within GPOS
+        std::uint8_t  size1 = 0;      ///< bytes in value record 1
+        std::uint8_t  size2 = 0;      ///< bytes in value record 2
+        std::uint8_t  x_adv = 0;      ///< XAdvance offset inside value record 1
+        std::uint8_t  x_adv_dev = 0;  ///< XAdvDevice offset inside record 1; 0 = absent
+    };
+
     // `kern` format 0: pairs are sorted by (left, right) per the spec.
     std::span<const std::uint8_t> kern_;      ///< the pair array, 6 bytes each
     std::span<const std::uint8_t> gpos_;      ///< the whole GPOS table
-    std::vector<std::size_t>      subs_;      ///< usable PairPos subtable offsets, in order
+    std::vector<std::vector<Sub>> lookups_;   ///< kern-feature PairPos lookups, in lookup order
+    std::span<const std::uint8_t> gdef_;      ///< GDEF, home of the variation store
+    std::size_t                   ivs_ = 0;   ///< item variation store offset in GDEF; 0 = none
 
     [[nodiscard]] static std::span<const std::uint8_t> find_kern(const ot::FontFile& f) {
         const auto data = f.table(ot::tags::kern);
@@ -308,9 +343,11 @@ class KernTable {
         return 0;
     }
 
-    /// Collect GPOS lookup type 2 subtables this shaper can apply: X advance
-    /// on the first glyph and nothing on the second. Anything else is
-    /// vertical or mark positioning, which this shaper does not do.
+    /// Collect the pair-adjustment lookups the `kern` feature names. Only
+    /// value record 1's XAdvance (plus its variation delta) is applied: that
+    /// is horizontal kerning, and it is all a pair lookup in a `kern`
+    /// feature means in practice. Lookups wrapped in extension lookups (type
+    /// 9) are unwrapped; big fonts such as SF put ALL their kerning there.
     void find_gpos(const ot::FontFile& f) {
         const auto data = f.table(ot::tags::gpos);
         if (data.size() < 10) return;
@@ -318,20 +355,76 @@ class KernTable {
         const std::size_t list = r.u16_at(8);
         if (list == 0 || list >= data.size()) return;
         const std::uint16_t n_lookups = r.u16_at(list);
-        for (std::uint16_t i = 0; i < n_lookups; ++i) {
-            const std::size_t off = list + r.u16_at(list + 2 + i * 2);
-            if (off + 6 > data.size() || r.u16_at(off) != 2) continue;   // pair adjustment only
-            const std::uint16_t n_subs = r.u16_at(off + 4);
-            for (std::uint16_t s = 0; s < n_subs; ++s) {
-                const std::size_t sub = off + r.u16_at(off + 6 + s * 2);
-                if (sub + 16 > data.size()) continue;
-                const std::uint16_t format = r.u16_at(sub);
-                if (format != 1 && format != 2) continue;
-                if (r.u16_at(sub + 4) != 0x0004 || r.u16_at(sub + 6) != 0) continue;
-                subs_.push_back(sub);
+
+        // Which lookups do `kern` features reference? A font's other pair
+        // lookups (CJK proportional widths, capital spacing) are opt-in
+        // features and must not apply by default.
+        std::vector<bool> wanted(n_lookups, false);
+        bool any_feature = false;
+        if (const std::size_t feats = r.u16_at(6); feats != 0 && feats + 2 <= data.size()) {
+            const std::uint16_t n_feats = r.u16_at(feats);
+            for (std::uint16_t i = 0; i < n_feats; ++i) {
+                const std::size_t recd = feats + 2 + static_cast<std::size_t>(i) * 6;
+                if (recd + 6 > data.size() || r.u32_at(recd) != ot::tag("kern")) continue;
+                const std::size_t feat = feats + r.u16_at(recd + 4);
+                const std::uint16_t n = r.u16_at(feat + 2);
+                for (std::uint16_t k = 0; k < n; ++k) {
+                    const std::uint16_t li = r.u16_at(feat + 4 + static_cast<std::size_t>(k) * 2);
+                    if (li < n_lookups) { wanted[li] = true; any_feature = true; }
+                }
             }
         }
-        if (!subs_.empty()) gpos_ = data;
+
+        for (std::uint16_t i = 0; i < n_lookups; ++i) {
+            if (any_feature && !wanted[i]) continue;
+            const std::size_t off = list + r.u16_at(list + 2 + static_cast<std::size_t>(i) * 2);
+            if (off + 6 > data.size()) continue;
+            const std::uint16_t type = r.u16_at(off);
+            if (type != 2 && type != 9) continue;
+            std::vector<Sub> subs;
+            const std::uint16_t n_subs = r.u16_at(off + 4);
+            for (std::uint16_t s = 0; s < n_subs; ++s) {
+                std::size_t sub = off + r.u16_at(off + 6 + static_cast<std::size_t>(s) * 2);
+                if (type == 9) {   // ExtensionPos: {format, lookup type, offset32}
+                    if (sub + 8 > data.size() || r.u16_at(sub + 2) != 2) continue;
+                    sub += r.u32_at(sub + 4);
+                }
+                if (sub + 16 > data.size()) continue;
+                const std::uint16_t format = r.u16_at(sub);
+                const std::uint16_t vf1 = r.u16_at(sub + 4), vf2 = r.u16_at(sub + 6);
+                if ((format != 1 && format != 2) || (vf1 & 0x0004) == 0) continue;
+                const auto bytes = [](std::uint16_t vf) {
+                    return static_cast<std::uint8_t>(2 * std::popcount(static_cast<unsigned>(vf & 0xFF)));
+                };
+                Sub d;
+                d.off   = sub;
+                d.size1 = bytes(vf1);
+                d.size2 = bytes(vf2);
+                d.x_adv = bytes(vf1 & 0x0003);
+                d.x_adv_dev = (vf1 & 0x0040) ? bytes(vf1 & 0x003F) : std::uint8_t{0};
+                subs.push_back(d);
+            }
+            if (!subs.empty()) lookups_.push_back(std::move(subs));
+        }
+        if (lookups_.empty()) return;
+        gpos_ = data;
+
+        // GDEF 1.3+ holds the item variation store that device offsets index.
+        const auto gdef = f.table(ot::tags::gdef);
+        const ot::Reader g{gdef};
+        if (gdef.size() >= 18 && g.u16_at(0) == 1 && g.u16_at(2) >= 3) {
+            const std::uint32_t ivs = g.u32_at(14);
+            if (ivs != 0 && ivs < gdef.size()) { gdef_ = gdef; ivs_ = ivs; }
+        }
+    }
+
+    /// A ValueRecord device offset that is really a VariationIndex table
+    /// (deltaFormat 0x8000): the delta the GDEF store holds for `coords`.
+    /// Classic hinting Device tables are ppem-specific and ignored.
+    [[nodiscard]] float device_delta(const ot::Reader& r, std::size_t dev,
+                                     const std::vector<float>& coords) const noexcept {
+        if (ivs_ == 0 || r.u16_at(dev + 4) != 0x8000) return 0.0f;
+        return var::ivs_delta(gdef_, ivs_, r.u16_at(dev), r.u16_at(dev + 2), coords);
     }
 
     /// Index of `g` in a Coverage table, or -1.
@@ -380,20 +473,87 @@ class KernTable {
     }
 
     /// Format 1: the PairSet for coverage index `ci`, searched for `right`.
-    [[nodiscard]] static std::optional<float> pair_set_value(const ot::Reader& r, std::size_t off,
-                                                             std::uint16_t ci, std::uint16_t right) noexcept {
-        if (ci >= r.u16_at(off + 8)) return std::nullopt;
-        const std::size_t set = off + r.u16_at(off + 10 + ci * 2);
+    /// Returns the offset of the pair's value record 1, or 0 if absent, and
+    /// sets `base` to the PairSet: a format-1 record's device offsets count
+    /// from its PairSet, not from the subtable (as HarfBuzz and CoreText read
+    /// it). Counting from the subtable read SF's comma-space delta from the
+    /// wrong bytes and set every ", " 100 units tight at text sizes.
+    [[nodiscard]] static std::size_t pair_set_record(const ot::Reader& r, const Sub& s,
+                                                     std::uint16_t ci, std::uint16_t right,
+                                                     std::size_t& base) noexcept {
+        if (ci >= r.u16_at(s.off + 8)) return 0;
+        const std::size_t set = s.off + r.u16_at(s.off + 10 + static_cast<std::size_t>(ci) * 2);
+        base = set;
+        const std::size_t stride = 2u + s.size1 + s.size2;
         std::size_t lo = 0, hi = r.u16_at(set);
         while (lo < hi) {
             const std::size_t mid = (lo + hi) / 2;
-            const std::size_t rec = set + 2 + mid * 4;
+            const std::size_t rec = set + 2 + mid * stride;
             const std::uint16_t g = r.u16_at(rec);
-            if (g == right) return static_cast<float>(r.i16_at(rec + 2));
+            if (g == right) return rec + 2;
             if (g < right) lo = mid + 1; else hi = mid;
         }
-        return std::nullopt;
+        return 0;
     }
+};
+
+// ══ trak: size-dependent tracking ═════════════════════════════════
+
+/// Apple's tracking table: how much to loosen or tighten spacing at each
+/// point size. SF draws ONE outline for every size and relies on this to
+/// space 11 pt captions open and 28 pt headlines tight. CoreText applies it
+/// to every glyph; ignoring it set SF text 1.7 px too wide over a 23-glyph
+/// 13 pt line and 5 px too narrow at 26 pt.
+class TrackTable {
+  public:
+    TrackTable() = default;
+    explicit TrackTable(const ot::FontFile& f) {
+        const auto data = f.table(ot::tag("trak"));
+        const ot::Reader r{data};
+        if (data.size() < 12 || r.u32_at(0) != 0x00010000 || r.u16_at(4) != 0) return;
+        const std::size_t horiz = r.u16_at(6);
+        if (horiz == 0 || horiz + 8 > data.size()) return;
+        const std::uint16_t n_tracks = r.u16_at(horiz);
+        const std::uint16_t n_sizes  = r.u16_at(horiz + 2);
+        const std::size_t   sizes    = r.u32_at(horiz + 4);
+        if (n_sizes == 0 || sizes + std::size_t{n_sizes} * 4 > data.size()) return;
+        for (std::uint16_t t = 0; t < n_tracks; ++t) {
+            const std::size_t rec = horiz + 8 + std::size_t{t} * 8;
+            if (rec + 8 > data.size() || r.u32_at(rec) != 0) continue;   // the NORMAL track (0.0)
+            const std::size_t vals = r.u16_at(rec + 6);
+            if (vals + std::size_t{n_sizes} * 2 > data.size()) return;
+            for (std::uint16_t s = 0; s < n_sizes; ++s) {
+                const auto fixed = static_cast<std::int32_t>(r.u32_at(sizes + std::size_t{s} * 4));
+                points_.push_back({static_cast<float>(fixed) / 65536.0f,
+                                   static_cast<float>(r.i16_at(vals + std::size_t{s} * 2))});
+            }
+            return;
+        }
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return points_.empty(); }
+
+    /// Tracking in font units per glyph at `point_size`: linear between the
+    /// table's sizes, held flat past either end, and FLOORED to whole font
+    /// units. CoreText floors (measured: 67.3 -> 67, 52.7 -> 52, 3.5 -> 3),
+    /// and matching it is what makes a line's width agree to the 1/1000 px.
+    [[nodiscard]] float at(float point_size) const noexcept {
+        if (points_.empty()) return 0.0f;
+        if (point_size <= points_.front().size) return points_.front().value;
+        for (std::size_t i = 1; i < points_.size(); ++i) {
+            const Point& a = points_[i - 1];
+            const Point& b = points_[i];
+            if (point_size <= b.size) {
+                const float t = (point_size - a.size) / (b.size - a.size);
+                return std::floor(a.value + (b.value - a.value) * t + 1e-4f);
+            }
+        }
+        return points_.back().value;
+    }
+
+  private:
+    struct Point { float size = 0.0f; float value = 0.0f; };
+    std::vector<Point> points_;
 };
 
 // ══ GSUB ligatures ════════════════════════════════════════════════

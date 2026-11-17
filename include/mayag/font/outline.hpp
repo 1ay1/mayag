@@ -116,6 +116,77 @@ class Outline {
     void append(const Outline& other) {
         contours.insert(contours.end(), other.contours.begin(), other.contours.end());
     }
+
+    /// Grow the ink by `d` (font units) on every side: each edge moves `d`
+    /// along its outward normal, holes shrink by the same. Every point,
+    /// on-curve and control alike, moves along the bisector of its two
+    /// neighbouring edge normals by d / cos(half the turn), which shifts both
+    /// edges by exactly `d` (FreeType's FT_Outline_EmboldenXY scheme). The
+    /// shift is capped by the shorter neighbouring edge so a tiny segment
+    /// cannot fold over, and corners sharper than ~160 degrees are left alone
+    /// instead of shooting out a spike. Advance and bearings are unchanged:
+    /// this is a rendering correction, not a different design.
+    void embolden(float d) {
+        if (d <= 0.0f || contours.empty()) return;
+        // Outward is decided once for the whole glyph, from its total winding:
+        // TrueType winds ink clockwise, CFF counter-clockwise, and holes wind
+        // opposite to ink in both, so one sign serves every contour.
+        float area = 0.0f;
+        std::vector<Vec2*> pts;
+        for (auto& c : contours) {
+            pts.clear();
+            collect(c, pts);
+            for (std::size_t i = 0; i < pts.size(); ++i)
+                area += cross(*pts[i], *pts[(i + 1) % pts.size()]);
+        }
+        const float side = area >= 0.0f ? 1.0f : -1.0f;
+
+        std::vector<Vec2> shift;
+        for (auto& c : contours) {
+            pts.clear();
+            collect(c, pts);
+            const std::size_t n = pts.size();
+            if (n < 3) continue;
+            shift.assign(n, Vec2{});
+            for (std::size_t i = 0; i < n; ++i) {
+                const Vec2 p = *pts[i];
+                // Nearest distinct neighbours: coincident points share a shift.
+                std::size_t a = (i + n - 1) % n, b = (i + 1) % n;
+                for (std::size_t k = 0; k < n && *pts[a] == p; ++k) a = (a + n - 1) % n;
+                for (std::size_t k = 0; k < n && *pts[b] == p; ++k) b = (b + 1) % n;
+                const Vec2 vin = p - *pts[a], vout = *pts[b] - p;
+                const float lin = vin.length(), lout = vout.length();
+                if (lin <= 0.0f || lout <= 0.0f) continue;
+                const Vec2 in = vin / lin, out = vout / lout;
+                const float cosine = dot(in, out);
+                if (cosine <= -0.94f) continue;          // a hairpin: no shift
+                const float denom = 1.0f + cosine;
+                // Sum of the two outward normals; scaled by d/(1+cos) it moves
+                // both edges exactly d.
+                const Vec2 normal = Vec2{in.y + out.y, -(in.x + out.x)} * side;
+                // Cap at concave corners, where the offset edges meet sooner
+                // than the shorter neighbour edge: never shift past it.
+                const float q = -cross(in, out) * side;   // > 0 at a concave turn
+                const float l = std::min(lin, lout);
+                const float k = (d * q <= l * denom) ? d / denom : l / q;
+                shift[i] = normal * k;
+            }
+            for (std::size_t i = 0; i < n; ++i) *pts[i] = *pts[i] + shift[i];
+        }
+    }
+
+  private:
+    /// The contour's points in drawing order, as pointers so a shift can be
+    /// written back. The closing point is dropped when it repeats the start.
+    static void collect(Contour& c, std::vector<Vec2*>& out) {
+        out.push_back(&c.start);
+        for (auto& s : c.segments) {
+            if (s.kind != Segment::Kind::line) out.push_back(&s.c0);
+            if (s.kind == Segment::Kind::cubic) out.push_back(&s.c1);
+            out.push_back(&s.to);
+        }
+        if (out.size() > 1 && *out.back() == c.start) out.pop_back();
+    }
 };
 
 // ════════════════════════════════════════════════════════════════════════

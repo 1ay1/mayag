@@ -67,6 +67,27 @@ inline float mg_coverage(float d, float px) {
     return smoothstep(w, -w, d);
 }
 
+// Text coverage composited as if in gamma space: kernel::apply_text_gamma,
+// verbatim. The Metal path is the one every macOS window draws with, and it
+// went without this correction (so on-screen text was lighter and bolder than
+// the CPU reference) until test_metal compared text pixel by pixel.
+inline float mg_srgb_to_linear(float c) {
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+inline float mg_linear_to_srgb(float c) {
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+inline float mg_text_gamma(float cov, float4 premul) {
+    if (cov <= 0.0 || cov >= 1.0) return cov;
+    float a = premul.w > 1e-4 ? premul.w : 1.0;
+    float lum = clamp((0.2126 * premul.x + 0.7152 * premul.y + 0.0722 * premul.z) / a, 0.0, 1.0);
+    float enc = mg_linear_to_srgb(lum);
+    float on_black = lum > 1e-4 ? mg_srgb_to_linear(cov * enc) / lum : cov;
+    float on_white = lum < 0.9999
+        ? (1.0 - mg_srgb_to_linear(1.0 - cov * (1.0 - enc))) / (1.0 - lum) : cov;
+    return clamp(mix(on_white, on_black, smoothstep(0.35, 0.65, enc)), 0.0, 1.0);
+}
+
 inline float mg_shadow(float d, float blur) {
     if (blur <= 0.0f) return d <= 0.0f ? 1.0f : 0.0f;
     return smoothstep(blur, -blur, d);
@@ -175,7 +196,12 @@ vertex Varyings mayag_vertex(uint vid [[vertex_id]],
     v.local     = pos - centre;
     v.norm      = (pos - I.rect.xy) / max(I.rect.zw, float2(1e-6));
     v.half_size = I.rect.zw * 0.5;
-    v.uv        = mix(I.uv.xy, I.uv.zw, corner);
+    // uv is measured against the UNPADDED rect, like norm. Interpolating the
+    // glyph's corner uvs across the grown quad stretched every glyph by
+    // `pad` px per side: Metal text was blurred and drifted ~0.4 px from the
+    // CPU's, invisible to the ink-count check, caught comparing pixels. The
+    // Vulkan template has had this fix since text sat a row high there.
+    v.uv        = mix(I.uv.xy, I.uv.zw, v.norm);
     v.color     = I.color;
     v.color2    = I.color2;
     v.radii     = I.radii;
@@ -229,9 +255,11 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
         // half-band comes from v.params.x (CPU-computed per glyph, matching
         // the software rasteriser); fwidth is only the fallback.
         float band = v.params.x > 0.0 ? v.params.x : max(fwidth(raw), 1e-5);
+        float edge = 0.5 - v.params.y;   // params.y: font-smoothing growth
         cov = ((v.flags & FLAG_GLYPH_SDF) != 0u)
-            ? smoothstep(0.5 - band, 0.5 + band, raw)
+            ? smoothstep(edge - band, edge + band, raw)
             : raw;
+        cov = mg_text_gamma(cov, v.color);
     } else {
         cov = mg_coverage(mg_rounded_box(v.local, v.half_size, v.radii), px);
     }

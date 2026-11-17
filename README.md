@@ -391,7 +391,7 @@ render_to_png(page, {900, 880}, "specimen.png", opts);
 | `outline.hpp` | `glyf` incl. composites, CFF/Type-2 charstrings, CID-keyed fonts |
 | `raster.hpp` | analytic-coverage scanline fill, 8SSEDT Euclidean SDF |
 | `atlas.hpp` | skyline packing, LRU eviction, dirty-rect upload |
-| `shape.hpp` | UTF-8, clusters, `kern` + `GPOS` pair kerning, UAX-14 break rules |
+| `shape.hpp` | UTF-8, clusters, `kern` + variable `GPOS` pair kerning, `trak` tracking, UAX-14 break rules |
 | `system.hpp` | font discovery + a complete per-script fallback chain |
 | `last_resort.hpp` | a TrueType face synthesized in memory — the always-available floor |
 
@@ -1190,20 +1190,56 @@ buffer. An idle window still blocks and measures **0% CPU**.
 
 ## Text quality
 
-Three things beyond "rasterise the outline", each of which is visible:
+The yardstick is CoreText: the same string, size and colours rendered by both,
+compared glyph by glyph and pixel by pixel (SF, the macOS system font, the
+hardest Latin font a UI meets).
 
+- **Positions are CoreText's, to 1/100 px.** SF keeps its kerning in GPOS
+  extension lookups whose values carry per-instance variation deltas (so a pair
+  kerns differently at 13 pt and 28 pt, Regular and Bold), and gets its
+  spacing from Apple's `trak` table. mayag applies all of it: the `kern`
+  feature's lookups only, any value-record format, GDEF variation-store deltas
+  at the face's instance, and per-size tracking, floored to whole units as
+  CoreText does. Across 81 string × size cases from 6 to 120 px, Regular and
+  Bold, every glyph lands within 0.01 px of `CTRunGetPositions`. Before, a
+  23-glyph line drifted up to 7.5 px.
+- **Subpixel positioning.** Bitmap glyphs must sit on the pixel grid to stay
+  sharp, but snapping the pen moves each glyph up to half a pixel and the eye
+  reads that as uneven spacing. mayag rasterises each glyph at four horizontal
+  phases (as Skia does) and draws it at the pen's whole pixel: sharp texels
+  *and* placement within 1/8 px. Measured column-profile drift against
+  CoreText went from 0.9–2.6 px RMS to 0.00.
+- **Font smoothing.** macOS grows glyph outlines; that is why native Mac text
+  has weight. Measured gamma-independently (straight stems at 64 subpixel
+  offsets, smoothing on vs off) it is 0.30 px per side, reached at 20 px for
+  light text and 51 px for dark. mayag offsets the outline itself (every edge
+  along its normal, FreeType's embolden scheme) for bitmap glyphs, and shifts
+  the threshold for distance-field glyphs, so weight is continuous across the
+  bitmap/SDF switch.
+- **Gamma-space text compositing.** Shapes blend in linear light; text is
+  blended as if in gamma space, the way CoreText, DirectWrite and Skia blend
+  it, because fonts are designed for that weight. In linear light the same
+  font reads bold on dark themes and thin on light ones. The kernel reshapes
+  coverage so the hardware's linear blend reproduces the gamma-space result
+  exactly against the design backdrop; one definition serves CPU, Metal and
+  Vulkan.
+- **The GPU draws the CPU's pixels.** Metal (the default on macOS) used to
+  interpolate glyph uvs across the antialiasing-padded quad instead of the
+  glyph's own rect, stretching every glyph by two pixels: all on-screen text
+  was blurred and drifted ~0.4 px, while an ink-count test passed. A per-pixel
+  GPU/CPU text test now pins mean edge error at 0.6/255 (it was 30).
 - **Analytic coverage.** Every pixel gets the true area of the glyph inside
-  it — not N supersamples. A coverage-conservation test asserts total area is
+  it, not N supersamples. A coverage-conservation test asserts total area is
   within 0.2% for axis-aligned, offset, fractional, and sub-pixel-thin shapes.
 - **Correct decode per glyph.** Bitmap entries are coverage; SDF entries are a
   distance field. Which one travels per *instance*, because hybrid mode mixes
-  both in one frame. Getting this wrong snapped every antialiased pixel to
-  0 or 1 and made text look eroded.
-- **Stem darkening.** Linear-light compositing is physically right but
-  perceptually wrong for text: a 50%-covered white-on-dark pixel lands ~0.19
-  L* lighter than a human reads as "half", so light text looks thin. mayag
-  applies a contrast-dependent gamma to *coverage* (never colour, so hue
-  cannot shift) — the same correction FreeType and Skia make.
+  both in one frame.
+
+The result, as mean coverage error against CoreText over every inked pixel
+(SF, 11–60 px, 0 = identical weight): light-on-dark went from +0.17–0.19 to
++0.00–0.05, and dark-on-light is within ±0.01. Ink mass is 0.94–1.09×
+CoreText's from 11 to 120 px, with no jump at the bitmap/SDF threshold (it
+used to drop 15% there).
 
 ## Cross platform
 

@@ -531,6 +531,10 @@ inline float region_scalar(std::span<const std::uint8_t> d, std::size_t region_o
 
 }  // namespace detail
 
+[[nodiscard]] inline float ivs_delta(std::span<const std::uint8_t> d, std::size_t ivs,
+                                     std::uint16_t outer, std::uint16_t inner,
+                                     const Coords& coords);
+
 /// The advance-width delta (in font units) for `gid` at `coords`. Returns 0
 /// when there is no HVAR, the glyph is unmapped, or the axes sit at default.
 [[nodiscard]] inline float hvar_advance_delta(const HvarTable& t, std::uint16_t gid,
@@ -560,8 +564,18 @@ inline float region_scalar(std::span<const std::uint8_t> d, std::size_t region_o
         outer = static_cast<std::uint16_t>(entry >> inner_bits);
     }
 
-    // ---- Item Variation Store ----
-    const std::size_t ivs = t.ivs_off;
+    return ivs_delta(d, t.ivs_off, outer, inner, coords);
+}
+
+/// The delta an Item Variation Store (at byte `ivs` of `d`) holds for the
+/// (outer, inner) delta-set index at `coords`, in font units. One store shape
+/// serves HVAR advances, GDEF/GPOS kerning and anchor deltas, and MVAR
+/// metrics; 0 for out-of-range indices or truncated data.
+[[nodiscard]] inline float ivs_delta(std::span<const std::uint8_t> d, std::size_t ivs,
+                                     std::uint16_t outer, std::uint16_t inner,
+                                     const Coords& coords) {
+    using namespace detail;
+    if (coords.empty()) return 0.0f;
     if (ivs + 8 > d.size()) return 0.0f;
     // format(2) variationRegionListOffset(4) itemVariationDataCount(2) [offsets32...]
     const std::size_t region_list = ivs + u32(d, ivs + 2);

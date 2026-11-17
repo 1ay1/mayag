@@ -391,7 +391,7 @@ class DrawList {
     /// which throws away the antialiasing and makes small text look eroded
     /// and ragged. That was a real bug.
     void glyph(const Rect& dst, const Rect& atlas_uv, Color<Srgb> c, bool sdf = false,
-               float sdf_edge = 0.0f) {
+               float sdf_edge = 0.0f, float sdf_grow = 0.0f) {
         Instance i{};
         i.kind  = static_cast<std::uint32_t>(ShapeKind::glyph);
         i.rect  = {dst.origin.x, dst.origin.y, dst.size.x, dst.size.y};
@@ -402,8 +402,11 @@ class DrawList {
         // units. 0 => the renderer falls back to its constant default. The
         // caller sets it so the band tracks ~1 display pixel no matter how far
         // the glyph is scaled from its raster size (otherwise magnified SDF
-        // text blurs and shrunk text aliases).
-        i.params = {sdf_edge, 0.0f, 0.0f, 0.0f};
+        // text blurs and shrunk text aliases). params.y moves the threshold
+        // outward by that many field units: font smoothing grows the glyph
+        // by a fixed number of DISPLAY pixels, and one shared field serves
+        // every size, so the growth can only be applied per draw.
+        i.params = {sdf_edge, sdf_grow, 0.0f, 0.0f};
         if (sdf) i.flags |= instance_flags::glyph_sdf;
         // Texture 0 for batching purposes: the atlas is already bound.
         push(i, 0);
