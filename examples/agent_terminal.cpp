@@ -478,7 +478,7 @@ int main(int argc, char** argv) {
             const auto px = rt.window().read_pixels();
             (void)imageio::write_png(std::string{shot_dir} + "/" + name + ".png", px, 2960, static_cast<int>(px.size() / 4 / 2960));
         };
-        const Mods cmd{.super = true}, cmd_sh{.shift = true, .super = true};
+        const Mods cmd = Mods::cmd(), cmd_sh = Mods::cmd(true);
         rt.tick(); rt.tick();
         shot("main");
 

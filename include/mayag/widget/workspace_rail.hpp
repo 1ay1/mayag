@@ -16,7 +16,8 @@
 //     finished green, idle grey, unread brighter), and a combined output
 //     sparkline
 // The rail collapses to a 64 px strip of tiles (rings and badges still
-// visible) and expands to 248 px. ⌃1-9 switch workspaces.
+// visible) and expands to 248 px. ⌃1-9 (Alt+1-9 off macOS) switch
+// workspaces; workspace_key_label() is that label.
 //
 // Interaction:
 //   Clicked on part_id(id, i)          -> switch to workspace i
@@ -32,6 +33,15 @@
 #include <vector>
 
 namespace mayag::dsl {
+
+/// "⌃3" on macOS, "Alt+3" elsewhere: the workspace switch key for n.
+[[nodiscard]] inline std::string workspace_key_label(int n) {
+#if defined(__APPLE__)
+    return "\u2303" + std::to_string(n);
+#else
+    return "Alt+" + std::to_string(n);
+#endif
+}
 
 struct WorkspaceInfo {
     std::string              name;
@@ -180,7 +190,7 @@ template <ControlContext C>
         rows.push_back((h(node(std::move(tile)),
                           v(h(text_owned(w.name) | font(t.font_size) | (on ? semibold : weight(FontWeight::medium))
                                   | fg(on ? t.text_primary : t.text_secondary) | ellipsis | grow() | min_size(0, 0),
-                              text_owned(i < 9 ? "\u2303" + std::to_string(i + 1) : std::string{}) | font(t.font_size * 0.72f)
+                              text_owned(i < 9 ? workspace_key_label(i + 1) : std::string{}) | font(t.font_size * 0.72f)
                                   | fg(hov ? t.text_secondary : t.text_disabled))
                                 | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
                             text_owned(summary_text(s, w.tabs.size())) | font(t.font_size * 0.76f) | fg(sub_col) | ellipsis,

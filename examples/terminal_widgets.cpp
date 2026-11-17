@@ -467,7 +467,7 @@ int main(int argc, char** argv) {
         }
         ok(M().ratio > before, "dragging the divider resizes the split");
 
-        rt.press_key(Key::f, Mods{.super = true});
+        rt.press_key(Key::f, Mods::cmd());
         rt.type("error");
         ok(M().search && M().query.text == "error", "cmd-f opens scrollback search");
         shot("search");
@@ -491,7 +491,7 @@ int main(int argc, char** argv) {
         rt.press_key(Key::escape);
         ok(!M().paste_confirm && M().log.back() == "paste-cancelled", "esc cancels the paste");
 
-        rt.press_key(Key::space, Mods{.shift = true, .super = true});
+        rt.press_key(Key::space, Mods::cmd(true));
         ok(M().hints, "cmd-shift-space shows quick-select hints");
         shot("hints");
         rt.type("d");

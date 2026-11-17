@@ -408,12 +408,7 @@ int main(int argc, char** argv) {
         rt.tick();
         ok(rt.model().input.text == "ab", "backspace edits the field");
 
-        Mods primary{};
-#if defined(__APPLE__)
-        primary.super = true;
-#else
-        primary.ctrl = true;
-#endif
+        const Mods primary = Mods::cmd();
         rt.window().press_key(Key::a, primary);
         rt.tick();
         ok(rt.model().input.selected() == "ab", "select-all works");

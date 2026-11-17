@@ -491,7 +491,7 @@ struct Terminal {
             return {};
         }
         const bool cmd = k.mods.primary();
-        if (k.mods.ctrl && !cmd && k.key >= Key::n1 && k.key <= Key::n9)
+        if (k.mods == workspace_mods() && k.key >= Key::n1 && k.key <= Key::n9)
             return update(m, SwitchWs{static_cast<int>(k.key) - static_cast<int>(Key::n1)});
         if (cmd && k.key == Key::b) return update(m, ToggleRail{});
         if (cmd && k.key == Key::backslash) return update(m, TogglePanel{});
@@ -506,6 +506,15 @@ struct Terminal {
         }
         if (k.key == Key::super) { m.numbers = true; return {}; }
         return {};
+    }
+    /// Workspaces switch on a modifier that isn't the tab one: ⌃N on macOS
+    /// (⌘N is tabs), Alt+N elsewhere (Ctrl+N is tabs there).
+    static constexpr Mods workspace_mods() noexcept {
+#if defined(__APPLE__)
+        return Mods{.ctrl = true};
+#else
+        return Mods{.alt = true};
+#endif
     }
     /// One tab's simulated life. `foreground` tabs never count as unread.
     static void simulate(Model& m, TabData& t, std::size_t i, double dt, bool foreground, const std::string& ws_name, std::uint32_t hue) {
@@ -787,11 +796,11 @@ int main(int argc, char** argv) {
         rt.press_key(Key::down); rt.press_key(Key::down); rt.press_key(Key::down); rt.press_key(Key::down);
         rt.press_key(Key::enter);
         ok(!M().launcher && M().tabs[static_cast<std::size_t>(M().active)].info.host_danger, "arrow + enter opens the prod ssh profile");
-        rt.press_key(Key::t, Mods{.super = true});
+        rt.press_key(Key::t, Mods::cmd());
         ok(M().opened == 2, "\u2318T opens a default tab");
-        rt.press_key(Key::n1, Mods{.super = true});
+        rt.press_key(Key::n1, Mods::cmd());
         ok(M().active == 0, "\u23181 jumps to the first tab");
-        rt.press_key(Key::w, Mods{.super = true});
+        rt.press_key(Key::w, Mods::cmd());
         ok(M().tabs.size() == 7, "\u2318W closes it");
 
         // ── workspaces ──
@@ -809,9 +818,9 @@ int main(int argc, char** argv) {
         shot("workspaces");
         rt.click(part_id("feed", 0));
         ok(M().ws == 1 && M().feed.empty(), "clicking the event switches to that workspace and clears it");
-        rt.press_key(Key::n3, Mods{.ctrl = true});
-        ok(M().ws == 2 && M().tabs[0].info.host_danger, "\u23033 switches to the prod workspace");
-        rt.press_key(Key::n1, Mods{.ctrl = true});
+        rt.press_key(Key::n3, Terminal::workspace_mods());
+        ok(M().ws == 2 && M().tabs[0].info.host_danger, "the workspace key (\u2303 / Alt) and 3 switches to prod");
+        rt.press_key(Key::n1, Terminal::workspace_mods());
         ok(M().ws == 0 && M().tabs.size() == 7, "and back: the first workspace kept its tabs");
         rt.click(part_id("rail", part_menu));
         ok(!M().rail_open, "the rail collapses to tiles");
@@ -822,7 +831,7 @@ int main(int argc, char** argv) {
         rt.click(part_id("rail", part_menu));
         ok(rt.node_rect(node_id("proj")).has_value(), "the project panel shows the workspace's folder");
         ok(rt.node_rect(part_id("proj", 2)).has_value(), "with one row per worktree");
-        rt.press_key(Key::n1, Mods{.super = true});
+        rt.press_key(Key::n1, Mods::cmd());
         settle(2);
         {
             const auto& pr = M().tabs[0].info;
@@ -847,7 +856,7 @@ int main(int argc, char** argv) {
         rt.click(part_id("proj", 2));
         ok(M().workspaces[0].project.shown == 2, "clicking a worktree shows it");
         const std::size_t before = M().tabs.size();
-        rt.press_key(Key::t, Mods{.super = true});
+        rt.press_key(Key::t, Mods::cmd());
         ok(M().tabs.size() == before + 1 && M().tabs[static_cast<std::size_t>(M().active)].info.cwd == "~/src/mayag-wt/metal-text",
            "\u2318T opens the new shell in the worktree the panel shows");
         {
@@ -864,10 +873,10 @@ int main(int argc, char** argv) {
             ok(M().tabs.size() == n0 + 1 && M().tabs[static_cast<std::size_t>(M().active)].info.cwd == "~/src/mayag-wt/metal-text/examples",
                "which opens a tab in that folder");
         }
-        rt.press_key(Key::backslash, Mods{.super = true});
+        rt.press_key(Key::backslash, Mods::cmd());
         ok(!M().panel_open && !rt.node_rect(node_id("proj")).has_value(), "\u2318\\ hides the panel");
-        rt.press_key(Key::backslash, Mods{.super = true});
-        rt.press_key(Key::n3, Mods{.ctrl = true});
+        rt.press_key(Key::backslash, Mods::cmd());
+        rt.press_key(Key::n3, Terminal::workspace_mods());
         settle(2);
         shot("no-folder");
 

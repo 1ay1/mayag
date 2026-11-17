@@ -62,6 +62,15 @@ struct Mods {
         return ctrl;
 #endif
     }
+    /// The primary accelerator held (plus shift if asked): what a test or
+    /// script should send for "cmd-s" so it means the same on every platform.
+    [[nodiscard]] static constexpr Mods cmd(bool with_shift = false) noexcept {
+#if defined(__APPLE__)
+        return Mods{.shift = with_shift, .super = true};
+#else
+        return Mods{.shift = with_shift, .ctrl = true};
+#endif
+    }
     [[nodiscard]] constexpr bool none() const noexcept {
         return !shift && !ctrl && !alt && !super;
     }
