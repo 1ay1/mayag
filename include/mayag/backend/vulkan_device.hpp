@@ -161,6 +161,7 @@ class VulkanDevice {
             std::memcpy(staging_ptr_, atlas.coverage, bytes);
             upload_plane(atlas_image_, w, h, /*channels=*/1);
             atlas.ack_coverage();
+            content_changed_ = true;
         }
 
         // The colour plane (emoji) is uploaded the same way, into its own RGBA
@@ -177,6 +178,7 @@ class VulkanDevice {
                 std::memcpy(staging_ptr_, atlas.color, bytes);
                 upload_plane(color_image_, w, h, /*channels=*/4);
                 atlas.ack_color();
+                content_changed_ = true;
             }
         }
     }
@@ -215,7 +217,7 @@ class VulkanDevice {
     void submit(const DrawList& list, Color<Srgb> clear) {
         if (!valid_ || offscreen_) return;
         if (rebuild_swapchain_) { rebuild_swapchain(); rebuild_swapchain_ = false; }
-        if (swapchain_ == nullptr) return;
+        if (swapchain_ == nullptr) { acquire_failed_ = true; return; }
 
         api_->WaitForFences(device_, 1, &in_flight_, 1, ~0ull);
 
@@ -233,8 +235,9 @@ class VulkanDevice {
         std::uint32_t image_index = 0;
         VkResultCheck acq = api_->AcquireNextImageKHR(device_, swapchain_, ~0ull,
                                                       image_available_, nullptr, &image_index);
-        if (acq == vk::VK_ERROR_OUT_OF_DATE_KHR) { rebuild_swapchain(); return; }
-        if (acq != vk::VK_SUCCESS && acq != vk::VK_SUBOPTIMAL_KHR) return;
+        if (acq == vk::VK_ERROR_OUT_OF_DATE_KHR) { rebuild_swapchain(); acquire_failed_ = true; return; }
+        if (acq != vk::VK_SUCCESS && acq != vk::VK_SUBOPTIMAL_KHR) { acquire_failed_ = true; return; }
+        acquire_failed_ = false;
 
         api_->ResetFences(device_, 1, &in_flight_);
         upload_instances(list);
@@ -270,6 +273,13 @@ class VulkanDevice {
         }
         last_presented_ = image_index;
         ++frames_;
+        content_changed_ = false;
+    }
+
+    /// The screen would change even for an identical draw list: a resize or
+    /// rebuild is pending, or a texture's pixels changed (a video frame).
+    [[nodiscard]] bool needs_present() const noexcept {
+        return rebuild_swapchain_ || content_changed_ || acquire_failed_;
     }
 
     /// Render to an offscreen framebuffer and read it back as RGBA8. Used by
@@ -437,6 +447,7 @@ class VulkanDevice {
         upload_plane(tex_image_, w, h, /*channels=*/4);
 
         atlas_dirty_binding_ = true;   // rebind so the shader sees it
+        content_changed_ = true;
         return 1;
     }
 
@@ -801,6 +812,7 @@ class VulkanDevice {
         tex_view_ = nullptr; tex_image_ = nullptr; tex_mem_ = nullptr;
         tex_w_ = tex_h_ = 0;
         atlas_dirty_binding_ = true;
+        content_changed_ = true;
     }
 
     /// The swapchain's pixel format, so callers can report it.
@@ -2187,6 +2199,8 @@ class VulkanDevice {
     }
 
     const A* api_ = nullptr;
+    bool content_changed_ = true;   ///< pixels changed since the last present (texture upload)
+    bool acquire_failed_ = false;   ///< the last submit drew nothing
     bool prepared_ = false;
     A local_api_{};
     bool have_local_api_ = false;

@@ -1132,9 +1132,11 @@ class window_host {
         if (framestats_at_ == 0.0) framestats_at_ = now;
         if (now - framestats_at_ < 1.0) return;
         const FrameTiming m = latency_.mean(framestats_frames_);
-        std::fprintf(stderr, "mayag: %zu frames  view %.3f  cascade %.3f  layout %.3f  paint %.3f  render %.3f  = %.3f ms  (%u instances, %u draws)\n",
+        std::uint64_t skipped = 0;
+        if constexpr (requires { window_.frames_skipped(); }) skipped = window_.frames_skipped();
+        std::fprintf(stderr, "mayag: %zu frames  view %.3f  cascade %.3f  layout %.3f  paint %.3f  render %.3f  = %.3f ms  (%u instances, %u draws, %llu identical skipped)\n",
                      framestats_frames_, m.view_ms, m.cascade_ms, m.layout_ms, m.paint_ms, m.render_ms, m.cpu_ms(),
-                     m.instances, m.draw_calls);
+                     m.instances, m.draw_calls, static_cast<unsigned long long>(skipped));
         framestats_at_ = now;
         framestats_frames_ = 0;
     }

@@ -571,9 +571,16 @@ class WaylandWindow {
         // case gpu_->valid() is false and control falls through to shm.
         if (gpu_active_) {
             if (atlas_ != nullptr) sync_atlas_to_gpu();
+            // Same pixels as what's on screen: don't wake the GPU and the
+            // compositor for it (a hover or model change that didn't change
+            // the picture). Texture and atlas uploads count as changes.
+            if (last_had_frame_ && clear == last_clear_ && dl.same_as(last_list_) && !gpu_->needs_present()) {
+                ++frames_skipped_;
+                return;
+            }
             request_feedback();   // before the commit vkQueuePresentKHR makes
             gpu_->submit(dl, clear);
-            last_list_ = dl; last_clear_ = clear; last_had_frame_ = true;
+            last_list_.assign_from(dl); last_clear_ = clear; last_had_frame_ = true;
             // Still ask for a frame callback, same as the shm path.
             if (!frame_pending_) {
                 frame_callback_ = wl::request_new(surface_, wl::surface_frame,
@@ -874,6 +881,7 @@ class WaylandWindow {
     [[nodiscard]] std::uint64_t frames_presented() const noexcept {
         return frames_presented_;
     }
+    [[nodiscard]] std::uint64_t frames_skipped() const noexcept { return frames_skipped_; }
 
     /// Frames skipped because the compositor still held every buffer.
     /// Nonzero in a tight present loop; should be zero in a frame-callback
@@ -1897,6 +1905,7 @@ class WaylandWindow {
     double        start_time_       = 0.0;
     double        refresh_hz_       = 60.0;
     std::uint64_t frames_presented_ = 0;
+    std::uint64_t frames_skipped_   = 0;   ///< identical frames not resubmitted
     std::uint64_t frames_dropped_   = 0;
     std::int32_t  repeat_rate_      = 25;
     std::int32_t  repeat_delay_     = 600;
@@ -2008,6 +2017,7 @@ class WaylandWindow {
     [[nodiscard]] std::uint64_t frames_presented() const noexcept {
         return p_->frames_presented();
     }
+    [[nodiscard]] std::uint64_t frames_skipped() const noexcept { return p_->frames_skipped(); }
 
     [[nodiscard]] std::uint64_t frames_dropped() const noexcept {
         return p_->frames_dropped();

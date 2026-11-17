@@ -20,6 +20,8 @@
 #include "../style/style.hpp"
 
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
 #include <vector>
 
 namespace mayag {
@@ -156,6 +158,30 @@ class DrawList {
     [[nodiscard]] const std::vector<Batch>& batches() const noexcept { return batches_; }
     [[nodiscard]] std::size_t size() const noexcept { return instances_.size(); }
     [[nodiscard]] bool empty() const noexcept { return instances_.empty(); }
+
+    /// Byte-identical instances and batches: the frame would draw the same
+    /// pixels (given the same textures). Instances and Batch are plain data.
+    [[nodiscard]] bool same_as(const DrawList& o) const noexcept {
+        static_assert(std::is_trivially_copyable_v<Instance>);
+        if (instances_.size() != o.instances_.size() || batches_.size() != o.batches_.size()) return false;
+        // Instances are value-initialised (padding zeroed), so bytes compare.
+        if (std::memcmp(instances_.data(), o.instances_.data(), instances_.size() * sizeof(Instance)) != 0)
+            return false;
+        for (std::size_t i = 0; i < batches_.size(); ++i) {
+            const Batch& a = batches_[i];
+            const Batch& b = o.batches_[i];
+            if (a.first != b.first || a.count != b.count || a.texture != b.texture || a.blend != b.blend ||
+                a.clip.origin.x != b.clip.origin.x || a.clip.origin.y != b.clip.origin.y ||
+                a.clip.size.x != b.clip.size.x || a.clip.size.y != b.clip.size.y)
+                return false;
+        }
+        return true;
+    }
+    /// Copy `o`'s commands into this list, reusing its storage.
+    void assign_from(const DrawList& o) {
+        instances_.assign(o.instances_.begin(), o.instances_.end());
+        batches_.assign(o.batches_.begin(), o.batches_.end());
+    }
 
     // ── clipping ────────────────────────────────────────────────────────
 
