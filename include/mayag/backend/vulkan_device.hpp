@@ -825,6 +825,8 @@ class VulkanDevice {
         if (set_layout_) api_->DestroyDescriptorSetLayout(device_, set_layout_, nullptr);
         if (render_pass_) api_->DestroyRenderPass(device_, render_pass_, nullptr);
         if (render_pass_load_) api_->DestroyRenderPass(device_, render_pass_load_, nullptr);
+        if (render_pass_clear_mid_) api_->DestroyRenderPass(device_, render_pass_clear_mid_, nullptr);
+        if (render_pass_load_mid_) api_->DestroyRenderPass(device_, render_pass_load_mid_, nullptr);
         if (capture_view_) api_->DestroyImageView(device_, capture_view_, nullptr);
         if (capture_image_) api_->DestroyImage(device_, capture_image_, nullptr);
         if (capture_mem_) api_->FreeMemory(device_, capture_mem_, nullptr);
@@ -1085,6 +1087,7 @@ class VulkanDevice {
         MG_LOAD(CmdCopyBufferToImage, "vkCmdCopyBufferToImage");
         MG_LOAD(CmdCopyImageToBuffer, "vkCmdCopyImageToBuffer");
         MG_LOAD(CmdCopyImage, "vkCmdCopyImage");
+        MG_LOAD(CmdBlitImage, "vkCmdBlitImage");
         MG_LOAD(CmdPipelineBarrier, "vkCmdPipelineBarrier");
         MG_LOAD(CreateSwapchainKHR, "vkCreateSwapchainKHR");
         MG_LOAD(DestroySwapchainKHR, "vkDestroySwapchainKHR");
@@ -1325,7 +1328,8 @@ class VulkanDevice {
         sci.magFilter = vk::VK_FILTER_LINEAR; sci.minFilter = vk::VK_FILTER_LINEAR;
         sci.mipmapMode = vk::VK_SAMPLER_MIPMAP_MODE_LINEAR;
         sci.addressModeU = sci.addressModeV = sci.addressModeW = vk::VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sci.maxLod = 0.0f;
+        sci.minLod = 0.0f;
+        sci.maxLod = 16.0f;   // only the backdrop capture has mips; 1-level images clamp
         if (api_->CreateSampler(device_, &sci, nullptr, &sampler_) != vk::VK_SUCCESS) return false;
 
         // A 1x1 placeholder so the descriptor is always valid, even before the
@@ -1485,6 +1489,19 @@ class VulkanDevice {
         vk::VkRenderPassCreateInfo rpci2 = rpci;
         rpci2.pAttachments = &att2;
         if (api_->CreateRenderPass(device_, &rpci2, nullptr, &render_pass_load_) != vk::VK_SUCCESS) return false;
+
+        // Mid-frame segments (before a backdrop is captured) must end in the
+        // attachment layout, not present-src: the capture copies from there.
+        vk::VkAttachmentDescription att3 = att;
+        att3.finalLayout = vk::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vk::VkRenderPassCreateInfo rpci3 = rpci;
+        rpci3.pAttachments = &att3;
+        if (api_->CreateRenderPass(device_, &rpci3, nullptr, &render_pass_clear_mid_) != vk::VK_SUCCESS) return false;
+        vk::VkAttachmentDescription att4 = att2;
+        att4.finalLayout = vk::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vk::VkRenderPassCreateInfo rpci4 = rpci;
+        rpci4.pAttachments = &att4;
+        if (api_->CreateRenderPass(device_, &rpci4, nullptr, &render_pass_load_mid_) != vk::VK_SUCCESS) return false;
 
         // shaders
         vk::VkShaderModule vert = make_module(render::spirv::vertex,
@@ -1871,63 +1888,141 @@ class VulkanDevice {
                 api_->CmdBindVertexBuffers(cb, 0, 1, &instance_buf_.buf, &o0);
             }
         };
-        auto draw_batches = [&](bool want_backdrop) {
+        if (!has_backdrop) {
+            begin(render_pass_);
             for (const auto& batch : list.batches()) {
-                const bool is_bd = batch.count > 0 &&
-                    static_cast<ShapeKind>(insts[batch.first].kind) == ShapeKind::backdrop;
-                if (is_bd != want_backdrop) continue;
+                vk::VkRect2D scissor = clamp_scissor(batch.clip, vw, vh);
+                api_->CmdSetScissor(cb, 0, 1, &scissor);
+                api_->CmdDraw(cb, 4, batch.count, 0, batch.first);
+            }
+            api_->CmdEndRenderPass(cb);
+            return;
+        }
+
+        // Glass reads what is drawn BEHIND it, and whatever comes after it in
+        // the list (its own fill, its text, later panels) must land on top of
+        // the blur. So the frame renders in painter order, split at each
+        // backdrop: draw up to it, snapshot the region it reads, blur.
+        const auto& batches = list.batches();
+        const auto is_bd = [&](const Batch& b) {
+            return b.count > 0 && static_cast<ShapeKind>(insts[b.first].kind) == ShapeKind::backdrop;
+        };
+        const auto draw_range = [&](std::size_t a, std::size_t b) {
+            for (std::size_t i = a; i < b; ++i) {
+                const auto& batch = batches[i];
                 vk::VkRect2D scissor = clamp_scissor(batch.clip, vw, vh);
                 api_->CmdSetScissor(cb, 0, 1, &scissor);
                 api_->CmdDraw(cb, 4, batch.count, 0, batch.first);
             }
         };
+        std::size_t last_bd = 0;
+        for (std::size_t i = 0; i < batches.size(); ++i) if (is_bd(batches[i])) last_bd = i;
 
-        if (!has_backdrop) {
-            begin(render_pass_);
-            draw_batches(false);
+        bool started = false;
+        std::size_t from = 0;
+        for (std::size_t i = 0; i < batches.size(); ++i) {
+            if (!is_bd(batches[i])) continue;
+            // Everything up to this backdrop.
+            begin(started ? render_pass_load_mid_ : render_pass_clear_mid_);
+            started = true;
+            draw_range(from, i);
             api_->CmdEndRenderPass(cb);
-            return;
+
+            capture_region(cb, target, backdrop_region(insts[batches[i].first], vw, vh));
+
+            // The backdrop itself, then (after the last one) the rest.
+            const bool last = i == last_bd;
+            begin(last ? render_pass_load_ : render_pass_load_mid_);
+            draw_range(i, i + 1);
+            if (last) draw_range(i + 1, batches.size());
+            api_->CmdEndRenderPass(cb);
+            from = i + 1;
         }
+    }
 
-        // Segment 1: everything except backdrops.
-        begin(render_pass_);
-        draw_batches(false);
-        api_->CmdEndRenderPass(cb);
+    /// Pixels a backdrop reads: its rect, plus the blur taps (+-r) and the
+    /// footprint of the mip they're read from.
+    [[nodiscard]] static vk::VkRect2D backdrop_region(const Instance& in, std::uint32_t vw, std::uint32_t vh) {
+        const float r = num::max(in.params.x, 0.0f);
+        const float pad = 1.5f * r + 4.0f;
+        const Rect area = Rect{in.rect.x, in.rect.y, in.rect.z, in.rect.w}.expand(pad);
+        return clamp_scissor(area, vw, vh);
+    }
 
-        // Snapshot the colour target into the capture image the backdrop shader
-        // samples. The capture was sized before recording began (see the
-        // callers), so here we only transition + copy.
+    /// Copy `reg` of the colour target into the capture image and rebuild its
+    /// mips over that region. Leaves the target ready to render into again.
+    void capture_region(vk::VkCommandBuffer cb, vk::VkImage target, vk::VkRect2D reg) {
+        if (reg.extent.width == 0 || reg.extent.height == 0) reg = {{0, 0}, {1, 1}};
         barrier_image(cb, target, vk::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                       vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                       vk::VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, vk::VK_ACCESS_TRANSFER_READ_BIT,
                       vk::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk::VK_PIPELINE_STAGE_TRANSFER_BIT);
-        barrier_image(cb, capture_image_, vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                      vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                      vk::VK_ACCESS_SHADER_READ_BIT, vk::VK_ACCESS_TRANSFER_WRITE_BIT,
-                      vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, vk::VK_PIPELINE_STAGE_TRANSFER_BIT);
+        barrier_mips(cb, capture_image_, 0, capture_mips_, vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk::VK_ACCESS_SHADER_READ_BIT,
+                     vk::VK_ACCESS_TRANSFER_WRITE_BIT, vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                     vk::VK_PIPELINE_STAGE_TRANSFER_BIT);
         {
             vk::VkImageCopy region{};
             region.srcSubresource = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             region.dstSubresource = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            region.extent = {vw, vh, 1};
+            region.srcOffset = region.dstOffset = {reg.offset.x, reg.offset.y, 0};
+            region.extent = {reg.extent.width, reg.extent.height, 1};
             api_->CmdCopyImage(cb, target, vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                capture_image_, vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         }
-        barrier_image(cb, capture_image_, vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                      vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                      vk::VK_ACCESS_TRANSFER_WRITE_BIT, vk::VK_ACCESS_SHADER_READ_BIT,
-                      vk::VK_PIPELINE_STAGE_TRANSFER_BIT, vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        // Each level from the one above, over the same region (rounded out).
+        std::int32_t x0 = reg.offset.x, y0 = reg.offset.y;
+        std::int32_t x1 = x0 + static_cast<std::int32_t>(reg.extent.width);
+        std::int32_t y1 = y0 + static_cast<std::int32_t>(reg.extent.height);
+        for (std::uint32_t lvl = 1; lvl < capture_mips_; ++lvl) {
+            barrier_mips(cb, capture_image_, lvl - 1, 1, vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk::VK_ACCESS_TRANSFER_WRITE_BIT,
+                         vk::VK_ACCESS_TRANSFER_READ_BIT, vk::VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         vk::VK_PIPELINE_STAGE_TRANSFER_BIT);
+            const std::int32_t pw = std::max(capture_w_ >> (lvl - 1), 1), ph = std::max(capture_h_ >> (lvl - 1), 1);
+            const std::int32_t cw = std::max(capture_w_ >> lvl, 1), chh = std::max(capture_h_ >> lvl, 1);
+            const std::int32_t sx0 = std::min(x0 & ~1, pw), sy0 = std::min(y0 & ~1, ph);
+            const std::int32_t sx1 = std::min((x1 + 1) & ~1, pw), sy1 = std::min((y1 + 1) & ~1, ph);
+            const std::int32_t dx0 = sx0 / 2, dy0 = sy0 / 2;
+            const std::int32_t dx1 = std::min(std::max(sx1 / 2, dx0 + 1), cw), dy1 = std::min(std::max(sy1 / 2, dy0 + 1), chh);
+            vk::VkImageBlit b{};
+            b.srcSubresource = {vk::VK_IMAGE_ASPECT_COLOR_BIT, lvl - 1, 0, 1};
+            b.dstSubresource = {vk::VK_IMAGE_ASPECT_COLOR_BIT, lvl, 0, 1};
+            b.srcOffsets[0] = {sx0, sy0, 0}; b.srcOffsets[1] = {std::max(sx1, sx0 + 1), std::max(sy1, sy0 + 1), 1};
+            b.dstOffsets[0] = {dx0, dy0, 0}; b.dstOffsets[1] = {dx1, dy1, 1};
+            api_->CmdBlitImage(cb, capture_image_, vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               capture_image_, vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+                               vk::VK_FILTER_LINEAR);
+            x0 = dx0; y0 = dy0; x1 = dx1; y1 = dy1;
+        }
+        // All but the last level end in TRANSFER_SRC, the last in TRANSFER_DST.
+        if (capture_mips_ > 1)
+            barrier_mips(cb, capture_image_, 0, capture_mips_ - 1, vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, vk::VK_ACCESS_TRANSFER_READ_BIT,
+                         vk::VK_ACCESS_SHADER_READ_BIT, vk::VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        barrier_mips(cb, capture_image_, capture_mips_ - 1, 1, vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, vk::VK_ACCESS_TRANSFER_WRITE_BIT,
+                     vk::VK_ACCESS_SHADER_READ_BIT, vk::VK_PIPELINE_STAGE_TRANSFER_BIT,
+                     vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         barrier_image(cb, target, vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                       vk::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                       vk::VK_ACCESS_TRANSFER_READ_BIT, vk::VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                       vk::VK_PIPELINE_STAGE_TRANSFER_BIT, vk::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        update_capture_descriptor();
+    }
 
-        // Segment 2: the backdrops, LOADing (preserving) the background and
-        // sampling the capture to blur it.
-        begin(render_pass_load_);
-        draw_batches(true);
-        api_->CmdEndRenderPass(cb);
+    void barrier_mips(vk::VkCommandBuffer cb, vk::VkImage image, std::uint32_t base, std::uint32_t count,
+                      int old_layout, int new_layout, vk::Flags src_access, vk::Flags dst_access,
+                      vk::Flags src_stage, vk::Flags dst_stage) {
+        vk::VkImageMemoryBarrier b{};
+        b.sType = vk::VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask = src_access; b.dstAccessMask = dst_access;
+        b.oldLayout = old_layout; b.newLayout = new_layout;
+        b.srcQueueFamilyIndex = vk::VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = vk::VK_QUEUE_FAMILY_IGNORED;
+        b.image = image;
+        b.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, base, count, 0, 1};
+        api_->CmdPipelineBarrier(cb, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
     }
 
     /// (Re)create the capture image at the frame size, matching the colour
@@ -1937,17 +2032,23 @@ class VulkanDevice {
     /// corrupts the shared one-shot buffer.
     void ensure_capture_image(int w, int h, int format) {
         if (capture_image_ && capture_w_ == w && capture_h_ == h && capture_format_ == format) return;
+        // A frame in flight may still sample the old capture.
+        if (capture_image_ && api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
         if (capture_view_) api_->DestroyImageView(device_, capture_view_, nullptr);
         if (capture_image_) api_->DestroyImage(device_, capture_image_, nullptr);
         if (capture_mem_) api_->FreeMemory(device_, capture_mem_, nullptr);
         capture_format_ = format;
+        // Mips feed wide blurs; 6 levels covers a 64 px radius.
+        capture_mips_ = 1;
+        while (capture_mips_ < 7 && (std::max(w, h) >> capture_mips_) > 0) ++capture_mips_;
         vk::VkImageCreateInfo ici{};
         ici.sType = vk::VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ici.imageType = vk::VK_IMAGE_TYPE_2D; ici.format = format;
         ici.extent = {static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), 1};
-        ici.mipLevels = 1; ici.arrayLayers = 1; ici.samples = vk::VK_SAMPLE_COUNT_1_BIT;
+        ici.mipLevels = capture_mips_; ici.arrayLayers = 1; ici.samples = vk::VK_SAMPLE_COUNT_1_BIT;
         ici.tiling = vk::VK_IMAGE_TILING_OPTIMAL;
-        ici.usage = vk::VK_IMAGE_USAGE_SAMPLED_BIT | vk::VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ici.usage = vk::VK_IMAGE_USAGE_SAMPLED_BIT | vk::VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                    vk::VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         ici.sharingMode = vk::VK_SHARING_MODE_EXCLUSIVE;
         ici.initialLayout = vk::VK_IMAGE_LAYOUT_UNDEFINED;
         api_->CreateImage(device_, &ici, nullptr, &capture_image_);
@@ -1962,15 +2063,16 @@ class VulkanDevice {
         vk::VkImageViewCreateInfo vci{};
         vci.sType = vk::VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         vci.image = capture_image_; vci.viewType = vk::VK_IMAGE_VIEW_TYPE_2D; vci.format = format;
-        vci.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vci.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, capture_mips_, 0, 1};
         api_->CreateImageView(device_, &vci, nullptr, &capture_view_);
         capture_w_ = w; capture_h_ = h;
         one_shot([&](vk::VkCommandBuffer c) {
-            barrier_image(c, capture_image_, vk::VK_IMAGE_LAYOUT_UNDEFINED,
-                          vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                          0, vk::VK_ACCESS_SHADER_READ_BIT,
-                          vk::VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            barrier_mips(c, capture_image_, 0, capture_mips_, vk::VK_IMAGE_LAYOUT_UNDEFINED,
+                         vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         0, vk::VK_ACCESS_SHADER_READ_BIT,
+                         vk::VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         });
+        if (desc_set_) update_capture_descriptor();
     }
 
     /// Point descriptor binding 2 at the current capture view.
@@ -2084,6 +2186,10 @@ class VulkanDevice {
     // A second render pass identical to render_pass_ but with loadOp=LOAD, used
     // for the segment that draws backdrops on top of the captured background.
     vk::VkRenderPass render_pass_load_ = nullptr;
+    // Glass splits a frame at each backdrop; these segments end in the
+    // attachment layout so the capture can copy from the target.
+    vk::VkRenderPass render_pass_clear_mid_ = nullptr;
+    vk::VkRenderPass render_pass_load_mid_ = nullptr;
     vk::VkPipelineLayout layout_ = nullptr;
     vk::VkPipeline pipeline_ = nullptr;
     vk::VkDescriptorSetLayout set_layout_ = nullptr;
@@ -2105,6 +2211,7 @@ class VulkanDevice {
     vk::VkImage capture_image_ = nullptr; vk::VkDeviceMemory capture_mem_ = nullptr;
     vk::VkImageView capture_view_ = nullptr;
     int capture_w_ = 0, capture_h_ = 0;
+    std::uint32_t capture_mips_ = 1;
     int capture_format_ = vk::VK_FORMAT_R8G8B8A8_UNORM;
     bool atlas_dirty_binding_ = false;
 

@@ -181,6 +181,8 @@ enum { VK_COLOR_COMPONENT_R_BIT = 1, VK_COLOR_COMPONENT_G_BIT = 2,
 enum { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER = 1 };
 enum { VK_FILTER_LINEAR = 1, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE = 2,
        VK_SAMPLER_MIPMAP_MODE_LINEAR = 1 };
+enum { VK_FORMAT_FEATURE_BLIT_SRC_BIT = 0x400, VK_FORMAT_FEATURE_BLIT_DST_BIT = 0x800,
+       VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT = 0x1000 };
 enum { VK_FENCE_CREATE_SIGNALED_BIT = 1 };
 enum { VK_DYNAMIC_STATE_VIEWPORT = 0, VK_DYNAMIC_STATE_SCISSOR = 1 };
 enum { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT = 1,
@@ -538,6 +540,10 @@ struct VkBufferImageCopy {
     VkExtent3D imageExtent;
 };
 struct VkOffset3D { std::int32_t x, y, z; };
+struct VkImageBlit {
+    VkImageSubresourceLayers srcSubresource; VkOffset3D srcOffsets[2];
+    VkImageSubresourceLayers dstSubresource; VkOffset3D dstOffsets[2];
+};
 struct VkImageCopy {
     VkImageSubresourceLayers srcSubresource; VkOffset3D srcOffset;
     VkImageSubresourceLayers dstSubresource; VkOffset3D dstOffset;
@@ -688,6 +694,7 @@ struct Api {
     void (*CmdCopyBufferToImage)(VkCommandBuffer, VkBuffer, VkImage, int, std::uint32_t, const VkBufferImageCopy*) = nullptr;
     void (*CmdCopyImageToBuffer)(VkCommandBuffer, VkImage, int, VkBuffer, std::uint32_t, const VkBufferImageCopy*) = nullptr;
     void (*CmdCopyImage)(VkCommandBuffer, VkImage, int, VkImage, int, std::uint32_t, const VkImageCopy*) = nullptr;
+    void (*CmdBlitImage)(VkCommandBuffer, VkImage, int, VkImage, int, std::uint32_t, const VkImageBlit*, int) = nullptr;
     void (*CmdPipelineBarrier)(VkCommandBuffer, Flags, Flags, Flags, std::uint32_t, const void*, std::uint32_t, const void*, std::uint32_t, const VkImageMemoryBarrier*) = nullptr;
 
     // surface / swapchain (KHR, resolved from the instance)

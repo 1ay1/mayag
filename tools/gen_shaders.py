@@ -323,6 +323,7 @@ struct Shaded { vec4 color; bool discarded; };
 float env_atlas_r(vec2 uv)     { return texture(u_atlas, uv).r; }
 vec4  env_atlas_rgba(vec2 uv)  { return texture(u_color_atlas, uv); }
 vec4  env_capture(vec2 uv)     { return texture(u_capture, uv); }
+vec4  env_capture_lod(vec2 uv, float lod) { return textureLod(u_capture, uv, lod); }
 vec4  env_texture(vec2 uv)     { return texture(u_texture, uv); }
 vec2  env_capture_size()       { return vec2(textureSize(u_capture, 0)); }
 """
@@ -365,6 +366,7 @@ def emit_glsl():
     # Env hooks -> the concrete fetches declared above.
     prog = re.sub(r"env\.atlas_r\(env\.ctx,\s*([^)]+)\)", r"env_atlas_r(\1)", prog)
     prog = re.sub(r"env\.atlas_rgba\(env\.ctx,\s*([^)]+)\)", r"env_atlas_rgba(\1)", prog)
+    prog = re.sub(r"env\.capture_lod\(env\.ctx,\s*([^)]+)\)", r"env_capture_lod(\1)", prog)
     prog = re.sub(r"env\.capture\(env\.ctx,\s*([^)]+)\)", r"env_capture(\1)", prog)
     prog = re.sub(r"env\.texture\(env\.ctx,\s*([^)]+)\)", r"env_texture(\1)", prog)
     prog = prog.replace("env.capture_size.x", "env_capture_size().x")

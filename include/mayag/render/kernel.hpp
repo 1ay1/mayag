@@ -90,6 +90,7 @@ namespace mg {
 [[nodiscard]] inline f32 sqrt(f32 x) noexcept { return num::sqrt(x); }
 [[nodiscard]] inline f32 pow(f32 x, f32 y) noexcept { return num::pow(x, y); }
 [[nodiscard]] inline f32 exp(f32 x) noexcept { return num::exp(x); }
+[[nodiscard]] inline f32 log2(f32 x) noexcept { return num::log(x) * 1.4426950409f; }
 [[nodiscard]] inline f32 cos(f32 x) noexcept { return num::cos(x); }
 [[nodiscard]] inline f32 sin(f32 x) noexcept { return num::sin(x); }
 [[nodiscard]] inline f32 atan2(f32 y, f32 x) noexcept { return num::atan2(y, x); }
@@ -337,6 +338,8 @@ struct Env {
     vec4 (*atlas_rgba)(const void* ctx, vec2 uv) = nullptr;
     /// Mid-frame capture of everything drawn so far (RGBA, linear premul).
     vec4 (*capture)(const void* ctx, vec2 uv) = nullptr;
+    /// The same capture at a mip level (box-filtered), for wide blurs.
+    vec4 (*capture_lod)(const void* ctx, vec2 uv, f32 lod) = nullptr;
     /// A user image (RGBA, straight, sRGB-encoded): photos, icons, video
     /// frames. Distinct from the colour atlas, which the font engine owns.
     vec4 (*texture)(const void* ctx, vec2 uv) = nullptr;
@@ -431,6 +434,9 @@ struct Env {
         const f32 bd_cov = coverage(rounded_box(f.local, f.half, f.radii), f.px);
         if (bd_cov <= 0.001f) { result.discard = true; return result; }
         const f32 r = mg::max(f.params.x, 0.0f);
+        // Taps sit r/2 apart. Read them from the mip whose texels are about
+        // that wide, so each tap is an average, not one sharp pixel.
+        const f32 lod = mg::log2(mg::max(r * 0.5f, 1.0f));
         vec4 sum{0, 0, 0, 0};
         f32  wsum = 0.0f;
         for (int oy = -2; oy <= 2; ++oy) {
@@ -441,7 +447,7 @@ struct Env {
                 const vec2 uv = vec2{
                     (f.frag.x + static_cast<f32>(ox) * r * 0.5f) / env.capture_size.x,
                     (f.frag.y + static_cast<f32>(oy) * r * 0.5f) / env.capture_size.y};
-                const vec4 s = env.capture(env.ctx, uv);
+                const vec4 s = env.capture_lod(env.ctx, uv, lod);
                 sum.x += s.x * w; sum.y += s.y * w; sum.z += s.z * w;
                 wsum += w;
             }
