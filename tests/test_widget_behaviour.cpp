@@ -45,19 +45,19 @@ void test_tree() {
 
     auto in = tree_key(Key::down, sel, sc, r);
     check(in.act == A::moved && sel == 1, "down moves the selection");
-    tree_key(Key::j, sel, sc, r);
+    (void)tree_key(Key::j, sel, sc, r);
     check(sel == 2, "j does too");
-    tree_key(Key::up, sel, sc, r); tree_key(Key::k, sel, sc, r);
+    (void)tree_key(Key::up, sel, sc, r); (void)tree_key(Key::k, sel, sc, r);
     check(sel == 0, "up and k move back");
-    tree_key(Key::up, sel, sc, r);
+    (void)tree_key(Key::up, sel, sc, r);
     check(sel == 0, "up stops at the first row");
 
     sel = 4;
-    tree_key(Key::down, sel, sc, r);
+    (void)tree_key(Key::down, sel, sc, r);
     check(sel == 4, "down stops at the last row");
     check(sc.offset.y > 0.0f, "moving below the viewport scrolls it into view");
-    tree_key(Key::up, sel, sc, r); tree_key(Key::up, sel, sc, r); tree_key(Key::up, sel, sc, r);
-    tree_key(Key::up, sel, sc, r);
+    (void)tree_key(Key::up, sel, sc, r); (void)tree_key(Key::up, sel, sc, r); (void)tree_key(Key::up, sel, sc, r);
+    (void)tree_key(Key::up, sel, sc, r);
     check(sel == 0 && sc.offset.y == 0.0f, "and moving back up scrolls back");
 
     sel = 2;
@@ -95,13 +95,13 @@ void test_picker() {
     TextEditState q;
     int sel = 0;
     check(picker_key(q, Key::down, {}, sel, 3).act == A::moved && sel == 1, "down moves");
-    picker_key(q, Key::n, Mods{.ctrl = true}, sel, 3);
+    (void)picker_key(q, Key::n, Mods{.ctrl = true}, sel, 3);
     check(sel == 2, "ctrl-n moves");
-    picker_key(q, Key::down, {}, sel, 3);
+    (void)picker_key(q, Key::down, {}, sel, 3);
     check(sel == 2, "down stops at the last item");
-    picker_key(q, Key::p, Mods{.ctrl = true}, sel, 3);
-    picker_key(q, Key::up, {}, sel, 3);
-    picker_key(q, Key::up, {}, sel, 3);
+    (void)picker_key(q, Key::p, Mods{.ctrl = true}, sel, 3);
+    (void)picker_key(q, Key::up, {}, sel, 3);
+    (void)picker_key(q, Key::up, {}, sel, 3);
     check(sel == 0, "ctrl-p and up move back, stopping at the first");
     sel = 2;
     const auto in = picker_key(q, Key::enter, {}, sel, 3);

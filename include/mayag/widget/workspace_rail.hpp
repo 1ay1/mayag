@@ -190,7 +190,7 @@ template <ControlContext C>
         rows.push_back((h(node(std::move(tile)),
                           v(h(text_owned(w.name) | font(t.font_size) | (on ? semibold : weight(FontWeight::medium))
                                   | fg(on ? t.text_primary : t.text_secondary) | ellipsis | grow() | min_size(0, 0),
-                              text_owned(i < 9 ? workspace_key_label(i + 1) : std::string{}) | font(t.font_size * 0.72f)
+                              text_owned(i < 9 ? workspace_key_label(static_cast<int>(i) + 1) : std::string{}) | font(t.font_size * 0.72f)
                                   | fg(hov ? t.text_secondary : t.text_disabled))
                                 | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
                             text_owned(summary_text(s, w.tabs.size())) | font(t.font_size * 0.76f) | fg(sub_col) | ellipsis,

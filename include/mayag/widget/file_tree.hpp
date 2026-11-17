@@ -120,14 +120,25 @@ inline void tree_reveal(ScrollState& scroll, int row) {
 
 /// A click on row `row` (`count` 2 for a double click): selects it; a folder
 /// toggles, a file previews on a single click and opens on a double.
+// GCC 16 at -O3 inlines a constant out-of-range row into this and warns
+// about rows[at] on the path the bounds check has already cut off (it can't
+// relate size(), a pointer difference over sizeof(TreeRow), to the index).
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
 [[nodiscard]] inline TreeIntent tree_click(int row, int count, int& selected,
                                            const std::vector<TreeRow>& rows) {
     using A = TreeIntent::Act;
-    if (row < 0 || row >= static_cast<int>(rows.size())) return {};
+    const auto at = static_cast<std::size_t>(row);   // a negative row wraps past size()
+    if (at >= rows.size()) return {};
     selected = row;
-    if (rows[static_cast<std::size_t>(row)].dir) return {A::toggle, row};
+    if (rows[at].dir) return {A::toggle, row};
     return {count >= 2 ? A::open : A::preview, row};
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 namespace detail {
 template <ControlContext C>

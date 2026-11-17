@@ -139,7 +139,7 @@ int main() {
         check(plain[i] == memo[i], "frame " + std::to_string(i) + " is identical with memo()");
         if (plain[i] != memo[i] && plain[i].size() == memo[i].size()) {   // say where, to debug a failure
             int x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
-            const int w = static_cast<int>(std::sqrt(plain[i].size() / 4 * 400.0 / 520.0) + 0.5);
+            const int w = static_cast<int>(std::sqrt(static_cast<double>(plain[i].size() / 4) * 400.0 / 520.0) + 0.5);
             for (std::size_t p = 0; p < plain[i].size(); p += 4)
                 if (std::memcmp(&plain[i][p], &memo[i][p], 4) != 0) {
                     const int px = static_cast<int>(p / 4) % w, py = static_cast<int>(p / 4) / w;

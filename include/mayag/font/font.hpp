@@ -1308,15 +1308,15 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                                           {sp.axes.data(), sp.axis_count}, sp.italic);
                 const float ell_w = ell_glyph ? ell_glyph->advance : st.size * 0.5f;
                 const float budget = box.width() - ell_w;
-                float run = 0.0f;
+                float kept = 0.0f;
                 draw_end = line.begin;
                 for (std::size_t i = line.begin; i < line.end && i < shaped.glyphs.size(); ++i) {
-                    const float nx = run + shaped.glyphs[i].advance;
+                    const float nx = kept + shaped.glyphs[i].advance;
                     if (nx > budget) break;
-                    run = nx;
+                    kept = nx;
                     draw_end = i + 1;
                 }
-                ellipsis_x = pen_x + run;
+                ellipsis_x = pen_x + kept;
                 show_ellipsis = true;
             }
 

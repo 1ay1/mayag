@@ -22,6 +22,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -39,11 +40,21 @@ namespace mayag {
 class MemoKey {
   public:
     MemoKey& add(std::uint64_t v) noexcept { h_ = memo_mix(h_, v); return *this; }
-    MemoKey& add(std::int64_t v) noexcept { return add(static_cast<std::uint64_t>(v)); }
+    // Every other integer width goes through one template: size_t is
+    // unsigned long on macOS but uint64_t is unsigned long long, so a fixed
+    // set of overloads is ambiguous on one platform or the other. add(int)
+    // stays a plain overload so unscoped enums still promote to it.
     MemoKey& add(int v) noexcept { return add(static_cast<std::uint64_t>(static_cast<std::int64_t>(v))); }
-    MemoKey& add(unsigned v) noexcept { return add(std::uint64_t{v}); }
-    MemoKey& add(bool v) noexcept { return add(std::uint64_t{v}); }
-    MemoKey& add(char v) noexcept { return add(static_cast<std::uint64_t>(static_cast<unsigned char>(v))); }
+    template <class T>
+        requires(std::is_integral_v<T> && !std::is_same_v<T, std::uint64_t> && !std::is_same_v<T, int>)
+    MemoKey& add(T v) noexcept {
+        if constexpr (std::is_same_v<T, char>)
+            return add(static_cast<std::uint64_t>(static_cast<unsigned char>(v)));
+        else if constexpr (std::is_signed_v<T>)
+            return add(static_cast<std::uint64_t>(static_cast<std::int64_t>(v)));
+        else
+            return add(static_cast<std::uint64_t>(v));
+    }
     MemoKey& add(float v) noexcept { std::uint32_t u; std::memcpy(&u, &v, 4); return add(std::uint64_t{u}); }
     MemoKey& add(double v) noexcept { std::uint64_t u; std::memcpy(&u, &v, 8); return add(u); }
     MemoKey& add(Vec2 v) noexcept { return add(v.x).add(v.y); }
@@ -57,7 +68,7 @@ class MemoKey {
     MemoKey& add(const char* s) noexcept { return add(std::string_view{s}); }
     template <class T>
     MemoKey& add(const std::vector<T>& v) {
-        add(std::uint64_t{v.size()});
+        add(static_cast<std::uint64_t>(v.size()));
         for (const auto& x : v) add(x);
         return *this;
     }
