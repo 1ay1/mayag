@@ -32,6 +32,7 @@
 #include "../layout/flex.hpp"
 #include "../render/draw_list.hpp"
 #include "../render/painter.hpp"
+#include "../scene/memo.hpp"
 #include "../scene/node.hpp"
 #include "../scene/overlay.hpp"
 #include "../style/cascade.hpp"
@@ -87,6 +88,8 @@ struct Ctx {
     TrackedSet*  tracked  = nullptr;
     OverlayList* overlays = nullptr;
     const Interaction* input = nullptr;
+    /// The host's memo cache; null outside a live window.
+    MemoCache* memos = nullptr;
 
     /// Follow a node's measured rect with a spring.
     void track(const Tracked& t, std::uint64_t node) const {
@@ -99,9 +102,14 @@ struct Ctx {
         if (overlays != nullptr) overlays->add(std::move(o));
     }
 
-    [[nodiscard]] bool hovered(std::uint64_t id) const noexcept { return input && input->is_hovered(id); }
-    [[nodiscard]] bool pressed(std::uint64_t id) const noexcept { return input && input->is_pressed(id); }
-    [[nodiscard]] bool focused(std::uint64_t id) const noexcept { return input && input->is_focused(id); }
+    [[nodiscard]] bool hovered(std::uint64_t id) const noexcept { note_read(); return input && input->is_hovered(id); }
+    [[nodiscard]] bool pressed(std::uint64_t id) const noexcept { note_read(); return input && input->is_pressed(id); }
+    [[nodiscard]] bool focused(std::uint64_t id) const noexcept { note_read(); return input && input->is_focused(id); }
+    /// Counts hover/press/focus questions this frame, shared by every copy of
+    /// the frame's Ctx; memo() uses it to see whether a subtree depends on them.
+    std::uint64_t* interaction_reads = nullptr;
+    void note_read() const noexcept { if (interaction_reads != nullptr) ++*interaction_reads; }
+    [[nodiscard]] std::uint64_t reads() const noexcept { return interaction_reads != nullptr ? *interaction_reads : 0; }
     template <dsl::fixed_string Name>
     [[nodiscard]] bool hovered() const noexcept { return hovered(dsl::node_id(Name.view())); }
     template <dsl::fixed_string Name>
@@ -175,6 +183,109 @@ template <class F>
         else return Node(build());
     }();
     return dsl::node(std::move(n)) | dsl::theme(t);
+}
+
+namespace detail {
+[[nodiscard]] inline std::uint64_t memo_mix(std::uint64_t h, std::uint64_t v) noexcept {
+    h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    return h * 0xff51afd7ed558ccdull;
+}
+/// The Ctx facts a subtree can read without them being in its key.
+[[nodiscard]] inline std::uint64_t ctx_fingerprint(const Ctx& c) noexcept {
+    std::uint64_t h = 0;
+    std::uint32_t u;
+    for (float f : {c.size.x, c.size.y, c.dpi_scale}) { std::memcpy(&u, &f, 4); h = memo_mix(h, u); }
+    const auto* b = reinterpret_cast<const unsigned char*>(&c.theme);
+    for (std::size_t i = 0; i < sizeof(Theme); i += 8) {
+        std::uint64_t w = 0;
+        std::memcpy(&w, b + i, std::min<std::size_t>(8, sizeof(Theme) - i));
+        h = memo_mix(h, w);
+    }
+    return h;
+}
+}  // namespace detail
+
+/// Builds a memo() key from the values a subtree depends on.
+///
+///     MemoKey k; k.add(m.sel).add(m.scroll.offset).add(rows);  memo(k, ...)
+class MemoKey {
+  public:
+    MemoKey& add(std::uint64_t v) noexcept { h_ = detail::memo_mix(h_, v); return *this; }
+    MemoKey& add(std::int64_t v) noexcept { return add(static_cast<std::uint64_t>(v)); }
+    MemoKey& add(int v) noexcept { return add(static_cast<std::uint64_t>(static_cast<std::int64_t>(v))); }
+    MemoKey& add(unsigned v) noexcept { return add(std::uint64_t{v}); }
+    MemoKey& add(bool v) noexcept { return add(std::uint64_t{v}); }
+    MemoKey& add(char v) noexcept { return add(static_cast<std::uint64_t>(static_cast<unsigned char>(v))); }
+    MemoKey& add(float v) noexcept { std::uint32_t u; std::memcpy(&u, &v, 4); return add(std::uint64_t{u}); }
+    MemoKey& add(double v) noexcept { std::uint64_t u; std::memcpy(&u, &v, 8); return add(u); }
+    MemoKey& add(Vec2 v) noexcept { return add(v.x).add(v.y); }
+    MemoKey& add(Color<Srgb> c) noexcept { return add(c.c0).add(c.c1).add(c.c2).add(c.a); }
+    MemoKey& add(std::string_view s) noexcept {
+        std::uint64_t x = 0xcbf29ce484222325ull ^ s.size();
+        for (unsigned char ch : s) x = (x ^ ch) * 0x100000001b3ull;
+        return add(x);
+    }
+    MemoKey& add(const std::string& s) noexcept { return add(std::string_view{s}); }
+    MemoKey& add(const char* s) noexcept { return add(std::string_view{s}); }
+    template <class T>
+    MemoKey& add(const std::vector<T>& v) {
+        add(std::uint64_t{v.size()});
+        for (const auto& x : v) add(x);
+        return *this;
+    }
+    [[nodiscard]] operator std::uint64_t() const noexcept { return h_; }
+
+  private:
+    std::uint64_t h_ = 0x51ED27A1u;
+};
+
+/// Reuse a subtree across frames while `key` is unchanged.
+///
+///     memo(MemoKey{}.add(m.rows_version), [&] { return big_list(m); })
+///
+/// On a hit the subtree comes back already styled and laid out, and the
+/// cascade and layout skip it unless something around it changed (theme,
+/// inherited text, hover or focus inside it, the space it's given). `key`
+/// must cover everything `build` reads from the model, and anything it
+/// reads from ctx() besides size, dpi, theme and hover/press/focus (those
+/// are tracked: a subtree that asks about hover is rebuilt when it moves).
+/// A subtree that posts overlays, tracks a spring or asks for animation
+/// frames while building isn't kept.
+/// Outside a live window (one-shot renders, tests) it just calls `build`.
+template <class F>
+[[nodiscard]] Node memo(std::uint64_t key, F&& build) {
+    // The cached subtree sits inside a plain wrapper, so whatever the caller
+    // pipes onto the result (`node(memo(...)) | width(300)`) styles the
+    // wrapper, never the cached root.
+    const auto wrap = [](Node inner) {
+        Node w{NodeKind::box};
+        w.add_child(std::move(inner));
+        return w;
+    };
+    const Ctx& c = ctx();
+    const std::uint64_t k = detail::memo_mix(detail::memo_mix(key, detail::ctx_fingerprint(c)), 1) | 1u;
+    MemoCache* cache = c.memos;
+    // A subtree that asked about hover/press/focus while building depends on
+    // them, so a hit also needs them unchanged.
+    const std::uint64_t interaction = c.input != nullptr
+        ? detail::memo_mix(detail::memo_mix(detail::memo_mix(c.input->hovered(), c.input->pressed()),
+                                            c.input->focused()), c.input->press_inside())
+        : 0;
+    if (cache != nullptr) {
+        if (auto hit = cache->take(k, interaction)) return wrap(std::move(*hit));
+    }
+    const std::uint64_t reads0 = c.reads();
+    const std::size_t overlays0 = c.overlays != nullptr ? c.overlays->size() : 0;
+    const std::size_t tracked0 = c.tracked != nullptr ? c.tracked->size() : 0;
+    const bool anim0 = animation_was_requested();
+    clear_animation_request();
+    Node n = Node(build());
+    const bool side_effects = (c.overlays != nullptr && c.overlays->size() != overlays0) ||
+                              (c.tracked != nullptr && c.tracked->size() != tracked0) || animation_was_requested();
+    if (anim0) request_animation_frame();
+    const bool reads_interaction = c.reads() != reads0;
+    if (cache != nullptr && !side_effects && cache->store_built(k, n, reads_interaction, interaction)) n.set_memo_key(k);
+    return wrap(std::move(n));
 }
 
 /// The theme a program renders in for `m`: its `static Theme theme(const
@@ -935,6 +1046,11 @@ class window_host {
         Ctx ctx{size_, dpi_, time_, theme_, &latency_, {}, &bindings_->measurer,
                 &tracked_, &overlays_, &input_};
         if constexpr (requires { window_.photon_stats(); }) ctx.photon = window_.photon_stats();
+        // Pull last frame's memo() subtrees out of the tree view() replaces.
+        memos_.begin_frame(frame_counter_);
+        ctx.memos = &memos_;
+        interaction_reads_ = 0;
+        ctx.interaction_reads = &interaction_reads_;
         {
             ScopedTimer t{frame.view_ms};
             try {
@@ -959,7 +1075,9 @@ class window_host {
             ci.focused       = input_.focused();
             ci.focus_visible = input_.focus_visible();
             ci.previous_ids  = seen_ids_valid_ ? &seen_ids_ : nullptr;
+            ci.memos         = &memos_;
             CascadeResult cr = cascade(tree_, ci);
+            ci.memos = nullptr;   // overlays are rebuilt into a fresh list each frame
             for (auto& o : overlays_.items()) {
                 const CascadeResult r = cascade(o.content, ci);
                 cr.transitions = cr.transitions || r.transitions;
@@ -1019,6 +1137,7 @@ class window_host {
             po.glyphs       = &bindings_->glyphs;
             po.debug_bounds = cfg_.debug_bounds;
             render::paint(tree_, draws_, po);
+            memos_.end_frame();
             if (!overlays_.empty()) {
                 auto sorted = overlays_.items();
                 std::stable_sort(sorted.begin(), sorted.end(),
@@ -1146,6 +1265,8 @@ class window_host {
     }
     int                 coalesced_moves_ = 0;
     LatencyStats        latency_{};
+    MemoCache           memos_{};
+    std::uint64_t       interaction_reads_ = 0;
     BusyLoopDetector    busy_{};
     bool                busy_warned_ = false;
     bool                input_since_render_ = false;

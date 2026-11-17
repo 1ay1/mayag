@@ -78,7 +78,7 @@ template <ControlContext C, Element Content>
              | a11y_value(state.max_offset.y > 0.0f ? state.offset.y / state.max_offset.y : 0.0f)
              | id_of(id, part_bar);
 
-    return h(v(content) | scroll(state) | grow() | height(pct(100)) | min_size(0, 0) | id_of(id),
+    return h(v(std::move(content)) | scroll(state) | grow() | height(pct(100)) | min_size(0, 0) | id_of(id),
              std::move(bar))
          | gap(t.spaced(2)) | width(pct(100)) | grow() | min_size(0, 0);
 }

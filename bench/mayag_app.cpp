@@ -27,16 +27,20 @@ struct BenchApp {
     }
     static Node view(const Model& m) {
         const Theme& t = ctx().theme;
-        std::vector<Node> rows;
-        rows.reserve(200);
-        for (int i = 0; i < 200; ++i)
-            rows.push_back(v(text_owned("Track " + std::to_string(i)) | fg(t.text_primary),
-                             text<"Artist name"> | fg(t.text_secondary)).build());
+        // The list doesn't depend on the model, so it's built once and reused.
+        Node list = memo(0, [&] {
+            std::vector<Node> rows;
+            rows.reserve(200);
+            for (int i = 0; i < 200; ++i)
+                rows.push_back(v(text_owned("Track " + std::to_string(i)) | fg(t.text_primary),
+                                 text<"Artist name"> | fg(t.text_secondary)).build());
+            return (v(std::move(rows)) | gap(4)).build();
+        });
         const float frac = static_cast<float>(0.5 + 0.5 * std::sin(m.t * 3.0));
         return (v(text<"Library"> | font(28) | bold | fg(t.text_primary),
                   z(box() | height(6) | width(pct(100)) | bg(t.surface_raised) | radius(3),
                     box() | height(6) | width(pct(100 * frac)) | bg(t.accent) | radius(3)),
-                  v(scroll_view(ctx(), "list", m.list, node((v(std::move(rows)) | gap(4)).build())) | grow() | min_size(0, 0)) | grow() | min_size(0, 0))
+                  v(scroll_view(ctx(), "list", m.list, node(std::move(list))) | grow() | min_size(0, 0)) | grow() | min_size(0, 0))
                 | gap(8) | pad(12) | bg(t.background))
             .build();
     }

@@ -93,6 +93,12 @@ class PassMeasurer final : public TextMeasurer {
 /// Intrinsic size of a subtree under `c`, ignoring grow/shrink.
 /// Pure; memoised per node during a layout_tree() pass.
 [[nodiscard]] inline Vec2 measure(const Node& node, Constraints c, const TextMeasurer& tm) {
+    // A memo root keeps its sizes across frames: its subtree doesn't change
+    // while it's reused, so neither do they.
+    if (node.memo_key() != 0) {
+        if (const auto* ms = node.memo_size(c.max_width, c.max_height); ms != nullptr && node.memo_reused())
+            return ms->out;
+    }
     const std::uint32_t g = tm.layout_pass();
     if (g == 0) return detail::measure_uncached(node, c, tm);
     auto& m = node.measure_memo();
@@ -107,6 +113,7 @@ class PassMeasurer final : public TextMeasurer {
     m.cw[slot] = c.max_width;
     m.ch[slot] = c.max_height;
     m.out[slot] = r;
+    if (node.memo_key() != 0) node.add_memo_size(c.max_width, c.max_height, r);
     return r;
 }
 
@@ -497,6 +504,23 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
 }  // namespace detail
 
 inline void arrange(Node& node, const Rect& frame, const TextMeasurer& tm) {
+    // A reused memo subtree at the same size only needs moving; at a new
+    // size it's relaid out from its resolved (pre-layout) copy.
+    if (node.memo_reused()) {
+        const Rect old = node.frame();
+        if (old.size.x == frame.size.x && old.size.y == frame.size.y) {
+            if (old.origin.x != frame.origin.x || old.origin.y != frame.origin.y)
+                node.translate(frame.origin - old.origin);
+            return;
+        }
+        if (const Node* fresh = node.memo_cascaded()) {
+            const std::uint64_t key = node.memo_key(), path = node.memo_path();
+            node = *fresh;
+            node.set_memo_key(key);
+            node.set_memo_path(path);
+            node.set_memo_reused(false);
+        }
+    }
     node.set_frame(frame);
     // Corner radii are clamped now that the real size is known, so `pill` /
     // `radius_full` become an actual pill -- for EVERY node, leaves and

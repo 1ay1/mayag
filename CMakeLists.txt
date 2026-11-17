@@ -411,6 +411,12 @@ if(MAYAG_BUILD_TESTS)
     target_compile_definitions(mayag_app_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
     add_test(NAME mayag_app_tests COMMAND mayag_app_tests)
 
+    add_executable(mayag_memo_tests tests/test_memo.cpp)
+    target_link_libraries(mayag_memo_tests PRIVATE mayag)
+    target_compile_options(mayag_memo_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_memo_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
+    add_test(NAME mayag_memo_tests COMMAND mayag_memo_tests)
+
     # The font engine, exercised against the REAL fonts on the machine:
     # ~1300 system faces swept, plus 400 fuzzed/corrupted files that must be
     # rejected without crashing.

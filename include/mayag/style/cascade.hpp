@@ -30,6 +30,7 @@
 
 #include "../core/animation.hpp"
 #include "../core/color.hpp"
+#include "../scene/memo.hpp"
 #include "../scene/node.hpp"
 #include "state.hpp"
 #include "style.hpp"
@@ -58,11 +59,15 @@ struct CascadeInput {
     /// Node ids that existed last frame; a node absent from it is `starting`.
     /// Null: nothing is starting (one-shot renders).
     const std::unordered_set<std::uint64_t>* previous_ids = nullptr;
+    /// Last frames' memo() subtrees. Null: no reuse (one-shot renders).
+    MemoCache* memos = nullptr;
 };
 
 // ════════════════════════════════════════════════════════════════════════
 // Token resolution
 // ════════════════════════════════════════════════════════════════════════
+
+inline void assign_hit_ids(Node& n, std::uint64_t path);
 
 namespace cascade_detail {
 
@@ -288,6 +293,20 @@ inline void inherit_text(TextStyle& to, const TextStyle& from) noexcept {
 inline state::Mask subtree_state(Node& n, const CascadeInput& in,
                                  std::unordered_map<const Node*, state::Mask>& out) {
     using namespace state::bit;
+    // A reused memo subtree: what it contributes to its ancestors comes from
+    // its id list. (If it gets re-cascaded, visit_memo walks it fresh.)
+    if (n.memo_reused() && in.memos != nullptr) {
+        if (const MemoCache::Entry* e = in.memos->find(n.memo_key()); e != nullptr && e->has_cascaded) {
+            const auto has = [&](std::uint64_t id) {
+                return id != 0 && std::binary_search(e->ids.begin(), e->ids.end(), id);
+            };
+            state::Mask m = 0;
+            if (has(in.hovered)) m |= hover;
+            if (has(in.pressed) && in.press_inside) m |= pressed;
+            if (has(in.focused)) m |= focus_within;
+            return m;
+        }
+    }
     state::Mask below = 0;
     for (auto& k : n.children()) below |= subtree_state(k, in, out);
     const std::uint64_t id = n.style().id;
@@ -309,9 +328,102 @@ struct Walk {
     bool                dark;
     bool                any_transition = false;
     bool                any_starting = false;
+    int                 memo_depth = 0;    // inside a memo subtree being cascaded fresh
+    const Theme*        hashed_theme = nullptr;
+    std::uint64_t       theme_hash = 0;
+
+    /// Theme and var bindings a node resolves against, hashed.
+    [[nodiscard]] std::uint64_t scope_hash(const Scope& sc) {
+        if (&sc.theme != hashed_theme) {
+            hashed_theme = &sc.theme;
+            static_assert(std::is_trivially_copyable_v<Theme>);
+            std::uint64_t h = 0xcbf29ce484222325ull;
+            const auto* b = reinterpret_cast<const unsigned char*>(&sc.theme);
+            for (std::size_t i = 0; i < sizeof(Theme); ++i) h = (h ^ b[i]) * 0x100000001b3ull;
+            theme_hash = h;
+        }
+        std::uint64_t h = theme_hash ^ (sc.explicit_theme ? 0x9E3779B97F4A7C15ull : 0);
+        for (const Scope* s = &sc; s != nullptr; s = s->parent) {
+            for (const auto& d : s->defs) {
+                const auto mix = [&h](std::uint64_t v) { h = (h ^ v) * 0x100000001b3ull; };
+                std::uint32_t u;
+                mix(d.token.code | (std::uint64_t{d.token.named} << 32));
+                std::memcpy(&u, &d.token.alpha, 4); mix(u);
+                std::memcpy(&u, &d.token.tint, 4); mix(u);
+                std::memcpy(&u, &d.value.c0, 4); mix(u);
+                std::memcpy(&u, &d.value.c1, 4); mix(u);
+                std::memcpy(&u, &d.value.c2, 4); mix(u);
+                std::memcpy(&u, &d.value.a, 4); mix(u);
+            }
+            mix_level(h);
+        }
+        return h;
+    }
+    static void mix_level(std::uint64_t& h) noexcept { h = (h ^ 0xA5u) * 0x100000001b3ull; }
 
     void visit(Node& n, const TextStyle* parent_text, const Scope& scope,
                state::Mask group_state, bool has_group, bool parent_disabled) {
+        if (n.memo_key() != 0) {
+            visit_memo(n, parent_text, scope, group_state, has_group, parent_disabled);
+            return;
+        }
+        visit_plain(n, parent_text, scope, group_state, has_group, parent_disabled);
+    }
+
+    // A memo() root: reuse last frame's resolved subtree when what it would
+    // resolve against is unchanged; otherwise cascade it and remember.
+    void visit_memo(Node& n, const TextStyle* parent_text, const Scope& scope,
+                    state::Mask group_state, bool has_group, bool parent_disabled) {
+        MemoCache* cache = in.memos;
+        MemoCache::Entry* e = cache != nullptr ? cache->find(n.memo_key()) : nullptr;
+        MemoCache::Env env{};
+        env.has_parent_text = parent_text != nullptr;
+        if (parent_text != nullptr) env.parent_text = *parent_text;
+        env.scope = scope_hash(scope);
+        env.group_state = group_state;
+        env.has_group = has_group;
+        env.parent_disabled = parent_disabled;
+        env.path = n.memo_path();
+
+        if (n.memo_reused()) {
+            if (e != nullptr && memo_depth == 0 && e->has_cascaded) {
+                MemoCache::interaction_inside(e->ids, in.hovered, in.pressed, in.focused, in.press_inside,
+                                              in.focus_visible, env);
+                if (env == e->env) { cache->live(&n); return; }   // reuse as is
+            }
+            // The outside changed (or it's nested): start over from the
+            // subtree as built, with the hit ids it would have had.
+            const std::uint64_t key = n.memo_key();
+            if (e == nullptr) { n.set_memo_key(0); n.set_memo_reused(false); visit_plain(n, parent_text, scope, group_state, has_group, parent_disabled); return; }
+            n = e->built;
+            n.set_memo_key(key);
+            n.set_memo_reused(false);
+            n.set_memo_path(env.path);
+            assign_hit_ids(n, env.path);
+            (void)subtree_state(n, in, deep);
+        }
+
+        // Nested memos, and subtrees that animate or start, are cascaded but
+        // not kept: reusing them would freeze the motion.
+        if (cache == nullptr || e == nullptr || memo_depth > 0) {
+            if (memo_depth > 0) n.set_memo_key(0);
+            visit_plain(n, parent_text, scope, group_state, has_group, parent_disabled);
+            return;
+        }
+        const bool t0 = any_transition, s0 = any_starting;
+        any_transition = any_starting = false;
+        ++memo_depth;
+        visit_plain(n, parent_text, scope, group_state, has_group, parent_disabled);
+        --memo_depth;
+        const bool moving = any_transition || any_starting;
+        any_transition = any_transition || t0;
+        any_starting = any_starting || s0;
+        if (moving) { cache->forget(n.memo_key()); n.set_memo_key(0); return; }
+        cache->cascaded(n, env, in.hovered, in.pressed, in.focused, in.press_inside, in.focus_visible);
+    }
+
+    void visit_plain(Node& n, const TextStyle* parent_text, const Scope& scope,
+                     state::Mask group_state, bool has_group, bool parent_disabled) {
         // A plain box with the default style and no rules: resolving a
         // default style changes nothing, so don't make one. Its children
         // still inherit what it would have passed down.
@@ -393,6 +505,10 @@ struct Walk {
 /// Marked `hit_only`, so these nodes are never Tab stops and never take
 /// focus on click; they are not controls, they only light up.
 inline void assign_hit_ids(Node& n, std::uint64_t path) {
+    // A memo root remembers the path it sits at; a reused one keeps the ids
+    // it was built with (the cascade redoes it if the path moved).
+    if (n.memo_key() != 0) n.set_memo_path(path);
+    if (n.memo_reused()) return;
     constexpr state::Mask pointer = state::bit::hover | state::bit::pressed;
     const Cascade* cc = n.cascade().get();
     const std::uint64_t own = std::as_const(n).style().id;   // reads must not allocate
@@ -636,6 +752,7 @@ class StyleMotion {
     // structural path. Every transitioning node animates, named or not: a
     // chevron that brightens on group hover needs no id to fade.
     void visit(Node& n, double dt, std::uint64_t path) {
+        if (n.memo_reused()) return;   // cached only when nothing in it transitions
         const Style& cs = std::as_const(n).style();
         const std::uint64_t key = (cs.id != 0 && !cs.hit_only) ? cs.id : path;
         if (cs.transition.on()) {
@@ -767,6 +884,8 @@ class StyleMotion {
 /// `CascadeInput::previous_ids`. Only those: a node without a starting rule
 /// never needs to know whether it is new, so the set stays tiny.
 inline void collect_starting_ids(const Node& n, std::unordered_set<std::uint64_t>& out) {
+    // A reused memo subtree has no `starting` rules (it wouldn't be cached).
+    if (n.memo_reused()) return;
     const Cascade* cc = n.cascade().get();
     if (n.style().id != 0 && cc != nullptr && (cc->uses & state::bit::starting) != 0)
         out.insert(n.style().id);

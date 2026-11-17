@@ -20,7 +20,7 @@ template <ControlContext C, Element Control>
                 text_owned(std::string{description_text}) | font(t.font_size * 0.86f)
                     | fg(var::text_secondary) | wrap_text | line_height(1.35f))
                 | gap(t.spaced(3)) | grow() | min_size(0, 0),
-              v(control) | align(Align::end))
+              v(std::move(control)) | align(Align::end))
             | gap(t.spaced(24)) | align(Align::center) | pad(t.spaced(14), t.spaced(18)) | width(pct(100))).build();
 }
 

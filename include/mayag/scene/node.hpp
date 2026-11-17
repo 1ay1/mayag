@@ -224,6 +224,47 @@ class Node {
     [[nodiscard]] bool cascaded() const noexcept { return cascaded_; }
     void set_cascaded(bool on) noexcept { cascaded_ = on; }
 
+    // -- memo ---------------------------------------------------------------
+
+    /// Nonzero on the root of a `memo(key, ...)` subtree: the key. The host
+    /// caches such subtrees cascaded and laid out, and reuses them on a hit.
+    [[nodiscard]] std::uint64_t memo_key() const noexcept { return memo_state_.key; }
+    void set_memo_key(std::uint64_t k) noexcept { memo_state_.key = k; }
+    /// True while this memo subtree is last frame's, already resolved: the
+    /// cascade, hit-id and transition passes leave it alone.
+    [[nodiscard]] bool memo_reused() const noexcept { return memo_state_.reused; }
+    void set_memo_reused(bool on) noexcept { memo_state_.reused = on; }
+    /// A reused subtree's post-cascade, pre-layout copy (owned by the cache),
+    /// for relaying it out at a new size.
+    [[nodiscard]] const Node* memo_cascaded() const noexcept { return memo_state_.cascaded; }
+    void set_memo_cascaded(const Node* n) noexcept { memo_state_.cascaded = n; }
+    /// The hit-id path this memo root was given this frame.
+    [[nodiscard]] std::uint64_t memo_path() const noexcept { return memo_state_.path; }
+    void set_memo_path(std::uint64_t p) noexcept { memo_state_.path = p; }
+
+    /// A memo root's measured sizes, kept across frames with the subtree
+    /// (unlike MeasureMemo, which is per pass).
+    struct MemoSize { float cw = 0, ch = 0; Vec2 out{}; };
+    [[nodiscard]] const MemoSize* memo_size(float cw, float ch) const noexcept {
+        for (std::uint8_t i = 0; i < memo_state_.n; ++i)
+            if (memo_state_.sizes[i].cw == cw && memo_state_.sizes[i].ch == ch) return &memo_state_.sizes[i];
+        return nullptr;
+    }
+    void add_memo_size(float cw, float ch, Vec2 out) const noexcept {
+        // Parents measure a child under a few constraints (intrinsic, then
+        // the space it gets); keep four, replacing round robin.
+        memo_state_.sizes[memo_state_.next] = {cw, ch, out};
+        memo_state_.next = static_cast<std::uint8_t>((memo_state_.next + 1) % 4);
+        if (memo_state_.n < 4) ++memo_state_.n;
+    }
+
+    /// Shift this subtree's frames by `d` (a reused subtree whose parent put
+    /// it somewhere else at the same size).
+    void translate(Vec2 d) noexcept {
+        frame_.origin = frame_.origin + d;
+        for (auto& c : children_) c.translate(d);
+    }
+
   private:
     NodeKind          kind_ = NodeKind::box;
     StyleBox          style_{};
@@ -235,6 +276,16 @@ class Node {
     Rect              frame_{};
     std::shared_ptr<const Cascade> cascade_{};
     bool              cascaded_ = false;
+    // memo bookkeeping; not part of a node's value
+    struct MemoState {
+        std::uint64_t key = 0;
+        std::uint64_t path = 0;
+        bool          reused = false;
+        const Node*   cascaded = nullptr;
+        mutable MemoSize      sizes[4]{};
+        mutable std::uint8_t  n = 0, next = 0;
+        friend constexpr bool operator==(const MemoState&, const MemoState&) noexcept { return true; }
+    } memo_state_{};
     mutable MeasureMemo memo_{};
 };
 

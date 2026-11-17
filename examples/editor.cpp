@@ -1297,11 +1297,20 @@ struct Editor {
                                 .active = b && b->path == n.path, .git = g, .errors = e});
             }
             const std::string root_name = g_builtin ? std::string{"demo"} : std::filesystem::path(g_root).filename().string();
+            // The tree only changes with its rows, selection, scroll and focus;
+            // everything it asks about hover is tracked by memo() itself.
+            MemoKey tree_key;
+            tree_key.add(m.tree_sel).add(m.tree_scroll.offset).add(m.focus == Focus::tree).add(rows.size());
+            for (const auto& r : rows)
+                tree_key.add(r.name).add(r.depth).add(r.dir).add(r.open).add(r.active).add(r.git).add(r.errors);
+            Node tree = memo(tree_key, [&] {
+                return file_tree(look, "tree", rows, m.tree_sel, m.tree_scroll, m.focus == Focus::tree);
+            });
             side = (h(v(h(text_owned(root_name) | font(11) | semibold | tracking(0.6f) | fg(t.text_secondary),
                           spacer(),
                           text_owned(std::to_string(m.project.size()) + " files") | font(10.5f) | fg(t.text_disabled))
                             | align(Align::center) | pad(0, 12) | height(34) | width(pct(100)),
-                        node(file_tree(look, "tree", rows, m.tree_sel, m.tree_scroll, m.focus == Focus::tree)))
+                        node(std::move(tree)) | grow() | min_size(0, 0))
                       | width(m.sidebar_w) | height(pct(100)) | bg(t.surface),
                       node(split_handle(look, "split-side", Axis::horizontal)))
                     | height(pct(100))).build();
