@@ -42,6 +42,7 @@ extern "C" void  objc_autoreleasePoolPop(void*);
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
@@ -409,6 +410,11 @@ class MetalDevice {
             msg<void>(enc, sel("setFragmentTexture:atIndex:"),
                       atlas_texture_, static_cast<std::uint64_t>(0));
         }
+        // The colour plane (emoji). Always bind something: an unbound slot
+        // the shader declares samples zeros on some GPUs and faults on others.
+        if (id ct = color_texture_ != nullptr ? color_texture_ : atlas_texture_; ct != nullptr) {
+            msg<void>(enc, sel("setFragmentTexture:atIndex:"), ct, static_cast<std::uint64_t>(1));
+        }
         if (sampler_ != nullptr) {
             msg<void>(enc, sel("setFragmentSamplerState:atIndex:"),
                       sampler_, static_cast<std::uint64_t>(0));
@@ -511,13 +517,55 @@ class MetalDevice {
             atlas_generation_ = atlas.generation();
             atlas_uploaded_   = true;
             atlas.clear_dirty();
+            sync_color(atlas, /*full=*/true);
             return;
         }
 
         const Rect& d = atlas.dirty_region();
-        if (d.empty()) return;
-        upload_region(atlas.pixels().data(), atlas.width(), d);
-        atlas.clear_dirty();
+        if (!d.empty()) {
+            upload_region(atlas.pixels().data(), atlas.width(), d);
+            atlas.clear_dirty();
+        }
+        sync_color(atlas, /*full=*/false);
+    }
+
+    /// The RGBA colour plane, mirroring the coverage plane: a new texture per
+    /// atlas generation (glyphs moved), dirty sub-rect uploads otherwise.
+    template <typename AtlasT>
+    void sync_color(AtlasT& atlas, bool full) {
+        using namespace mtl;
+        if (!atlas.has_color()) return;
+        const int w = atlas.width(), h = atlas.height();
+        if (color_texture_ == nullptr || color_w_ != w || color_h_ != h || full) {
+            if (color_texture_ != nullptr) msg<void>(color_texture_, sel("release"));
+            id desc = msg_cls<id>(objc_getClass("MTLTextureDescriptor"),
+                sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
+                static_cast<std::uint64_t>(70),   // MTLPixelFormatRGBA8Unorm: sRGB data, sampled raw like the CPU
+                static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h), static_cast<BOOL>(NO));
+            color_texture_ = msg<id>(device_, sel("newTextureWithDescriptor:"), desc);
+            color_w_ = w;
+            color_h_ = h;
+            if (color_texture_ == nullptr) return;
+            struct { std::uint64_t x, y, z, w, h, d; } region{0, 0, 0, static_cast<std::uint64_t>(w),
+                                                               static_cast<std::uint64_t>(h), 1};
+            msg<void>(color_texture_, sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), region,
+                      static_cast<std::uint64_t>(0), atlas.color_pixels().data(), static_cast<std::uint64_t>(w) * 4);
+            atlas.clear_color_dirty();
+            return;
+        }
+        const Rect& r = atlas.color_dirty_region();
+        if (r.empty()) return;
+        const int x = std::max(0, static_cast<int>(r.left())), y = std::max(0, static_cast<int>(r.top()));
+        const int rw = std::min(w - x, static_cast<int>(std::ceil(r.right())) - x);
+        const int rh = std::min(h - y, static_cast<int>(std::ceil(r.bottom())) - y);
+        if (rw > 0 && rh > 0) {
+            struct { std::uint64_t x, y, z, w, h, d; } region{static_cast<std::uint64_t>(x), static_cast<std::uint64_t>(y), 0,
+                                                               static_cast<std::uint64_t>(rw), static_cast<std::uint64_t>(rh), 1};
+            const std::uint8_t* origin = atlas.color_pixels().data() + (static_cast<std::size_t>(y) * w + x) * 4;
+            msg<void>(color_texture_, sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), region,
+                      static_cast<std::uint64_t>(0), origin, static_cast<std::uint64_t>(w) * 4);
+        }
+        atlas.clear_color_dirty();
     }
 
     /// Upload a sub-rectangle of an existing atlas texture.
@@ -806,6 +854,8 @@ class MetalDevice {
     id    sampler_ = nullptr;
     id    instance_buffer_ = nullptr;
     id    atlas_texture_ = nullptr;
+    id    color_texture_ = nullptr;
+    int   color_w_ = 0, color_h_ = 0;
 
     std::size_t   instance_capacity_ = 0;
     int           atlas_w_ = 0, atlas_h_ = 0;

@@ -218,11 +218,23 @@ vertex Varyings mayag_vertex(uint vid [[vertex_id]],
 
 fragment float4 mayag_fragment(Varyings v [[stage_in]],
                                texture2d<float> atlas [[texture(0)]],
+                               texture2d<float> color_atlas [[texture(1)]],
                                sampler smp [[sampler(0)]]) {
     constexpr uint KIND_ROUNDED_BOX = 0u, KIND_RING = 2u, KIND_LINE = 3u;
     constexpr uint KIND_GLYPH = 4u, KIND_TEXTURE = 5u, KIND_SHADOW = 6u, KIND_ARC = 7u;
+    constexpr uint KIND_COLOR_GLYPH = 8u;
     constexpr uint FLAG_GRADIENT = 1u, FLAG_RADIAL = 2u, FLAG_ANGULAR = 4u;
     constexpr uint FLAG_SRGB = 8u, FLAG_STROKE = 16u, FLAG_INSET = 32u, FLAG_GLYPH_SDF = 128u;
+
+    // Colour glyphs (emoji): straight RGBA from the colour plane, tinted only
+    // by opacity (kernel::shade's first case, verbatim). Without this case
+    // they fell through to the rectangle path and drew as white boxes.
+    if (v.kind == KIND_COLOR_GLYPH) {
+        float4 t = color_atlas.sample(smp, v.uv);
+        float a = t.a * v.color.a;
+        if (a <= 0.001) discard_fragment();
+        return float4(t.rgb * a, a);
+    }
 
     // Pixel footprint from screen-space derivatives — what makes the
     // antialiasing correct under any transform or zoom.

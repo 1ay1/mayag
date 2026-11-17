@@ -293,6 +293,33 @@ int main() {
                 check(std::abs(mean) < 2.5 && mad < 6.0,
                       "GPU and CPU text agree per pixel (no missing coverage correction)");
             }
+
+            // Colour glyphs (emoji) sample the RGBA plane. The MSL used to
+            // have no case for them: every emoji drew as a white box.
+            DrawList edl;
+            edl.fill_rect(Rect{0, 0, static_cast<float>(w), static_cast<float>(h)}, rgb<0x101418>);
+            TextStyle es{};
+            es.size = 48.0f;
+            es.color = rgb<0xFFFFFF>;
+            glyphs.draw_text(edl, "\xF0\x9F\x98\x80", Rect{20, 10, 160, 80}, es);   // grinning face
+            if (fonts->atlas().has_color()) {
+                gpu.sync_atlas(fonts->atlas());
+                const auto eg = gpu.render_offscreen(edl, rgb<0x101418>, w, h);
+                backend::Framebuffer efb{w, h};
+                backend::Tiled::render(edl, efb, &cpu_sampler, &backend::shared_pool(), rgb<0x101418>);
+                const auto ec = efb.to_rgba8();
+                const auto yellow = [](const std::vector<std::uint8_t>& p) {
+                    long n = 0;
+                    for (std::size_t i = 0; i + 3 < p.size(); i += 4)
+                        n += (p[i] > 200 && p[i + 1] > 150 && p[i + 2] < 120);
+                    return n;
+                };
+                const long gy = yellow(eg), cy = yellow(ec);
+                std::printf("       emoji yellow px: gpu %ld, cpu %ld\n", gy, cy);
+                check(cy > 100 && std::labs(gy - cy) <= cy / 50, "GPU draws colour emoji like the CPU (not a white box)");
+            } else {
+                std::printf("       (no colour emoji font; skipping)\n");
+            }
         }
     }
 
