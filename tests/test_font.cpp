@@ -1620,6 +1620,63 @@ void test_complex_text() {
           "stacked combining marks add no advance");
 }
 
+/// The flicker bug: an atlas that fills mid-frame repacks, moving glyphs
+/// whose old uvs are already in that frame's draw list. The atlas must move
+/// glyphs between frames (maintain), grow when its working set churns, and
+/// report any mid-frame move so the frame is repainted.
+void test_atlas_churn() {
+    section("atlas under churn (no mid-frame moves)");
+    typo::Atlas atlas{256};
+    typo::Bitmap bmp{20, 20};
+    for (auto& p : bmp.pixels) p = 200;
+    std::uint16_t next_gid = 1;
+    int mid_frame_moves = 0, frames = 0;
+    const std::uint32_t gen0 = atlas.generation();
+    // Each frame draws 12 glyphs it drew before and 6 new ones (an animated
+    // weight produces new rasters every frame).
+    std::vector<typo::GlyphKey> live;
+    for (std::uint64_t f = 1; f <= 2000; ++f) {
+        atlas.set_frame(f);
+        atlas.maintain();
+        (void)atlas.take_moved();   // a between-frame move needs no repaint
+        for (std::size_t k = live.size() > 12 ? live.size() - 12 : 0; k < live.size(); ++k)
+            (void)atlas.find(live[k]);
+        for (int n = 0; n < 6; ++n) {
+            typo::GlyphKey key;
+            key.face_id = 1;
+            key.glyph_id = next_gid++;
+            key.size_bucket = 64;
+            if (atlas.insert(key, bmp, {}, 10.0f, 1.0f, 0.0f, false)) live.push_back(key);
+        }
+        mid_frame_moves += atlas.take_moved() ? 1 : 0;
+        ++frames;
+    }
+    check(mid_frame_moves == 0, "glyphs never move mid-frame (" + std::to_string(mid_frame_moves) + " frames repainted)");
+    check(atlas.width() > 256, "a churning working set grows the atlas (" + std::to_string(atlas.width()) + ")");
+    check(atlas.generation() != gen0, "every move is a new generation (GPU gets a fresh texture)");
+    // Every live glyph's uvs point inside the texture.
+    bool in_bounds = true;
+    for (std::size_t k = live.size() - 12; k < live.size(); ++k)
+        if (const auto* g = atlas.find(live[k]))
+            in_bounds &= g->atlas_rect.right() <= static_cast<float>(atlas.width()) &&
+                         g->atlas_rect.bottom() <= static_cast<float>(atlas.height());
+    check(in_bounds, "surviving glyphs keep valid uvs after repacks");
+
+    // Forced overflow inside a frame is reported, so the host repaints.
+    typo::Atlas tiny{64};
+    tiny.set_frame(1);
+    typo::Bitmap big{30, 30};
+    int inserted = 0;
+    for (std::uint16_t g = 1; g <= 8; ++g) {
+        typo::GlyphKey key;
+        key.face_id = 2;
+        key.glyph_id = g;
+        if (tiny.insert(key, big, {}, 10.0f, 1.0f, 0.0f, false)) ++inserted;
+    }
+    check(inserted == 8 && tiny.take_moved(), "a mid-frame overflow grows the atlas and flags a repaint");
+    (void)frames;
+}
+
 int main() {
     std::printf("mayag font engine\n=================");
 
@@ -1631,6 +1688,7 @@ int main() {
     test_rasterization();
     test_sdf();
     test_atlas();
+    test_atlas_churn();
     test_shaping();
     test_fallback();
     test_line_breaking();

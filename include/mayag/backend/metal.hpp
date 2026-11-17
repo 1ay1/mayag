@@ -41,6 +41,7 @@ extern "C" void* objc_autoreleasePoolPush(void);
 extern "C" void  objc_autoreleasePoolPop(void*);
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
@@ -438,6 +439,7 @@ class MetalDevice {
             msg<void>(cmd, sel("presentDrawable:"), present_drawable);
         }
         msg<void>(cmd, sel("commit"));
+        retire_slot(cmd);
         if (wait) msg<void>(cmd, sel("waitUntilCompleted"));
 
         last_draw_calls_ = draws;
@@ -487,6 +489,7 @@ class MetalDevice {
     /// the font engine — backends see pixels, never typefaces.
     template <typename AtlasT>
     void sync_atlas(AtlasT& atlas) {
+        using namespace mtl;
         if (device_ == nullptr) return;
 
         const bool realloc = !atlas_uploaded_ ||
@@ -494,6 +497,16 @@ class MetalDevice {
                              atlas.width() != atlas_w_ || atlas.height() != atlas_h_;
 
         if (realloc) {
+            // A new generation means glyphs MOVED. Writing them into the
+            // texture the previous frame is still sampling on the GPU (CPU
+            // replaceRegion is not ordered against in-flight command
+            // buffers) shows that frame with half-moved glyphs: flicker.
+            // So a new generation gets a NEW texture; the old one lives until
+            // the command buffers that reference it complete (they retain it).
+            if (atlas_texture_ != nullptr && atlas_uploaded_) {
+                msg<void>(atlas_texture_, sel("release"));
+                atlas_texture_ = nullptr;
+            }
             upload_atlas(atlas.pixels().data(), atlas.width(), atlas.height());
             atlas_generation_ = atlas.generation();
             atlas_uploaded_   = true;
@@ -706,19 +719,51 @@ class MetalDevice {
         using namespace mtl;
         const std::size_t bytes = list.size() * sizeof(Instance);
 
+        // A RING of instance buffers, one per frame that may be in flight.
+        //
+        // With one buffer, the CPU's memcpy for frame N+1 overwrote the
+        // instances the GPU was still reading for frame N whenever the CPU
+        // ran ahead (mailbox presentation, no vsync wait: it does, by
+        // design). Glyphs were drawn with the next frame's positions and
+        // atlas uvs: text flickered, worst exactly when it was changing.
+        // Now each frame writes its own buffer, and before reusing one the
+        // CPU waits for the command buffer that last read it. With three
+        // slots that wait almost never blocks.
+        slot_ = (slot_ + 1) % ring_size;
+        Slot& s = ring_[slot_];
+        if (s.last_cmd != nullptr) {
+            // MTLCommandBufferStatusCompleted = 4, Error = 5
+            if (msg<std::uint64_t>(s.last_cmd, sel("status")) < 4)
+                msg<void>(s.last_cmd, sel("waitUntilCompleted"));
+            msg<void>(s.last_cmd, sel("release"));
+            s.last_cmd = nullptr;
+        }
         // Grow geometrically, so a frame that adds one instance does not
         // reallocate. Unified memory means "upload" is just a memcpy.
-        if (instance_buffer_ == nullptr || bytes > instance_capacity_) {
-            instance_capacity_ = num::max<std::size_t>(bytes * 2, 64 * 1024);
-            instance_buffer_ = msg<id>(device_, sel("newBufferWithLength:options:"),
-                                       static_cast<std::uint64_t>(instance_capacity_),
-                                       storage_mode_shared);
+        if (s.buffer == nullptr || bytes > s.capacity) {
+            if (s.buffer != nullptr) msg<void>(s.buffer, sel("release"));
+            s.capacity = num::max<std::size_t>(bytes * 2, 64 * 1024);
+            s.buffer = msg<id>(device_, sel("newBufferWithLength:options:"),
+                               static_cast<std::uint64_t>(s.capacity), storage_mode_shared);
         }
+        instance_buffer_ = s.buffer;
+        instance_capacity_ = s.capacity;
         if (instance_buffer_ == nullptr) return;
 
         void* dst = msg<void*>(instance_buffer_, sel("contents"));
         if (dst != nullptr) std::memcpy(dst, list.instances().data(), bytes);
     }
+
+    /// Remember which command buffer reads the current ring slot.
+    void retire_slot(id cmd) {
+        using namespace mtl;
+        ring_[slot_].last_cmd = msg<id>(cmd, sel("retain"));
+    }
+
+    static constexpr std::size_t ring_size = 3;
+    struct Slot { id buffer = nullptr; std::size_t capacity = 0; id last_cmd = nullptr; };
+    std::array<Slot, ring_size> ring_{};
+    std::size_t slot_ = 0;
 
   public:
     /// Frames that reached the display (or were replaced) since the last call.

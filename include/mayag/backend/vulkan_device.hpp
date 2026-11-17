@@ -152,6 +152,9 @@ class VulkanDevice {
         // re-upload.
         bool full = false;
         if (w != atlas_w_ || h != atlas_h_) {
+            // The atlas grew. The frame in flight still samples the old
+            // image: let it finish before destroying it.
+            if (atlas_image_) api_->WaitForFences(device_, 1, &in_flight_, 1, ~0ull);
             recreate_atlas_image(w, h);
             full = true;
         }
@@ -169,6 +172,7 @@ class VulkanDevice {
         if (atlas.has_color && atlas.color != nullptr) {
             bool color_full = false;
             if (w != color_w_ || h != color_h_) {
+                if (color_image_) api_->WaitForFences(device_, 1, &in_flight_, 1, ~0ull);
                 recreate_color_image(w, h);
                 color_full = true;
             }

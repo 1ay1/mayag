@@ -567,11 +567,15 @@ class FontStack : public Shaper {
 
     [[nodiscard]] Atlas& atlas() noexcept { return atlas_; }
     [[nodiscard]] const Atlas& atlas() const noexcept { return atlas_; }
+    /// True once if the atlas moved glyphs since the last call (see
+    /// Atlas::take_moved): a frame painted across the move must be redone.
+    [[nodiscard]] bool atlas_moved() noexcept { return atlas_.take_moved(); }
     [[nodiscard]] const FontConfig& config() const noexcept { return config_; }
 
     void begin_frame(std::uint64_t frame) {
         atlas_.set_frame(frame);
         if (frame % 120 == 0) atlas_.collect(config_.glyph_ttl_frames);
+        atlas_.maintain();   // move glyphs only here, before anything paints
         std::lock_guard lock{shape_mutex_};
         shape_frame_ = frame;
         if (frame % 120 == 0) evict_shapes(frame);

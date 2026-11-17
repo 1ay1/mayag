@@ -1114,6 +1114,14 @@ class window_host {
             po.glyphs       = &bindings_->glyphs;
             po.debug_bounds = cfg_.debug_bounds;
             render::paint(tree_, draws_, po);
+            // The atlas had to move glyphs mid-paint (it overflowed): uvs
+            // recorded before the move are stale. Paint again; the second
+            // pass finds every glyph resident at its new place.
+            if (cfg_.fonts && cfg_.fonts->atlas_moved()) {
+                draws_.clear();
+                render::paint(tree_, draws_, po);
+                (void)cfg_.fonts->atlas_moved();
+            }
             memos_.end_frame();
             if (!overlays_.empty()) {
                 auto sorted = overlays_.items();

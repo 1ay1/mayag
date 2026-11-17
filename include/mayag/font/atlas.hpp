@@ -19,9 +19,11 @@
 #include "raster.hpp"
 #include "../core/geometry.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace mayag::typo {
@@ -330,7 +332,7 @@ class Atlas {
 
         int x = 0, y = 0;
         if (!packer_.pack(w, h, x, y)) {
-            if (!evict_and_repack(w, h, x, y)) return nullptr;
+            if (!make_room(w, h, x, y)) return nullptr;
         }
 
         blit(bmp, x + gutter, y + gutter);
@@ -371,7 +373,7 @@ class Atlas {
         const int h = bh + gutter * 2;
         int x = 0, y = 0;
         if (!packer_.pack(w, h, x, y)) {
-            if (!evict_and_repack(w, h, x, y)) return nullptr;
+            if (!make_room(w, h, x, y)) return nullptr;
         }
 
         ensure_color_plane();
@@ -446,6 +448,54 @@ class Atlas {
         return removed;
     }
 
+    // ── moving glyphs safely ──────────────────────────────────────────────────────────
+    //
+    // Repacking MOVES glyphs: every survivor gets new uvs. A glyph painted
+    // earlier in the same frame keeps its old uvs in the draw list, which
+    // now point at some other glyph's pixels, so that frame draws garbage.
+    // With text that keeps producing new rasters (an animated weight, a
+    // resize, a long scroll through new text) the atlas fills every few
+    // seconds and that one bad frame is a visible flicker.
+    //
+    // So the atlas moves glyphs only BETWEEN frames (maintain(), from
+    // FontStack::begin_frame, before anything is painted), and keeps enough
+    // headroom that a frame almost never overflows. When one does anyway,
+    // it still makes room, and reports it: take_moved() tells the host to
+    // paint that frame again with the new uvs. Every move also bumps the
+    // generation, so a GPU backend uploads into a NEW texture and the frame
+    // still in flight keeps sampling the old one.
+
+    static constexpr int   max_size = 2048;     ///< 4 MiB coverage (+16 MiB colour if used)
+    static constexpr float high_water = 0.75f;  ///< maintain() compacts above this
+
+    /// Between frames: compact when crowded, growing when compaction would
+    /// not leave real headroom. Call before painting a frame.
+    void maintain() {
+        if (packer_.occupancy() < high_water) return;
+        // Keep the last ~half second of glyphs: what is on screen now and
+        // what just scrolled or animated away (likely to come back).
+        const std::uint64_t keep_since = frame_ > 30 ? frame_ - 30 : 0;
+        std::size_t live_area = 0;
+        for (const auto& [k, g] : entries_)
+            if (g.last_used >= keep_since) live_area += static_cast<std::size_t>((g.size.x + 2) * (g.size.y + 2));
+        const auto area = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
+        int w = width_, h = height_;
+        // Live set over half the atlas, or the last compaction was only a
+        // few seconds ago (a churning working set: animated weights, many
+        // sizes): compacting again would just refill. Grow instead, once per
+        // doubling, up to max_size.
+        const bool churning = last_repack_frame_ != 0 && frame_ - last_repack_frame_ < 600;
+        if ((live_area * 2 > area || churning) && w < max_size) { w *= 2; h *= 2; }
+        last_repack_frame_ = frame_ ? frame_ : 1;
+        const bool was = moved_;
+        repack(w, h, keep_since);
+        moved_ = was;   // nothing was painted yet this frame: no repaint needed
+    }
+
+    /// True once since the last call if glyphs moved during this frame
+    /// (a mid-frame repack): the frame must be painted again.
+    [[nodiscard]] bool take_moved() noexcept { return std::exchange(moved_, false); }
+
   private:
     void blit(const Bitmap& bmp, int dx, int dy) {
         for (int y = 0; y < bmp.height; ++y) {
@@ -462,62 +512,72 @@ class Atlas {
         dirty_ = dirty_.empty() ? touched : dirty_.unite(touched);
     }
 
-    /// When the atlas fills up: drop everything not used recently and rebuild
-    /// the skyline. A full repack is expensive but happens rarely, and the
-    /// alternative (fragmenting forever) is worse.
-    bool evict_and_repack(int w, int h, int& x, int& y) {
-        const std::uint64_t cutoff = frame_ > 60 ? frame_ - 60 : 0;
+    /// Mid-frame, the atlas is full: compact to what this and the previous
+    /// frame use, growing if even that does not fit, and flag the move so
+    /// the frame is repainted.
+    bool make_room(int w, int h, int& x, int& y) {
+        const std::uint64_t keep_since = frame_ > 1 ? frame_ - 1 : 0;
+        repack(width_, height_, keep_since);
+        if (packer_.pack(w, h, x, y)) return true;
+        if (width_ < max_size) {
+            repack(width_ * 2, height_ * 2, keep_since);
+            if (packer_.pack(w, h, x, y)) return true;
+        }
+        return false;
+    }
 
+    /// Rebuild the atlas at `nw` x `nh` with the glyphs used since
+    /// `keep_since`, tallest first (what makes skyline packing efficient on
+    /// a second pass). Glyphs that do not fit are dropped and re-rasterised
+    /// on demand.
+    void repack(int nw, int nh, std::uint64_t keep_since) {
         std::vector<std::pair<GlyphKey, CachedGlyph>> survivors;
         survivors.reserve(entries_.size());
-        for (const auto& [k, g] : entries_) {
-            if (g.last_used >= cutoff) survivors.emplace_back(k, g);
-        }
-        if (survivors.size() == entries_.size()) return false;   // nothing to gain
-
-        // Repack survivors tallest-first, which is what makes skyline
-        // packing efficient on a second pass.
+        for (const auto& [k, g] : entries_)
+            if (g.last_used >= keep_since) survivors.emplace_back(k, g);
         std::sort(survivors.begin(), survivors.end(),
                   [](const auto& a, const auto& b) { return a.second.size.y > b.second.size.y; });
 
         std::vector<std::uint8_t> old_pixels = std::move(pixels_);
+        std::vector<std::uint8_t> old_color = std::move(color_);
         const int old_w = width_;
-
+        width_ = nw;
+        height_ = nh;
         pixels_.assign(static_cast<std::size_t>(width_) * height_, 0);
+        if (!old_color.empty()) color_.assign(static_cast<std::size_t>(width_) * height_ * 4, 0);
         packer_.reset(width_, height_);
         entries_.clear();
 
         constexpr int gutter = 1;
         for (auto& [k, g] : survivors) {
+            if (g.size.x <= 0.0f || g.size.y <= 0.0f) { entries_.insert_or_assign(k, g); continue; }
             const int gw = static_cast<int>(g.size.x) + gutter * 2;
             const int gh = static_cast<int>(g.size.y) + gutter * 2;
             int nx = 0, ny = 0;
             if (!packer_.pack(gw, gh, nx, ny)) continue;
-
-            // Copy the pixels from their old home.
+            const int sx0 = static_cast<int>(g.atlas_rect.left()), sy0 = static_cast<int>(g.atlas_rect.top());
+            const int cw = static_cast<int>(g.size.x);
             for (int row = 0; row < static_cast<int>(g.size.y); ++row) {
-                for (int col = 0; col < static_cast<int>(g.size.x); ++col) {
-                    const int sx = static_cast<int>(g.atlas_rect.left()) + col;
-                    const int sy = static_cast<int>(g.atlas_rect.top())  + row;
-                    const std::size_t si = static_cast<std::size_t>(sy) * old_w + sx;
-                    if (si >= old_pixels.size()) continue;
-                    const int tx = nx + gutter + col, ty = ny + gutter + row;
-                    pixels_[static_cast<std::size_t>(ty) * width_ + tx] = old_pixels[si];
+                const std::size_t src = static_cast<std::size_t>(sy0 + row) * old_w + sx0;
+                const std::size_t dst = static_cast<std::size_t>(ny + gutter + row) * width_ + (nx + gutter);
+                if (g.is_color) {
+                    if ((src + cw) * 4 > old_color.size()) continue;
+                    std::memcpy(color_.data() + dst * 4, old_color.data() + src * 4, static_cast<std::size_t>(cw) * 4);
+                } else {
+                    if (src + cw > old_pixels.size()) continue;
+                    std::memcpy(pixels_.data() + dst, old_pixels.data() + src, static_cast<std::size_t>(cw));
                 }
             }
-
-            g.atlas_rect = Rect{static_cast<float>(nx + gutter), static_cast<float>(ny + gutter),
-                                g.size.x, g.size.y};
-            g.uv = Rect{g.atlas_rect.left()  / static_cast<float>(width_),
-                        g.atlas_rect.top()   / static_cast<float>(height_),
-                        g.atlas_rect.width() / static_cast<float>(width_),
-                        g.atlas_rect.height()/ static_cast<float>(height_)};
+            g.atlas_rect = Rect{static_cast<float>(nx + gutter), static_cast<float>(ny + gutter), g.size.x, g.size.y};
+            g.uv = Rect{g.atlas_rect.left() / static_cast<float>(width_), g.atlas_rect.top() / static_cast<float>(height_),
+                        g.atlas_rect.width() / static_cast<float>(width_), g.atlas_rect.height() / static_cast<float>(height_)};
             entries_.insert_or_assign(k, g);
         }
-
-        // The whole texture moved.
+        // Everything moved: a new generation means a fresh GPU texture.
         dirty_ = Rect{0, 0, static_cast<float>(width_), static_cast<float>(height_)};
-        return packer_.pack(w, h, x, y);
+        if (!color_.empty()) color_dirty_ = dirty_;
+        ++generation_;
+        moved_ = true;
     }
 
     void ensure_color_plane() {
@@ -538,6 +598,8 @@ class Atlas {
     Rect                      dirty_{};
     std::uint64_t             frame_ = 0;
     std::uint32_t             generation_ = 0;
+    bool                      moved_ = false;   ///< glyphs moved since take_moved()
+    std::uint64_t             last_repack_frame_ = 0;
 };
 
 }  // namespace mayag::typo
