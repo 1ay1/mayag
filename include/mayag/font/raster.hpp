@@ -380,7 +380,8 @@ inline void union_boundary(const std::vector<std::pair<Vec2, Vec2>>& in, int h,
     for (const auto& [a, b] : in) {
         if (a.y == b.y) continue;
         const bool down = b.y > a.y;
-        const E e{down ? a.x : b.x, down ? a.y : b.y, down ? b.x : a.x, down ? b.y : a.y, down ? 1 : -1};
+        const auto d = [](float f) { return static_cast<double>(f); };
+        const E e{d(down ? a.x : b.x), d(down ? a.y : b.y), d(down ? b.x : a.x), d(down ? b.y : a.y), down ? 1 : -1};
         const int r0 = std::max(0, static_cast<int>(std::floor(e.ya)));
         const int r1 = std::min(h - 1, static_cast<int>(std::ceil(e.yb)) - 1);
         for (int r = r0; r <= r1; ++r) rows[static_cast<std::size_t>(r)].push_back(static_cast<std::uint32_t>(es.size()));

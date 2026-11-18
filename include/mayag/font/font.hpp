@@ -524,9 +524,13 @@ class Face {
     }
 
     // Map CSS weight -> wght from the face's named weight instances (other
-    // axes at their defaults). Kept empty when the named Regular already sits
-    // at 400, so faces whose axis is in CSS units (SF, most web fonts) keep
-    // using the requested value verbatim.
+    // axes at their defaults), the way CoreText resolves a weight: a bold
+    // request lands on each face's own "Bold" instance. That matters for
+    // fallback: SF Arabic's Bold sits at wght 711.1 and its Semibold at
+    // 622.2, SF's Semibold at 590, so bold Arabic beside bold SF used to set
+    // 0.3% narrow (and visibly lighter). Kept empty when every named
+    // instance already sits at its CSS value, so the requested value is used
+    // verbatim.
     void build_weight_map() {
         weight_map_.clear();
         std::size_t wi = axes_.size();
@@ -544,11 +548,20 @@ class Face {
             if (std::none_of(m.begin(), m.end(), [&](const auto& p) { return p.first == css; }))
                 m.emplace_back(css, in.coords[wi]);
         }
+        // Apple names its lightest weight Ultralight and the next Thin
+        // (NSFontWeightUltraLight < NSFontWeightThin), the reverse of CSS's
+        // Thin 100 / Extra Light 200. Order the two by where they actually sit.
+        const auto at = [&](float css) {
+            return std::find_if(m.begin(), m.end(), [&](const auto& p) { return p.first == css; });
+        };
+        if (const auto t = at(100.0f), u = at(200.0f); t != m.end() && u != m.end() && u->second < t->second)
+            std::swap(t->second, u->second);
         for (std::size_t i = 1; i < m.size(); ++i)   // insertion sort: <= ~10 entries
             for (std::size_t j = i; j > 0 && m[j].first < m[j - 1].first; --j) std::swap(m[j], m[j - 1]);
-        const auto reg = std::find_if(m.begin(), m.end(), [](const auto& p) { return p.first == 400.0f; });
-        if (reg == m.end() || std::abs(reg->second - 400.0f) < 0.5f) return;
+        if (at(400.0f) == m.end() || m.size() < 2) return;
         for (std::size_t i = 1; i < m.size(); ++i) if (m[i].second <= m[i - 1].second) return;  // not monotone
+        if (std::all_of(m.begin(), m.end(), [](const auto& p) { return std::abs(p.second - p.first) < 0.5f; }))
+            return;
         weight_map_ = std::move(m);
     }
 
@@ -698,7 +711,43 @@ enum class RenderMode : std::uint8_t {
     hybrid,
 };
 
+/// Whether glyphs default to the macOS look (CoreGraphics font smoothing and
+/// curve flattening). On by default on Apple platforms only: there mayag's
+/// text sits beside every native app's and must match it; elsewhere the
+/// native rasterisers (FreeType, DirectWrite) neither thicken glyphs nor
+/// under-flatten curves, so mayag draws exact outlines instead. Define
+/// MAYAG_COREGRAPHICS_TEXT to 0 or 1 to override the platform choice.
+#if !defined(MAYAG_COREGRAPHICS_TEXT)
+#  if defined(__APPLE__)
+#    define MAYAG_COREGRAPHICS_TEXT 1
+#  else
+#    define MAYAG_COREGRAPHICS_TEXT 0
+#  endif
+#endif
+inline constexpr bool coregraphics_text_default = MAYAG_COREGRAPHICS_TEXT != 0;
+
 struct FontConfig {
+    /// The macOS look regardless of platform: CoreGraphics smoothing,
+    /// flattening and vertical autohinting, pixel-matched to CoreText.
+    [[nodiscard]] static constexpr FontConfig coregraphics() noexcept {
+        FontConfig c;
+        c.smoothing     = 0.30f;
+        c.cg_flattening = true;
+        c.cg_autohint   = true;
+        return c;
+    }
+    /// The FreeType/DirectWrite look regardless of platform: exact outlines
+    /// (no smoothing growth, accurate flattening) with light vertical
+    /// hinting, i.e. FreeType's default "light" mode: x-height and cap
+    /// height on whole pixels at small sizes, no horizontal distortion.
+    [[nodiscard]] static constexpr FontConfig portable() noexcept {
+        FontConfig c;
+        c.smoothing     = 0.0f;
+        c.cg_flattening = false;
+        c.cg_autohint   = true;
+        return c;
+    }
+
     RenderMode mode = RenderMode::hybrid;
 
     /// DEVICE pixel size at or above which hybrid mode switches to SDF.
@@ -737,7 +786,7 @@ struct FontConfig {
     /// mayag's stems came out 0.6 px thinner than every native Mac app's and
     /// body text read thin and grey beside them. 0 turns it off; other
     /// values scale it.
-    float      smoothing              = 0.30f;
+    float      smoothing              = coregraphics_text_default ? 0.30f : 0.0f;
     /// CoreGraphics' vertical autohinter (cg_autohint.hpp): at integer device
     /// ppem 7-18, x-height and cap height snap to whole pixels, as every
     /// macOS app draws them.
@@ -745,7 +794,7 @@ struct FontConfig {
     /// Flatten glyph curves exactly as CoreGraphics does (raster.hpp,
     /// cg_glyph_flattening): macOS under-flattens, and its glyphs carry
     /// that ink deficit (~4% on an SF 'o' at 24 px).
-    bool       cg_flattening = true;
+    bool       cg_flattening = coregraphics_text_default;
     /// Glyphs untouched for this many frames become eviction candidates.
     std::uint64_t glyph_ttl_frames = 600;
 };
@@ -1395,7 +1444,8 @@ class FontStack : public Shaper {
         if (config_.cg_autohint && !use_sdf && !face.is_color() && !face.has_colr(gid)) {
             if (const auto m = face.cg_hint_metrics()) {
                 const double stem = apple::autohint_stem(face.file().postscript_name());
-                hint = cg_autohint::create(static_cast<double>(size_px), face.units_per_em(), m->xh, m->cap, m->asc,
+                hint = cg_autohint::create(static_cast<double>(size_px), face.units_per_em(), static_cast<double>(m->xh),
+                                           static_cast<double>(m->cap), static_cast<double>(m->asc),
                                            stem, static_cast<double>(smoothing_px(size_px, smoothing)));
             }
         }

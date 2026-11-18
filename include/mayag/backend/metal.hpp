@@ -343,7 +343,7 @@ class MetalDevice {
     void resize(Vec2 logical, float dpi_scale) {
         if (!valid_) return;
         dpi_ = dpi_scale;
-        struct { double w, h; } size{logical.x * dpi_scale, logical.y * dpi_scale};
+        struct { double w, h; } size{static_cast<double>(logical.x * dpi_scale), static_cast<double>(logical.y * dpi_scale)};
         mtl::msg<void>(layer_, mtl::sel("setDrawableSize:"), size);
         mtl::msg<void>(layer_, mtl::sel("setContentsScale:"), static_cast<double>(dpi_scale));
         viewport_ = logical;
@@ -392,7 +392,7 @@ class MetalDevice {
         // Clear in LINEAR light, because the surface is sRGB-encoded on
         // write. Passing the sRGB value would double-encode the background.
         const auto lin = clear.to<Linear>();
-        struct { double r, g, b, a; } c{lin.c0, lin.c1, lin.c2, 1.0};
+        struct { double r, g, b, a; } c{static_cast<double>(lin.c0), static_cast<double>(lin.c1), static_cast<double>(lin.c2), 1.0};
         msg<void>(color0, sel("setClearColor:"), c);
 
         id cmd = msg<id>(queue_, sel("commandBuffer"));
@@ -847,7 +847,7 @@ class MetalDevice {
         msg<void>(color0, sel("setStoreAction:"), store_action_store);
 
         const auto lin = clear.to<Linear>();
-        struct { double r, g, b, a; } c{lin.c0, lin.c1, lin.c2, 1.0};
+        struct { double r, g, b, a; } c{static_cast<double>(lin.c0), static_cast<double>(lin.c1), static_cast<double>(lin.c2), 1.0};
         msg<void>(color0, sel("setClearColor:"), c);
 
         id cmd = msg<id>(queue_, sel("commandBuffer"));

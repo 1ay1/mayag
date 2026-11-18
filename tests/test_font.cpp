@@ -1508,8 +1508,16 @@ void test_named_weights() {
     near(f->wght_for(100.0f), 250.0f, 0.01f, "Thin (100) -> wght 250");
     near(f->wght_for(450.0f), 569.0f, 0.01f, "between named weights interpolates");
     if (auto sf = typo::Face::from_file("/System/Library/Fonts/SFNS.ttf")) {
+        // CoreText resolves NSFontWeight* to each face's named instance:
+        // SF Medium is wght 510, Semibold 590, Ultralight (CSS 100) 30.9.
         near(sf->wght_for(400.0f), 400.0f, 0.01f, "SF Regular stays at 400");
-        near(sf->wght_for(500.0f), 500.0f, 0.01f, "SF keeps CSS weights verbatim");
+        near(sf->wght_for(500.0f), 510.0f, 0.01f, "SF Medium (500) -> its named instance, wght 510");
+        near(sf->wght_for(600.0f), 590.0f, 0.01f, "SF Semibold (600) -> wght 590");
+        near(sf->wght_for(100.0f), 30.925f, 0.01f, "CSS 100 is Apple's Ultralight, the lighter of the two");
+        near(sf->wght_for(200.0f), 110.725f, 0.01f, "CSS 200 is Apple's Thin");
+    }
+    if (auto ar = typo::Face::from_file("/System/Library/Fonts/SFArabic.ttf")) {
+        near(ar->wght_for(700.0f), 711.111f, 0.01f, "SF Arabic Bold sits at wght 711.1, not SF's 700");
     }
 }
 
@@ -1755,10 +1763,10 @@ void test_coretext_parity() {
               std::to_string(static_cast<int>(size)) + " px glyph positions match CoreText (worst " +
               std::to_string(worst) + " px)");
     }
-    TextStyle bold;
-    bold.size = 13.0f;
-    bold.weight = FontWeight::bold;
-    near(stack->shaped(s, typo::detail::shape_params_of(bold))->width, 149.963f, 0.01f,
+    TextStyle bold_style;
+    bold_style.size = 13.0f;
+    bold_style.weight = FontWeight::bold;
+    near(stack->shaped(s, typo::detail::shape_params_of(bold_style))->width, 149.963f, 0.01f,
          "bold kerning deltas follow the weight axis (line width matches CoreText)");
 }
 
@@ -1766,8 +1774,20 @@ void test_coretext_parity() {
 /// what CoreText draws instead of a thin, grid-snapped approximation.
 void test_smoothing() {
     section("smoothing and subpixel phases");
-    auto stack = typo::system::default_stack();
+    // The macOS look is the platform default only on Apple; ask for it
+    // explicitly so these checks hold everywhere.
+    auto stack = typo::system::default_stack(typo::FontConfig::coregraphics());
     if (stack == nullptr || stack->face_count() == 0) return;
+    {
+        constexpr typo::FontConfig dflt{};
+        constexpr auto cg = typo::FontConfig::coregraphics();
+        constexpr auto pt = typo::FontConfig::portable();
+        check(cg.smoothing > 0.0f && cg.cg_flattening && pt.smoothing == 0.0f && !pt.cg_flattening,
+              "coregraphics() and portable() presets select the two looks");
+        check((dflt.smoothing > 0.0f) == typo::coregraphics_text_default &&
+                  dflt.cg_flattening == typo::coregraphics_text_default,
+              "FontConfig{} follows the platform's native look");
+    }
     const std::uint16_t gid = stack->face_at(0)->glyph_for('l');
     if (gid == 0) return;
 
@@ -1789,12 +1809,12 @@ void test_smoothing() {
     typo::FontConfig off = stack->config();
     off.smoothing = 0.0f;
     auto plain = typo::system::default_stack(off);
-    const double light = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, 4), *stack);
+    const double light_ink = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, 4), *stack);
     const double dark  = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, 0), *stack);
     const double none  = ink(plain->glyph(0, gid, 13.0f), *plain);
-    check(light > none * 1.05, "smoothing thickens light text (" + std::to_string(light) +
+    check(light_ink > none * 1.05, "smoothing thickens light text (" + std::to_string(light_ink) +
                                    " vs " + std::to_string(none) + ")");
-    check(dark > none && dark < light, "dark text is grown less than light at 13 px");
+    check(dark > none && dark < light_ink, "dark text is grown less than light at 13 px");
     // CoreGraphics' growth: min(0.3, (0.0058 + 0.0025 level) px per px), level =
     // round(4 * linear luminance of the text colour).
     near(stack->smoothing_px(16.0f, 0), 0.0928f, 1e-4f, "black text at 16 px grows 0.0928 px");

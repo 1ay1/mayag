@@ -656,6 +656,12 @@ if(MAYAG_BUILD_TESTS)
                          COMMAND mayag_${demo} --headless)
             endif()
         endforeach()
+        # reactive asserts a wall-clock frame budget (p99 < 16.6 ms, zero
+        # missed frames). Sharing the cores with five other tests measures
+        # the machine, not the app, so it runs alone.
+        if(TARGET mayag_reactive)
+            set_tests_properties(mayag_reactive_headless PROPERTIES RUN_SERIAL TRUE)
+        endif()
     endif()
 
     # Negative compilation tests: each of these MUST fail to compile. A

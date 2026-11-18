@@ -48,7 +48,6 @@ void section(const std::string& s) { std::printf("\n%s\n", s.c_str()); }
 class ChalkBackend final : public backend::Device {
   public:
     static inline int instances_seen = 0;
-    static inline int atlases_synced = 0;
 
     [[nodiscard]] static std::unique_ptr<Device> create(const backend::SurfaceHandle&,
                                                         Vec2 logical, float dpi) {
@@ -84,7 +83,6 @@ class ChalkBackend final : public backend::Device {
     }
 
     void sync_atlas(const backend::AtlasView& v) override {
-        ++atlases_synced;
         atlas_w_ = v.width;
         atlas_h_ = v.height;
     }

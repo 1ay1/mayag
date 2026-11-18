@@ -1332,6 +1332,12 @@ hardest Latin font a UI meets).
   along its normal, FreeType's embolden scheme) for bitmap glyphs, and shifts
   the threshold for distance-field glyphs, so weight is continuous across the
   bitmap/SDF switch.
+- **Each platform's native look.** The CoreGraphics-specific behaviour
+  (smoothing growth and CG's curve flattening) is the default on Apple
+  platforms only. Elsewhere text draws exact outlines with light vertical
+  hinting, closer to FreeType and DirectWrite. `FontConfig::coregraphics()` and
+  `FontConfig::portable()` choose a look explicitly, and
+  `-DMAYAG_COREGRAPHICS_TEXT=0/1` overrides the platform default.
 - **Gamma-space text compositing.** Shapes blend in linear light; text is
   blended as if in gamma space, the way CoreText, DirectWrite and Skia blend
   it, because fonts are designed for that weight. In linear light the same
