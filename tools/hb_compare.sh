@@ -1,5 +1,9 @@
 #!/bin/sh
 # cmp.sh CASEFILE : each line is  FONT|TEXT|EXTRA-ARGS  ; compares mg_shape vs hb-shape.
+# The oracle is HarfBuzz 15.1.0 (its AAT matches native CoreText); set
+# HB_SHAPE to its hb-shape. Build: meson setup build -Dcoretext=enabled && ninja -C build util/hb-shape
+HB_SHAPE=${HB_SHAPE:-$HOME/.local/harfbuzz-15.1/bin/hb-shape}
+"$HB_SHAPE" --version | grep -q '15\.1\.' || { echo "need HarfBuzz 15.1 hb-shape (HB_SHAPE)" >&2; exit 2; }
 pass=0; fail=0
 while IFS='|' read -r font text extra; do
   [ -z "$font" ] && continue
@@ -17,7 +21,7 @@ for i in range(n):
   t,c,off,l=struct.unpack('>4sIII',d[o+12+16*i:o+28+16*i])
   if t==b'head': print(struct.unpack('>H',d[off+18:off+20])[0])")
   hbargs=$(echo "$extra" | sed 's/--variations=/--variations=/')
-  hb=$(/opt/local/bin/hb-shape --face-index=$idx --font-size=$upem --no-glyph-names $hbargs "$f" "$text" 2>&1)
+  hb=$("$HB_SHAPE" --face-index=$idx --font-size=$upem --no-glyph-names $hbargs "$f" "$text" 2>&1)
   mg=$(${MGS:-/tmp/mgs} "$f:$idx" "$text" $extra 2>&1)
   if [ "$hb" = "$mg" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL $font | $text | $extra"; echo "  hb: $hb"; echo "  mg: $mg"; fi
 done < "$1"

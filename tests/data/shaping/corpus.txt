@@ -627,3 +627,43 @@
 /System/Library/Fonts/Supplemental/Telugu Sangam MN.ttc|తెలుగు భాష క్ష|
 /System/Library/Fonts/Supplemental/Telugu Sangam MN.ttc|కృష్ణ స్త్రీ|
 /System/Library/Fonts/ヒラギノ角ゴシック W8.ttc|Type AVATAR 日本語|
+/System/Library/Fonts/Helvetica.ttc|ğ ũ̀|
+/System/Library/Fonts/Helvetica.ttc|ñ é|
+/System/Library/Fonts/Helvetica.ttc|q̧́|
+/System/Library/Fonts/Helvetica.ttc|x̣̂|
+/System/Library/Fonts/Helvetica.ttc|Zöë|
+/System/Library/Fonts/HelveticaNeue.ttc|ğ ũ̀|
+/System/Library/Fonts/HelveticaNeue.ttc|ñ é|
+/System/Library/Fonts/HelveticaNeue.ttc|q̧́|
+/System/Library/Fonts/HelveticaNeue.ttc|x̣̂|
+/System/Library/Fonts/HelveticaNeue.ttc|Zöë|
+/System/Library/Fonts/Supplemental/Apple Chancery.ttf|ñ é|
+/System/Library/Fonts/Supplemental/Apple Chancery.ttf|q̧́|
+/System/Library/Fonts/Supplemental/Apple Chancery.ttf|Zöë|
+/System/Library/Fonts/Supplemental/Baskerville.ttc|ğ ũ̀|
+/System/Library/Fonts/Supplemental/Baskerville.ttc|ñ é|
+/System/Library/Fonts/Supplemental/Baskerville.ttc|q̧́|
+/System/Library/Fonts/Supplemental/Baskerville.ttc|x̣̂|
+/System/Library/Fonts/Supplemental/Baskerville.ttc|Zöë|
+/System/Library/Fonts/Supplemental/Didot.ttc|ğ ũ̀|
+/System/Library/Fonts/Supplemental/Didot.ttc|ñ é|
+/System/Library/Fonts/Supplemental/Didot.ttc|q̧́|
+/System/Library/Fonts/Supplemental/Didot.ttc|Zöë|
+/System/Library/Fonts/Supplemental/Futura.ttc|ğ ũ̀|
+/System/Library/Fonts/Supplemental/Futura.ttc|ñ é|
+/System/Library/Fonts/Supplemental/Futura.ttc|q̧́|
+/System/Library/Fonts/Supplemental/Futura.ttc|Zöë|
+/System/Library/Fonts/Supplemental/Hoefler Text.ttc|ñ é|
+/System/Library/Fonts/Supplemental/Hoefler Text.ttc|q̧́|
+/System/Library/Fonts/Supplemental/Hoefler Text.ttc|Zöë|
+/System/Library/Fonts/Supplemental/Papyrus.ttc|ğ ũ̀|
+/System/Library/Fonts/Supplemental/Papyrus.ttc|ñ é|
+/System/Library/Fonts/Supplemental/Papyrus.ttc|q̧́|
+/System/Library/Fonts/Supplemental/Papyrus.ttc|x̣̂|
+/System/Library/Fonts/Supplemental/Papyrus.ttc|Zöë|
+/System/Library/Fonts/Supplemental/Skia.ttf|ñ é|
+/System/Library/Fonts/Supplemental/Skia.ttf|Zöë|
+/System/Library/Fonts/Supplemental/Zapfino.ttf|ğ ũ̀|
+/System/Library/Fonts/Supplemental/Zapfino.ttf|ñ é|
+/System/Library/Fonts/Supplemental/Zapfino.ttf|q̧́|
+/System/Library/Fonts/Supplemental/Zapfino.ttf|Zöë|

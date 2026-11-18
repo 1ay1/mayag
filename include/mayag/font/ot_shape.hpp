@@ -79,6 +79,9 @@ struct FontFuncs {
     /// font has no GPOS mark positioning.
     struct Extents { int x_bearing = 0, y_bearing = 0, width = 0, height = 0; };
     std::function<bool(std::uint16_t, Extents&)> extents;
+    /// OS/2 sxHeight / sCapHeight in font units (0: unknown). CoreText's
+    /// fallback mark placement measures its gaps from them.
+    int x_height = 0, cap_height = 0;
 };
 
 // ── per-glyph unicode properties (hb_set_unicode_props) ───────────────────
@@ -406,9 +409,14 @@ struct ShapePlan {
     bool has_gpos_mark = false;
     bool adjust_mark_positioning_when_zeroing = false;
     bool fallback_mark_positioning = false;
+    /// Fallback marks placed the way CoreText places them on AAT faces
+    /// (position_marks_coretext) instead of HarfBuzz's way.
+    bool coretext_mark_positioning = false;
     bool fallback_glyph_classes = false;
     bool apply_morx = false;              ///< AAT morx replaces GSUB
     std::span<const std::uint8_t> morx;
+    /// For morx faces: the script shaper's compose (the dumber shaper has none).
+    bool (*morx_compose)(const detail::NormalizeContext&, char32_t a, char32_t b, char32_t& ab) = nullptr;
 };
 
 /// What a GSUB/GPOS pause callback receives through `user`.
@@ -562,6 +570,7 @@ inline ShapePlan compile_plan(const Layout& l, ucd::Script script, Direction dir
     const bool apply_morx = !morx.empty() && Reader{morx}.u32_at(0) != 0;
     const bool script_zero_marks = shaper->zero_marks != ZeroMarks::none;
     const bool script_fallback_position = shaper->fallback_position;
+    const ScriptShaper* script_shaper = shaper;
     if (apply_morx && shaper != &default_shaper()) {   // _hb_ot_shaper_dumber
         static const ScriptShaper dumber{.name = "dumber", .zero_marks = ZeroMarks::none, .fallback_position = false};
         shaper = &dumber;
@@ -610,26 +619,47 @@ inline ShapePlan compile_plan(const Layout& l, ucd::Script script, Direction dir
     const bool disable_gpos = shaper->gpos_tag && shaper->gpos_tag != sp.map.chosen_script[table::gpos];
     sp.fallback_glyph_classes = !l.has_glyph_classes();
     const bool gpos = !disable_gpos && l.has_gpos();
-    // AAT `kerx` wins when the font lacks GSUB+GPOS, or when GPOS has no
-    // kern feature (HarfBuzz prefers it then). mayag does not apply kerx
-    // yet, but the POLICY follows HarfBuzz: with kerx, marks keep their
-    // advances and nothing falls back to the legacy kern table.
+    // hb_ot_shape_plan (HarfBuzz 15.1): AAT `kerx` wins when the font lacks
+    // GSUB+GPOS together, or when GPOS has no kern feature; the legacy `kern`
+    // table runs only for shapers that position by fallback (default,
+    // Arabic, Hangul, Hebrew) and only when kerning was requested.
     const bool has_gsub = !apply_morx && l.has_gsub();
     const bool kerx = has_kerx_table && (!(has_gsub && gpos) || !has_gpos_kern);
     sp.apply_gpos = gpos && !(has_kerx_table && !(has_gsub && gpos));
-    sp.apply_kern = !kerx && (!has_gpos_kern || !sp.apply_gpos) && has_kern_table && sp.kern_mask;
+    const bool plan_kern = !kerx && (!has_gpos_kern || !sp.apply_gpos) && has_kern_table && script_fallback_position;
+    sp.apply_kern = plan_kern && sp.kern_mask;   // HarfBuzz gates the pass on requested_kerning
     sp.apply_kerx = kerx;
     // A state-machine `kern` positions marks itself; cross-stream kern
     // moves them vertically: either way HarfBuzz leaves marks alone.
-    const bool machine_kern = sp.apply_kern && aat::has_machine_kern(font.kern_table);
-    const bool cross_kern = sp.apply_kern && aat::has_cross_kern(font.kern_table);
+    const bool machine_kern = plan_kern && aat::has_machine_kern(font.kern_table);
+    const bool cross_kern = plan_kern && aat::has_cross_kern(font.kern_table);
     sp.zero_marks = script_zero_marks && !kerx && !machine_kern;
     sp.has_gpos_mark = sp.map.one_mask_of(make_tag('m', 'a', 'r', 'k')) != 0;
     sp.adjust_mark_positioning_when_zeroing = !sp.apply_gpos && !kerx && !cross_kern;
     sp.fallback_mark_positioning = sp.adjust_mark_positioning_when_zeroing && script_fallback_position;
     sp.apply_morx = apply_morx;
     if (apply_morx) sp.adjust_mark_positioning_when_zeroing = false;   // after fallback_mark_positioning
+    // CoreText (Ned Holbrook, harfbuzz#1528): "no mark width zeroing, and no
+    // fallback positioning for Hebrew, Thai, or [any] script with Shaping
+    // Required". HarfBuzz ports only the zeroing half (the dumber shaper);
+    // mayag takes both, so an AAT Hebrew face (Raanana) sets its points
+    // where the font draws them, exactly as every macOS app shows them.
+    if (apply_morx && shaper != &default_shaper()) sp.fallback_mark_positioning = false;
+    // An AAT face is DESIGNED against CoreText; where it leaves marks to the
+    // engine (no GPOS `mark`, no kerx), CoreText places them itself, even
+    // when a kern-only GPOS is present (Futura, Papyrus). So does mayag.
+    if (apply_morx && shaper == &default_shaper() && !sp.has_gpos_mark && !kerx) {
+        sp.coretext_mark_positioning = true;
+        sp.fallback_mark_positioning = true;
+    }
     sp.morx = morx;
+    // CoreText composes canonically equivalent PRESENTATION forms the font
+    // maps (shin + shin dot -> U+FB2A across a qamats), which is what the
+    // script shaper's compose does; HarfBuzz's dumber shaper loses it.
+    if (apply_morx) sp.morx_compose = script_shaper->compose;
+    // A GPOS `mark` that never runs (morx + kerx faces like Arial Hebrew)
+    // must not stop Hebrew presentation forms: CoreText composes them.
+    if (apply_morx && !sp.apply_gpos) sp.has_gpos_mark = false;
     if (shaper->data_create) sp.data = shaper->data_create(sp);
     return sp;
 }
@@ -643,7 +673,8 @@ inline void normalize(const ShapePlan& plan, Buffer& b, const FontFuncs& font) {
     if (mode == Normalization::automatic) mode = Normalization::composed_diacritics;
     detail::NormalizeContext c{plan, b, font,
                                plan.shaper->decompose ? plan.shaper->decompose : detail::decompose_unicode,
-                               plan.shaper->compose ? plan.shaper->compose : detail::compose_unicode};
+                               plan.morx_compose ? plan.morx_compose
+                               : plan.shaper->compose ? plan.shaper->compose : detail::compose_unicode};
     const bool always_short_circuit = mode == Normalization::none;
     const bool might_short_circuit = always_short_circuit ||
         (mode != Normalization::decomposed && mode != Normalization::composed_diacritics_no_short_circuit);
@@ -676,12 +707,21 @@ inline void normalize(const ShapePlan& plan, Buffer& b, const FontFuncs& font) {
                 if (!is_unicode_mark(b.info[end])) break;
             detail::decompose_multi_char_cluster(c, end, always_short_circuit);
         } while (b.idx < count && b.successful);
+        // Decomposition can introduce marks into otherwise simple input
+        // (U+1B08 -> U+1B07 U+1B35 must still be recomposed).
+        if (b.successful && b.out_len() != count) all_simple = false;
         b.sync();
     }
 
     // Second round: reorder marks (stable sort runs of nonzero mcc).
     if (!all_simple) {
         const std::size_t count = b.len();
+        // Remember each mark's INPUT rank in its run: CoreText stacks
+        // uncomposed marks in input order (position_around_base_coretext).
+        for (std::size_t i = 0, rank = 0; i < count; ++i) {
+            if (b.info[i].mcc == 0) { rank = 0; continue; }
+            if (b.info[i].aux == 0) b.info[i].aux = static_cast<std::uint8_t>(std::min<std::size_t>(++rank, 255));
+        }
         for (std::size_t i = 0; i < count; ++i) {
             if (b.info[i].mcc == 0) continue;
             std::size_t end;
@@ -1013,8 +1053,76 @@ inline void position_mark(const FontFuncs& font, Buffer& b, FontFuncs::Extents& 
     pos.y_offset = static_cast<float>(yo);
 }
 
+/// CoreText's fallback mark placement (measured against CTLine on Apple's
+/// AAT faces; exact to the unit):
+///   x  centred on the base's ADVANCE; *_RIGHT classes align ink right edges,
+///      *_LEFT ink left edges, DOUBLE_* centre on the base's trailing edge;
+///   y  above / below the cluster's ink so far by a gap of capHeight/8 when
+///      the cluster reaches cap height, else xHeight/5; ATTACHED_* classes
+///      touch (gap 0); overlays (ccc 1) centre on capHeight/2.
+inline void position_around_base_coretext(const FontFuncs& font, Buffer& b, std::size_t base, std::size_t end,
+                                          bool adjust) {
+    FontFuncs::Extents be;
+    if (!font.extents || !font.extents(b.info[base].gid, be)) { zero_mark_advances(b, base + 1, end, adjust); return; }
+    const float advance = font.advance(b.info[base].gid);
+    const float bx0 = static_cast<float>(be.x_bearing), bx1 = bx0 + static_cast<float>(be.width);
+    const float xh = static_cast<float>(font.x_height > 0 ? font.x_height : font.upem / 2);
+    const float ch = static_cast<float>(font.cap_height > 0 ? font.cap_height : font.upem * 7 / 10);
+    float ftop = static_cast<float>(be.y_bearing) + b.pos[base].y_offset;   // cluster ink so far, y-up
+    float fbottom = ftop + static_cast<float>(be.height);
+    // Pen travelled from the base to each glyph, in buffer order.
+    std::vector<float> pen(end - base, 0.0f);
+    {
+        float x = 0;
+        if (b.direction == Direction::ltr) x -= b.pos[base].x_advance;
+        for (std::size_t i = base + 1; i < end; ++i) {
+            pen[i - base] = x;
+            if (!b.info[i].mcc) x += b.direction == Direction::ltr ? -b.pos[i].x_advance : b.pos[i].x_advance;
+        }
+    }
+    // CoreText stacks marks in INPUT order (aux = input rank, set before
+    // the canonical reorder), so `x ^ .` and `x . ^` stack differently.
+    std::vector<std::size_t> order;
+    for (std::size_t i = base + 1; i < end; ++i) if (b.info[i].mcc) order.push_back(i);
+    std::stable_sort(order.begin(), order.end(),
+                     [&](std::size_t a, std::size_t c) { return b.info[a].aux < b.info[c].aux; });
+    for (const std::size_t i : order) {
+        FontFuncs::Extents m;
+        b.pos[i].x_advance = 0;
+        b.pos[i].y_advance = 0;
+        if (!font.extents(b.info[i].gid, m)) continue;
+        GlyphPos& pos = b.pos[i];
+        const float mx0 = static_cast<float>(m.x_bearing), mx1 = mx0 + static_cast<float>(m.width);
+        const float mtop = static_cast<float>(m.y_bearing), mbottom = mtop + static_cast<float>(m.height);
+        const unsigned u = b.info[i].mcc;
+        float xo;
+        switch (u) {
+            case 216: case 222: case 232: xo = bx1 - mx1; break;                     // *_RIGHT
+            case 200: case 218: case 228: xo = bx0 - mx0; break;                     // *_LEFT
+            case 233: case 234: xo = advance - (mx0 + mx1) / 2.0f; break;            // DOUBLE_*
+            default: xo = advance / 2.0f - (mx0 + mx1) / 2.0f; break;
+        }
+        const float gap = ftop >= ch ? ch / 8.0f : xh / 5.0f;
+        float yo;
+        switch (u) {
+            case 1: yo = ch / 2.0f - (mtop + mbottom) / 2.0f; break;                  // overlay
+            case 200: case 202: yo = fbottom - mtop; break;                          // attached below
+            case 214: case 216: yo = ftop - mbottom; break;                          // attached above
+            case 218: case 220: case 222: case 233: case 240: yo = fbottom - gap - mtop; break;
+            default: yo = ftop + gap - mbottom; break;                                // above
+        }
+        pos.x_offset = xo + pen[i - base];
+        pos.y_offset = yo;
+        if (u != 1) {
+            ftop = std::max(ftop, mtop + yo);
+            fbottom = std::min(fbottom, mbottom + yo);
+        }
+    }
+}
+
 inline void position_around_base(const ShapePlan& plan, const FontFuncs& font, Buffer& b, std::size_t base,
                                  std::size_t end, bool adjust) {
+    if (plan.coretext_mark_positioning) { position_around_base_coretext(font, b, base, end, adjust); return; }
     FontFuncs::Extents be;
     if (!font.extents || !font.extents(b.info[base].gid, be)) { zero_mark_advances(b, base + 1, end, adjust); return; }
     be.y_bearing += static_cast<int>(b.pos[base].y_offset);

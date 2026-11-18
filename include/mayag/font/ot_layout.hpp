@@ -1772,6 +1772,24 @@ inline bool gpos_cursive(ApplyContext& c, std::size_t s) {
     return true;
 }
 
+/// MarkArray.hh resolve_cross_offset (HarfBuzz 15): the glyph's cross-axis
+/// (y, horizontal text) offset plus every cursive ancestor's. A mark takes
+/// its base's at attach time, so a later lookup moving the base vertically
+/// does not drag the mark along.
+inline float resolve_cross_offset(const std::vector<GlyphPos>& pos, std::size_t g, bool reversed = false) {
+    const std::size_t len = pos.size();
+    float offset = pos[g].y_offset;
+    for (std::size_t count = 1; count < len && (pos[g].attach_type & attach_cursive); ++count) {
+        const int chain = pos[g].attach_chain;
+        if (!chain) break;
+        const long parent = static_cast<long>(g) + (reversed ? -chain : chain);
+        if (parent < 0 || static_cast<std::size_t>(parent) >= len) break;
+        g = static_cast<std::size_t>(parent);
+        offset += pos[g].y_offset;
+    }
+    return offset;
+}
+
 /// MarkArray::apply: attach the current mark (index `mark_index` in the
 /// MarkArray at `marks`) to the glyph at `glyph_pos`, whose anchors are row
 /// `row` of the AnchorMatrix at `matrix` (`class_count` columns).
@@ -1790,8 +1808,9 @@ inline bool attach_mark_to(ApplyContext& c, std::size_t marks, unsigned mark_ind
     if (mark_anchor != npos) anchor(c, mark_anchor, mx, my);   // a Null anchor is (0, 0)
     anchor(c, glyph_anchor, gx, gy);
     GlyphPos& o = b.pos[b.idx];
+    const float base_offset = resolve_cross_offset(b.pos, glyph_pos);
     o.x_offset = gx - mx;
-    o.y_offset = gy - my;
+    o.y_offset = gy - my + base_offset;
     o.attach_type = attach_mark;
     o.attach_chain = static_cast<std::int16_t>(static_cast<long>(glyph_pos) - static_cast<long>(b.idx));
     c.has_attachment = true;
@@ -2173,8 +2192,8 @@ inline void propagate_attachments(Buffer& b, Direction dir) {
             pos[i].y_offset += pos[j].y_offset;
             return;
         }
+        // Marks: main axis only; the cross offset was resolved at attach.
         pos[i].x_offset += pos[j].x_offset;
-        pos[i].y_offset += pos[j].y_offset;
         if (j < i) {
             if (dir == Direction::ltr) for (std::size_t k = j; k < i; ++k) pos[i].x_offset -= pos[k].x_advance;
             else for (std::size_t k = j + 1; k < i + 1; ++k) pos[i].x_offset += pos[k].x_advance;
@@ -2183,8 +2202,14 @@ inline void propagate_attachments(Buffer& b, Direction dir) {
             else for (std::size_t k = i + 1; k < j + 1; ++k) pos[i].x_offset -= pos[k].x_advance;
         }
     };
-    for (std::size_t i = 0; i < len; ++i)
-        if (pos[i].attach_chain) propagate(propagate, i, 0);
+    // harfbuzz#5514: walk in the logical direction of the text.
+    if (dir == Direction::ltr) {
+        for (std::size_t i = 0; i < len; ++i)
+            if (pos[i].attach_chain) propagate(propagate, i, 0);
+    } else {
+        for (std::size_t i = len; i-- > 0;)
+            if (pos[i].attach_chain) propagate(propagate, i, 0);
+    }
 }
 
 /// When marks lose their advance (HarfBuzz zero_width_marks): before GPOS

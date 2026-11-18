@@ -1,0 +1,42 @@
+# Cases where mayag deliberately follows NATIVE CoreText instead of HarfBuzz.
+# Same format as expected.txt (FONT|TEXT|ARGS|OUTPUT); a line here replaces
+# the expected.txt line with the same FONT|TEXT|ARGS. Every output below was
+# verified glyph-for-glyph and position-for-position against CTLine with
+# tools/ct_compare.py.
+#
+# Why: for a face with a live `morx`, CoreText sets marks of a script that
+# "requires shaping" (Hebrew, Thai, ...) exactly where the font draws them --
+# no fallback mark positioning (Ned Holbrook, harfbuzz#1528). HarfBuzz ports
+# the no-mark-zeroing half of that rule (its "dumber" shaper) but still runs
+# the Hebrew shaper's fallback positioning, which slides the points of
+# Raanana and Corsiva off the place Apple's designers put them.
+/System/Library/Fonts/Supplemental/Corsiva.ttc|שָׁלוֹם בְּרֵאשִׁית||[169=18+991|152=17+444|126=14+0|133=14+1075|143=13+909|124=11+0|167=11+795|136=8+0|62=8+881|19=7+512|156=6+928|118=4+444|155=3+815|122=0+0|133=0+1075]
+/System/Library/Fonts/Supplemental/Raanana.ttc|שָׁלוֹם||[140=6+1178|106=4+588|139=3+856|110=0+0|118=0+1178]
+/System/Library/Fonts/Supplemental/Raanana.ttc|בְּרֵאשִׁית בָּרָא||[127=17+1126|41=15+860|110=12+0|52=12+950|3=11+547|153=10+1122|136=9+588|114=6+0|118=6+1178|127=5+1126|43=3+860|120=0+0|52=0+950]
+/System/Library/Fonts/Supplemental/Raanana.ttc|שִׂמְחָה||[131=7+1069|110=5+0|134=5+1065|120=3+0|141=3+1098|114=0+0|119=0+1178]
+/System/Library/Fonts/Supplemental/Raanana.ttc:1|שָׁלוֹם עוֹלָם||[140=13+1184|110=11+0|139=11+887|106=9+588|145=8+983|3=7+547|140=6+1184|106=4+588|139=3+887|110=0+0|118=0+1303]
+#
+# Latin combining marks on AAT faces with no mark positioning of their own:
+# CoreText centres each mark on the base ADVANCE and stacks it, in input
+# order, capHeight/8 (cluster at cap height) or xHeight/5 off the cluster's
+# ink (position_around_base_coretext). HarfBuzz uses a fixed upem/16 gap.
+/System/Library/Fonts/Helvetica.ttc|ğ ũ̀||[249=0+1139|3=2+569|341=3+1139|365=3@0,449+0]
+/System/Library/Fonts/Helvetica.ttc|q̧́||[84=0+1139|377=0@1,-427+0|366=0@0,96+0]
+/System/Library/Fonts/Helvetica.ttc|x̣̂||[91=0+1024|514=0@58,-29+0|367=0@58,72+0]
+/System/Library/Fonts/HelveticaNeue.ttc|ğ ũ̀||[536=0+574|3=2+278|570=3+556|253=3@-128,219+0]
+/System/Library/Fonts/HelveticaNeue.ttc|q̧́||[88=0+593|264=0@-190,-197+0|254=0@-229,24+0]
+/System/Library/Fonts/HelveticaNeue.ttc|x̣̂||[95=0+518|749=0@19,-10+0|255=0@-151,12+0]
+/System/Library/Fonts/Supplemental/Apple Chancery.ttf|q̧́||[84=0+993|1054=0@-857,-835+0|1044=0@-1225,49+0]
+/System/Library/Fonts/Supplemental/Baskerville.ttc|ğ ũ̀||[614=0+960|3=2+512|842=3+1067|255=3@-23,462+0]
+/System/Library/Fonts/Supplemental/Baskerville.ttc|q̧́||[89=0+1067|266=0@-23,-519+0|257=0@-23,14+0]
+/System/Library/Fonts/Supplemental/Baskerville.ttc|x̣̂||[96=0+981|308=0@25,42+0|256=0@21,-18+0]
+/System/Library/Fonts/Supplemental/Didot.ttc|ğ ũ̀||[370=0+519|3=2+278|434=3+593|321=3@-124,213+0]
+/System/Library/Fonts/Supplemental/Didot.ttc|q̧́||[85=0+593|332=0@-200,-280+0|322=0@-219,-23+0]
+/System/Library/Fonts/Supplemental/Futura.ttc|ğ ũ̀||[255=0+1226|3=2+632|417=3+1116|372=3@159,514+0]
+/System/Library/Fonts/Supplemental/Futura.ttc|q̧́||[106=0+1228|383=0@-52,-407+0|373=0@-176,75+0]
+/System/Library/Fonts/Supplemental/Hoefler Text.ttc|q̧́||[84=0+1074|900=0@-859,-558+0|889=0@-882,41+0]
+/System/Library/Fonts/Supplemental/Papyrus.ttc|ğ ũ̀||[757=0+763|3=2+321|809=3+790|272=3@26,420+0]
+/System/Library/Fonts/Supplemental/Papyrus.ttc|q̧́||[89=0+814|282=0@14,-950+0|273=0@14,87+0]
+/System/Library/Fonts/Supplemental/Papyrus.ttc|x̣̂||[96=0+691|360=0@77,-289+0|274=0@75,129+0]
+/System/Library/Fonts/Supplemental/Zapfino.ttf|ğ ũ̀||[756=0+237|3=2+200|949=3+257|1294=3@-100,138+0]
+/System/Library/Fonts/Supplemental/Zapfino.ttf|q̧́||[589=0+257|1318=0@74,-509+0|1296=0@-195,113+0]

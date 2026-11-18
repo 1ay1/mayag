@@ -24,6 +24,7 @@ struct Options {
     std::vector<ot::Feature> features;
     std::vector<std::pair<std::uint32_t, float>> variations;
     bool bot = false;
+    float ptem = 0;   ///< > 0: apply `trak` at this point size (hb-shape --ptem)
 };
 
 /// Parse hb-shape style arguments ("--features=+smcp,-liga", "--direction=rtl",
@@ -34,6 +35,7 @@ inline Options parse_args(const std::vector<std::string>& args) {
         const auto val = [&](const char* k) { return a.rfind(k, 0) == 0 ? a.substr(std::strlen(k)) : std::string{}; };
         if (a == "--bot") { o.bot = true; continue; }
         if (auto v = val("--script="); !v.empty()) o.script = v;
+        else if (auto pt = val("--ptem="); !pt.empty()) o.ptem = std::stof(pt);
         else if (auto d = val("--direction="); !d.empty()) o.direction = d;
         else if (auto lg = val("--language="); !lg.empty()) o.language = lg;
         else if (auto fs = val("--features="); !fs.empty()) {
@@ -108,8 +110,11 @@ inline std::string shape(Face& face, const std::string& text, const Options& o) 
     if (const auto kt = file.table(ot::tag("kern")); aat::has_kern(kt)) { ff.kern_table = kt; ff.num_glyphs = file.num_glyphs(); }
     ff.kerx_table = file.table(ot::tag("kerx"));
     ff.ankr_table = file.table(ot::tag("ankr"));
+    ff.x_height = file.os2().x_height;
+    ff.cap_height = file.os2().cap_height;
     // hb-shape applies `trak` at CoreText's default 12 pt when the font has STAT.
     if (file.has_table(ot::tag("STAT"))) ff.tracking = face.track_table().at_exact(12.0f);
+    if (o.ptem > 0) ff.tracking = face.track_table().at_exact(o.ptem);
     ff.extents = [&](std::uint16_t g, ot::FontFuncs::Extents& e) {
         const Outline ol = face.outline(g);
         if (ol.empty()) { e = {}; return true; }

@@ -141,6 +141,7 @@ inline void for_each_kern_subtable(std::span<const std::uint8_t> data, F&& f) {
 /// as a byte offset into the state array, flags: Push 0x8000, DontAdvance
 /// 0x4000, Offset 0x3FFF = byte offset of the action list}.
 inline void apply_format1(const ot::Reader& r, const KernSub& s, ot::Buffer& b, std::uint32_t kern_mask) {
+    constexpr std::size_t npos = static_cast<std::size_t>(-1);
     const std::size_t st = s.body;   // the StateTable starts right after the header
     const unsigned n_classes = r.u16_at(st);
     const std::size_t class_table = st + r.u16_at(st + 2);
@@ -154,24 +155,29 @@ inline void apply_format1(const ot::Reader& r, const KernSub& s, ot::Buffer& b, 
         const unsigned i = static_cast<unsigned>(g) - first;
         return (g >= first && i < count) ? r.u8_at(class_table + 4 + i) : 1u;   // 1 = out of bounds
     };
-    const auto entry_at = [&](unsigned state, unsigned klass) -> std::size_t {
+    const auto entry_at = [&](int state, unsigned klass) -> std::size_t {
         if (klass >= n_classes) klass = 1;
-        const unsigned e = r.u8_at(state_array + std::size_t{state} * n_classes + klass);
+        // States can be negative: Apple lets stateTableOffset name an initial
+        // state other than the first row (HarfBuzz's StateTable::sanitize).
+        const long cell = static_cast<long>(state) * static_cast<long>(n_classes) + static_cast<long>(klass);
+        const long at = static_cast<long>(state_array) + cell;
+        if (at < static_cast<long>(st) || static_cast<std::size_t>(at) >= r.size()) return npos;
+        const unsigned e = r.u8_at(static_cast<std::size_t>(at));
         return entry_table + std::size_t{e} * 4;
     };
-    const auto new_state = [&](std::size_t e) -> unsigned {   // byte offset -> state index
+    const auto new_state = [&](std::size_t e) -> int {   // byte offset -> (signed) state index
         const int ns = r.u16_at(e);
-        const int v = (ns - static_cast<int>(state_array - st)) / static_cast<int>(n_classes);
-        return v < 0 ? 0u : static_cast<unsigned>(v);
+        return (ns - static_cast<int>(state_array - st)) / static_cast<int>(n_classes);
     };
     std::size_t stack[8];
     unsigned depth = 0;
-    unsigned state = 0;
+    int state = 0;
     for (b.idx = 0; b.successful;) {
         const unsigned klass = b.idx < b.len() ? get_class(b.cur().gid) : 0u;
         const std::size_t e = entry_at(state, klass);
+        if (e == npos || e + 4 > r.size()) break;
         const unsigned flags = r.u16_at(e + 2);
-        const unsigned next = new_state(e);
+        const int next = new_state(e);
         // transition
         if (flags & 0x8000) {
             if (depth < 8) stack[depth++] = b.idx;

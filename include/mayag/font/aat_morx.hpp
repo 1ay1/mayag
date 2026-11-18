@@ -164,6 +164,12 @@ inline void mark_deleted(ot::GlyphInfo& g) {
     g.uflags = static_cast<std::uint8_t>(g.uflags | uflag_aat_deleted | ot::uflag::hidden);
 }
 
+/// replace_glyph_inplace: a lookup that maps to the deleted glyph deletes it.
+inline void replace_inplace(ot::GlyphInfo& g, std::uint16_t v) {
+    g.gid = v;
+    if (v == deleted_glyph) mark_deleted(g);
+}
+
 struct Rearrangement {
     static constexpr bool in_place = true;
     std::size_t start = 0, end = 0;
@@ -209,12 +215,12 @@ struct Contextual {
         const std::uint16_t mark_index = m.data(e, 0), cur_index = m.data(e, 1);
         if (mark_index != 0xFFFF && mark < b.len()) {
             const std::size_t lk = subs + m.r.u32_at(subs + 4u * mark_index);
-            if (auto v = lookup16(m.r, lk, b.info[mark].gid, m.num_glyphs, false)) b.info[mark].gid = *v;
+            if (auto v = lookup16(m.r, lk, b.info[mark].gid, m.num_glyphs, false)) replace_inplace(b.info[mark], *v);
         }
         const std::size_t i = std::min(b.idx, b.len() - 1);
         if (cur_index != 0xFFFF) {
             const std::size_t lk = subs + m.r.u32_at(subs + 4u * cur_index);
-            if (auto v = lookup16(m.r, lk, b.info[i].gid, m.num_glyphs, false)) b.info[i].gid = *v;
+            if (auto v = lookup16(m.r, lk, b.info[i].gid, m.num_glyphs, false)) replace_inplace(b.info[i], *v);
         }
         if (m.flags(e) & 0x8000) { mark_set = true; mark = b.idx; }
     }
@@ -377,7 +383,7 @@ inline void substitute(std::span<const std::uint8_t> morx, ot::Buffer& b, unsign
                 }
                 case 4:
                     for (auto& g : b.info)
-                        if (auto v = lookup16(r, body, g.gid, num_glyphs, false)) g.gid = *v;
+                        if (auto v = lookup16(r, body, g.gid, num_glyphs, false)) detail::replace_inplace(g, *v);
                     break;
                 case 5: {
                     StateTable m{r, body, 8, num_glyphs};

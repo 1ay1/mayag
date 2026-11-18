@@ -14,7 +14,7 @@
 //   6  row/column index Lookups (short or long values)   hb_kern_machine_t
 //
 // Values are in font units (mayag shapes at upem, so HarfBuzz's em_scale is
-// the identity). A port of HarfBuzz 11.2.1 hb-aat-layout-kerx-table.hh and
+// the identity). A port of HarfBuzz 15.1.0 hb-aat-layout-kerx-table.hh and
 // hb-aat-layout-ankr-table.hh (Old MIT; see THIRD_PARTY_NOTICES.md).
 
 #include "aat_morx.hpp"
@@ -85,7 +85,9 @@ struct Sub {
                                   unsigned ng) {
     const unsigned l = lookup<2>(r, s.off + r.u32_at(s.off + 16), left, ng, false).value_or(0);
     const unsigned rr = lookup<2>(r, s.off + r.u32_at(s.off + 20), right, ng, false).value_or(0);
-    const std::size_t p = s.off + r.u32_at(s.off + 24) + 2 * std::size_t{l + rr};
+    // The class values are pre-multiplied BYTE offsets (rows by the row
+    // width, columns by 2): their sum / 2 is the value index (HarfBuzz 15.1).
+    const std::size_t p = s.off + r.u32_at(s.off + 24) + 2 * std::size_t{(l + rr) / 2};
     if (p + 2 > s.limit) return 0;
     return tuple_kern(r, r.i16_at(p), s.tuple_count, s.off, s.limit);
 }
@@ -131,7 +133,11 @@ template <class Acts>
     return v && *v < m.n_classes && filter(*v);
 }
 
-/// KerxSubTableFormat1::driver_context_t (extended types).
+/// KerxSubTableFormat1::driver_context_t (extended types), as HarfBuzz 15.1
+/// matches native CoreText: an eight-slot CIRCULAR history (unused slots are
+/// glyph 0) that every action list walks anew from the newest push, Reset
+/// ignored, lists ended by a lone 0xFFFF (no odd-bit terminator), and the
+/// action index read as an index, not a byte offset.
 struct Format1 {
     static constexpr bool in_place = true;
     const ot::Reader& r;
@@ -139,28 +145,30 @@ struct Format1 {
     std::uint32_t tuple_count = 0, kern_mask = 0;
     bool cross_stream = false;
     std::size_t stack[8]{};
-    unsigned depth = 0;
+    unsigned depth = 0, stack_pos = 0;
 
     void transition(ot::Buffer& b, const StateTable& m, std::size_t e) {
         const unsigned flags = m.flags(e);
-        if (flags & 0x2000) depth = 0;   // Reset
         if (flags & 0x8000) {            // Push
-            if (depth < 8) stack[depth++] = b.idx;
-            else depth = 0;
+            stack[stack_pos] = b.idx;
+            stack_pos = (stack_pos + 1) % 8;
+            depth = std::min(depth + 1, 8u);
         }
         const unsigned action = m.data(e, 0);
         if (action == 0xFFFF || !depth) return;
         const std::uint32_t tc = tuple_count ? tuple_count : 1;
-        std::size_t p = kern_action + 2 * std::size_t{action / 2u};
-        if (p + 2 * std::size_t{depth} * tc > limit) { depth = 0; return; }
-        bool last = false;
-        while (!last && depth) {
-            const std::size_t idx = stack[--depth];
-            int v = r.i16_at(p);
+        std::size_t p = kern_action + 2 * std::size_t{action};
+        unsigned cursor = stack_pos;
+        for (;;) {
+            if (b.max_ops-- <= 0) { b.successful = false; return; }
+            if (p + 2 > limit) { depth = 0; return; }
+            const int v = r.i16_at(p);
+            if (v == -1) break;
+            if (tc > 1 && p + 2 * std::size_t{tc} > limit) { depth = 0; return; }
+            cursor = (cursor + 7) % 8;
+            const std::size_t idx = stack[cursor];
             p += 2 * std::size_t{tc};
             if (idx >= b.len()) continue;
-            last = v & 1;
-            v &= ~1;
             ot::GlyphPos& o = b.pos[idx];
             if (cross_stream) {
                 if (v == -0x8000) { o.attach_type = 0; o.attach_chain = 0; o.y_offset = 0; }
@@ -198,6 +206,7 @@ struct Format4 {
     std::span<const std::uint8_t> ankr;
     std::size_t ankr_data = 0, limit = 0;
     unsigned action_type = 0, num_glyphs = 0;
+    bool reversed = false;   ///< the buffer is reversed from its original order
     bool mark_set = false;
     std::size_t mark = 0;
 
@@ -205,6 +214,10 @@ struct Format4 {
         const unsigned action = m.data(e, 0);
         if (mark_set && action != 0xFFFF && b.idx < b.len()) {
             ot::GlyphPos& o = b.pos[b.idx];
+            // Chains are kept in the ORIGINAL buffer order (HarfBuzz 15).
+            long chain = static_cast<long>(mark) - static_cast<long>(b.idx);
+            if (reversed) chain = -chain;
+            if (chain != static_cast<std::int16_t>(chain)) { o.attach_chain = 0; goto set_mark; }
             switch (action_type) {
             case 0:   // control points: hb-ot-font has no contour points, so HarfBuzz bails
                 return;
@@ -227,10 +240,12 @@ struct Format4 {
             }
             default: break;
             }
+            o.y_offset += ot::detail::resolve_cross_offset(b.pos, mark, reversed);
             o.attach_type = 1;   // ATTACH_TYPE_MARK
-            o.attach_chain = static_cast<std::int16_t>(static_cast<long>(mark) - static_cast<long>(b.idx));
+            o.attach_chain = static_cast<std::int16_t>(chain);
             b.has_attachment = true;
         }
+    set_mark:
         if (m.flags(e) & 0x8000) { mark_set = true; mark = b.idx; }
     }
 };
@@ -250,7 +265,7 @@ inline void apply_kerx(std::span<const std::uint8_t> data, std::span<const std::
     if (r.u16_at(0) == 0) return;   // has_data
     const bool requested = kern_mask != 0;
     const std::uint32_t count = r.u32_at(4);
-    bool seen_cross = false;
+    bool seen_cross = false, reversed = false;
     std::size_t pos = 8;
     for (std::uint32_t i = 0; i < count && pos + 12 <= data.size(); ++i) {
         Sub s;
@@ -290,7 +305,7 @@ inline void apply_kerx(std::span<const std::uint8_t> data, std::span<const std::
                 p.attach_chain = static_cast<std::int16_t>(b.direction == ot::Direction::ltr ? -1 : 1);
             }
         }
-        if (reverse) b.reverse();
+        if (reverse != reversed) { b.reverse(); reversed = !reversed; }
         switch (type) {
         case 1:
             if (requested || s.cross_stream()) {
@@ -300,7 +315,7 @@ inline void apply_kerx(std::span<const std::uint8_t> data, std::span<const std::
             break;
         case 4: {
             const std::uint32_t flags = r.u32_at(s.off + 28);
-            Format4 c{r, ankr, s.off + 12 + (flags & 0x00FFFFFFu), s.limit, flags >> 30, num_glyphs};
+            Format4 c{r, ankr, s.off + 12 + (flags & 0x00FFFFFFu), s.limit, flags >> 30, num_glyphs, reversed};
             drive(*machine, b, c);
             break;
         }
@@ -336,8 +351,9 @@ inline void apply_kerx(std::span<const std::uint8_t> data, std::span<const std::
             break;
         }
         }
-        if (reverse) b.reverse();
+        if (!b.successful) break;
     }
+    if (reversed) b.reverse();
 }
 
 }  // namespace mayag::typo::aat

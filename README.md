@@ -471,7 +471,7 @@ mayag_typography.png  1800x1760
 ### Every script, shaped like HarfBuzz shapes it
 
 mayag carries its own OpenType shaping stack, a rule-for-rule port of
-HarfBuzz 11.2.1, and it is held to HarfBuzz's output exactly:
+HarfBuzz (tracking 15.1.0), and it is held to HarfBuzz's output exactly:
 
 - **Bidi:** UAX #9 in full (explicit embeddings, isolates, bracket pairs, L1/L2).
   It passes **770,241 / 770,241** of `BidiTest.txt` and **91,707 / 91,707** of
@@ -495,19 +495,41 @@ HarfBuzz 11.2.1, and it is held to HarfBuzz's output exactly:
   layout for that script. Glyphs are stored in logical order, and each line
   is painted in visual order.
 
-`tests/test_shaping.cpp` replays **629 hb-shape outputs** over about 200 system
-fonts and every script family. All 629 match, glyph for glyph and font unit
-for font unit. A fuzzer has shaped 100,000 strings on corrupted GSUB/GPOS/GDEF
-tables under ASan and UBSan with no failures. Shaping runs at about 290
-ns/char for Latin and 470 ns/char for Devanagari, and results are cached per
-string.
+`tests/test_shaping.cpp` replays **669 hb-shape (HarfBuzz 15.1.0) outputs**
+over about 200 system fonts and every script family. All 669 match, glyph for
+glyph and font unit for font unit, except 25 where mayag follows native
+CoreText instead (below). A fuzzer has shaped 100,000 strings on corrupted
+GSUB/GPOS/GDEF tables under ASan and UBSan with no failures. Shaping runs at
+about 290 ns/char for Latin and 470 ns/char for Devanagari, and results are
+cached per string.
 
-Apple's AAT tables shape the way HarfBuzz-on-macOS shapes them: `morx`
-(rearrangement, contextual, ligature, noncontextual and insertion subtables)
-replaces GSUB, `kerx` (formats 0/1/2/4/6, with `ankr` anchors for marks) or
-Apple's `kern` (formats 0–3, cross-stream included) replaces GPOS, and `trak`
-adjusts the tracking. Faces that only carry `morx`, like Geeza Pro, Raanana
-and Zapfino, therefore join the fallback chain for every script they cover.
+Apple's AAT tables shape the way CoreText shapes them, because Apple's fonts
+are designed against CoreText: `morx` (rearrangement, contextual, ligature,
+noncontextual and insertion subtables) replaces GSUB, `kerx` (formats
+0/1/2/4/6, with `ankr` anchors for marks, and format 1's eight-slot circular
+history) or Apple's `kern` (formats 0–3, cross-stream included, initial
+states before StartOfText) replaces GPOS, and `trak` adjusts the tracking.
+`tools/ct_compare.py` checks glyph ids and absolute positions against
+`CTLine` itself. Of the cases CoreText sets in the face itself, mayag matches
+111 of 112 AAT/kerx cases and 44 of 45 Latin combining-mark cases (the miss
+is one unit of Skia `gvar` rounding); HarfBuzz 15.1 matches 107 and 21.
+Where HarfBuzz and CoreText disagree, mayag takes CoreText's side:
+
+- **Marks of a script that "requires shaping"** (Hebrew, Thai...) on a `morx`
+  face are set where the font draws them, with no fallback positioning
+  (CoreText's rule, harfbuzz#1528). Raanana's and Corsiva's points sit where
+  every macOS app puts them.
+- **Combining marks the font leaves to the engine** are placed with
+  CoreText's own rule, not HarfBuzz's: centred on the base's advance and
+  stacked in input order capHeight/8 or xHeight/5 off the cluster's ink, so
+  `x̣̂` or `q̧́` in Helvetica or Baskerville land exactly where CoreText puts them.
+
+Two known differences remain, both inside CoreText's AAT engine rather than
+in anything the tables say: Geeza Pro forms its Allah ligature under
+fatha+shadda where CoreText does not (in the bismillah above), and
+Oriya/Gurmukhi MN form a Latin `fi` ligature that CoreText skips. Faces that
+only carry `morx`, like Geeza Pro, Raanana and Zapfino, join the fallback
+chain for every script they cover.
 
 ### Untrusted input
 

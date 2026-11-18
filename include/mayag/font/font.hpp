@@ -817,6 +817,8 @@ class FontStack : public Shaper {
         ff.kerx_table = file.table(ot::tag("kerx"));   // kern=0 masks its pair kerning, as in HarfBuzz
         ff.ankr_table = file.table(ot::tag("ankr"));
         ff.num_glyphs = file.num_glyphs();
+        ff.x_height = file.os2().x_height;
+        ff.cap_height = file.os2().cap_height;
         ff.extents = [&](std::uint16_t g, ot::FontFuncs::Extents& e) {
             const Outline o = face.outline(g);
             if (o.empty()) { e = {}; return true; }

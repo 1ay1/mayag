@@ -1,5 +1,8 @@
 #!/bin/sh
 # capture.sh CORPUS OUT : FONT|TEXT|ARGS|EXPECTED per line, EXPECTED from hb-shape.
+# The oracle is HarfBuzz 15.1.0; see tools/hb_compare.sh.
+HB_SHAPE=${HB_SHAPE:-$HOME/.local/harfbuzz-15.1/bin/hb-shape}
+"$HB_SHAPE" --version | grep -q '15\.1\.' || { echo "need HarfBuzz 15.1 hb-shape (HB_SHAPE)" >&2; exit 2; }
 : > "$2"
 while IFS='|' read -r font text extra; do
   [ -z "$font" ] && continue
@@ -14,6 +17,6 @@ n=struct.unpack('>H',d[o+4:o+6])[0]
 for i in range(n):
   t,c,off,l=struct.unpack('>4sIII',d[o+12+16*i:o+28+16*i])
   if t==b'head': print(struct.unpack('>H',d[off+18:off+20])[0])")
-  hb=$(/opt/local/bin/hb-shape --face-index=$idx --font-size=$upem --no-glyph-names $extra "$f" "$text" 2>&1)
+  hb=$("$HB_SHAPE" --face-index=$idx --font-size=$upem --no-glyph-names $extra "$f" "$text" 2>&1)
   printf '%s|%s|%s|%s\n' "$font" "$text" "$extra" "$hb" >> "$2"
 done < "$1"
