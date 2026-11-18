@@ -94,6 +94,33 @@ inline float f2dot14(std::span<const std::uint8_t> d, std::size_t o) noexcept {
     return axes;
 }
 
+/// One fvar named instance: its subfamily name id and coordinates (USER units,
+/// fvar axis order).
+struct NamedInstance {
+    std::uint16_t name_id = 0;
+    std::vector<float> coords;
+};
+
+[[nodiscard]] inline std::vector<NamedInstance> parse_fvar_instances(std::span<const std::uint8_t> fvar) {
+    using namespace detail;
+    std::vector<NamedInstance> out;
+    if (fvar.size() < 16) return out;
+    const std::uint16_t axes_off = u16(fvar, 4), axis_count = u16(fvar, 8), axis_size = u16(fvar, 10);
+    const std::uint16_t inst_count = u16(fvar, 12), inst_size = u16(fvar, 14);
+    const std::size_t first = axes_off + static_cast<std::size_t>(axis_count) * axis_size;
+    if (inst_size < 4 + 4 * static_cast<std::size_t>(axis_count)) return out;
+    for (std::uint16_t i = 0; i < inst_count && i < 1024; ++i) {
+        const std::size_t o = first + static_cast<std::size_t>(i) * inst_size;
+        if (o + 4 + 4 * static_cast<std::size_t>(axis_count) > fvar.size()) break;
+        NamedInstance n;
+        n.name_id = u16(fvar, o);
+        for (std::uint16_t a = 0; a < axis_count; ++a)
+            n.coords.push_back(static_cast<float>(static_cast<std::int32_t>(u32(fvar, o + 4 + 4 * a))) / 65536.0f);
+        out.push_back(std::move(n));
+    }
+    return out;
+}
+
 /// Normalise a user coordinate on one axis to [-1, 1] per the fvar rule, then
 /// (if avar is present) remap it through the axis's segment list.
 [[nodiscard]] inline float normalize_axis(const Axis& a, float user,

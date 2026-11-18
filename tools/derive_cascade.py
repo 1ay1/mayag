@@ -4,17 +4,10 @@
 import collections, json, sys
 from fontTools.ttLib import TTFont, TTCollection
 rows = [l.rstrip('\n').split('\t') for l in open(sys.argv[2] if len(sys.argv) > 2 else '/tmp/ct_all.txt', encoding='utf-8')]
-# PingFang UI is stored in Apple's undocumented `hvgl` outline format, which
-# nothing outside Apple reads (HarfBuzz/FreeType included). Its predecessor,
-# Heiti (STHeiti SC Light, glyf), is the same sans design class and covers
-# 98.4% of what CoreText draws from PingFang SC: put it in PingFang's slot.
-SUBST = {'.PingFangUITextSC-Regular': ('/System/Library/Fonts/STHeiti Light.ttc', 1, 'STHeitiSC-Light'),
-         '.PingFangUITextTC-Regular': ('/System/Library/Fonts/STHeiti Light.ttc', 0, 'STHeitiTC-Light'),
-         '.PingFangUITextHK-Regular': ('/System/Library/Fonts/STHeiti Light.ttc', 0, 'STHeitiTC-Light')}
+# mayag reads every format CoreText draws with (glyf, CFF/CFF2, sbix/CBDT/
+# COLR and Apple's HVF 'hvgl' for PingFang UI), so no face is substituted.
+SUBST = {}
 orig_pf = collections.defaultdict(set)
-for r in rows:
-    if len(r) == 4 and r[3] in SUBST: orig_pf[SUBST[r[3]][2]].add(int(r[0], 16))
-rows = [[r[0], *SUBST[r[3]]] if len(r) == 4 and r[3] in SUBST else r for r in rows]
 choice = {}
 # CoreText reports a face index into the file's DESCRIPTOR list, which for a
 # variable .ttc counts named instances. Map each (path, ps) to the real face
@@ -54,14 +47,12 @@ for path, idx, ps in fonts:
     except Exception as e:
         print('skip', path, idx, e, file=sys.stderr)
 fonts = [f for f in fonts if f in cmaps]
-# Faces with no outline format mayag reads (Apple's undocumented `hvgl`, e.g.
-# PingFang UI) cannot be used; leave them out and let the order solve for
-# the best renderable substitute.
+# Faces with no outline format mayag reads are left out (none on macOS 26).
 renderable = {}
 for f in fonts:
     path, idx, ps = f
     t = TTFont(path, fontNumber=idx, lazy=True) if path.endswith(('.ttc', '.otc')) else TTFont(path, lazy=True)
-    renderable[f] = any(k in t for k in ('glyf', 'CFF ', 'CFF2', 'sbix', 'CBDT', 'COLR'))
+    renderable[f] = any(k in t for k in ('glyf', 'CFF ', 'CFF2', 'sbix', 'CBDT', 'COLR', 'hvgl'))
 unusable = [f[2] for f in fonts if not renderable[f]]
 if unusable: print('unrenderable (left out):', ', '.join(unusable), file=sys.stderr)
 fonts = [f for f in fonts if renderable[f]]

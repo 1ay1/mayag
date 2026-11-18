@@ -892,6 +892,30 @@ class Database {
         for (const auto& x : apple::ui_exceptions)
             if (x.entry < face_at_entry.size() && face_at_entry[x.entry] != static_cast<std::size_t>(-1))
                 stack->prefer_range(x.lo, x.hi, face_at_entry[x.entry]);
+        // CoreText draws PingFang UI's "Text" design below 20 pt and its
+        // "Display" design (a sibling face of the same collection) from 20 pt.
+        const std::size_t n_faces = stack->face_count();
+        for (std::size_t k = 0; k < n_faces; ++k) {
+            const Face* f = stack->face_at(k);
+            if (f == nullptr) continue;
+            const std::string& ps = f->file().postscript_name();
+            const auto at = ps.find("UIText");
+            if (at == std::string::npos || ps.rfind(".PingFang", 0) != 0) continue;
+            const std::string want = ps.substr(0, at) + "UIDisplay" + ps.substr(at + 6, ps.find('-', at) - at - 6);
+            for (const auto& [path, idx] : added) {
+                if (auto probe = Face::from_file(path, idx); probe == nullptr || probe->file().postscript_name() != ps) continue;
+                for (std::uint32_t j = 0; j < 64; ++j) {
+                    auto d = Face::from_file(path, j);
+                    if (d == nullptr) break;
+                    const std::string& dps = d->file().postscript_name();
+                    if (dps.rfind(want, 0) == 0 && dps.size() > want.size() && dps[want.size()] == '-') {
+                        stack->add_size_variant(k, std::move(d), 20.0f);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
     }
 #endif
 

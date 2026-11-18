@@ -161,6 +161,8 @@ inline constexpr std::uint32_t glyf = tag("glyf");
 inline constexpr std::uint32_t loca = tag("loca");
 inline constexpr std::uint32_t cff  = tag("CFF ");
 inline constexpr std::uint32_t cff2 = tag("CFF2");
+inline constexpr std::uint32_t hvgl = tag("hvgl");   ///< Apple HVF outlines (PingFang UI)
+inline constexpr std::uint32_t hvpm = tag("hvpm");   ///< HVF part remapping
 inline constexpr std::uint32_t gsub = tag("GSUB");
 inline constexpr std::uint32_t gpos = tag("GPOS");
 inline constexpr std::uint32_t gdef = tag("GDEF");
@@ -669,6 +671,12 @@ class FontFile {
 
     [[nodiscard]] const std::vector<TableRecord>& tables() const noexcept { return tables_; }
     [[nodiscard]] const Reader& reader() const noexcept { return reader_; }
+    /// Any 'name' table string by id (empty if absent).
+    [[nodiscard]] std::string name(std::uint16_t id) const {
+        for (const auto& rec : tables_)
+            if (rec.tag == tags::name) return read_name(reader_, rec.offset, id);
+        return {};
+    }
 
     // ── identity ────────────────────────────────────────────────────────
 
@@ -691,7 +699,7 @@ class FontFile {
     /// consult this.
     [[nodiscard]] bool has_outlines() const noexcept {
         return has_table(tags::glyf) || has_table(tags::cff) ||
-               has_table(tags::cff2);
+               has_table(tags::cff2) || has_table(tags::hvgl);
     }
 
     /// True when the face carries colour or bitmap glyphs.
@@ -942,7 +950,7 @@ inline std::optional<FontFile> FontFile::parse(std::span<const std::uint8_t> dat
     // all). A cmap without either is a subsetting artefact, not a usable
     // face, and is rejected.
     const bool has_outlines = f.has_table(tags::glyf) || f.has_table(tags::cff) ||
-                              f.has_table(tags::cff2);
+                              f.has_table(tags::cff2) || f.has_table(tags::hvgl);
     const bool has_bitmaps  = f.has_table(tags::cbdt) || f.has_table(tags::sbix) ||
                               f.has_table(tags::ebdt) || f.has_table(tags::colr);
     if (!has_outlines && !has_bitmaps) {

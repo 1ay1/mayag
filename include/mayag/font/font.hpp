@@ -117,6 +117,7 @@ class Face {
         // default, so an untouched variable font renders exactly like its
         // default instance. set_variation() later moves along the axes.
         face->axes_ = var::parse_fvar(face->file_.table(ot::tags::fvar));
+        face->build_weight_map();
         face->avar_ = face->file_.table(ot::tags::avar);
         if (!face->axes_.empty()) {
             // Empty user list => every axis normalises to its default (0.0).
@@ -305,6 +306,25 @@ class Face {
 
     // VARIATION_API_ANCHOR
 
+    /// The wght axis value CoreText draws `css_weight` at. CoreText resolves a
+    /// weight to the face's NAMED instance of that weight class, so a
+    /// fallback face whose "Regular" sits at wght 542 (CJK Symbols Fallback)
+    /// or 400 (PingFang UI) is drawn there, not at axis value 400. Between
+    /// named weights the axis value is interpolated; faces without named
+    /// weights use the CSS value directly.
+    [[nodiscard]] float wght_for(float css_weight) const {
+        if (weight_map_.empty()) return css_weight;
+        const auto& m = weight_map_;
+        if (css_weight <= m.front().first) return m.front().second;
+        if (css_weight >= m.back().first) return m.back().second;
+        for (std::size_t i = 1; i < m.size(); ++i)
+            if (css_weight <= m[i].first) {
+                const float t = (css_weight - m[i - 1].first) / (m[i].first - m[i - 1].first);
+                return m[i - 1].second + t * (m[i].second - m[i - 1].second);
+            }
+        return css_weight;
+    }
+
     /// Ink extents in font units, y-up: {x_bearing, y_bearing (top), width,
     /// height (negative)}, exactly as hb_font_get_glyph_extents reports them
     /// for hb-ot-font: a static TrueType glyph's STORED glyf bounding box
@@ -409,6 +429,47 @@ class Face {
   private:
     Face() = default;
 
+    // CSS weight of a named instance's subfamily ("Regular", "Bold", ...);
+    // 0 for anything else ("Condensed Bold", "Regular G1").
+    static float css_weight_of(std::string_view s) noexcept {
+        static constexpr std::pair<std::string_view, float> names[] = {
+            {"Thin", 100}, {"Ultralight", 200}, {"ExtraLight", 200}, {"Extra Light", 200},
+            {"Light", 300}, {"Regular", 400}, {"Medium", 500}, {"Semibold", 600},
+            {"SemiBold", 600}, {"Semi Bold", 600}, {"Bold", 700}, {"ExtraBold", 800},
+            {"Extra Bold", 800}, {"Heavy", 800}, {"Black", 900}};
+        for (const auto& [n, w] : names) if (s == n) return w;
+        return 0.0f;
+    }
+
+    // Map CSS weight -> wght from the face's named weight instances (other
+    // axes at their defaults). Kept empty when the named Regular already sits
+    // at 400, so faces whose axis is in CSS units (SF, most web fonts) keep
+    // using the requested value verbatim.
+    void build_weight_map() {
+        weight_map_.clear();
+        std::size_t wi = axes_.size();
+        for (std::size_t a = 0; a < axes_.size(); ++a) if (axes_[a].tag == var::tag_wght) wi = a;
+        if (wi == axes_.size()) return;
+        std::vector<std::pair<float, float>> m;
+        for (const auto& in : var::parse_fvar_instances(file_.table(ot::tags::fvar))) {
+            if (in.coords.size() != axes_.size()) continue;
+            bool others_default = true;
+            for (std::size_t a = 0; a < axes_.size(); ++a)
+                if (a != wi && std::abs(in.coords[a] - axes_[a].def) > 1e-3f) others_default = false;
+            if (!others_default) continue;
+            const float css = css_weight_of(file_.name(in.name_id));
+            if (css <= 0.0f) continue;
+            if (std::none_of(m.begin(), m.end(), [&](const auto& p) { return p.first == css; }))
+                m.emplace_back(css, in.coords[wi]);
+        }
+        for (std::size_t i = 1; i < m.size(); ++i)   // insertion sort: <= ~10 entries
+            for (std::size_t j = i; j > 0 && m[j].first < m[j - 1].first; --j) std::swap(m[j], m[j - 1]);
+        const auto reg = std::find_if(m.begin(), m.end(), [](const auto& p) { return p.first == 400.0f; });
+        if (reg == m.end() || std::abs(reg->second - 400.0f) < 0.5f) return;
+        for (std::size_t i = 1; i < m.size(); ++i) if (m[i].second <= m[i - 1].second) return;  // not monotone
+        weight_map_ = std::move(m);
+    }
+
     // Re-derive the normalised coords from a set of user-unit axis values,
     // then invalidate everything downstream that baked in the old instance.
     void apply_user_coords(std::span<const std::pair<std::uint32_t, float>> vals) {
@@ -478,6 +539,7 @@ class Face {
 
     // ── variable-font state ─────────────────────────────────────────────
     std::vector<var::Axis>        axes_;      // fvar axes (empty ⇒ static font)
+    std::vector<std::pair<float, float>> weight_map_;   ///< css weight -> wght, from named instances
     std::span<const std::uint8_t> avar_{};    // optional axis remap table
     var::Coords                   coords_;    // current normalised position
     std::vector<float>            user_;      // current value per axis, USER units
@@ -617,16 +679,39 @@ class FontStack : public Shaper {
         clear_shape_cache();
     }
 
+    /// Register `face` as the design `base` switches to from `min_pt` (logical
+    /// points) up -- CoreText's PingFang UI Text/Display split at 20 pt. It
+    /// inherits the base's coverage limits and never takes part in fallback.
+    void add_size_variant(std::size_t base, std::shared_ptr<Face> face, float min_pt) {
+        if (face == nullptr || base >= faces_.size()) return;
+        const std::size_t at = faces_.size();
+        faces_.push_back(std::move(face));
+        if (base < limits_.size() && !limits_[base].empty()) {
+            limits_.resize(faces_.size());
+            limits_[at] = limits_[base];
+        }
+        siblings_.push_back(Sibling{base, at, 0, false, min_pt});
+        clear_shape_cache();
+    }
+
     /// The face (`base` or one of its siblings) to draw `base`'s glyphs at
     /// `weight`: the nearest real weight with the right slant, if it beats the
     /// base face. Variable faces reach any weight themselves, so stay put.
+    [[nodiscard]] std::size_t face_for_size(std::size_t base, float pt) const noexcept {
+        std::size_t best = base;
+        float best_min = 0.0f;
+        for (const auto& s : siblings_)
+            if (s.of == base && s.min_pt > 0.0f && pt >= s.min_pt && s.min_pt > best_min) { best = s.at; best_min = s.min_pt; }
+        return best;
+    }
+
     [[nodiscard]] std::size_t face_for_weight(std::size_t base, float weight, bool italic) const noexcept {
         if (siblings_.empty() || base >= faces_.size() || faces_[base]->is_variable()) return base;
         std::size_t best = base;
         float best_d = num::abs(static_cast<float>(faces_[base]->weight()) - weight) +
                        (faces_[base]->is_italic() != italic ? 1000.0f : 0.0f);
         for (const auto& s : siblings_) {
-            if (s.of != base) continue;
+            if (s.of != base || s.min_pt > 0.0f) continue;
             const float d = num::abs(static_cast<float>(s.weight) - weight) + (s.italic != italic ? 1000.0f : 0.0f);
             if (d < best_d) { best_d = d; best = s.at; }
         }
@@ -878,6 +963,12 @@ class FontStack : public Shaper {
             for (std::size_t k = begin; k < end && covers; ++k)
                 covers = ucd::is_default_ignorable(cps[k]) || serves(w, cps[k]);
             if (covers) face_idx = w;
+        }
+        {   // optical-size design switch (logical points: the opsz pin, else size)
+            float pt = params.size_px;
+            for (std::uint8_t a = 0; a < params.axis_count; ++a)
+                if (params.axes[a].tag == ot::tag("opsz")) pt = params.axes[a].value;
+            face_idx = face_for_size(face_idx, pt);
         }
         Face& face = *faces_[face_idx];
         pin_variations(&face, params.weight, {params.axes.data(), params.axis_count}, params.italic);
@@ -1206,7 +1297,7 @@ class FontStack : public Shaper {
         if (face == nullptr || !face->is_variable()) return;
         std::array<std::pair<std::uint32_t, float>, ShapeParams::max_axes + 2> vals;
         std::size_t n = 0;
-        vals[n++] = {var::tag_wght, weight};
+        vals[n++] = {var::tag_wght, face->wght_for(weight)};
 
         // Real oblique from the font when italic is asked for and the face has
         // a slant/italic axis (true masters beat any synthetic shear).
@@ -1355,7 +1446,7 @@ class FontStack : public Shaper {
     mutable std::unordered_map<ShapeKey, ShapeEntry, ShapeHash, ShapeEq> shapes_;
     std::uint64_t shape_frame_ = 0;
 
-    struct Sibling { std::size_t of, at; std::uint16_t weight; bool italic; };
+    struct Sibling { std::size_t of, at; std::uint16_t weight; bool italic; float min_pt = 0.0f; };
     std::vector<Sibling> siblings_;
     [[nodiscard]] bool is_sibling(std::size_t i) const noexcept {
         for (const auto& s : siblings_) if (s.at == i) return true;

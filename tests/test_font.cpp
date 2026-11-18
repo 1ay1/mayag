@@ -1284,6 +1284,26 @@ void test_optical_size() {
                            std::to_string(w_auto) + " vs " + std::to_string(w_disp) + " px wide)");
 }
 
+// CoreText draws a CSS weight at the face's NAMED instance of that class:
+// CJK Symbols Fallback's "Regular" sits at wght 542, so weight 400 must pin
+// 542 there, while SF (Regular at 400) keeps the requested value verbatim.
+void test_named_weights() {
+    section("named-instance weights");
+    const char* cjk = "/System/Library/Fonts/CJKSymbolsFallback.ttc";
+    if (!std::filesystem::exists(cjk)) { check(true, "no CJK Symbols Fallback — skipping"); return; }
+    auto f = typo::Face::from_file(cjk, 0);
+    check(f != nullptr && f->is_variable(), "CJK Symbols Fallback loads as a variable face");
+    if (!f) return;
+    near(f->wght_for(400.0f), 542.0f, 0.01f, "Regular (400) -> wght 542");
+    near(f->wght_for(700.0f), 725.0f, 0.01f, "Bold (700) -> wght 725");
+    near(f->wght_for(100.0f), 250.0f, 0.01f, "Thin (100) -> wght 250");
+    near(f->wght_for(450.0f), 569.0f, 0.01f, "between named weights interpolates");
+    if (auto sf = typo::Face::from_file("/System/Library/Fonts/SFNS.ttf")) {
+        near(sf->wght_for(400.0f), 400.0f, 0.01f, "SF Regular stays at 400");
+        near(sf->wght_for(500.0f), 500.0f, 0.01f, "SF keeps CSS weights verbatim");
+    }
+}
+
 void test_variations() {
     section("variable fonts");
 
@@ -1873,6 +1893,7 @@ int main() {
     test_metrics();
     test_rendering();
     test_variations();
+    test_named_weights();
     test_optical_size();
     test_caret();
     test_italic();

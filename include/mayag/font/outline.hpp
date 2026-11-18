@@ -1527,6 +1527,10 @@ class Cff2Source {
 // GlyphSource — the format-agnostic front door
 // ════════════════════════════════════════════════════════════════════════
 
+}  // namespace mayag::typo
+#include "hvgl.hpp"
+namespace mayag::typo {
+
 /// Loads outlines from whichever format the face uses. Everything downstream
 /// depends on THIS, not on glyf/CFF, which is why adding CFF2 or SVG glyphs
 /// later will not ripple.
@@ -1535,7 +1539,11 @@ class GlyphSource {
     GlyphSource() = default;
 
     explicit GlyphSource(const ot::FontFile& f) : upem_{f.units_per_em()} {
-        if (f.has_table(ot::tags::cff2) && !f.has_table(ot::tags::glyf)) {
+        if (f.has_table(ot::tags::hvgl) && !f.has_table(ot::tags::glyf) && !f.has_table(ot::tags::cff) &&
+            !f.has_table(ot::tags::cff2)) {
+            hvgl_ = HvglSource{f};
+            kind_ = hvgl_.valid() ? Kind::hvgl : Kind::none;
+        } else if (f.has_table(ot::tags::cff2) && !f.has_table(ot::tags::glyf)) {
             cff2_ = Cff2Source{f};
             kind_ = cff2_.valid() ? Kind::cff2 : Kind::none;
         } else if (f.is_cff()) {
@@ -1561,6 +1569,7 @@ class GlyphSource {
             case Kind::glyf: return glyf_.load(gid);
             case Kind::cff:  return cff_.load(gid);
             case Kind::cff2: return cff2_.load(gid);
+            case Kind::hvgl: return hvgl_.load(gid);
             case Kind::none: break;
         }
         return {};
@@ -1572,21 +1581,23 @@ class GlyphSource {
     void set_coords(const var::Coords* c) noexcept {
         if (kind_ == Kind::glyf) glyf_.set_coords(c);
         if (kind_ == Kind::cff2) cff2_.set_coords(c);
+        if (kind_ == Kind::hvgl) hvgl_.set_coords(c);
     }
 
     /// True when the face carries gvar / CFF2 variation data we can apply.
     [[nodiscard]] bool is_variable() const noexcept {
         return (kind_ == Kind::glyf && glyf_.is_variable()) ||
-               (kind_ == Kind::cff2 && cff2_.is_variable());
+               (kind_ == Kind::cff2 && cff2_.is_variable()) || kind_ == Kind::hvgl;
     }
 
   private:
-    enum class Kind : std::uint8_t { none, glyf, cff, cff2 };
+    enum class Kind : std::uint8_t { none, glyf, cff, cff2, hvgl };
 
     Kind          kind_ = Kind::none;
     GlyfSource    glyf_;
     CffSource     cff_;
     Cff2Source    cff2_;
+    HvglSource    hvgl_;
     std::uint16_t upem_ = 1000;
 };
 
