@@ -540,7 +540,7 @@ class MetalDevice {
             if (color_texture_ != nullptr) msg<void>(color_texture_, sel("release"));
             id desc = msg_cls<id>(objc_getClass("MTLTextureDescriptor"),
                 sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
-                static_cast<std::uint64_t>(70),   // MTLPixelFormatRGBA8Unorm: sRGB data, sampled raw like the CPU
+                static_cast<std::uint64_t>(71),   // MTLPixelFormatRGBA8Unorm_sRGB: emoji are sRGB images; decode to linear on sample
                 static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h), static_cast<BOOL>(NO));
             color_texture_ = msg<id>(device_, sel("newTextureWithDescriptor:"), desc);
             color_w_ = w;

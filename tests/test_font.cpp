@@ -1783,6 +1783,44 @@ void test_language() {
     check(typo::ot::ot_language_tags("tr-TR").front() == typo::ot::make_tag('T', 'R', 'K', ' '), "tr-TR maps to TRK");
 }
 
+/// Emoji land where CoreText puts them. The numbers are CTFontGetBounding-
+/// RectsForGlyphs / CTRunGetAdvances for U+1F600 in .AppleColorEmojiUI (the
+/// face CTFontCreateUIFontForLanguage falls back to), measured on macOS.
+void test_emoji_placement() {
+    section("emoji placement (vs CoreText)");
+#if defined(__APPLE__)
+    using namespace mayag::typo;
+    auto ui = Face::from_file("/System/Library/Fonts/Apple Color Emoji.ttc", 1);
+    if (!ui) { check(true, "Apple Color Emoji not installed: skipped"); return; }
+    FontStack stack;
+    stack.add(ui);
+    const std::uint16_t g = ui->glyph_for(0x1F600);
+    struct Want { float pt, w, bottom, adv; };
+    // size, image width, image bottom (y-up), advance
+    for (const Want w : {Want{12, 15.0f, -3.0f, 17}, Want{13, 16.25f, -3.25f, 19}, Want{20, 22.0f, -3.5f, 25},
+                         Want{24, 24.0f, -3.0f, 27}, Want{48, 48.0f, -6.0f, 52}}) {
+        const ShapeParams::Axis opsz{ot::tag("opsz"), w.pt};
+        const CachedGlyph* cg = stack.glyph(0, g, w.pt, 400.0f, {&opsz, 1});
+        check(cg != nullptr && cg->is_color, "\U0001F600 is a colour glyph at " + std::to_string(int(w.pt)) + " pt");
+        if (!cg) continue;
+        const float bottom = -(cg->bearing.y + cg->size.y);   // y-up
+        check(std::fabs(cg->size.x - w.w) <= 1.0f && std::fabs(bottom - w.bottom) <= 1.0f,
+              "\U0001F600 at " + std::to_string(int(w.pt)) + " pt: image " + std::to_string(cg->size.x) + " px wide, bottom " +
+              std::to_string(bottom) + " (CoreText " + std::to_string(w.w) + ", " + std::to_string(w.bottom) + ")");
+        ShapeParams sp; sp.size_px = w.pt; sp.axes[0] = opsz; sp.axis_count = 1;
+        const auto r = stack.shape("\U0001F600", sp);
+        check(!r.glyphs.empty() && std::fabs(r.glyphs[0].advance - w.adv) < 0.5f,
+              "\U0001F600 advance at " + std::to_string(int(w.pt)) + " pt is CoreText's " + std::to_string(int(w.adv)) +
+              " (got " + std::to_string(r.glyphs.empty() ? 0.0f : r.glyphs[0].advance) + ")");
+    }
+    // The emoji's top is ABOVE the baseline (it used to hang a full em below).
+    const CachedGlyph* big = stack.glyph(0, g, 48.0f);
+    check(big != nullptr && big->bearing.y < -30.0f, "emoji sit on the baseline, not below it");
+#else
+    check(true, "Apple Color Emoji is macOS-only: skipped");
+#endif
+}
+
 int main() {
     std::printf("mayag font engine\n=================");
 
@@ -1810,6 +1848,7 @@ int main() {
     test_justify();
     test_ligatures();
     test_color_glyphs();
+    test_emoji_placement();
     test_coretext_parity();
     test_smoothing();
     test_complex_text();

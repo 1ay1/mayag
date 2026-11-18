@@ -105,6 +105,7 @@ class Face {
         face->kerning_ = KernTable{face->file_};
         face->legacy_kern_ = KernTable::legacy(face->file_);
         face->tracking_ = TrackTable{face->file_};
+        face->coretext_emoji_ = face->file_.family().find("Apple Color Emoji") != std::string::npos && face->file_.has_color();
         face->ligatures_ = LigatureTable{face->file_};
         face->layout_ = std::make_unique<ot::Layout>(face->file_);
         face->id_      = next_id();
@@ -158,6 +159,23 @@ class Face {
     [[nodiscard]] bool has_outlines() const noexcept { return file_.has_outlines(); }
     /// True when the face carries colour or bitmap glyphs.
     [[nodiscard]] bool is_color() const noexcept { return file_.has_color(); }
+
+    /// How CoreText sets Apple Color Emoji's sbix images, measured against
+    /// CTFontGetBoundingRectsForGlyphs at every size (nothing in the font says
+    /// this; HarfBuzz/FreeType would put a 1 em image on the baseline, which
+    /// draws emoji high and small). Fractions of the em at LOGICAL `point_size`:
+    ///   <= 16 pt  the image is 1.25 em, bottom at -0.25 em (top at 1 em)
+    ///   16..24    the image shrinks linearly from 20 to 24 units at 16/24 pt
+    ///   >= 24 pt  1 em, bottom at -0.125 em
+    struct BitmapBox { float scale = 1.0f, bottom = 0.0f; };
+    [[nodiscard]] BitmapBox bitmap_box(float point_size) const noexcept {
+        if (!coretext_emoji_) return {};
+        const float s = std::max(point_size, 1.0f);
+        if (s <= 16.0f) return {1.25f, -0.25f};
+        if (s >= 24.0f) return {1.0f, -0.125f};
+        const float d = s - 16.0f;
+        return {(20.0f + d * 0.5f) / s, (-4.0f + d * 0.125f) / s};
+    }
     [[nodiscard]] std::uint16_t num_glyphs() const noexcept { return file_.num_glyphs(); }
     [[nodiscard]] std::uint16_t units_per_em() const noexcept { return file_.units_per_em(); }
     [[nodiscard]] const ot::FontFile& file() const noexcept { return file_; }
@@ -427,6 +445,7 @@ class Face {
     KernTable                 kerning_;
     KernTable                 legacy_kern_;   // `kern` only, for the OpenType pipeline
     TrackTable                tracking_;
+    bool                      coretext_emoji_ = false;   ///< Apple Color Emoji: bitmap_box applies
     LigatureTable             ligatures_;
     std::unique_ptr<ot::Layout> layout_;      // GSUB/GPOS/GDEF, read in place
     std::uint32_t             id_ = 0;
@@ -857,6 +876,13 @@ class FontStack : public Shaper {
         if (dir == ot::Direction::rtl) b.reverse();
         const float scale = face.scale_for(params.size_px);
         const float track = tracking_px(face, params);
+        // CoreText's emoji box widens the advance with the image: the pen
+        // moves ceil(box * em + tracking) (measured, every size).
+        float emoji_pt = params.size_px;
+        for (std::uint8_t a = 0; a < params.axis_count; ++a)
+            if (params.axes[a].tag == ot::tag("opsz")) emoji_pt = params.axes[a].value;
+        const Face::BitmapBox ebox = face.bitmap_box(emoji_pt);
+        const bool emoji_box = ebox.scale != 1.0f || ebox.bottom != 0.0f;
         const auto fi8 = static_cast<std::uint8_t>(num::min<std::size_t>(face_idx, 255));
         for (std::size_t k = 0; k < b.len(); ++k) {
             const auto& gi = b.info[k];
@@ -869,6 +895,13 @@ class FontStack : public Shaper {
             g.advance = gp.x_advance * scale;
             g.offset = Vec2{gp.x_offset * scale, -gp.y_offset * scale};   // y-up font units -> y-down px
             if (g.advance != 0.0f) g.advance += params.letter_spacing + track;
+            if (emoji_box && gp.x_advance != 0.0f) {
+                // CoreText's emoji advance: the image width plus tracking,
+                // rounded to whole pixels with a bias that fades out between
+                // 21 and 25 pt (fitted to CTRunGetAdvances, 8..160 pt).
+                const float bias = 0.37f * std::clamp((25.0f - emoji_pt) / 4.0f, 0.0f, 1.0f);
+                g.advance = std::round(gp.x_advance * scale * ebox.scale + track + bias) + params.letter_spacing;
+            }
             g.level = level;
             g.run = run_id;
             out.width += g.advance;
@@ -1009,11 +1042,20 @@ class FontStack : public Shaper {
         }
 
         if (face.is_color()) {
-            ColorBitmap cb = color_bitmap_for(face.file(), gid);
+            // Strike for the size it will be DRAWN at (device px, emoji box
+            // included): HarfBuzz's smallest-strike-at-least rule.
+            float want_pt = size_px;
+            for (const auto& ax : axes) if (ax.tag == ot::tag("opsz")) want_pt = ax.value;
+            const int want_ppem = static_cast<int>(std::ceil(size_px * face.bitmap_box(want_pt).scale));
+            ColorBitmap cb = color_bitmap_for(face.file(), gid, want_ppem);
             if (cb.valid()) {
                 // The strike is authored at cb.ppem px/em; scale it so the em
-                // matches the requested size_px.
-                const float scale = cb.ppem > 0 ? size_px / static_cast<float>(cb.ppem) : 1.0f;
+                // matches the requested size_px -- times CoreText's emoji box
+                // (Face::bitmap_box) at the logical point size.
+                float pt = size_px;
+                for (const auto& ax : axes) if (ax.tag == ot::tag("opsz")) pt = ax.value;
+                const Face::BitmapBox box = face.bitmap_box(pt);
+                const float scale = (cb.ppem > 0 ? size_px / static_cast<float>(cb.ppem) : 1.0f) * box.scale;
                 const int dw = std::max(1, static_cast<int>(static_cast<float>(cb.width) * scale + 0.5f));
                 const int dh = std::max(1, static_cast<int>(static_cast<float>(cb.height) * scale + 0.5f));
                 std::vector<std::uint8_t> scaled;
@@ -1026,8 +1068,13 @@ class FontStack : public Shaper {
                 // the bitmap ABOVE the baseline (positive up); mayag's dst is
                 // pen.y + bearing.y with y growing DOWN, so the top of the
                 // bitmap is at -bearingY from the pen. bearingX is a normal
-                // left offset.
-                const Vec2 bearing{cb.bearing_x * scale, -cb.bearing_y * scale};
+                // left offset. CoreText's emoji box moves the bottom to
+                // box.bottom em and centres the image in its tracked advance.
+                Vec2 bearing{cb.bearing_x * scale, -cb.bearing_y * scale};
+                if (box.scale != 1.0f || box.bottom != 0.0f) {
+                    bearing.y = -(static_cast<float>(dh) + box.bottom * size_px);
+                    bearing.x += face.tracking(pt, size_px) * 0.4f * box.scale;   // CoreText, measured
+                }
                 return atlas_.insert_color(key, pixels, dw, dh, bearing, advance);
             }
             // No usable strike — cache a blank so we stop retrying.

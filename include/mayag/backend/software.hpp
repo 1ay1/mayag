@@ -421,8 +421,13 @@ class Software {
                     const Vec4 texel = sampler->sample_rgba(inst.texture_slot, su, sv);
                     const float a = texel.w * op;
                     if (a <= 0.001f) continue;
+                    // Emoji bitmaps are sRGB-encoded like any image; the
+                    // framebuffer blends in linear light. Blending the raw
+                    // values washed every emoji out (159 drew as 205).
+                    const float r = kernel::srgb_to_linear(texel.x), g = kernel::srgb_to_linear(texel.y),
+                                bl = kernel::srgb_to_linear(texel.z);
                     // Straight -> premultiplied, honouring opacity.
-                    fb.blend(x, y, Vec4{texel.x * a, texel.y * a, texel.z * a, a}, 1.0f);
+                    fb.blend(x, y, Vec4{r * a, g * a, bl * a, a}, 1.0f);
                 }
             }
             return;

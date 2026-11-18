@@ -173,73 +173,125 @@ struct BitmapLoc {
 }
 
 /// sbix: strikes[] each a table of glyph-offset u32s; entry = {originX i16,
-/// originY i16, graphicType u32 ('png '), then image bytes}.
+/// originY i16, graphicType u32 ('png ' or 'dupe'), then image bytes}.
+/// HarfBuzz rules (OT/Color/sbix): the smallest strike whose ppem is at least
+/// `want_ppem` (else the largest), `dupe` entries redirect to another glyph
+/// up to 8 times, and the image's bottom-left sits at (originX, originY).
 [[nodiscard]] inline ColorBitmap decode_sbix(std::span<const std::uint8_t> sbix,
-                                             std::uint16_t gid, std::uint16_t num_glyphs) {
+                                             std::uint16_t gid, std::uint16_t num_glyphs,
+                                             int want_ppem = 1 << 30) {
     ColorBitmap out;
     if (sbix.size() < 8) return out;
     const std::uint32_t num_strikes = u32(sbix, 4);
-    // Pick the largest strike (last offset is usually the biggest ppem).
-    std::size_t best_strike_off = 0; int best_ppem = 0;
-    for (std::uint32_t s = 0; s < num_strikes; ++s) {
+    std::size_t best_strike_off = 0; int best_ppem = 0;          // smallest >= want
+    std::size_t max_strike_off = 0; int max_ppem = 0;            // fallback: largest
+    for (std::uint32_t s = 0; s < num_strikes && 8 + s * 4 + 4 <= sbix.size(); ++s) {
         const std::uint32_t so = u32(sbix, 8 + s * 4);
         if (so + 4 > sbix.size()) continue;
-        const int ppem = u16(sbix, so);   // strike ppem
-        if (ppem >= best_ppem) { best_ppem = ppem; best_strike_off = so; }
+        const int ppem = u16(sbix, so);
+        if (ppem == 0) continue;
+        if (ppem > max_ppem) { max_ppem = ppem; max_strike_off = so; }
+        if (ppem >= want_ppem && (best_ppem == 0 || ppem < best_ppem)) { best_ppem = ppem; best_strike_off = so; }
     }
+    if (best_strike_off == 0) { best_strike_off = max_strike_off; best_ppem = max_ppem; }
     if (best_strike_off == 0) return out;
 
     // Strike: ppem u16, resolution u16, then glyphDataOffset[numGlyphs+1] u32.
-    const std::size_t goff = best_strike_off + 4 + static_cast<std::size_t>(gid) * 4;
-    const std::uint32_t o0 = u32(sbix, goff);
-    const std::uint32_t o1 = u32(sbix, goff + 4);
-    (void)num_glyphs;
-    if (o1 <= o0 + 8) return out;
-    const std::size_t entry = best_strike_off + o0;
-    const std::uint32_t gtype = u32(sbix, entry + 4);
-    if (gtype != ot::tag("png ")) return out;
+    std::size_t entry = 0, png_len = 0;
+    for (int retry = 0; retry <= 8; ++retry) {
+        if (gid >= num_glyphs) return out;
+        const std::size_t goff = best_strike_off + 4 + static_cast<std::size_t>(gid) * 4;
+        if (goff + 8 > sbix.size()) return out;
+        const std::uint32_t o0 = u32(sbix, goff), o1 = u32(sbix, goff + 4);
+        if (o1 <= o0 + 8 || best_strike_off + o1 > sbix.size()) return out;
+        entry = best_strike_off + o0;
+        const std::uint32_t gtype = u32(sbix, entry + 4);
+        if (gtype == ot::tag("dupe")) {
+            if (o1 - o0 - 8 < 2) return out;
+            gid = u16(sbix, entry + 8);
+            continue;
+        }
+        if (gtype != ot::tag("png ")) return out;
+        png_len = o1 - o0 - 8;
+        break;
+    }
+    if (png_len == 0) return out;
     const std::size_t png_off = entry + 8;
-    const std::size_t png_len = o1 - o0 - 8;
-    if (png_off + png_len > sbix.size()) return out;
     auto img = imageio::decode_png({sbix.data() + png_off, png_len});
     if (!img.ok()) return out;
     out.width = img.width; out.height = img.height; out.rgba = std::move(img.rgba);
+    const int img_height = out.height;
     out.ppem = best_ppem;
     out.bearing_x = static_cast<float>(static_cast<std::int16_t>(u16(sbix, entry)));      // originX
-    out.bearing_y = static_cast<float>(static_cast<std::int16_t>(u16(sbix, entry + 2)));  // originY
+    // originOffsetY places the bitmap's BOTTOM-left corner relative to the
+    // origin (y up), so its top sits height + originY above the baseline
+    // (HarfBuzz sbix::get_png_extents). Using originY as the top dropped
+    // every Apple Color Emoji glyph a full em below the baseline.
+    out.bearing_y = static_cast<float>(img_height + static_cast<std::int16_t>(u16(sbix, entry + 2)));
     return out;
 }
 
 }  // namespace colordetail
 
-/// Bilinearly resample a straight-RGBA image to a new size. Emoji strikes are
-/// authored at ~128 px and usually drawn smaller, so a good downscale matters
-/// more than speed; bilinear is the right cost/quality point here.
+/// Resample a straight-RGBA image to a new size, the way CoreGraphics draws a
+/// scaled bitmap: each output pixel is the AREA average of the source pixels
+/// it covers (a box filter, exact at any ratio -- bilinear skips source
+/// pixels when shrinking more than 2x and turned a 160 px flag's 1 px border
+/// into broken dashes at 13 px), done in PREMULTIPLIED space so transparent
+/// edges do not bleed their undefined colour into the image. Upscaling falls
+/// back to bilinear (the box would just replicate pixels).
 [[nodiscard]] inline std::vector<std::uint8_t> scale_rgba(
         const std::vector<std::uint8_t>& src, int sw, int sh, int dw, int dh) {
     std::vector<std::uint8_t> out(static_cast<std::size_t>(dw) * dh * 4);
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return out;
     const float fx = static_cast<float>(sw) / static_cast<float>(dw);
     const float fy = static_cast<float>(sh) / static_cast<float>(dh);
-    for (int y = 0; y < dh; ++y) {
+    const auto px = [&](int x, int y, float acc[4], float w) {
+        const std::uint8_t* s = src.data() + (static_cast<std::size_t>(y) * sw + x) * 4;
+        const float a = static_cast<float>(s[3]) * w;
+        acc[0] += static_cast<float>(s[0]) * a; acc[1] += static_cast<float>(s[1]) * a;
+        acc[2] += static_cast<float>(s[2]) * a; acc[3] += a;
+    };
+    const auto store = [&](int x, int y, const float acc[4], float total) {
+        std::uint8_t* d = out.data() + (static_cast<std::size_t>(y) * dw + x) * 4;
+        const float a = total > 0 ? acc[3] / total : 0.0f;
+        for (int c = 0; c < 3; ++c)
+            d[c] = acc[3] > 0 ? static_cast<std::uint8_t>(std::min(255.0f, acc[c] / acc[3] + 0.5f)) : 0;
+        d[3] = static_cast<std::uint8_t>(std::min(255.0f, a + 0.5f));
+    };
+    if (fx >= 1.0f && fy >= 1.0f) {   // shrinking: exact box filter
+        for (int y = 0; y < dh; ++y) {
+            const float y0 = static_cast<float>(y) * fy, y1 = y0 + fy;
+            for (int x = 0; x < dw; ++x) {
+                const float x0 = static_cast<float>(x) * fx, x1 = x0 + fx;
+                float acc[4] = {0, 0, 0, 0}, total = 0;
+                for (int sy = static_cast<int>(y0); sy < sh && static_cast<float>(sy) < y1; ++sy) {
+                    const float wy = std::min(y1, static_cast<float>(sy + 1)) - std::max(y0, static_cast<float>(sy));
+                    for (int sx = static_cast<int>(x0); sx < sw && static_cast<float>(sx) < x1; ++sx) {
+                        const float w = wy * (std::min(x1, static_cast<float>(sx + 1)) - std::max(x0, static_cast<float>(sx)));
+                        px(sx, sy, acc, w);
+                        total += w;
+                    }
+                }
+                store(x, y, acc, total);
+            }
+        }
+        return out;
+    }
+    for (int y = 0; y < dh; ++y) {   // enlarging: premultiplied bilinear
         const float syf = (static_cast<float>(y) + 0.5f) * fy - 0.5f;
-        int y0 = static_cast<int>(syf); float ty = syf - static_cast<float>(y0);
+        int y0 = static_cast<int>(std::floor(syf)); float ty = syf - static_cast<float>(y0);
         if (y0 < 0) { y0 = 0; ty = 0.0f; }
-        int y1 = y0 + 1 < sh ? y0 + 1 : sh - 1;
+        const int y1 = y0 + 1 < sh ? y0 + 1 : sh - 1;
         for (int x = 0; x < dw; ++x) {
             const float sxf = (static_cast<float>(x) + 0.5f) * fx - 0.5f;
-            int x0 = static_cast<int>(sxf); float tx = sxf - static_cast<float>(x0);
+            int x0 = static_cast<int>(std::floor(sxf)); float tx = sxf - static_cast<float>(x0);
             if (x0 < 0) { x0 = 0; tx = 0.0f; }
-            int x1 = x0 + 1 < sw ? x0 + 1 : sw - 1;
-            std::uint8_t* d = out.data() + (static_cast<std::size_t>(y) * dw + x) * 4;
-            for (int c = 0; c < 4; ++c) {
-                auto at = [&](int px, int py) {
-                    return static_cast<float>(src[(static_cast<std::size_t>(py) * sw + px) * 4 + c]);
-                };
-                const float top = at(x0, y0) * (1 - tx) + at(x1, y0) * tx;
-                const float bot = at(x0, y1) * (1 - tx) + at(x1, y1) * tx;
-                d[c] = static_cast<std::uint8_t>(top * (1 - ty) + bot * ty + 0.5f);
-            }
+            const int x1 = x0 + 1 < sw ? x0 + 1 : sw - 1;
+            float acc[4] = {0, 0, 0, 0};
+            px(x0, y0, acc, (1 - tx) * (1 - ty)); px(x1, y0, acc, tx * (1 - ty));
+            px(x0, y1, acc, (1 - tx) * ty);       px(x1, y1, acc, tx * ty);
+            store(x, y, acc, 1.0f);
         }
     }
     return out;
@@ -248,8 +300,9 @@ struct BitmapLoc {
 /// Read the colour bitmap for `gid` from a parsed font, if it has one.
 /// Returns an invalid ColorBitmap when the font has no colour bitmap tables or
 /// the glyph has no strike, so the caller falls back to the outline path.
+/// `want_ppem`: the device pixels per em it will be drawn at (strike choice).
 [[nodiscard]] inline ColorBitmap color_bitmap_for(const ot::FontFile& file,
-                                                  std::uint16_t gid) {
+                                                  std::uint16_t gid, int want_ppem = 1 << 30) {
     using namespace colordetail;
     const float upem = static_cast<float>(file.units_per_em());
 
@@ -268,7 +321,7 @@ struct BitmapLoc {
     // sbix (Apple — Apple Color Emoji).
     const auto sbix = file.table(tags::sbix);
     if (!sbix.empty()) {
-        ColorBitmap bmp = decode_sbix(sbix, gid, file.num_glyphs());
+        ColorBitmap bmp = decode_sbix(sbix, gid, file.num_glyphs(), want_ppem);
         if (bmp.valid()) return bmp;
     }
 

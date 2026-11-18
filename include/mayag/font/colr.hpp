@@ -11,10 +11,11 @@
 // reuses the coverage rasteriser: each layer is rasterised to an 8-bit mask
 // and composited over the accumulator with its resolved paint.
 //
-// Supported: CPAL (all formats), COLR v0 (layers), COLR v1 (PaintColrLayers,
-// PaintSolid, PaintLinearGradient, PaintRadialGradient, PaintGlyph,
-// PaintColrGlyph, PaintTransform family, PaintTranslate/Scale/Rotate). Sweep
-// gradients and advanced composite modes fall back to source-over.
+// Supported: CPAL (all formats), COLR v0 (layers), and the whole COLR v1
+// paint graph (every format 1-32): layers, solids, linear / radial (two-point
+// conical) / sweep gradients with pad/repeat/reflect, glyph clips, nested
+// COLR glyphs with ClipBoxes, every transform, and PaintComposite with all
+// 28 modes -- a port of HarfBuzz 15.1's paint model (see the v1 section).
 
 #pragma once
 
@@ -371,34 +372,285 @@ inline bool v0_layers(const ColrTable& t, std::uint16_t gid,
 }  // namespace detail
 
 // ---- COLR v1 paint graph ----
+//
+// A port of HarfBuzz 15.1's COLRv1 paint model (OT/Color/COLR/COLR.hh walked
+// into hb-raster-paint.cc's surface/clip/group stack), so emoji like Noto
+// Color Emoji's flags -- PaintComposite MULTIPLY over SRC_IN -- render, and
+// every paint matches the spec rather than an approximation:
+//
+//   * a GROUP stack: PaintComposite paints its backdrop and source into their
+//     own transparent surfaces and blends them with any of the 28 modes
+//     (Porter-Duff, separable and HSL blends), then source-overs the result;
+//   * a CLIP stack of coverage masks: PaintGlyph clips its child paint to the
+//     glyph outline (not "fill outline with paint"), nested clips multiply,
+//     PaintColrGlyph clips to its ClipBox;
+//   * gradients evaluated per pixel through the inverse transform, colours
+//     interpolated in PREMULTIPLIED space; linear gradients reduce the
+//     3-point spec to an axis (hb_paint_reduce_linear_anchors), colour lines
+//     are normalised (hb_paint_normalize_color_line), radial gradients solve
+//     the two-point conical equation for the largest valid root, sweep angles
+//     are (F2Dot14 + 1) * pi;
+//   * field types as the spec has them: scales and angles F2Dot14 (angles in
+//     half-turns), translations and centres FWORD, Affine2x3 Fixed 16.16;
+//     skew x is negated like HarfBuzz's push_skew.
+// Variation deltas (the Var* formats) read their base values.
 
 namespace detail {
 
-// Walk state: the shared canvas, the placement (font->pixel), the current
-// affine in FONT units (applied before placement), a recursion budget, and
-// the render context.
+/// A premultiplied RGBA surface plus a coverage mask, the unit of the stacks.
+struct Surface {
+    int w = 0, h = 0;
+    std::vector<float> px;   // premultiplied rgba
+    explicit Surface(int width = 0, int height = 0)
+        : w(width), h(height), px(static_cast<std::size_t>(width) * height * 4, 0.0f) {}
+};
+
 struct V1 {
     const ColrTable& t;
     const RenderContext& ctx;
-    Canvas& cv;
-    const Placement& pl;
+    int w = 0, h = 0;
+    Placement pl;
+    V1(const ColrTable& table, const RenderContext& rc, int width, int height, Placement p)
+        : t(table), ctx(rc), w(width), h(height), pl(p) {}
+    std::vector<Surface> groups;          // back() is the current surface
+    std::vector<std::vector<float>> clips;   // back() is the current clip (coverage)
+    struct Box { int x0 = 0, y0 = 0, x1 = 0, y1 = 0; };
+    std::vector<Box> clip_boxes;          // pixel bounds of each clip's nonzero coverage
+    std::vector<Affine> xforms;           // back() maps paint space -> font units
+    int budget = 200000;                  // paint visits (hostile graphs)
+    std::vector<std::uint16_t> glyph_stack;   // decycler for PaintColrGlyph
+    std::vector<std::uint32_t> layer_stack;   // decycler for PaintColrLayers
 
-    // Map a font-unit point through the current transform, then to canvas px.
-    Affine xform;   // font-unit -> font-unit
+    [[nodiscard]] Surface& surface() { return groups.back(); }
+    [[nodiscard]] const std::vector<float>& clip() const { return clips.back(); }
+    [[nodiscard]] const Affine& xform() const { return xforms.back(); }
 
-    // Map a canvas pixel back to (transformed) font units, for gradient eval.
-    [[nodiscard]] Vec2 px_to_font(float px, float py) const {
-        // invert placement: fx = (px - ox)/scale ; fy = -(py - oy)/scale
-        const float fx = (px - pl.ox) / pl.scale;
-        const float fy = -(py - pl.oy) / pl.scale;
-        // invert xform
-        return xform.inverse().apply(Vec2{fx, fy});
+    // Canvas pixel centre -> paint-space point (font units, y-up).
+    [[nodiscard]] Vec2 to_paint(const Affine& inv, int x, int y) const {
+        const float fx = (static_cast<float>(x) + 0.5f - pl.ox) / pl.scale;
+        const float fy = -(static_cast<float>(y) + 0.5f - pl.oy) / pl.scale;
+        return inv.apply(Vec2{fx, fy});
+    }
+
+    /// Fill the current clip with a per-pixel premultiplied colour, source-over.
+    template <class ColourAt>
+    void fill(ColourAt&& colour_at) {
+        Surface& s = surface();
+        const auto& c = clip();
+        const Box b = clip_boxes.back();
+        const Affine inv = xform().inverse();
+        for (int y = b.y0; y < b.y1; ++y)
+            for (int x = b.x0; x < b.x1; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y) * w + x;
+                const float cov = c[i];
+                if (cov <= 0.0f) continue;
+                float rgba[4];
+                colour_at(to_paint(inv, x, y), rgba);
+                const float a = rgba[3] * cov;
+                if (a <= 0.0f) continue;
+                const float ia = 1.0f - a;
+                float* d = &s.px[i * 4];
+                d[0] = rgba[0] * cov + d[0] * ia;
+                d[1] = rgba[1] * cov + d[1] * ia;
+                d[2] = rgba[2] * cov + d[2] * ia;
+                d[3] = a + d[3] * ia;
+            }
+    }
+
+    /// Push a clip: the current clip times `outline`'s coverage, the outline
+    /// mapped through the current transform (font units) and the placement.
+    void push_clip_outline(Outline o) {
+        o.transform(xform());
+        std::vector<float> m(static_cast<std::size_t>(w) * h, 0.0f);
+        Box nb{w, h, 0, 0};
+        const Box pb = clip_boxes.back();
+        if (!o.empty()) {
+            const RasterResult rr = rasterize(o, pl.scale, 1);
+            const int bx = static_cast<int>(std::lround(rr.offset.x + pl.ox));
+            const int by = static_cast<int>(std::lround(rr.offset.y + pl.oy));
+            const auto& prev = clip();
+            for (int y = 0; y < rr.bitmap.height; ++y) {
+                const int cy = by + y;
+                if (cy < pb.y0 || cy >= pb.y1) continue;
+                for (int x = 0; x < rr.bitmap.width; ++x) {
+                    const int cx = bx + x;
+                    if (cx < pb.x0 || cx >= pb.x1) continue;
+                    const std::size_t i = static_cast<std::size_t>(cy) * w + cx;
+                    const float v = static_cast<float>(rr.bitmap.at(x, y)) / 255.0f * prev[i];
+                    if (v <= 0.0f) continue;
+                    m[i] = v;
+                    nb.x0 = std::min(nb.x0, cx); nb.y0 = std::min(nb.y0, cy);
+                    nb.x1 = std::max(nb.x1, cx + 1); nb.y1 = std::max(nb.y1, cy + 1);
+                }
+            }
+        }
+        if (nb.x1 <= nb.x0) nb = Box{};
+        clips.push_back(std::move(m));
+        clip_boxes.push_back(nb);
+    }
+
+    void pop_clip() { clips.pop_back(); clip_boxes.pop_back(); }
+
+    /// Push a clip rectangle given in the CURRENT paint space (font units).
+    void push_clip_rect(float x0, float y0, float x1, float y1) {
+        Outline o;
+        Contour c;
+        c.start = Vec2{x0, y0};
+        c.segments.push_back(Segment{Segment::Kind::line, {}, {}, Vec2{x1, y0}});
+        c.segments.push_back(Segment{Segment::Kind::line, {}, {}, Vec2{x1, y1}});
+        c.segments.push_back(Segment{Segment::Kind::line, {}, {}, Vec2{x0, y1}});
+        c.segments.push_back(Segment{Segment::Kind::line, {}, {}, Vec2{x0, y0}});
+        o.contours.push_back(std::move(c));
+        push_clip_outline(std::move(o));
     }
 };
 
-inline void paint(V1& s, std::size_t off, int depth);
+// ── colours and colour lines ─────────────────────────────────────────────
 
-// Locate a v1 base glyph's root paint offset (absolute in the COLR table).
+struct PStop { float offset; float c[4]; };   // premultiplied colour
+
+[[nodiscard]] inline std::array<float, 4> premul(Rgba c, float alpha_mul = 1.0f) {
+    const float a = std::clamp(static_cast<float>(c.a) / 255.0f * alpha_mul, 0.0f, 1.0f);
+    return {static_cast<float>(c.r) / 255.0f * a, static_cast<float>(c.g) / 255.0f * a,
+            static_cast<float>(c.b) / 255.0f * a, a};
+}
+
+/// ColorLine (VarColorLine for var formats: 4 more bytes per stop), sorted
+/// and normalised to [0, 1] (hb_paint_normalize_color_line). `mn`/`mx` are
+/// the original offset range; gradients rescale their geometry by them.
+inline std::vector<PStop> color_line(const V1& s, std::size_t off, bool var, Extend& ext, float& mn, float& mx) {
+    std::vector<PStop> stops;
+    const auto d = s.t.data;
+    mn = mx = 0.0f;
+    if (off + 3 > d.size()) return stops;
+    ext = d[off] > 2 ? Extend::pad : static_cast<Extend>(d[off]);
+    const std::uint16_t n = be16(d, off + 1);
+    const std::size_t rec_size = var ? 10 : 6;
+    for (std::uint16_t i = 0; i < n && i < 1024; ++i) {
+        const std::size_t rec = off + 3 + static_cast<std::size_t>(i) * rec_size;
+        if (rec + 6 > d.size()) break;
+        const std::uint16_t pal = be16(d, rec + 2);
+        const Rgba base = (pal == 0xFFFF || s.ctx.palette == nullptr) ? s.ctx.text_color
+                                                                      : s.ctx.palette->at(pal, s.ctx.text_color);
+        const auto c = premul(base, bef2dot14(d, rec + 4));
+        stops.push_back(PStop{bef2dot14(d, rec), {c[0], c[1], c[2], c[3]}});
+    }
+    if (stops.empty()) return stops;
+    std::stable_sort(stops.begin(), stops.end(), [](const PStop& a, const PStop& b) { return a.offset < b.offset; });
+    mn = stops.front().offset;
+    mx = stops.back().offset;
+    if (mn != mx)
+        for (auto& st : stops) st.offset = (st.offset - mn) / (mx - mn);
+    return stops;
+}
+
+/// evaluate_color_line: extend, then interpolate in premultiplied space.
+inline void eval_line(const std::vector<PStop>& st, float t, Extend ext, float out[4]) {
+    out[0] = out[1] = out[2] = out[3] = 0.0f;
+    if (st.empty()) return;
+    if (st.size() == 1 || !std::isfinite(t)) { std::copy(st[0].c, st[0].c + 4, out); if (std::isfinite(t)) return; t = 0; }
+    if (ext == Extend::pad) t = std::clamp(t, 0.0f, 1.0f);
+    else if (ext == Extend::repeat) t = t - std::floor(t);
+    else { t = std::fmod(std::fabs(t), 2.0f); if (t > 1.0f) t = 2.0f - t; }
+    if (t <= st.front().offset) { std::copy(st.front().c, st.front().c + 4, out); return; }
+    if (t >= st.back().offset) { std::copy(st.back().c, st.back().c + 4, out); return; }
+    std::size_t i = 0;
+    while (i + 1 < st.size() && !(t < st[i + 1].offset)) ++i;
+    const float range = st[i + 1].offset - st[i].offset;
+    const float f = range > 0.0f ? (t - st[i].offset) / range : 0.0f;
+    for (int k = 0; k < 4; ++k) out[k] = st[i].c[k] + (st[i + 1].c[k] - st[i].c[k]) * f;
+}
+
+// ── compositing (hb-raster-image.cc composite_pixel) ─────────────────────
+
+[[nodiscard]] inline float blend_sep(unsigned mode, float sc, float dc) {
+    switch (mode) {
+        case 13: return sc + dc - sc * dc;                                                    // screen
+        case 14: return dc <= 0.5f ? 2 * sc * dc : 1 - 2 * (1 - sc) * (1 - dc);              // overlay
+        case 15: return std::min(sc, dc);                                                     // darken
+        case 16: return std::max(sc, dc);                                                     // lighten
+        case 17: return dc <= 0 ? 0 : sc >= 1 ? 1 : std::min(1.0f, dc / (1 - sc));          // color dodge
+        case 18: return dc >= 1 ? 1 : sc <= 0 ? 0 : 1 - std::min(1.0f, (1 - dc) / sc);      // color burn
+        case 19: return sc <= 0.5f ? 2 * sc * dc : 1 - 2 * (1 - sc) * (1 - dc);              // hard light
+        case 20: {                                                                            // soft light
+            if (sc <= 0.5f) return dc - (1 - 2 * sc) * dc * (1 - dc);
+            const float d = dc <= 0.25f ? ((16 * dc - 12) * dc + 4) * dc : std::sqrt(dc);
+            return dc + (2 * sc - 1) * (d - dc);
+        }
+        case 21: return std::fabs(sc - dc);                                                   // difference
+        case 22: return sc + dc - 2 * sc * dc;                                                // exclusion
+        case 23: return sc * dc;                                                              // multiply
+        default: return sc;
+    }
+}
+
+[[nodiscard]] inline float hsl_lum(float r, float g, float b) { return 0.299f * r + 0.587f * g + 0.114f * b; }
+inline void hsl_clip(float& r, float& g, float& b) {
+    const float l = hsl_lum(r, g, b), n = std::min({r, g, b}), x = std::max({r, g, b});
+    if (n < 0 && l - n > 0) { r = l + (r - l) * l / (l - n); g = l + (g - l) * l / (l - n); b = l + (b - l) * l / (l - n); }
+    if (x > 1 && x - l > 0) { r = l + (r - l) * (1 - l) / (x - l); g = l + (g - l) * (1 - l) / (x - l); b = l + (b - l) * (1 - l) / (x - l); }
+}
+inline void hsl_set_lum(float& r, float& g, float& b, float l) {
+    const float d = l - hsl_lum(r, g, b); r += d; g += d; b += d; hsl_clip(r, g, b);
+}
+inline void hsl_set_sat(float& r, float& g, float& b, float sat) {
+    float* c[3] = {&r, &g, &b};
+    std::sort(c, c + 3, [](float* a, float* bb) { return *a < *bb; });
+    if (*c[2] > *c[0]) { *c[1] = (*c[1] - *c[0]) * sat / (*c[2] - *c[0]); *c[2] = sat; }
+    else { *c[1] = *c[2] = 0; }
+    *c[0] = 0;
+}
+
+/// Composite premultiplied `s` onto premultiplied `d` with CompositeMode `mode`.
+inline void composite(unsigned mode, const float* s, float* d) {
+    const float sa = s[3], da = d[3];
+    float o[4];
+    switch (mode) {
+        case 0: o[0] = o[1] = o[2] = o[3] = 0; break;                                        // clear
+        case 1: std::copy(s, s + 4, o); break;                                               // src
+        case 2: return;                                                                      // dest
+        case 3: for (int k = 0; k < 4; ++k) o[k] = s[k] + d[k] * (1 - sa); break;           // src over
+        case 4: for (int k = 0; k < 4; ++k) o[k] = d[k] + s[k] * (1 - da); break;           // dest over
+        case 5: for (int k = 0; k < 4; ++k) o[k] = s[k] * da; break;                        // src in
+        case 6: for (int k = 0; k < 4; ++k) o[k] = d[k] * sa; break;                        // dest in
+        case 7: for (int k = 0; k < 4; ++k) o[k] = s[k] * (1 - da); break;                  // src out
+        case 8: for (int k = 0; k < 4; ++k) o[k] = d[k] * (1 - sa); break;                  // dest out
+        case 9: for (int k = 0; k < 3; ++k) o[k] = s[k] * da + d[k] * (1 - sa); o[3] = da; break;   // src atop
+        case 10: for (int k = 0; k < 3; ++k) o[k] = d[k] * sa + s[k] * (1 - da); o[3] = sa; break;  // dest atop
+        case 11: for (int k = 0; k < 4; ++k) o[k] = s[k] * (1 - da) + d[k] * (1 - sa); break;       // xor
+        case 12: for (int k = 0; k < 4; ++k) o[k] = std::min(1.0f, s[k] + d[k]); break;             // plus
+        default: {
+            // Separable / HSL blends (W3C compositing): unpremultiply, blend,
+            // then B(cs,cb)*sa*da + cs*sa*(1-da) + cb*da*(1-sa).
+            const float us[3] = {sa > 0 ? s[0] / sa : 0, sa > 0 ? s[1] / sa : 0, sa > 0 ? s[2] / sa : 0};
+            const float ud[3] = {da > 0 ? d[0] / da : 0, da > 0 ? d[1] / da : 0, da > 0 ? d[2] / da : 0};
+            float b[3];
+            if (mode >= 24 && mode <= 27) {
+                float r = 0, g = 0, bb = 0;
+                if (mode == 24) { r = us[0]; g = us[1]; bb = us[2];
+                    hsl_set_sat(r, g, bb, std::max({ud[0], ud[1], ud[2]}) - std::min({ud[0], ud[1], ud[2]}));
+                    hsl_set_lum(r, g, bb, hsl_lum(ud[0], ud[1], ud[2])); }                    // hue
+                else if (mode == 25) { r = ud[0]; g = ud[1]; bb = ud[2];
+                    hsl_set_sat(r, g, bb, std::max({us[0], us[1], us[2]}) - std::min({us[0], us[1], us[2]}));
+                    hsl_set_lum(r, g, bb, hsl_lum(ud[0], ud[1], ud[2])); }                    // saturation
+                else if (mode == 26) { r = us[0]; g = us[1]; bb = us[2];
+                    hsl_set_lum(r, g, bb, hsl_lum(ud[0], ud[1], ud[2])); }                    // color
+                else { r = ud[0]; g = ud[1]; bb = ud[2];
+                    hsl_set_lum(r, g, bb, hsl_lum(us[0], us[1], us[2])); }                    // luminosity
+                b[0] = r; b[1] = g; b[2] = bb;
+            } else {
+                for (int k = 0; k < 3; ++k) b[k] = blend_sep(mode, us[k], ud[k]);
+            }
+            for (int k = 0; k < 3; ++k) o[k] = sa * da * b[k] + sa * (1 - da) * us[k] + (1 - sa) * da * ud[k];
+            o[3] = sa + da - sa * da;
+            break;
+        }
+    }
+    for (int k = 0; k < 4; ++k) d[k] = std::clamp(o[k], 0.0f, 1.0f);
+}
+
+// ── the walk ─────────────────────────────────────────────────────────────
+
 inline bool find_v1_base(const ColrTable& t, std::uint16_t gid, std::size_t& paint_off) {
     if (t.base_list_off == 0 || t.base_list_off + 4 > t.data.size()) return false;
     const std::uint32_t n = be32(t.data, t.base_list_off);
@@ -406,211 +658,232 @@ inline bool find_v1_base(const ColrTable& t, std::uint16_t gid, std::size_t& pai
     while (lo < hi) {
         const std::uint32_t mid = (lo + hi) / 2;
         const std::size_t rec = t.base_list_off + 4 + static_cast<std::size_t>(mid) * 6;
+        if (rec + 6 > t.data.size()) return false;
         const std::uint16_t g = be16(t.data, rec);
-        if (g == gid) {
-            paint_off = t.base_list_off + be32(t.data, rec + 2);
-            return true;
-        }
+        if (g == gid) { paint_off = t.base_list_off + be32(t.data, rec + 2); return paint_off < t.data.size(); }
         if (g < gid) lo = mid + 1; else hi = mid;
     }
     return false;
 }
 
-// Compose one transform onto s.xform, recurse into the child paint, restore.
-// Handles the PaintTransform family (formats 12..31). Coordinates are font
-// units; Affine is {a,b,c,d,e,f} with apply(p) = (a*x+c*y+e, b*x+d*y+f).
-inline void apply_transform(V1& s, std::size_t off, int depth) {
-    const auto d = s.t.data;
-    const std::uint32_t sub = be24(d, off + 1);   // child paint, offset from here
-    const std::size_t child = off + sub;
-    const Affine saved = s.xform;
-    Affine m = Affine::identity();
-    const std::size_t p = off + 4;   // params start after format(1)+childOffset(3)
-    switch (d[off]) {
-        case 12: case 13: {   // PaintTransform / PaintVarTransform (Affine2x3)
-            // Affine2x3 is referenced by offset for 12; inline is not used.
-            const std::size_t ao = off + be24(d, off + 4);
-            m = Affine{befixed(d, ao + 0), befixed(d, ao + 4), befixed(d, ao + 8),
-                       befixed(d, ao + 12), befixed(d, ao + 16), befixed(d, ao + 20)};
-            break;
+/// ClipList lookup: the glyph's ClipBox in font units, if it has one.
+inline bool clip_box(const ColrTable& t, std::uint16_t gid, float& x0, float& y0, float& x1, float& y1) {
+    if (t.clip_list_off == 0 || t.clip_list_off + 5 > t.data.size()) return false;
+    const std::uint32_t n = be32(t.data, t.clip_list_off + 1);
+    for (std::uint32_t i = 0; i < n && i < 65536; ++i) {
+        const std::size_t rec = t.clip_list_off + 5 + static_cast<std::size_t>(i) * 7;
+        if (rec + 7 > t.data.size()) return false;
+        if (gid >= be16(t.data, rec) && gid <= be16(t.data, rec + 2)) {
+            const std::size_t box = t.clip_list_off + be24(t.data, rec + 4);
+            if (box + 9 > t.data.size()) return false;
+            x0 = be16s(t.data, box + 1); y0 = be16s(t.data, box + 3);
+            x1 = be16s(t.data, box + 5); y1 = be16s(t.data, box + 7);
+            return true;
         }
-        case 14: case 15: {   // PaintTranslate
-            m = Affine{1, 0, 0, 1, befixed(d, p), befixed(d, p + 4)};
-            break;
-        }
-        case 16: case 17: {   // PaintScale
-            m = Affine{befixed(d, p), 0, 0, befixed(d, p + 4), 0, 0};
-            break;
-        }
-        case 18: case 19: {   // PaintScaleAroundCenter
-            const float sx = befixed(d, p), sy = befixed(d, p + 4);
-            const float cx = be16s(d, p + 8), cy = be16s(d, p + 10);
-            m = Affine{1,0,0,1,cx,cy} * Affine{sx,0,0,sy,0,0} * Affine{1,0,0,1,-cx,-cy};
-            break;
-        }
-        case 20: case 21: {   // PaintScaleUniform
-            const float sc = befixed(d, p);
-            m = Affine{sc, 0, 0, sc, 0, 0};
-            break;
-        }
-        case 22: case 23: {   // PaintScaleUniformAroundCenter
-            const float sc = befixed(d, p);
-            const float cx = be16s(d, p + 4), cy = be16s(d, p + 6);
-            m = Affine{1,0,0,1,cx,cy} * Affine{sc,0,0,sc,0,0} * Affine{1,0,0,1,-cx,-cy};
-            break;
-        }
-        case 24: case 25: {   // PaintRotate (degrees)
-            const float ang = befixed(d, p) * 3.14159265358979f / 180.0f;
-            m = Affine{std::cos(ang), std::sin(ang), -std::sin(ang), std::cos(ang), 0, 0};
-            break;
-        }
-        case 26: case 27: {   // PaintRotateAroundCenter
-            const float ang = befixed(d, p) * 3.14159265358979f / 180.0f;
-            const float cx = be16s(d, p + 4), cy = be16s(d, p + 6);
-            const Affine rot{std::cos(ang), std::sin(ang), -std::sin(ang), std::cos(ang), 0, 0};
-            m = Affine{1,0,0,1,cx,cy} * rot * Affine{1,0,0,1,-cx,-cy};
-            break;
-        }
-        case 28: case 29: {   // PaintSkew (degrees)
-            const float ax = std::tan(befixed(d, p) * 3.14159265358979f / 180.0f);
-            const float ay = std::tan(befixed(d, p + 4) * 3.14159265358979f / 180.0f);
-            m = Affine{1, ay, ax, 1, 0, 0};
-            break;
-        }
-        case 30: case 31: {   // PaintSkewAroundCenter
-            const float ax = std::tan(befixed(d, p) * 3.14159265358979f / 180.0f);
-            const float ay = std::tan(befixed(d, p + 4) * 3.14159265358979f / 180.0f);
-            const float cx = be16s(d, p + 8), cy = be16s(d, p + 10);
-            m = Affine{1,0,0,1,cx,cy} * Affine{1, ay, ax, 1, 0, 0} * Affine{1,0,0,1,-cx,-cy};
-            break;
-        }
-        default: break;
     }
-    s.xform = saved * m;
-    paint(s, child, depth + 1);
-    s.xform = saved;
+    return false;
 }
 
-// PaintGlyph (format 10): clip to a base outline, then paint the sub-paint
-// only where the outline covers. We approximate the clip by rendering the
-// sub-paint's colour per covered pixel of the (transformed) outline.
-inline void paint_glyph(V1& s, std::size_t off, int depth) {
-    const auto d = s.t.data;
-    const std::uint32_t sub = be24(d, off + 1);
-    const std::uint16_t gid = be16(d, off + 4);
-    Outline o = s.ctx.outline_of(gid);
-    if (o.empty()) return;
-    o.transform(s.xform);
+inline void paint(V1& s, std::size_t off, int depth);
 
-    // Build a PaintFn from the sub-paint. Only formats 2..7 yield a colour;
-    // anything else recurses (an acceptable degrade without the outline clip).
-    const std::size_t spoff = off + sub;
-    if (spoff + 1 > d.size()) return;
-    const std::uint8_t fmt = d[spoff];
-    PaintFn fn;
-    if (fmt == 2 || fmt == 3) {              // PaintSolid / PaintVarSolid
-        const std::uint16_t pal = be16(d, spoff + 1);
-        const float alpha = bef2dot14(d, spoff + 3);
-        Rgba c = s.ctx.palette ? s.ctx.palette->at(pal, s.ctx.text_color) : s.ctx.text_color;
-        c.a = static_cast<std::uint8_t>(std::clamp(static_cast<float>(c.a) * alpha, 0.0f, 255.0f));
-        fn = [c](float, float) { return c; };
-    } else if (fmt == 4 || fmt == 5) {       // PaintLinearGradient
-        Extend ext; const std::uint32_t clo = be24(d, spoff + 1);
-        auto stops = parse_color_line(d, spoff + clo, s.ctx, ext);
-        const float x0 = be16s(d, spoff + 4),  y0 = be16s(d, spoff + 6);
-        const float x1 = be16s(d, spoff + 8),  y1 = be16s(d, spoff + 10);
-        const float x2 = be16s(d, spoff + 12), y2 = be16s(d, spoff + 14);
-        const V1* sp = &s;
-        fn = [stops, ext, x0, y0, x1, y1, x2, y2, sp](float px, float py) {
-            const Vec2 f = sp->px_to_font(px, py);
-            // Project f onto the p0->p1 axis, rotated by the p0->p2 normal.
-            const float dx = x1 - x0, dy = y1 - y0;
-            const float rx = x2 - x0, ry = y2 - y0;
-            // Rotate gradient vector so it is perpendicular to (rx,ry).
-            const float len2 = dx * dx + dy * dy;
-            float t = 0.0f;
-            if (len2 > 0.0f) t = ((f.x - x0) * dx + (f.y - y0) * dy) / len2;
-            (void)rx; (void)ry;
-            return sample_ramp(stops, t, ext);
-        };
-    } else if (fmt == 6 || fmt == 7) {       // PaintRadialGradient
-        Extend ext; const std::uint32_t clo = be24(d, spoff + 1);
-        auto stops = parse_color_line(d, spoff + clo, s.ctx, ext);
-        // (c0 = spoff+4, +6) is not used by the c1-distance approximation below.
-        const float r0  = be16s(d, spoff + 8);
-        const float cx1 = be16s(d, spoff + 10), cy1 = be16s(d, spoff + 12);
-        const float r1  = be16s(d, spoff + 14);
-        const V1* sp = &s;
-        fn = [stops, ext, r0, cx1, cy1, r1, sp](float px, float py) {
-            const Vec2 f = sp->px_to_font(px, py);
-            // Approximate two-circle radial as distance from c1 remapped by
-            // the radii (exact for the common concentric r0=0 case).
-            const float dcx = f.x - cx1, dcy = f.y - cy1;
-            const float dist = std::sqrt(dcx * dcx + dcy * dcy);
-            const float denom = (r1 - r0);
-            const float t = std::fabs(denom) > 0.0001f ? (dist - r0) / denom : 0.0f;
-            return sample_ramp(stops, t, ext);
-        };
-    } else if (fmt == 8 || fmt == 9) {       // PaintSweepGradient
-        Extend ext; const std::uint32_t clo = be24(d, spoff + 1);
-        auto stops = parse_color_line(d, spoff + clo, s.ctx, ext);
-        const float cx = be16s(d, spoff + 4), cy = be16s(d, spoff + 6);
-        // startAngle/endAngle are F2Dot14 encoding angle/180 (1.0 => 180deg).
-        const float sa = bef2dot14(d, spoff + 8)  * 180.0f;
-        const float ea = bef2dot14(d, spoff + 10) * 180.0f;
-        const V1* sp = &s;
-        fn = [stops, ext, cx, cy, sa, ea, sp](float px, float py) {
-            const Vec2 f = sp->px_to_font(px, py);
-            float ang = std::atan2(f.y - cy, f.x - cx) * 180.0f / 3.14159265358979f;
-            if (ang < 0.0f) ang += 360.0f;
-            const float span = (ea - sa);
-            const float t = std::fabs(span) > 0.0001f ? (ang - sa) / span : 0.0f;
-            return sample_ramp(stops, t, ext);
-        };
-    } else {
-        // Nested/unsupported sub-paint: recurse so PaintColrLayers etc. still
-        // draw (without the outline clip, which is an acceptable degrade).
-        paint(s, spoff, depth + 1);
-        return;
-    }
-    fill_outline(s.cv, o, s.pl, fn);
+/// Recurse into a child paint under an extra transform `m` (paint space).
+inline void paint_transformed(V1& s, std::size_t child, const Affine& m, int depth) {
+    s.xforms.push_back(s.xform() * m);
+    paint(s, child, depth + 1);
+    s.xforms.pop_back();
 }
 
 inline void paint(V1& s, std::size_t off, int depth) {
-    if (depth > 64 || off + 1 > s.t.data.size()) return;
     const auto d = s.t.data;
+    if (depth > 64 || off >= d.size() || --s.budget < 0) return;
     const std::uint8_t fmt = d[off];
+    const std::size_t p = off + 1;
+    const auto child_at = [&](std::size_t field) -> std::size_t {
+        const std::uint32_t o = be24(d, field);
+        return o ? off + o : static_cast<std::size_t>(-1);
+    };
+    constexpr float pi = 3.14159265358979323846f;
     switch (fmt) {
-        case 1: {   // PaintColrLayers
-            const std::uint8_t n = d[off + 1];
-            const std::uint32_t first = be32(d, off + 2);
-            if (s.t.layer_list_off == 0) return;
-            const std::uint32_t nl = be32(d, s.t.layer_list_off);
-            for (std::uint8_t i = 0; i < n; ++i) {
-                const std::uint32_t li = first + i;
-                if (li >= nl) break;
-                const std::size_t po = s.t.layer_list_off +
-                    be32(d, s.t.layer_list_off + 4 + static_cast<std::size_t>(li) * 4);
-                paint(s, po, depth + 1);
+    case 1: {   // PaintColrLayers
+        const std::uint8_t n = d[p];
+        const std::uint32_t first = be32(d, p + 1);
+        if (s.t.layer_list_off == 0 || s.t.layer_list_off + 4 > d.size()) return;
+        for (const std::uint32_t l : s.layer_stack) if (l == first) return;   // cycle
+        s.layer_stack.push_back(first);
+        const std::uint32_t total = be32(d, s.t.layer_list_off);
+        for (std::uint32_t i = first; i < first + n && i < total; ++i) {
+            const std::size_t rec = s.t.layer_list_off + 4 + static_cast<std::size_t>(i) * 4;
+            if (rec + 4 > d.size()) break;
+            paint(s, s.t.layer_list_off + be32(d, rec), depth + 1);
+        }
+        s.layer_stack.pop_back();
+        break;
+    }
+    case 2: case 3: {   // PaintSolid / PaintVarSolid
+        const std::uint16_t pal = be16(d, p);
+        const Rgba base = (pal == 0xFFFF || s.ctx.palette == nullptr) ? s.ctx.text_color
+                                                                      : s.ctx.palette->at(pal, s.ctx.text_color);
+        const auto c = premul(base, bef2dot14(d, p + 2));
+        s.fill([&](Vec2, float out[4]) { std::copy(c.begin(), c.end(), out); });
+        break;
+    }
+    case 4: case 5: {   // PaintLinearGradient
+        Extend ext = Extend::pad; float mn, mx;
+        const auto st = color_line(s, child_at(p), fmt == 5, ext, mn, mx);
+        float x0 = be16s(d, p + 3), y0 = be16s(d, p + 5), x1 = be16s(d, p + 7), y1 = be16s(d, p + 9);
+        const float x2 = be16s(d, p + 11), y2 = be16s(d, p + 13);
+        // hb_paint_reduce_linear_anchors: project P1 onto the normal of P0P2.
+        const float q2x = x2 - x0, q2y = y2 - y0, sq = q2x * q2x + q2y * q2y;
+        if (sq >= 1e-6f) {
+            const float k = (q2x * (x1 - x0) + q2y * (y1 - y0)) / sq;
+            x1 -= k * q2x; y1 -= k * q2y;
+        }
+        // normalised colour line: move the endpoints with it
+        const float ax = x0 + mn * (x1 - x0), ay = y0 + mn * (y1 - y0);
+        const float bx = x0 + mx * (x1 - x0), by = y0 + mx * (y1 - y0);
+        const float vx = bx - ax, vy = by - ay, len2 = vx * vx + vy * vy;
+        s.fill([&](Vec2 q, float out[4]) {
+            const float t = len2 > 0 ? ((q.x - ax) * vx + (q.y - ay) * vy) / len2 : 0.0f;
+            eval_line(st, t, ext, out);
+        });
+        break;
+    }
+    case 6: case 7: {   // PaintRadialGradient (two-point conical)
+        Extend ext = Extend::pad; float mn, mx;
+        const auto st = color_line(s, child_at(p), fmt == 7, ext, mn, mx);
+        const float x0 = be16s(d, p + 3), y0 = be16s(d, p + 5), r0 = be16(d, p + 7);
+        const float x1 = be16s(d, p + 9), y1 = be16s(d, p + 11), r1 = be16(d, p + 13);
+        const float cx0 = x0 + mn * (x1 - x0), cy0 = y0 + mn * (y1 - y0), cr0 = r0 + mn * (r1 - r0);
+        const float cx1 = x0 + mx * (x1 - x0), cy1 = y0 + mx * (y1 - y0), cr1 = r0 + mx * (r1 - r0);
+        const float cdx = cx1 - cx0, cdy = cy1 - cy0, dr = cr1 - cr0;
+        const float A = cdx * cdx + cdy * cdy - dr * dr;
+        s.fill([&](Vec2 q, float out[4]) {
+            out[0] = out[1] = out[2] = out[3] = 0;
+            const float dx = q.x - cx0, dy = q.y - cy0;
+            const float B = -2 * (dx * cdx + dy * cdy + cr0 * dr);
+            const float C = dx * dx + dy * dy - cr0 * cr0;
+            float t;
+            if (std::fabs(A) > 1e-10f) {
+                const float disc = B * B - 4 * A * C;
+                if (disc < 0) return;
+                const float sq = std::sqrt(disc);
+                const float t1 = (-B + sq) / (2 * A), t2 = (-B - sq) / (2 * A);
+                // the larger root whose radius is non-negative
+                if (cr0 + t1 * dr >= 0) t = t1;
+                else if (cr0 + t2 * dr >= 0) t = t2;
+                else return;
+                if (A < 0 && cr0 + std::max(t1, t2) * dr >= 0) t = std::max(t1, t2);
+            } else {
+                if (std::fabs(B) < 1e-10f) return;
+                t = -C / B;
+                if (cr0 + t * dr < 0) return;
             }
-            break;
+            eval_line(st, t, ext, out);
+        });
+        break;
+    }
+    case 8: case 9: {   // PaintSweepGradient
+        Extend ext = Extend::pad; float mn, mx;
+        const auto st = color_line(s, child_at(p), fmt == 9, ext, mn, mx);
+        const float cx = be16s(d, p + 3), cy = be16s(d, p + 5);
+        const float a0 = (bef2dot14(d, p + 7) + 1) * pi, a1 = (bef2dot14(d, p + 9) + 1) * pi;
+        // normalised colour line rescales the angle range
+        const float s0 = a0 + mn * (a1 - a0), s1 = a0 + mx * (a1 - a0);
+        const float range = s1 - s0;
+        s.fill([&](Vec2 q, float out[4]) {
+            float ang = std::atan2(q.y - cy, q.x - cx);
+            if (ang < 0) ang += 2 * pi;
+            const float t = range != 0 ? (ang - s0) / range : 0.0f;
+            eval_line(st, t, ext, out);
+        });
+        break;
+    }
+    case 10: {   // PaintGlyph: clip the child paint to the glyph outline
+        const std::uint16_t gid = be16(d, p + 3);
+        s.push_clip_outline(s.ctx.outline_of(gid));
+        if (const std::size_t c = child_at(p); c != static_cast<std::size_t>(-1)) paint(s, c, depth + 1);
+        s.pop_clip();
+        break;
+    }
+    case 11: {   // PaintColrGlyph: another base glyph's graph, inside its ClipBox
+        const std::uint16_t gid = be16(d, p);
+        for (const std::uint16_t g : s.glyph_stack) if (g == gid) return;   // cycle
+        std::size_t root = 0;
+        if (!find_v1_base(s.t, gid, root)) return;
+        s.glyph_stack.push_back(gid);
+        float x0, y0, x1, y1;
+        const bool clipped = clip_box(s.t, gid, x0, y0, x1, y1);
+        if (clipped) s.push_clip_rect(x0, y0, x1, y1);
+        paint(s, root, depth + 1);
+        if (clipped) s.pop_clip();
+        s.glyph_stack.pop_back();
+        break;
+    }
+    case 12: case 13: {   // PaintTransform: Affine2x3 of Fixed
+        const std::size_t a = off + be24(d, p + 3);
+        if (a + 24 > d.size()) return;
+        const Affine m{befixed(d, a), befixed(d, a + 4), befixed(d, a + 8),
+                       befixed(d, a + 12), befixed(d, a + 16), befixed(d, a + 20)};
+        if (const std::size_t c = child_at(p); c != static_cast<std::size_t>(-1)) paint_transformed(s, c, m, depth);
+        break;
+    }
+    case 14: case 15:   // PaintTranslate: FWORD dx, dy
+        if (const std::size_t c = child_at(p); c != static_cast<std::size_t>(-1))
+            paint_transformed(s, c, Affine{1, 0, 0, 1, static_cast<float>(be16s(d, p + 3)), static_cast<float>(be16s(d, p + 5))}, depth);
+        break;
+    case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: {   // scales (F2Dot14)
+        const bool uniform = fmt >= 20, centred = fmt == 18 || fmt == 19 || fmt == 22 || fmt == 23;
+        const float sx = bef2dot14(d, p + 3);
+        const float sy = uniform ? sx : bef2dot14(d, p + 5);
+        const std::size_t cpos = p + (uniform ? 5 : 7);
+        Affine m{sx, 0, 0, sy, 0, 0};
+        if (centred) {
+            const float cx = be16s(d, cpos), cy = be16s(d, cpos + 2);
+            m = Affine{1, 0, 0, 1, cx, cy} * m * Affine{1, 0, 0, 1, -cx, -cy};
         }
-        case 2: case 3: {   // PaintSolid over the whole clip (rare at top)
-            // No geometry here; handled inside PaintGlyph. Ignore standalone.
-            break;
+        if (const std::size_t c = child_at(p); c != static_cast<std::size_t>(-1)) paint_transformed(s, c, m, depth);
+        break;
+    }
+    case 24: case 25: case 26: case 27: {   // rotations: F2Dot14 half-turns
+        const float ang = bef2dot14(d, p + 3) * pi;
+        Affine m{std::cos(ang), std::sin(ang), -std::sin(ang), std::cos(ang), 0, 0};
+        if (fmt >= 26) {
+            const float cx = be16s(d, p + 5), cy = be16s(d, p + 7);
+            m = Affine{1, 0, 0, 1, cx, cy} * m * Affine{1, 0, 0, 1, -cx, -cy};
         }
-        case 10: paint_glyph(s, off, depth); break;   // PaintGlyph
-        case 11: {   // PaintColrGlyph: paint another base glyph's paint
-            const std::uint16_t bgid = be16(d, off + 1);
-            std::size_t po = 0;
-            if (find_v1_base(s.t, bgid, po)) paint(s, po, depth + 1);
-            break;
+        if (const std::size_t c = child_at(p); c != static_cast<std::size_t>(-1)) paint_transformed(s, c, m, depth);
+        break;
+    }
+    case 28: case 29: case 30: case 31: {   // skews: F2Dot14 half-turns, x negated (push_skew)
+        const float kx = std::tan(-bef2dot14(d, p + 3) * pi), ky = std::tan(bef2dot14(d, p + 5) * pi);
+        Affine m{1, ky, kx, 1, 0, 0};
+        if (fmt >= 30) {
+            const float cx = be16s(d, p + 7), cy = be16s(d, p + 9);
+            m = Affine{1, 0, 0, 1, cx, cy} * m * Affine{1, 0, 0, 1, -cx, -cy};
         }
-        default:
-            if (fmt >= 12 && fmt <= 31) {   // transform family
-                apply_transform(s, off, depth);
-            }
-            break;
+        if (const std::size_t c = child_at(p); c != static_cast<std::size_t>(-1)) paint_transformed(s, c, m, depth);
+        break;
+    }
+    case 32: {   // PaintComposite: source composited onto backdrop, in a group
+        const std::size_t src = child_at(p), backdrop = child_at(p + 4);
+        const unsigned mode = d[p + 3];
+        s.groups.emplace_back(s.w, s.h);           // backdrop group
+        if (backdrop != static_cast<std::size_t>(-1)) paint(s, backdrop, depth + 1);
+        s.groups.emplace_back(s.w, s.h);           // source group
+        if (src != static_cast<std::size_t>(-1)) paint(s, src, depth + 1);
+        Surface source = std::move(s.groups.back());
+        s.groups.pop_back();
+        Surface& bd = s.groups.back();
+        if (mode <= 27)
+            for (std::size_t i = 0; i < source.px.size(); i += 4) composite(mode, &source.px[i], &bd.px[i]);
+        Surface result = std::move(s.groups.back());
+        s.groups.pop_back();
+        // pop_group(SRC_OVER) onto the enclosing surface
+        Surface& out = s.surface();
+        for (std::size_t i = 0; i < result.px.size(); i += 4) composite(3, &result.px[i], &out.px[i]);
+        break;
+    }
+    default: break;
     }
 }
 
@@ -644,29 +917,11 @@ inline void paint(V1& s, std::size_t off, int depth) {
         std::size_t root = 0;
         if (!detail::find_v1_base(t, gid, root)) return none;
 
-        // Canvas bounds: use the ClipList entry for this gid if present,
-        // otherwise a generous em box (font units, y-up).
+        // The base glyph's own ClipBox bounds the canvas and clips the
+        // paint (HarfBuzz paint_glyph `clip`); without one, a generous em.
         float cminx = 0, cminy = static_cast<float>(ctx.upem) * -0.30f;
         float cmaxx = static_cast<float>(ctx.upem), cmaxy = static_cast<float>(ctx.upem) * 1.05f;
-        if (t.clip_list_off != 0 && t.clip_list_off + 5 <= t.data.size()) {
-            const std::uint32_t nclip = be32(t.data, t.clip_list_off + 1);
-            for (std::uint32_t i = 0; i < nclip; ++i) {
-                const std::size_t rec = t.clip_list_off + 5 + static_cast<std::size_t>(i) * 7;
-                if (rec + 7 > t.data.size()) break;
-                const std::uint16_t g0 = be16(t.data, rec);
-                const std::uint16_t g1 = be16(t.data, rec + 2);
-                if (gid >= g0 && gid <= g1) {
-                    const std::size_t box = t.clip_list_off + be24(t.data, rec + 4);
-                    if (box + 9 <= t.data.size() /* format(1)+4*i16 */) {
-                        cminx = be16s(t.data, box + 1);
-                        cminy = be16s(t.data, box + 3);
-                        cmaxx = be16s(t.data, box + 5);
-                        cmaxy = be16s(t.data, box + 7);
-                    }
-                    break;
-                }
-            }
-        }
+        const bool clipped = detail::clip_box(t, gid, cminx, cminy, cmaxx, cmaxy);
 
         const int pad = 2;
         const int x0 = static_cast<int>(std::floor(cminx * scale)) - pad;
@@ -676,13 +931,19 @@ inline void paint(V1& s, std::size_t off, int depth) {
         const int w = x1 - x0, h = y1 - y0;
         if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return none;
 
-        Canvas cv{w, h};
         Placement pl;
         pl.scale = scale;
         pl.ox = static_cast<float>(-x0);
         pl.oy = static_cast<float>(-y0);
-        detail::V1 st{t, ctx, cv, pl, Affine::identity()};
+        detail::V1 st(t, ctx, w, h, pl);
+        st.groups.emplace_back(w, h);
+        st.clips.emplace_back(static_cast<std::size_t>(w) * h, 1.0f);
+        st.clip_boxes.push_back(detail::V1::Box{0, 0, w, h});
+        st.xforms.push_back(Affine::identity());
+        if (clipped) st.push_clip_rect(cminx, cminy, cmaxx, cmaxy);
         detail::paint(st, root, 0);
+        Canvas cv{w, h};
+        cv.px = std::move(st.groups.front().px);
 
         ColorBitmap cb = cv.to_bitmap(size_px);
         cb.bearing_x = static_cast<float>(x0);

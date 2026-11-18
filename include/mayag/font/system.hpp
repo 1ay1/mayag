@@ -786,6 +786,22 @@ class Database {
     };
     const auto add_entry = [&](const FontEntry* e) {
         if (e == nullptr || already(e)) return false;
+#if defined(__APPLE__)
+        // The UI font's emoji fallback is face 1 of Apple Color Emoji.ttc,
+        // .AppleColorEmojiUI: the same images, spaced by its own UI `trak`
+        // (CTFontCreateUIFontForLanguage cascades to it, never to face 0).
+        if (e->color && e->face_index == 0 && e->family == "Apple Color Emoji") {
+            FontEntry ui = *e;
+            ui.face_index = 1;
+            if (!already(&ui))
+                if (auto face = Face::from_file(ui.path, 1)) {
+                    added.emplace_back(ui.path, 1);
+                    added.emplace_back(e->path, 0);
+                    stack->add(std::move(face));
+                    return true;
+                }
+        }
+#endif
         if (auto face = Face::from_file(e->path, e->face_index)) {
             added.emplace_back(e->path, e->face_index);
             stack->add(std::move(face));

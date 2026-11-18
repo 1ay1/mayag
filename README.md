@@ -436,13 +436,34 @@ glyph as a PNG (Google's `CBDT`/`CBLC`, Apple's `sbix`), so the engine:
    DEFLATE decoder (stored, fixed- and dynamic-Huffman blocks) plus the five
    PNG scanline filters, verified byte-exact against a reference decoder;
 2. **parses `CBLC`/`CBDT` and `sbix`** to locate a glyph's strike and read its
-   PNG bytes and placement metrics;
+   PNG bytes and placement metrics, choosing strikes the way HarfBuzz does
+   (the smallest at least as large as the drawn size, `dupe` entries
+   followed) and shrinking them with an exact area filter in premultiplied
+   space, so a flag's 1 px border survives a 160 → 13 px reduction;
 3. **packs the RGBA into a colour plane** of the same atlas as coverage glyphs,
    so a 😀 is cached, packed and evicted through the one glyph path; and
-4. **blends it verbatim** — a colour glyph is a distinct draw kind that samples
-   the RGBA atlas and takes its pixels as-is, tinted only by the run's opacity,
-   never by the text colour. `CPU 温度 🔥` renders every character, and the fire
-   is orange.
+4. **blends it as the image it is** — a colour glyph is a distinct draw kind
+   that samples the RGBA atlas, decodes it from sRGB like any image and
+   blends in linear light, tinted only by the run's opacity, never by the
+   text colour. `CPU 温度 🔥` renders every character, and the fire is orange.
+
+Emoji sit where macOS puts them. Apple Color Emoji's bitmaps carry no
+placement CoreText honours: CoreText draws them 1.25 em tall below 16 pt,
+shrinking to 1 em at 24 pt, hanging 0.25 em (then 0.125 em) under the
+baseline, inside an advance spaced by the UI face's own `trak`. mayag
+measured that rule from `CTFontGetBoundingRectsForGlyphs` at every size,
+uses the same `.AppleColorEmojiUI` face the system UI font falls back to,
+and lands every emoji, flag, skin tone and ZWJ sequence on CoreText's pixel
+grid at 13, 20, 32 and 48 px.
+
+Vector colour fonts (`COLR` v0 and v1, e.g. Noto Color Emoji) render through
+a port of HarfBuzz 15.1's paint model: the whole COLRv1 graph with a group
+stack for `PaintComposite` (all 28 Porter-Duff, separable and HSL modes), a
+clip stack of coverage masks for `PaintGlyph` and ClipBoxes, two-point
+conical radial and sweep gradients, and premultiplied colour lines. Flags,
+which are soft-light and src-in composites, render; against CoreText's own
+COLRv1 drawing the ink boxes agree to a pixel and the median colour error is
+zero.
 
 Both renderers draw colour emoji: the software rasteriser blends the RGBA plane
 per pixel, and the Vulkan backend uploads it as a second atlas texture the

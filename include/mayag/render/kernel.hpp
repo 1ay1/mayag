@@ -444,12 +444,13 @@ struct Env {
 [[nodiscard]] inline Shaded shade(const Fragment& f, const Env& env) noexcept {
     Shaded result;
 
-    // ── colour glyphs (emoji): straight RGBA, tinted only by opacity ──
+    // ── colour glyphs (emoji): straight sRGB RGBA, tinted only by opacity ──
     if (f.kind == KIND_COLOR_GLYPH) {
         const vec4 t = env.atlas_rgba(env.ctx, f.uv);
         const f32  a = t.w * f.color.w;
         if (a <= 0.001f) { result.discard = true; return result; }
-        result.color = vec4{t.x * a, t.y * a, t.z * a, a};
+        // Decode like any image: blending the encoded values washes emoji out.
+        result.color = vec4{srgb_to_linear(t.x) * a, srgb_to_linear(t.y) * a, srgb_to_linear(t.z) * a, a};
         return result;
     }
 
