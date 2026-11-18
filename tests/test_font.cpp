@@ -1382,6 +1382,53 @@ void test_union_coverage() {
     // aa_quadto halves until |P0 - 2C + P1| <= 0.8 px per component:
     // 12.8 -> 3.2 -> 0.8, i.e. 4 chords (+ the closing line).
     check(e.size() == 5, "a quad with |dd| 12.8 px flattens to 4 chords + the closing line (got " + std::to_string(e.size()) + ")");
+
+    // A single contour overlapping itself (SF's 'e' draws its bar as a loop
+    // over both strokes): the loop counts once.
+    typo::Outline self;
+    typo::Contour sc; sc.start = {10.1f, 0.0f};
+    for (const Vec2 qv : {Vec2{10.1f, 10.0f}, Vec2{10.7f, 10.0f}, Vec2{10.7f, 0.0f}, Vec2{10.3f, 0.0f}, Vec2{10.3f, 10.0f},
+                          Vec2{10.9f, 10.0f}, Vec2{10.9f, 0.0f}, Vec2{10.1f, 0.0f}}) {
+        typo::Segment sg; sg.kind = typo::Segment::Kind::line; sg.to = qv; sc.segments.push_back(sg);
+    }
+    self.contours.push_back(sc);
+    const auto rs = typo::rasterize(self, 1.0f, 1);
+    double st = 0.0;
+    for (const auto v : rs.bitmap.pixels) st += v / 255.0;
+    near(static_cast<float>(st), 8.0f, 0.1f, "a self-overlapping contour covers its union once");
+
+    // Exact box coverage of a half-plane, used for distance-field glyphs.
+    near(kernel::box_halfplane_coverage(0.0f, 1.0f, 0.0f), 0.5f, 1e-5f, "edge through the centre covers half");
+    near(kernel::box_halfplane_coverage(0.25f, 1.0f, 0.0f), 0.75f, 1e-5f, "axis-aligned edge is linear");
+    const float r2 = std::sqrt(0.5f);
+    near(kernel::box_halfplane_coverage(0.0f, r2, r2), 0.5f, 1e-5f, "45-degree edge through the centre covers half");
+    near(kernel::box_halfplane_coverage(r2 * 0.5f, r2, r2), 0.875f, 1e-4f, "45-degree edge a quarter-diagonal in covers 7/8");
+    near(kernel::box_halfplane_coverage(-r2, r2, r2), 0.0f, 1e-5f, "45-degree edge outside the corner covers nothing");
+}
+
+// Large text through the distance-field path must match the coverage path
+// (which matches CoreText) to well under a percent.
+void test_sdf_matches_bitmap() {
+    section("SDF vs coverage at large sizes");
+    typo::FontConfig bm; bm.mode = typo::RenderMode::bitmap;
+    auto sb = typo::system::default_stack(bm);
+    auto sh = typo::system::default_stack();
+    if (!sb || sb->face_count() == 0) return;
+    const auto render = [](std::shared_ptr<typo::FontStack> st) {
+        RenderOptions ro; ro.background = rgb8(0xFA, 0xFA, 0xFA); ro.fonts = st;
+        auto ui = dsl::v(dsl::text_owned("Hamburg") | dsl::font(72) | dsl::fg(rgb8(0x1C, 0x1F, 0x24))) | dsl::pad(24.0f, 4.0f) |
+                  dsl::width(600) | dsl::height(160);
+        return render_to_pixels(ui, Vec2{600, 160}, ro);
+    };
+    const auto a = render(sb), b = render(sh);
+    if (a.empty() || a.size() != b.size()) { check(false, "both renders produced images"); return; }
+    double ink = 0.0, diff = 0.0;
+    for (std::size_t i = 0; i < a.size(); i += 4) {
+        const double ca = (250.0 - a[i]) / 222.0, cb = (250.0 - b[i]) / 222.0;
+        ink += std::max(ca, 0.0);
+        diff += std::abs(ca - cb);
+    }
+    check(diff / ink < 0.012, "72 px SDF text within 1.2% of coverage text (got " + std::to_string(100.0 * diff / ink) + "%)");
 }
 
 // CoreText draws runs of 'connected language' faces as one bitmap run
@@ -2125,6 +2172,7 @@ int main() {
     test_tracking_rounding();
     test_cg_autohint();
     test_union_coverage();
+    test_sdf_matches_bitmap();
     test_merge_mode();
     test_square_embolden();
     test_hvgl();

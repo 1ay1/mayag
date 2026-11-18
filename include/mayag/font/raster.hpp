@@ -122,26 +122,29 @@ namespace detail {
 /// glyph coverage is the exact area of THAT polygon — it deliberately
 /// under-flattens, so an SF 'o' at 24 px holds 4% less ink than its true
 /// outline, and matching macOS means flattening the same way.
+/// Any negative value -s flattens the CoreGraphics way with both thresholds
+/// scaled by s, for flattening in a space s times finer than device px (a
+/// distance field rasterised larger than it is drawn).
 inline constexpr float cg_glyph_flattening = -1.0f;
 
 namespace detail {
-inline void cg_cubic(Vec2 a, Vec2 b, Vec2 c, Vec2 d, int depth, std::vector<std::pair<Vec2, Vec2>>& edges) {
+inline void cg_cubic(Vec2 a, Vec2 b, Vec2 c, Vec2 d, int depth, std::vector<std::pair<Vec2, Vec2>>& edges, float s = 1.0f) {
     const Vec2 d1 = a - b * 2.0f + c, d2 = b - c * 2.0f + d;
-    constexpr float t = 4.0f / 15.0f;
+    const float t = 4.0f / 15.0f * s;
     if (depth >= 22 || (std::abs(d1.x) <= t && std::abs(d1.y) <= t && std::abs(d2.x) <= t && std::abs(d2.y) <= t)) {
         edges.emplace_back(a, d);
         return;
     }
     const Vec2 ab = (a + b) * 0.5f, bc = (b + c) * 0.5f, cd = (c + d) * 0.5f;
     const Vec2 abc = (ab + bc) * 0.5f, bcd = (bc + cd) * 0.5f, m = (abc + bcd) * 0.5f;
-    cg_cubic(a, ab, abc, m, depth + 1, edges);
-    cg_cubic(m, bcd, cd, d, depth + 1, edges);
+    cg_cubic(a, ab, abc, m, depth + 1, edges, s);
+    cg_cubic(m, bcd, cd, d, depth + 1, edges, s);
 }
-[[nodiscard]] inline int cg_quad_steps(Vec2 p0, Vec2 c, Vec2 p1) noexcept {
+[[nodiscard]] inline int cg_quad_steps(Vec2 p0, Vec2 c, Vec2 p1, float s = 1.0f) noexcept {
     const Vec2 dd = p0 - c * 2.0f + p1;
     float m = std::max(std::abs(dd.x), std::abs(dd.y));
     int n = 1;
-    for (int k = 0; k < 22 && m > 0.8f; ++k) { m *= 0.25f; n *= 2; }
+    for (int k = 0; k < 22 && m > 0.8f * s; ++k) { m *= 0.25f; n *= 2; }
     return std::min(n, 1 << 12);
 }
 }  // namespace detail
@@ -153,6 +156,7 @@ inline void cg_cubic(Vec2 a, Vec2 b, Vec2 c, Vec2 d, int depth, std::vector<std:
 inline void flatten(const Outline& outline, const Affine& xf, float tolerance,
                     std::vector<std::pair<Vec2, Vec2>>& edges) {
     const bool cg = tolerance < 0.0f;
+    const float cg_scale = cg ? -tolerance : 1.0f;
     for (const auto& contour : outline.contours) {
         if (contour.empty()) continue;
 
@@ -168,7 +172,7 @@ inline void flatten(const Outline& outline, const Affine& xf, float tolerance,
 
                 case Segment::Kind::quad: {
                     const Vec2 c = xf.apply(seg.c0);
-                    const int n = cg ? detail::cg_quad_steps(cursor, c, to) : detail::quad_steps(cursor, c, to, tolerance);
+                    const int n = cg ? detail::cg_quad_steps(cursor, c, to, cg_scale) : detail::quad_steps(cursor, c, to, tolerance);
                     Vec2 prev = cursor;
                     for (int i = 1; i <= n; ++i) {
                         const Vec2 p = i == n ? to : detail::quad_at(cursor, c, to,
@@ -182,7 +186,7 @@ inline void flatten(const Outline& outline, const Affine& xf, float tolerance,
                 case Segment::Kind::cubic: {
                     const Vec2 c0 = xf.apply(seg.c0);
                     const Vec2 c1 = xf.apply(seg.c1);
-                    if (cg) { detail::cg_cubic(cursor, c0, c1, to, 0, edges); break; }
+                    if (cg) { detail::cg_cubic(cursor, c0, c1, to, 0, edges, cg_scale); break; }
                     const int n = detail::cubic_steps(cursor, c0, c1, to, tolerance);
                     Vec2 prev = cursor;
                     for (int i = 1; i <= n; ++i) {
@@ -385,6 +389,8 @@ inline void union_boundary(const std::vector<std::pair<Vec2, Vec2>>& in, int h,
     const auto x_at = [](const E& e, double y) { return e.xa + (e.xb - e.xa) * (y - e.ya) / (e.yb - e.ya); };
     std::vector<double> ev;
     std::vector<std::pair<double, std::uint32_t>> order;
+    struct Span { double x0, x1; std::uint32_t i; };
+    std::vector<Span> spans;
     for (int r = 0; r < h; ++r) {
         const auto& ids = rows[static_cast<std::size_t>(r)];
         if (ids.empty()) continue;
@@ -395,10 +401,21 @@ inline void union_boundary(const std::vector<std::pair<Vec2, Vec2>>& in, int h,
             if (e.ya > top && e.ya < bot) ev.push_back(e.ya);
             if (e.yb > top && e.yb < bot) ev.push_back(e.yb);
         }
-        for (std::size_t p = 0; p < ids.size(); ++p)
-            for (std::size_t q = p + 1; q < ids.size(); ++q) {
-                const E& a = es[ids[p]];
-                const E& b = es[ids[q]];
+        // Crossings: only edges whose x-spans within this row overlap can
+        // cross. Sort by span start and sweep (all-pairs made HVF glyphs,
+        // dozens of overlapping parts, cost ~50 us each).
+        spans.clear();
+        for (const auto i : ids) {
+            const E& e = es[i];
+            const double lo = std::max(top, e.ya), hi = std::min(bot, e.yb);
+            const double xa = x_at(e, lo), xb = x_at(e, hi);
+            spans.push_back({std::min(xa, xb), std::max(xa, xb), i});
+        }
+        std::sort(spans.begin(), spans.end(), [](const Span& a, const Span& b) { return a.x0 < b.x0; });
+        for (std::size_t p = 0; p < spans.size(); ++p)
+            for (std::size_t q = p + 1; q < spans.size() && spans[q].x0 <= spans[p].x1; ++q) {
+                const E& a = es[spans[p].i];
+                const E& b = es[spans[q].i];
                 const double lo = std::max({top, a.ya, b.ya}), hi = std::min({bot, a.yb, b.yb});
                 if (hi <= lo) continue;
                 const double da = x_at(a, lo) - x_at(b, lo), db = x_at(a, hi) - x_at(b, hi);
@@ -462,9 +479,11 @@ inline void union_boundary(const std::vector<std::pair<Vec2, Vec2>>& in, int h,
     std::vector<std::pair<Vec2, Vec2>> edges;
     edges.reserve(outline.point_count() * 3);
     flatten(outline, xf, tolerance, edges);
-    // Exact nonzero union (overlapping contours): only for multi-contour
-    // outlines, a single simple contour cannot overlap itself in a glyph.
-    if (outline.contours.size() > 1) {
+    // Exact nonzero union: contours overlapping each other AND single
+    // contours overlapping themselves (SF's 'e' draws its bar as a loop over
+    // both strokes, winding 2 there; summing and clamping put 1.00 where
+    // CoreGraphics' exact union gives 0.79).
+    {
         std::vector<std::pair<Vec2, Vec2>> u;
         u.reserve(edges.size() * 2);
         detail::union_boundary(edges, h, u);
@@ -750,7 +769,8 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
 /// keeps CoreText's weight on curves and diagonals.
 [[nodiscard]] inline RasterResult rasterize_sdf(const Outline& outline, float scale,
                                                 float spread = 4.0f, int supersample = 2,
-                                                float embolden_px = 0.0f, bool chebyshev = false) {
+                                                float embolden_px = 0.0f, bool chebyshev = false,
+                                                float flatten_tolerance = 0.02f) {
     (void)supersample;
     RasterResult result;
     if (outline.empty() || scale <= 0.0f || spread <= 0.0f) return result;
@@ -769,7 +789,11 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
 
     // Fine flattening: the field is magnified at draw time (48 px drives
     // 190 px text), so chord error must stay far below a display pixel.
-    constexpr float sdf_tolerance = 0.02f;
+    // Fine flattening by default: the field is magnified at draw time, so
+    // chord error must stay far below a display pixel. A negative value
+    // selects CoreGraphics' flattening (see cg_glyph_flattening) so the field
+    // describes the same polygon macOS fills.
+    const float sdf_tolerance = flatten_tolerance;
     const Affine xf{scale, 0.0f, 0.0f, -scale, -x0, -y0};
     std::vector<std::pair<Vec2, Vec2>> edges;
     edges.reserve(outline.point_count() * 4);

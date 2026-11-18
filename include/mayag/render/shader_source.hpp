@@ -77,6 +77,28 @@ inline float mg_srgb_to_linear(float c) {
 inline float mg_linear_to_srgb(float c) {
     return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
 }
+inline float mg_box_halfplane(float d, float nx, float ny) {
+    float a = min(abs(nx), abs(ny));
+    float b = max(max(abs(nx), abs(ny)), 1e-6);
+    float t = d + 0.5 * (a + b);
+    if (t <= 0.0) return 0.0;
+    if (t >= a + b) return 1.0;
+    if (a < 1e-4) return clamp(t / b, 0.0, 1.0);
+    if (t < a) return t * t / (2.0 * a * b);
+    if (t <= b) return (t - 0.5 * a) / b;
+    float u = a + b - t;
+    return 1.0 - u * u / (2.0 * a * b);
+}
+// kernel::sdf_glyph_coverage, verbatim.
+inline float mg_sdf_glyph(float raw, float rx, float ry, float4 params) {
+    float band = params.x > 0.0 ? params.x : 0.09;
+    float per_px = 2.0 * band;
+    float gx = rx - raw, gy = ry - raw;
+    float gl = sqrt(gx * gx + gy * gy);
+    if (gl > 1e-6) { gx /= gl; gy /= gl; } else { gx = 0.0; gy = 1.0; }
+    float d = (raw - 0.5) / per_px + (params.y / per_px) * (abs(gx) + abs(gy));
+    return mg_box_halfplane(d, gx, gy);
+}
 inline float mg_text_gamma(float cov, float4 premul) {
     if (cov <= 0.0 || cov >= 1.0) return cov;
     float a = premul.w > 1e-4 ? premul.w : 1.0;
@@ -266,15 +288,16 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
         }
     } else if (v.kind == KIND_GLYPH) {
         float raw = atlas.sample(smp, v.uv).r;
-        // A bitmap entry IS coverage; an SDF entry must be thresholded. The
-        // flag travels per instance because hybrid mode mixes both. The
-        // half-band comes from v.params.x (CPU-computed per glyph, matching
-        // the software rasteriser); fwidth is only the fallback.
-        float band = v.params.x > 0.0 ? v.params.x : max(fwidth(raw), 1e-5);
-        float edge = 0.5 - v.params.y;   // params.y: font-smoothing growth
-        cov = ((v.flags & FLAG_GLYPH_SDF) != 0u)
-            ? smoothstep(edge - band, edge + band, raw)
-            : raw;
+        // A bitmap entry IS coverage; an SDF entry becomes exact box
+        // coverage from the field and its gradient one display pixel away
+        // (params.zw = uv step of a display pixel), as kernel.hpp does.
+        if ((v.flags & FLAG_GLYPH_SDF) != 0u) {
+            float rx = atlas.sample(smp, v.uv + float2(v.params.z, 0.0)).r;
+            float ry = atlas.sample(smp, v.uv + float2(0.0, v.params.w)).r;
+            cov = mg_sdf_glyph(raw, rx, ry, v.params);
+        } else {
+            cov = raw;
+        }
 #if MG_FB_FETCH
         // CoreGraphics' text blend, exactly (Framebuffer::blend_text): per
         // channel a lerp in ENCODED values, enc(dst) + (enc(src) - enc(dst))

@@ -406,7 +406,11 @@ class DrawList {
         // outward by that many field units: font smoothing grows the glyph
         // by a fixed number of DISPLAY pixels, and one shared field serves
         // every size, so the growth can only be applied per draw.
-        i.params = {sdf_edge, sdf_grow, 0.0f, 0.0f};
+        // params.zw: the atlas uv step of one display pixel (x, y), so the
+        // kernel can sample the field's gradient one pixel away.
+        const float uv_dx = dst.size.x > 0.0f ? atlas_uv.width() / dst.size.x : 0.0f;
+        const float uv_dy = dst.size.y > 0.0f ? atlas_uv.height() / dst.size.y : 0.0f;
+        i.params = {sdf_edge, sdf_grow, sdf ? uv_dx : 0.0f, sdf ? uv_dy : 0.0f};
         if (sdf) i.flags |= instance_flags::glyph_sdf;
         // Texture 0 for batching purposes: the atlas is already bound.
         push(i, 0);

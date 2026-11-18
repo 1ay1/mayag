@@ -323,6 +323,42 @@ inline constexpr u32 FLAG_GLYPH_SDF = 128u;
 /// ramp: a clean edge without the blur a wider band would introduce.
 inline constexpr f32 sdf_edge_fallback = 0.09f;
 
+/// Exact box-filtered coverage of a 1x1 pixel by the half-plane whose
+/// boundary lies `d` px from the pixel centre (positive inside) with unit
+/// normal (nx, ny): the area, piecewise quadratic/linear in d. This is what
+/// an exact-area rasteriser (CoreGraphics, mayag's bitmap path) produces for
+/// a straight edge; a smoothstep or a linear ramp is off by up to 0.125 at
+/// 45 degrees.
+[[nodiscard]] inline f32 box_halfplane_coverage(f32 d, f32 nx, f32 ny) noexcept {
+    const f32 a = mg::min(mg::abs(nx), mg::abs(ny));
+    const f32 b = mg::max(mg::max(mg::abs(nx), mg::abs(ny)), 1e-6f);
+    const f32 t = d + 0.5f * (a + b);   // distance from the box's outermost corner
+    if (t <= 0.0f) return 0.0f;
+    if (t >= a + b) return 1.0f;
+    if (a < 1e-4f) return mg::clamp(t / b, 0.0f, 1.0f);
+    if (t < a) return t * t / (2.0f * a * b);
+    if (t <= b) return (t - 0.5f * a) / b;
+    const f32 u = a + b - t;
+    return 1.0f - u * u / (2.0f * a * b);
+}
+
+/// Coverage of a distance-field glyph texel. `raw` is the field at the pixel
+/// centre, `rx`/`ry` the field one display pixel right/down (the gradient
+/// gives the edge normal). params.x = half a display pixel in field units
+/// (the field is Euclidean, so distance in px = (raw - 0.5) / (2 params.x)),
+/// params.y = font-smoothing growth in field units: CoreGraphics dilates
+/// with a SQUARE kernel, so an edge with normal n moves g (|nx| + |ny|).
+[[nodiscard]] inline f32 sdf_glyph_coverage(f32 raw, f32 rx, f32 ry, vec4 params) noexcept {
+    const f32 band = params.x > 0.0f ? params.x : sdf_edge_fallback;
+    const f32 per_px = 2.0f * band;
+    f32 gx = rx - raw, gy = ry - raw;
+    const f32 gl = mg::sqrt(gx * gx + gy * gy);
+    if (gl > 1e-6f) { gx = gx / gl; gy = gy / gl; } else { gx = 0.0f; gy = 1.0f; }
+    const f32 grow_px = params.y / per_px;
+    const f32 d = (raw - 0.5f) / per_px + grow_px * (mg::abs(gx) + mg::abs(gy));
+    return box_halfplane_coverage(d, gx, gy);
+}
+
 // ── the fragment program ────────────────────────────────────────────────
 
 /// Everything the kernel needs about one fragment. The backends fill this in:
@@ -493,14 +529,13 @@ struct Env {
     if (f.kind == KIND_GLYPH) {
         const f32 raw = env.atlas_r(env.ctx, f.uv);
         if ((f.flags & FLAG_GLYPH_SDF) != 0u) {
-            // Distance-field entry: 0.5 is the edge. The half-band comes from
-            // the glyph emitter (params.x), which derives it from the SDF
-            // spread and the raster->display scale. Using a derivative here
-            // instead would over-estimate the ramp on a magnified, bilinearly
-            // sampled field and bloom every glyph into a grey halo.
-            const f32 band = f.params.x > 0.0f ? f.params.x : sdf_edge_fallback;
-            const f32 edge = 0.5f - f.params.y;   // params.y: font-smoothing growth
-            cov = mg::smoothstep(edge - band, edge + band, raw);
+            // Distance-field entry: exact box coverage from the field value
+            // and its gradient (sdf_glyph_coverage). params.zw = the uv step
+            // of one display pixel, so the two extra taps sit one pixel away
+            // whatever the scale.
+            const f32 rx = env.atlas_r(env.ctx, vec2{f.uv.x + f.params.z, f.uv.y});
+            const f32 ry = env.atlas_r(env.ctx, vec2{f.uv.x, f.uv.y + f.params.w});
+            cov = sdf_glyph_coverage(raw, rx, ry, f.params);
         } else {
             cov = raw;   // bitmap entry: already coverage
         }

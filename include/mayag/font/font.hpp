@@ -1485,10 +1485,30 @@ class FontStack : public Shaper {
             // on both sides of the SDF threshold.
             const float embolden_px = synth_bold
                 ? num::max(sdf_px * 0.03f, 1.0f) : 0.0f;
-            // Spread scales with the tier so the field covers the same
-            // DISPLAY distance (smoothing growth, the edge band) at every tier.
-            const float spread = config_.sdf_spread * sdf_px / num::max(config_.sdf_raster_size, 1.0f);
-            auto r = rasterize_sdf(o, raster_scale, spread, 2, embolden_px, /*chebyshev=*/true);
+            // Spread: the base tier also serves pure-SDF mode down to tiny
+            // sizes (one display px spans many texels), so it keeps the
+            // configured spread. Higher tiers are only ever minified by up to
+            // sqrt(2) (or magnified past the top tier), so +-3 texels covers
+            // the smoothing growth and the edge band, and the 8-bit field gets
+            // ~3x finer steps (0.067 -> 0.024 texels at the 68 px tier),
+            // which is visible as edge error against CoreText.
+            const float base_px = num::max(config_.sdf_raster_size, 1.0f);
+            const float spread = sdf_px <= base_px + 0.5f ? config_.sdf_spread : num::max(3.0f, embolden_px + 2.0f);
+            // Flatten as CoreGraphics would at the tier's typical display
+            // size: thresholds are 0.8 / k device px, with k = display/field
+            // scale, here the tier's geometric mean 2^-1/4 (fields serve
+            // k in (1/sqrt2, 1]). Flattening the true curve instead left
+            // large SDF text ~1.5% off CoreText along every arch.
+            const float flat = config_.cg_flattening ? -std::exp2(0.25f) : 0.02f;
+            // Font smoothing baked into the geometry on tiers above the base:
+            // CoreGraphics' dilation (cg_autohint::dilate) at the saturated
+            // 0.3 display px, scaled to field px at the tier's mean k. emit()
+            // applies only the remainder as a threshold shift.
+            const float baked = sdf_baked_growth_field(sdf_px);
+            Outline fo = o;
+            fo.transform(Affine{raster_scale, 0.0f, 0.0f, raster_scale, 0.0f, 0.0f});
+            if (baked > 0.0f) fo = cg_autohint::dilate(fo, baked, baked);
+            auto r = rasterize_sdf(fo, 1.0f, spread, 2, embolden_px, /*chebyshev=*/false, flat);
             return atlas_.insert(key, r.bitmap, r.offset, advance,
                                  raster_scale, spread, true);
         }
@@ -1620,6 +1640,17 @@ class FontStack : public Shaper {
 
   public:
     [[nodiscard]] bool should_use_sdf_public(float size_px) const noexcept { return should_use_sdf(size_px); }
+
+    /// Smoothing growth baked into an SDF tier's geometry, in FIELD px: 0 on
+    /// the base tier (it serves arbitrarily small sizes, whose growth varies
+    /// with size and colour), else the saturated 0.3 px at the tier's mean
+    /// display/field scale 2^-1/4. Sizes above the base tier are past
+    /// 0.3 / 0.0058 = 51.7 px for all but the darkest text between 48.5 and
+    /// 51.7 px, where emit()'s remainder shift (negative) corrects it.
+    [[nodiscard]] float sdf_baked_growth_field(float tier_px) const noexcept {
+        if (config_.smoothing <= 0.0f || tier_px <= num::max(config_.sdf_raster_size, 1.0f) + 0.5f) return 0.0f;
+        return config_.smoothing * std::exp2(0.25f);
+    }
 
     /// The pixel size an SDF entry for text drawn at `size_px` is rasterised
     /// at: sdf_raster_size stepped up by sqrt(2) (48, 68, 96, 136, 192 by
@@ -2406,23 +2437,22 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
         } else if (g.is_sdf) {
             // The SDF field changes by ~1/(2*spread) per RASTER texel; one
             // DISPLAY pixel spans 1/k raster texels, so the field moves
-            // 1/(2*spread*k) per display pixel. Size the smoothstep half-band
-            // to about one display pixel so a magnified glyph (k>1) gets a
-            // thin crisp edge instead of a fat blur, and a shrunk one still
-            // antialiases. Clamp so a texel-scale ramp never vanishes. 0.6 px
-            // is the smoothstep half-band whose ramp best matches box-filtered
-            // coverage (fitted against CoreText at 60-120 px: 0.75 softened
-            // edges, ~1 point of error).
+            // 1/(2*spread*k) per display pixel.
             const float spread = g.spread > 0.0f ? g.spread : 4.0f;
             const float per_px = 1.0f / (2.0f * spread * num::max(k, 0.01f));
-            const float edge = num::clamp(per_px * 0.6f, 0.01f, 0.25f);
-            // Font smoothing: the same per-side growth the bitmap path bakes
-            // into its outlines, as a threshold shift (per_px field units per
-            // display pixel), so text keeps its weight across the threshold.
-            const float grow_px = stack_->smoothing_px(st.size, FontStack::smoothing_level(st.color));
+            // Half a display pixel in field units: the kernel turns the field
+            // into an exact distance in px (Euclidean field) and evaluates
+            // box-filtered half-plane coverage along the field's gradient.
+            const float edge = num::max(per_px * 0.5f, 1e-4f);
+            // Font smoothing: tiers above the base carry CoreGraphics'
+            // dilation in their geometry (FontStack::sdf_baked_growth_field);
+            // only the remainder against this size's real growth is applied
+            // here, as a threshold shift (per_px field units per display px)
+            // plus CoreGraphics' vertical asymmetry: the top grows 2x, the
+            // bottom not at all, i.e. the dilated glyph moves up by it.
+            const float baked_px = stack_->sdf_baked_growth_field(stack_->sdf_raster_px(st.size)) * k;
+            const float grow_px = stack_->smoothing_px(st.size, FontStack::smoothing_level(st.color)) - baked_px;
             const float grow = grow_px * per_px;
-            // ...and CoreGraphics' vertical asymmetry: the top grows 2x, the
-            // bottom not at all, i.e. the dilated glyph moves up by grow_px.
             dst.origin.y -= grow_px;
             dl.glyph(dst, g.uv, st.color, true, edge, grow);
         } else {

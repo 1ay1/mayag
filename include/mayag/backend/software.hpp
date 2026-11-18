@@ -585,17 +585,16 @@ class Software {
                 (void)texture;
                 const float raw = sampler->sample(inst.texture_slot, u, v);
 
-                // A bitmap entry IS coverage; a distance-field entry has to be
-                // thresholded. Which one this is travels per instance, because
-                // hybrid mode mixes both within a single frame. params.x is
-                // the scale-correct half-band the emitter computed for THIS
-                // glyph (so magnified text stays crisp); fall back to the
-                // constant when it wasn't set.
-                const float band = inst.params.x > 0.0f ? inst.params.x : sdf_edge;
-                const float edge = 0.5f - inst.params.y;   // font-smoothing growth
-                const float cov = (inst.flags & instance_flags::glyph_sdf) == 0
-                    ? raw
-                    : num::smoothstep(edge - band, edge + band, raw);
+                // A bitmap entry IS coverage; a distance-field entry is turned
+                // into exact box coverage by the shared kernel function, from
+                // the field and two taps one display pixel away (params.zw).
+                (void)sdf_edge;
+                float cov = raw;
+                if ((inst.flags & instance_flags::glyph_sdf) != 0) {
+                    const float rx = sampler->sample(inst.texture_slot, u + inst.params.z, v);
+                    const float ry = sampler->sample(inst.texture_slot, u, v + inst.params.w);
+                    cov = kernel::sdf_glyph_coverage(raw, rx, ry, inst.params);
+                }
 
                 // ── text coverage ─────────────────────────────────────
                 //
