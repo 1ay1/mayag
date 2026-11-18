@@ -588,9 +588,11 @@ struct FontConfig {
     /// on the monitor was a real bug: the same UI rendered differently on
     /// different screens.
     float      sdf_threshold = 56.0f;
-    /// SDF is generated at this pixel size and scaled; larger means better
-    /// fidelity at large display sizes and a bigger atlas footprint.
+    /// Base SDF raster size in pixels. Text up to this size shares one field;
+    /// larger text uses sqrt(2)-spaced tiers up to 4x this (48..192 px), so
+    /// fields are minified rather than magnified (FontStack::sdf_raster_px).
     float      sdf_raster_size = 48.0f;
+    /// SDF spread at the base tier, in pixels; scaled with each tier.
     float      sdf_spread      = 6.0f;
     int        atlas_size      = 1024;
     /// Font smoothing: grow every glyph outline by this many DEVICE pixels
@@ -1143,14 +1145,16 @@ class FontStack : public Shaper {
         GlyphKey key;
         key.face_id  = face.id();
         key.glyph_id = gid;
-        // The payoff of SDF: every size collapses to one bucket, so a page
-        // with ten type sizes rasterises each glyph once instead of ten times.
-        // SDF entries are scale-free, so every size collapses to one bucket.
+        // The payoff of SDF: sizes share a raster. Entries are made in TIERS
+        // (sdf_raster_px, sqrt(2) apart), so a field is minified rather than
+        // magnified up to 4x the base raster, while a page with ten type
+        // sizes still rasterises each glyph only a few times.
         // Bitmap entries are rasterised for the size they are drawn at, and
         // quantising to QUARTER pixels keeps the cache from exploding while
         // staying far finer than the eye can resolve.
+        const float sdf_px = use_sdf ? sdf_raster_px(size_px) : 0.0f;
         key.size_bucket = use_sdf
-            ? 0
+            ? static_cast<std::uint16_t>(sdf_px)
             : static_cast<std::uint16_t>(num::clamp(num::round(size_px * 4.0f),
                                                     1.0f, 65000.0f));
         // Synthesise italic by shearing when the font can't slant itself
@@ -1249,22 +1253,32 @@ class FontStack : public Shaper {
         }
 
         if (use_sdf) {
-            const float raster_scale = face.scale_for(config_.sdf_raster_size);
-            // Faux-bold in the SDF path: thicken the field's source coverage by
-            // ~3% of the SDF raster size, matching the coverage path so bold
-            // looks the same on both sides of the SDF threshold.
+            const float raster_scale = face.scale_for(sdf_px);
+            // Faux-bold in the SDF path: thicken the outline by ~3% of the
+            // raster size, matching the coverage path so bold looks the same
+            // on both sides of the SDF threshold.
             const float embolden_px = synth_bold
-                ? num::max(config_.sdf_raster_size * 0.03f, 1.0f) : 0.0f;
-            auto r = rasterize_sdf(o, raster_scale, config_.sdf_spread, 2, embolden_px);
+                ? num::max(sdf_px * 0.03f, 1.0f) : 0.0f;
+            // Spread scales with the tier so the field covers the same
+            // DISPLAY distance (smoothing growth, the edge band) at every tier.
+            const float spread = config_.sdf_spread * sdf_px / num::max(config_.sdf_raster_size, 1.0f);
+            auto r = rasterize_sdf(o, raster_scale, spread, 2, embolden_px);
             return atlas_.insert(key, r.bitmap, r.offset, advance,
-                                 raster_scale, config_.sdf_spread, true);
+                                 raster_scale, spread, true);
         }
 
         // Rasterise at the size the KEY represents, not the raw request, so
         // two calls that share a cache slot also share identical pixels.
         const float quantised = static_cast<float>(key.size_bucket) * 0.25f;
         const float scale = face.scale_for(quantised);
-        if (const float grow = smoothing_px(quantised, dark_text); grow > 0.0f) o.embolden(grow / scale);
+        if (const float grow = smoothing_px(quantised, dark_text); grow > 0.0f) {
+            // CoreGraphics' smoothing grows each side horizontally by `grow`
+            // but vertically grows the TOP by 2*grow and the bottom not at
+            // all (measured on straight SF stems and bars, 32-160 px): a
+            // symmetric dilation plus an upward shift of `grow`.
+            o.embolden(grow / scale);
+            o.transform(Affine{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, grow / scale});
+        }
         if (x_phase != 0) {
             // Bake the pen's fraction into the outline (font units, so divide
             // the pixel shift by the scale). rasterize() floors the bounds, so
@@ -1363,6 +1377,21 @@ class FontStack : public Shaper {
             case RenderMode::hybrid: return size_px >= config_.sdf_threshold;
         }
         return false;
+    }
+
+  public:
+    /// The pixel size an SDF entry for text drawn at `size_px` is rasterised
+    /// at: sdf_raster_size stepped up by sqrt(2) (48, 68, 96, 136, 192 by
+    /// default) to the first tier at least as large as the drawn size, so
+    /// fields are only ever minified, up to 4x the base; past that the top
+    /// tier is magnified. A field magnified 4x blurred the ~1 texel strokes
+    /// of dense CJK (龘) into grey bars and shifted thin features.
+    [[nodiscard]] float sdf_raster_px(float size_px) const noexcept {
+        const float base = num::max(config_.sdf_raster_size, 1.0f);
+        float px = base;
+        for (int i = 0; i < 4 && size_px > px + 0.5f; ++i)
+            px = num::round(base * std::exp2(static_cast<float>(i + 1) * 0.5f));
+        return px;
     }
 
   private:
@@ -1999,29 +2028,39 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
     ///
     /// A coverage glyph is drawn at the pen's whole pixel with the fraction
     /// rasterised into its bitmap (FontStack::subpixel_phases_for), so it is
-    /// sharp AND where the shaper put it. SDF and colour glyphs are resampled
-    /// images with no phases; they take the pen as is.
+    /// sharp AND where the shaper put it. An SDF glyph is resampled, but is
+    /// placed on the SAME grid: x floored to 1/N px and, for both, the
+    /// baseline on a whole device pixel, as CoreGraphics positions glyphs (x
+    /// subpixel, y never), so coverage bitmaps are never resampled vertically
+    /// and text sits on the rows macOS puts it on.
+    /// Colour glyphs take the pen as is.
     void place(DrawList& dl, std::size_t face_index, std::uint16_t gid, Vec2 pen,
                const TextStyle& st, const ShapeParams& sp) const {
-        const auto split = FontStack::split_pen(pen.x, FontStack::subpixel_phases_for(st.size));
+        const int phases = FontStack::subpixel_phases_for(st.size);
+        const auto split = FontStack::split_pen(pen.x, phases);
         const CachedGlyph* cached = stack_->glyph(face_index, gid, st.size, st.effective_weight(),
                                                    {sp.axes.data(), sp.axis_count}, sp.italic,
                                                    split.phase, FontStack::is_dark_text(st.color));
         if (cached == nullptr || cached->size.x <= 0.0f) return;
-        const bool phased = !cached->is_sdf && !cached->is_color;
-        emit(dl, *cached, phased ? Vec2{split.pixel, pen.y} : pen, st);
+        Vec2 at = pen;
+        if (cached->is_sdf && !cached->is_color)
+            at = Vec2{split.pixel + static_cast<float>(split.phase) / static_cast<float>(phases), num::round(pen.y)};
+        else if (!cached->is_color)
+            at = Vec2{split.pixel, num::round(pen.y)};
+        emit(dl, *cached, at, st);
     }
 
     void emit(DrawList& dl, const CachedGlyph& g, Vec2 pen, const TextStyle& st) const {
         // An SDF entry was rasterised at one size and is reused at every
         // other, so its bearing and extent scale by the ratio between them.
         // A bitmap entry was made for this exact size, so the ratio is 1.
+        // Every SDF entry is rasterised at its tier, sdf_raster_px(size), so
+        // the ratio is size / tier whatever the face: deriving it from face
+        // 0's units-per-em scaled glyphs of faces with another upem wrongly
+        // (PingFang UI Display, 1064 upem behind SF's 2048, came out half
+        // size from the 56 px SDF threshold up).
         float k = 1.0f;
-        if (g.is_sdf && g.raster_scale > 0.0f) {
-            if (const Face* face = stack_->face_at(0); face != nullptr) {
-                k = face->scale_for(st.size) / g.raster_scale;
-            }
-        }
+        if (g.is_sdf && g.raster_scale > 0.0f) k = st.size / stack_->sdf_raster_px(st.size);
 
         Rect dst{pen.x + g.bearing.x * k,
                  pen.y + g.bearing.y * k,
@@ -2067,7 +2106,11 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             // Font smoothing: the same per-side growth the bitmap path bakes
             // into its outlines, as a threshold shift (per_px field units per
             // display pixel), so text keeps its weight across the threshold.
-            const float grow = stack_->smoothing_px(st.size, FontStack::is_dark_text(st.color)) * per_px;
+            const float grow_px = stack_->smoothing_px(st.size, FontStack::is_dark_text(st.color));
+            const float grow = grow_px * per_px;
+            // ...and CoreGraphics' vertical asymmetry: the top grows 2x, the
+            // bottom not at all, i.e. the dilated glyph moves up by grow_px.
+            dst.origin.y -= grow_px;
             dl.glyph(dst, g.uv, st.color, true, edge, grow);
         } else {
             dl.glyph(dst, g.uv, st.color, false);

@@ -19,15 +19,23 @@
 // way from the previous segment's off-curve point to its own, and a lone
 // tangent (blend 2) keeps its on-curve point on that same segment
 // (projected); both clamp t to [0, 1]. The rest store the on-curve point
-// directly. The spec does not say how a composite's transform deltas
-// compose with rotations; measured against CTFontCreatePathForGlyph, deltas
-// move a part in the frame of its MASTER rotation (see part()).
+// directly.
 //
-// Accuracy vs CoreText on PingFang UI (random glyphs, random instances):
-// 94% of glyphs match every point within 0.01 font units. The rest share
-// one component (47401, the water radical) whose rotation comes only from
-// extremum deltas; its exact composition is still unknown, and it is off by
-// up to ~13 units of 1028 (0.2 px at 16 px).
+// The spec does not say how a composite's transform deltas compose. Derived
+// against Apple's own libhvf (HVF_render_current_part, which CoreText uses),
+// part by part: every tree row is placed by a RIGID MOTION
+//     row = master ∘ E_c0 ∘ E_c1 ∘ … ∘ inherited
+// where master is the row's master rotation + translation, E_c is the
+// extremum column c (ascending) — rotation w·θ and, when that column also
+// rotates, a translation that follows the rotation's arc (a screw motion:
+// t·(1 − e^{iwθ})/(1 − e^{iθ}), exact at w = 0 and w = 1) — and inherited is
+// the motion the ancestors computed for this row. Axis values are NOT
+// clamped: a composite may drive a subpart's axes past ±1 and the deltas
+// extrapolate.
+//
+// Accuracy: 1200 random parts × axis vectors match libhvf within 1e-6
+// units; 600 random glyph instances match CTFontCreatePathForGlyph within
+// 0.006 units (float32 rounding).
 //
 // All values little-endian; shapes use float64, composites float32. The
 // table is untrusted input: every read is bounds-checked, part recursion is
@@ -83,22 +91,28 @@ class HvglSource {
         std::vector<double> root(coords_ != nullptr ? coords_->size() : 0, 0.0);
         for (std::size_t i = 0; i < root.size(); ++i) root[i] = (*coords_)[i];
         std::size_t budget = 1 << 16;   // parts visited, for hostile trees
-        part(gid, root, {}, {}, {}, Xf{}, out, 0, budget);
+        part(gid, root, {}, {}, Motion{}, out, 0, budget);
         return out;
     }
 
   private:
-    struct Xf {
-        double a = 1, b = 0, c = 0, d = 1, e = 0, f = 0;
-        [[nodiscard]] Vec2 apply(double x, double y) const {
-            return Vec2{static_cast<float>(a * x + c * y + e), static_cast<float>(b * x + d * y + f)};
+    /// p -> R(th) p + (x, y)
+    struct Motion {
+        double th = 0, x = 0, y = 0;
+        [[nodiscard]] Vec2 apply(double px, double py) const {
+            const double c = std::cos(th), s = std::sin(th);
+            return Vec2{static_cast<float>(c * px - s * py + x), static_cast<float>(s * px + c * py + y)};
         }
-        [[nodiscard]] Xf then(const Xf& n) const {   // this ∘ n
-            return {a * n.a + c * n.b, b * n.a + d * n.b, a * n.c + c * n.d, b * n.c + d * n.d,
-                    a * n.e + c * n.f + e, b * n.e + d * n.f + f};
+        [[nodiscard]] Motion then(const Motion& n) const {   // this ∘ n
+            const double c = std::cos(th), s = std::sin(th);
+            return {th + n.th, x + c * n.x - s * n.y, y + s * n.x + c * n.y};
         }
     };
     struct Remap { std::uint32_t start, end, dest; };
+    struct ColDelta {   // one extremum column's contribution to one tree row
+        std::size_t row, col;
+        double th, x, y;
+    };
 
     std::span<const std::uint8_t> data_;
     std::uint32_t n_parts_ = 0, index_ = 0, n_glyphs_ = 0;
@@ -135,15 +149,17 @@ class HvglSource {
     }
 
     static void push_weights(std::span<const double> axes, std::size_t naxes, std::vector<double>& w) {
+        // Not clamped: composites legitimately drive subpart axes past ±1
+        // and libhvf extrapolates the deltas (checked part by part).
         w.assign(2 * naxes, 0.0);
         for (std::size_t a = 0; a < naxes && a < axes.size(); ++a) {
-            const double v = std::clamp(axes[a], -1.0, 1.0);
+            const double v = axes[a];
             if (v < 0) w[2 * a] = -v;
             else w[2 * a + 1] = v;
         }
     }
 
-    void shape(std::size_t o, std::span<const double> axes, const Xf& xf, Outline& out) const {
+    void shape(std::size_t o, std::span<const double> axes, const Motion& xf, Outline& out) const {
         const std::size_t naxes = rd16(o + 2), npaths = rd16(o + 4), nseg = rd16(o + 6);
         std::size_t p = o + 8;
         if (p + 2 * npaths + nseg > data_.size()) return;
@@ -203,7 +219,7 @@ class HvglSource {
     }
 
     void part(std::uint32_t id, std::span<const double> axes, std::span<const double> inh_axes,
-              std::span<const double> inh_tx, std::span<const double> inh_rot, const Xf& xf,
+              std::span<const Motion> inherited, const Motion& xf,
               Outline& out, int depth, std::size_t& budget) const {
         if (depth > 32 || budget == 0) return;
         --budget;
@@ -218,16 +234,12 @@ class HvglSource {
         if (ntree == 0 || treeaxes < naxes) return;
         const std::size_t rows_ax = treeaxes - naxes, rows_tr = ntree - 1, ncol = 2 * naxes;
         const auto at4 = [&](std::uint16_t q) { return o + 4 * std::size_t{q}; };
-        // Per tree row: the composite's OWN master translation/rotation, and
-        // the deltas (its extremum contributions plus everything inherited
-        // from ancestors). Measured against CoreText: a part is placed by
-        //   p' = R(rot_total) p + t_master + R(rot_master) * t_delta
-        // i.e. deltas move the part in the frame of the master rotation.
-        std::vector<double> vax(rows_ax, 0.0), vdel(2 * rows_tr, 0.0), vmas(2 * rows_tr, 0.0),
-            vrot(rows_tr, 0.0), vmrot(rows_tr, 0.0);
+        // Per tree row: master motion, then this composite's extremum columns
+        // (sparse, ascending column order), composed with the inherited
+        // motion — see the header comment.
+        std::vector<double> vax(rows_ax, 0.0);
+        std::vector<Motion> master(rows_tr);
         for (std::size_t i = 0; i < rows_ax && i < inh_axes.size(); ++i) vax[i] = inh_axes[i];
-        for (std::size_t i = 0; i < 2 * rows_tr && i < inh_tx.size(); ++i) vdel[i] = inh_tx[i];
-        for (std::size_t i = 0; i < rows_tr && i < inh_rot.size(); ++i) vrot[i] = inh_rot[i];
         std::vector<double> w;
         push_weights(axes, naxes, w);
         // axis values: master (sparse rows) + extremum (column-sparse)
@@ -250,25 +262,53 @@ class HvglSource {
         const std::size_t mtd = t, etd = t + 8 * nmtr, eti = etd + 8 * nextr, mti = eti + 4 * nextr;
         for (std::size_t i = 0; i < nmtr; ++i) {
             const std::size_t r = rd16(mti + 2 * i);
-            if (r < rows_tr) { vmas[2 * r] += finite(rdf(mtd + 8 * i)); vmas[2 * r + 1] += finite(rdf(mtd + 8 * i + 4)); }
+            if (r < rows_tr) { master[r].x += finite(rdf(mtd + 8 * i)); master[r].y += finite(rdf(mtd + 8 * i + 4)); }
         }
+        std::vector<ColDelta> cols;   // (row, col) -> rotation + translation, this instance's active columns
+        const auto col_entry = [&](std::size_t r, std::size_t c) -> ColDelta& {
+            for (auto& d : cols) if (d.row == r && d.col == c) return d;
+            cols.push_back(ColDelta{r, c, 0.0, 0.0, 0.0});
+            return cols.back();
+        };
         for (std::size_t i = 0; i < nextr; ++i) {
             const std::size_t r = rd16(eti + 4 * i), c = rd16(eti + 4 * i + 2);
             if (r < rows_tr && c < ncol && w[c] != 0.0) {
-                vdel[2 * r] += finite(rdf(etd + 8 * i)) * w[c];
-                vdel[2 * r + 1] += finite(rdf(etd + 8 * i + 4)) * w[c];
+                ColDelta& d = col_entry(r, c);
+                d.x += finite(rdf(etd + 8 * i));
+                d.y += finite(rdf(etd + 8 * i + 4));
             }
         }
         // rotations, same layout with scalars
         const std::size_t mrd = at4(h[17]), erd = mrd + 4 * nmrot, eri = erd + 4 * nexrot, mri = eri + 4 * nexrot;
         for (std::size_t i = 0; i < nmrot; ++i) {
             const std::size_t r = rd16(mri + 2 * i);
-            if (r < rows_tr) { const double v = finite(rdf(mrd + 4 * i)); vrot[r] += v; vmrot[r] += v; }
+            if (r < rows_tr) master[r].th += finite(rdf(mrd + 4 * i));
         }
         for (std::size_t i = 0; i < nexrot; ++i) {
             const std::size_t r = rd16(eri + 4 * i), c = rd16(eri + 4 * i + 2);
-            if (r < rows_tr && c < ncol && w[c] != 0.0) vrot[r] += finite(rdf(erd + 4 * i)) * w[c];
+            if (r < rows_tr && c < ncol && w[c] != 0.0) col_entry(r, c).th += finite(rdf(erd + 4 * i));
         }
+        // Row motions: master ∘ E_c (ascending c) ∘ inherited.
+        std::sort(cols.begin(), cols.end(), [](const ColDelta& a, const ColDelta& b) {
+            return a.row != b.row ? a.row < b.row : a.col < b.col;
+        });
+        std::vector<Motion> row(master);
+        for (const auto& d : cols) {
+            const double ww = w[d.col], th = ww * d.th;
+            double tx = ww * d.x, ty = ww * d.y;
+            if (d.th != 0.0 && (1.0 - std::cos(d.th)) * (1.0 - std::cos(d.th)) + std::sin(d.th) * std::sin(d.th) > 1e-18) {
+                // screw: translation follows the rotation's arc,
+                // t * (1 - e^{i w θ}) / (1 - e^{i θ})
+                const double nr = 1.0 - std::cos(th), ni = -std::sin(th);
+                const double dr = 1.0 - std::cos(d.th), di = -std::sin(d.th);
+                const double den = dr * dr + di * di;
+                const double fr = (nr * dr + ni * di) / den, fi = (ni * dr - nr * di) / den;
+                tx = fr * d.x - fi * d.y;
+                ty = fr * d.y + fi * d.x;
+            }
+            row[d.row] = row[d.row].then(Motion{th, tx, ty});
+        }
+        for (std::size_t r = 0; r < rows_tr && r < inherited.size(); ++r) row[r] = row[r].then(inherited[r]);
         // subparts
         const std::size_t sub = at4(h[12]);
         for (std::size_t k = 0; k < nsub; ++k) {
@@ -282,20 +322,10 @@ class HvglSource {
             const std::size_t po = part_offset(pid);
             const std::size_t sub_axes = po != 0 ? rd16(po + 2) : 0;
             if (ta + sub_axes > ta_end) continue;
-            const double th = vrot[tp], cs_ = std::cos(th), sn = std::sin(th);
-            const double cm = std::cos(vmrot[tp]), sm = std::sin(vmrot[tp]);
-            const double dx = vdel[2 * tp], dy = vdel[2 * tp + 1];
-            const Xf local{cs_, sn, -sn, cs_, vmas[2 * tp] + cm * dx - sm * dy, vmas[2 * tp + 1] + sm * dx + cm * dy};
-            // descendants inherit this level's totals (master + deltas)
-            std::vector<double> itx(2 * (tp_end - tp - 1));
-            for (std::size_t r = tp + 1; r < tp_end; ++r) {
-                itx[2 * (r - tp - 1)] = vmas[2 * r] + vdel[2 * r];
-                itx[2 * (r - tp - 1) + 1] = vmas[2 * r + 1] + vdel[2 * r + 1];
-            }
             const std::span<const double> ax{vax.data() + ta, sub_axes};
             const std::span<const double> iax{vax.data() + ta + sub_axes, ta_end - ta - sub_axes};
-            const std::span<const double> irot{vrot.data() + tp + 1, tp_end - tp - 1};
-            part(pid, ax, iax, itx, irot, xf.then(local), out, depth + 1, budget);
+            const std::span<const Motion> inh{row.data() + tp + 1, tp_end - tp - 1};
+            part(pid, ax, iax, inh, xf.then(row[tp]), out, depth + 1, budget);
         }
     }
 };

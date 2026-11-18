@@ -398,6 +398,36 @@ void test_sdf() {
     }
     check(crossings == 4, "upscaled 'o' crosses its outline 4 times (got " +
                           std::to_string(crossings) + ")");
+
+    // The field is exact: thresholding it at 0.5 must put the glyph where
+    // coverage puts it. The old EDT route (seeded from a supersampled
+    // coverage bitmap) shifted 'H' ~0.85 raster px right, which magnified
+    // SDF text then drew 3 px off at 200 px.
+    for (const char32_t cp : {U'H', U'O', U'l'}) {
+        const auto g = face->outline(face->glyph_for(static_cast<std::uint32_t>(cp)));
+        const float sc = face->scale_for(48.0f);
+        const auto cov = typo::rasterize(g, sc, 1);
+        const auto f = typo::rasterize_sdf(g, sc, spread, 2);
+        double s = 0, cx = 0, s2 = 0, cx2 = 0;
+        for (int py = 0; py < cov.bitmap.height; ++py)
+            for (int px = 0; px < cov.bitmap.width; ++px) {
+                const double a = cov.bitmap.at(px, py) / 255.0;
+                s += a; cx += a * (px + 0.5 + static_cast<double>(cov.offset.x));
+            }
+        constexpr int U = 8;
+        for (int py = 0; py < f.bitmap.height * U; ++py)
+            for (int px = 0; px < f.bitmap.width * U; ++px) {
+                const float u = (static_cast<float>(px) + 0.5f) / static_cast<float>(f.bitmap.width * U);
+                const float v = (static_cast<float>(py) + 0.5f) / static_cast<float>(f.bitmap.height * U);
+                if (f.bitmap.sample(u, v) >= 0.5f) {
+                    s2 += 1.0; cx2 += (px + 0.5) / U + static_cast<double>(f.offset.x);
+                }
+            }
+        const double bias = cx2 / s2 - cx / s;
+        check(std::abs(bias) < 0.15, std::string("exact SDF centroid matches coverage for '") + char(cp) +
+                                         "' (bias " + std::to_string(bias) + " px)");
+        check(std::abs(s2 / (U * U) - s) / s < 0.03, std::string("exact SDF area matches coverage for '") + char(cp) + "'");
+    }
 }
 
 void test_atlas() {
@@ -462,16 +492,24 @@ void test_atlas() {
     check(stack.atlas().glyph_count() > count_after_first,
           "a different size is a different bitmap entry");
 
-    // SDF mode: every size shares ONE entry. This is the whole reason the
-    // typography page above renders in a single draw call.
+    // SDF mode: sizes up to the base raster share ONE entry (this is why a
+    // page of type sizes renders in a single draw call); larger sizes use
+    // sqrt(2)-spaced tiers so a field is minified rather than magnified, so
+    // six sizes from 8 to 96 px make three entries (48, 68, 96 px fields).
     typo::FontStack sdf_stack{typo::FontConfig{.mode = typo::RenderMode::sdf}};
     sdf_stack.add(face);
-    for (float size : {8.0f, 12.0f, 16.0f, 24.0f, 48.0f, 96.0f}) {
+    for (float size : {8.0f, 12.0f, 16.0f, 24.0f, 48.0f}) {
         (void)sdf_stack.glyph(0, face->glyph_for('A'), size);
     }
     check(sdf_stack.atlas().glyph_count() == 1,
-          "SDF mode shares one entry across 6 sizes (got " +
+          "SDF mode shares one entry across sizes up to the base raster (got " +
           std::to_string(sdf_stack.atlas().glyph_count()) + ")");
+    for (float size : {60.0f, 64.0f, 96.0f}) (void)sdf_stack.glyph(0, face->glyph_for('A'), size);
+    check(sdf_stack.atlas().glyph_count() == 3,
+          "larger sizes add one entry per sqrt(2) tier (got " +
+          std::to_string(sdf_stack.atlas().glyph_count()) + ")");
+    near(sdf_stack.sdf_raster_px(200.0f), 192.0f, 0.01f, "tiers stop at 4x the base raster");
+    near(sdf_stack.sdf_raster_px(60.0f), 68.0f, 0.01f, "60 px text uses the 68 px tier (minified)");
 }
 
 void test_shaping() {
@@ -1304,6 +1342,61 @@ void test_named_weights() {
     }
 }
 
+// Apple HVF ('hvgl') outlines: PingFang UI Display, 沙 (gid 1669) at wght 700.
+// The water radical's strokes rotate from extremum deltas, where libhvf moves
+// the translation along the rotation's arc (a screw) and composes columns as
+// rigid motions; reference points are CTFontCreatePathForGlyph's, in font
+// units. The previous linear composition was off by 1.44 units here.
+void test_hvgl() {
+    section("hvgl outlines");
+    const char* pf = "/System/Library/PrivateFrameworks/FontServices.framework/Resources/Reserved/PingFangUI.ttc";
+    if (!std::filesystem::exists(pf)) { check(true, "no PingFang UI — skipping"); return; }
+    auto f = typo::Face::from_file(pf, 5);
+    check(f != nullptr, "PingFang UI Display loads (hvgl outlines)");
+    if (!f) return;
+    f->set_variation(typo::var::tag_wght, 700.0f);
+    const auto o = f->outline(1669);
+    std::vector<Vec2> pts;
+    for (const auto& c : o.contours) {
+        pts.push_back(c.start);
+        for (const auto& s : c.segments) { pts.push_back(s.c0); pts.push_back(s.to); }
+    }
+    check(pts.size() == 91, "沙 has CoreText's 91 path points");
+    if (pts.size() != 91) return;
+    const std::pair<std::size_t, Vec2> ref[] = {
+        {0, {575.312f, 819.318f}}, {13, {375.573f, 247.717f}}, {26, {723.819f, 676.324f}},
+        {39, {823.555f, 374.450f}}, {53, {53.297f, 722.263f}}, {54, {132.930f, 806.773f}},
+        {60, {238.048f, 572.907f}}, {90, {234.800f, 72.494f}}};
+    float err = 0.0f;
+    for (const auto& [i, p] : ref) err = std::max({err, num::abs(pts[i].x - p.x), num::abs(pts[i].y - p.y)});
+    check(err < 0.01f, "沙 bold matches CoreText within 0.01 units (got " + std::to_string(err) + ")");
+
+    // SDF glyphs from a fallback face with ANOTHER units-per-em than the
+    // primary (PingFang UI Display 1064 behind Arial's 2048) must draw at the
+    // drawn size: the quad scale used to come from face 0's upem, so they
+    // came out half size from the SDF threshold up. Compare the quad of the
+    // same PingFang glyph drawn via a stack where it IS face 0.
+    const auto quad_h = [&](std::vector<std::shared_ptr<typo::Face>> faces) {
+        auto stack = std::make_shared<typo::FontStack>();
+        for (auto& fc : faces) stack->add(fc);
+        typo::StackMeasurer measurer{*stack};
+        typo::StackGlyphRenderer glyphs{*stack};
+        Node root = (text_owned("\xE4\xB8\xAD") | font(120)).build();   // 中
+        layout::layout_tree(root, {400, 300}, measurer);
+        DrawList dl;
+        render::PaintOptions po; po.measurer = &measurer; po.glyphs = &glyphs;
+        render::paint(root, dl, po);
+        float h = 0.0f;
+        for (const auto& inst : dl.instances()) h = num::max(h, inst.rect.w);
+        return h;
+    };
+    auto pf_display = typo::Face::from_file(pf, 5);
+    const float alone = quad_h({pf_display});
+    const float behind = quad_h({test_face(), pf_display});
+    check(alone > 60.0f, "120 px 中 draws a full-size SDF quad (" + std::to_string(alone) + " px)");
+    near(behind, alone, 0.5f, "SDF quad size does not depend on the primary face's upem");
+}
+
 void test_variations() {
     section("variable fonts");
 
@@ -1894,6 +1987,7 @@ int main() {
     test_rendering();
     test_variations();
     test_named_weights();
+    test_hvgl();
     test_optical_size();
     test_caret();
     test_italic();

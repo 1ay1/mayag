@@ -512,12 +512,13 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
     return sdf;
 }
 
-/// Render straight to an SDF. Rasterises at a higher internal resolution than
-/// the SDF needs, because the distance transform's accuracy is bounded by the
-/// coverage bitmap it is seeded from.
-[[nodiscard]] inline RasterResult rasterize_sdf(const Outline& outline, float scale,
-                                                float spread = 4.0f, int supersample = 2,
-                                                float embolden_px = 0.0f) {
+/// The previous SDF route: rasterise coverage at `supersample`x and run the
+/// 8SSEDT over it. Kept for comparison; its seeds carry their sub-pixel
+/// distance along x only, which biases every field horizontally (~0.75
+/// raster px on 'H'), so rasterize_sdf() below computes distances exactly.
+[[nodiscard]] inline RasterResult rasterize_sdf_edt(const Outline& outline, float scale,
+                                                    float spread = 4.0f, int supersample = 2,
+                                                    float embolden_px = 0.0f) {
     const int   ss     = num::clamp(supersample, 1, 4);
     const int   pad    = static_cast<int>(std::ceil(spread)) + 1;
     const float hi_res = scale * static_cast<float>(ss);
@@ -588,6 +589,167 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
     out.bitmap = std::move(out_bmp);
     out.offset = hi.offset / static_cast<float>(ss);
     return out;
+}
+
+/// Render straight to an EXACT signed distance field.
+///
+/// Every texel centre stores its true Euclidean distance to the outline
+/// (flattened at 0.02 px, see below), signed by the nonzero winding rule at
+/// that centre: positive inside, encoded as 0.5 + d / (2 * spread). Nothing
+/// is seeded from a coverage bitmap, so there is no supersampling, no seed
+/// quantisation and no directional bias, and bilinear sampling between texels
+/// reconstructs the edge to within the field's linearity. Faux-bold
+/// (`embolden_px`) grows the outline by exactly that distance.
+///
+/// `supersample` is accepted for API compatibility and ignored.
+[[nodiscard]] inline RasterResult rasterize_sdf(const Outline& outline, float scale,
+                                                float spread = 4.0f, int supersample = 2,
+                                                float embolden_px = 0.0f) {
+    (void)supersample;
+    RasterResult result;
+    if (outline.empty() || scale <= 0.0f || spread <= 0.0f) return result;
+    embolden_px = num::max(embolden_px, 0.0f);
+    const float reach = spread + embolden_px;       // distances beyond this clamp
+    const int   pad   = static_cast<int>(std::ceil(reach)) + 1;
+
+    const Rect bounds = outline.control_bounds();
+    const float x0 = std::floor(bounds.left()  * scale) - static_cast<float>(pad);
+    const float y0 = std::floor(-bounds.bottom() * scale) - static_cast<float>(pad);
+    const float x1 = std::ceil (bounds.right() * scale) + static_cast<float>(pad);
+    const float y1 = std::ceil (-bounds.top()  * scale) + static_cast<float>(pad);
+    const int w = static_cast<int>(x1 - x0) + 1;
+    const int h = static_cast<int>(y1 - y0) + 1;
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return result;
+
+    // Fine flattening: the field is magnified at draw time (48 px drives
+    // 190 px text), so chord error must stay far below a display pixel.
+    constexpr float sdf_tolerance = 0.02f;
+    const Affine xf{scale, 0.0f, 0.0f, -scale, -x0, -y0};
+    std::vector<std::pair<Vec2, Vec2>> edges;
+    edges.reserve(outline.point_count() * 4);
+    flatten(outline, xf, sdf_tolerance, edges);
+    if (edges.empty()) return result;
+
+    const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+
+    // Overlapping contours (variable fonts keep them; HVF glyphs are built
+    // from overlapping parts) leave edges INSIDE the filled area. They are
+    // not boundary, and measuring distance to them would draw a seam at
+    // coverage 0.5 along every overlap. So split edges into short pieces and
+    // keep only those with winding 0 on one side (nonzero rule), measured at
+    // the piece midpoint +- a small step along its normal with an exact
+    // point winding query over the edges crossing that row.
+    std::vector<std::vector<std::uint32_t>> bucket(static_cast<std::size_t>(h));
+    for (std::uint32_t e = 0; e < edges.size(); ++e) {
+        const auto& [a, b] = edges[e];
+        if (a.y == b.y) continue;
+        const int r0 = num::max(0, static_cast<int>(std::floor(num::min(a.y, b.y))));
+        const int r1 = num::min(h - 1, static_cast<int>(std::floor(num::max(a.y, b.y))));
+        for (int r = r0; r <= r1; ++r) bucket[static_cast<std::size_t>(r)].push_back(e);
+    }
+    const auto winding_at = [&](float px, float py) {
+        if (py < 0.0f || py >= static_cast<float>(h)) return 0;
+        int wn = 0;
+        for (const std::uint32_t e : bucket[static_cast<std::size_t>(py)]) {
+            const auto& [a, b] = edges[e];
+            const bool up = b.y > a.y;
+            const float ylo = up ? a.y : b.y, yhi = up ? b.y : a.y;
+            if (py < ylo || py >= yhi) continue;
+            const float cx = a.x + (py - a.y) / (b.y - a.y) * (b.x - a.x);
+            if (cx <= px) wn += up ? 1 : -1;
+        }
+        return wn;
+    };
+    std::vector<std::pair<Vec2, Vec2>> boundary;
+    boundary.reserve(edges.size());
+    {
+        constexpr float piece = 0.25f, step = 0.05f;
+        for (const auto& [a, b] : edges) {
+            const float ex = b.x - a.x, ey = b.y - a.y;
+            const float len = std::sqrt(ex * ex + ey * ey);
+            if (len <= 0.0f) continue;
+            const float nx = -ey / len * step, ny = ex / len * step;
+            const int k = num::max(1, static_cast<int>(std::ceil(len / piece)));
+            int run = -1;   // first piece of the current kept run
+            for (int i = 0; i <= k; ++i) {
+                bool keep = false;
+                if (i < k) {
+                    const float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(k);
+                    const float mx = a.x + t * ex, my = a.y + t * ey;
+                    keep = winding_at(mx + nx, my + ny) == 0 || winding_at(mx - nx, my - ny) == 0;
+                }
+                if (keep && run < 0) run = i;
+                if (!keep && run >= 0) {
+                    const float t0 = static_cast<float>(run) / static_cast<float>(k);
+                    const float t1 = static_cast<float>(i) / static_cast<float>(k);
+                    boundary.emplace_back(Vec2{a.x + t0 * ex, a.y + t0 * ey}, Vec2{a.x + t1 * ex, a.y + t1 * ey});
+                    run = -1;
+                }
+            }
+        }
+    }
+    // Unsigned distance: each edge updates only the texels within `reach` of
+    // it (its bounding box, grown), so cost is O(edges * reach^2), not
+    // O(edges * texels).
+    const float far2 = (reach + 1.0f) * (reach + 1.0f);
+    std::vector<float> d2(n, far2);
+    for (const auto& [a, b] : boundary) {
+        const float ex = b.x - a.x, ey = b.y - a.y;
+        const float len2 = ex * ex + ey * ey;
+        const float inv = len2 > 0.0f ? 1.0f / len2 : 0.0f;
+        const int bx0 = num::max(0, static_cast<int>(std::floor(num::min(a.x, b.x) - reach - 0.5f)));
+        const int bx1 = num::min(w - 1, static_cast<int>(std::ceil(num::max(a.x, b.x) + reach - 0.5f)));
+        const int by0 = num::max(0, static_cast<int>(std::floor(num::min(a.y, b.y) - reach - 0.5f)));
+        const int by1 = num::min(h - 1, static_cast<int>(std::ceil(num::max(a.y, b.y) + reach - 0.5f)));
+        for (int y = by0; y <= by1; ++y) {
+            const float py = static_cast<float>(y) + 0.5f;
+            float* row = d2.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
+            for (int x = bx0; x <= bx1; ++x) {
+                const float px = static_cast<float>(x) + 0.5f;
+                const float t = num::clamp(((px - a.x) * ex + (py - a.y) * ey) * inv, 0.0f, 1.0f);
+                const float dx = px - (a.x + t * ex), dy = py - (a.y + t * ey);
+                const float dd = dx * dx + dy * dy;
+                if (dd < row[x]) row[x] = dd;
+            }
+        }
+    }
+
+    // Sign: nonzero winding at each texel centre, by scanline. An edge counts
+    // on rows whose centre lies in [min y, max y) (half-open, so a vertex
+    // shared by two edges is counted once).
+    std::vector<std::vector<std::pair<float, int>>> rows(static_cast<std::size_t>(h));
+    for (const auto& [a, b] : edges) {
+        if (a.y == b.y) continue;
+        const int dir = b.y > a.y ? 1 : -1;
+        const float ylo = num::min(a.y, b.y), yhi = num::max(a.y, b.y);
+        const int r0 = num::max(0, static_cast<int>(std::ceil(ylo - 0.5f)));
+        const int r1 = num::min(h - 1, static_cast<int>(std::ceil(yhi - 0.5f)) - 1);
+        for (int y = r0; y <= r1; ++y) {
+            const float py = static_cast<float>(y) + 0.5f;
+            const float t = (py - a.y) / (b.y - a.y);
+            rows[static_cast<std::size_t>(y)].emplace_back(a.x + t * (b.x - a.x), dir);
+        }
+    }
+
+    Bitmap sdf{w, h};
+    for (int y = 0; y < h; ++y) {
+        auto& cr = rows[static_cast<std::size_t>(y)];
+        std::sort(cr.begin(), cr.end(), [](const auto& p, const auto& q) { return p.first < q.first; });
+        std::size_t ci = 0;
+        int winding = 0;
+        for (int x = 0; x < w; ++x) {
+            const float px = static_cast<float>(x) + 0.5f;
+            while (ci < cr.size() && cr[ci].first <= px) winding += cr[ci++].second;
+            const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x);
+            const float dist = std::sqrt(d2[i]);
+            const float sd = (winding != 0 ? dist : -dist) + embolden_px;
+            const float normalized = num::clamp(sd / spread, -1.0f, 1.0f);
+            sdf.pixels[i] = static_cast<std::uint8_t>((normalized * 0.5f + 0.5f) * 255.0f + 0.5f);
+        }
+    }
+    result.bitmap = std::move(sdf);
+    result.offset = Vec2{x0, y0};
+    return result;
 }
 
 }  // namespace mayag::typo
