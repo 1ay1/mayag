@@ -182,6 +182,8 @@ class Face {
     }
     [[nodiscard]] std::uint16_t num_glyphs() const noexcept { return file_.num_glyphs(); }
     [[nodiscard]] std::uint16_t units_per_em() const noexcept { return file_.units_per_em(); }
+    /// CFF faces: the Private DICT's StdHW (font units), else 0.
+    [[nodiscard]] float cff_std_hw() const noexcept { return glyphs_.cff_std_hw(); }
     [[nodiscard]] const ot::FontFile& file() const noexcept { return file_; }
 
     /// Pixels per font unit at `size_px`.
@@ -1517,7 +1519,12 @@ class FontStack : public Shaper {
         std::optional<cg_autohint::Transform> hint;
         if (config_.cg_autohint && !use_sdf && !face.is_color() && !face.has_colr(gid)) {
             if (const auto m = face.cg_hint_metrics()) {
-                const double stem = apple::autohint_stem(face.file().postscript_name());
+                double stem = apple::autohint_stem(face.file().postscript_name());
+                // Fonts this Mac's registry snapshot doesn't know (user-installed
+                // OpenType/CFF): libFontParser serves StdHW, rescaled to 1000 upem.
+                if (stem <= 0.0)
+                    if (const float hw = face.cff_std_hw(); hw > 0.0f)
+                        stem = std::round(static_cast<double>(hw) * 1000.0 / face.units_per_em());
                 hint = cg_autohint::create(static_cast<double>(size_px), face.units_per_em(), static_cast<double>(m->xh),
                                            static_cast<double>(m->cap), static_cast<double>(m->asc),
                                            stem, static_cast<double>(smoothing_px(size_px, smoothing)));

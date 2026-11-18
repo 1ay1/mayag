@@ -1349,6 +1349,25 @@ void test_cg_autohint() {
     check(!typo::cg_autohint::create(12.002, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0).has_value(), "non-integer ppem is not hinted");
     check(!typo::cg_autohint::create(19.0, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0).has_value(), "19 px is not hinted");
     check(!typo::cg_autohint::create(6.0, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0).has_value(), "6 px is not hinted");
+
+    // The registry's stemH for a CFF font is its StdHW: a user-installed
+    // OpenType/CFF face (not in apple_stems.hpp) gets the same stem.
+    int cff = 0, agree = 0;
+    for (const auto& dir : {"/System/Library/Fonts", "/System/Library/Fonts/Supplemental"}) {
+        if (!std::filesystem::exists(dir)) continue;
+        for (const auto& e : std::filesystem::directory_iterator(dir)) {
+            if (e.path().extension() != ".otf") continue;
+            auto f = typo::Face::from_file(e.path().string());
+            if (!f || f->cff_std_hw() <= 0.0f) continue;
+            const auto want = typo::apple::autohint_stem(f->file().postscript_name());
+            if (want == 0) continue;
+            ++cff;
+            agree += std::lround(f->cff_std_hw() * 1000.0f / f->units_per_em()) == want;
+        }
+    }
+    if (cff > 0)
+        check(agree == cff, "CFF StdHW reproduces the registry stem (" + std::to_string(agree) + "/" +
+                                std::to_string(cff) + ")");
 }
 
 // Exact nonzero union: two overlapping contours each covering 0.6 of a

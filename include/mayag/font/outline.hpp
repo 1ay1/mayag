@@ -730,6 +730,11 @@ class CffSource {
     }
 
     [[nodiscard]] bool valid() const noexcept { return charstrings_.count() > 0; }
+    /// The Private DICT's StdHW (dominant horizontal stem, font units), 0
+    /// when absent or CID-keyed. CoreGraphics' autohinter takes its stem
+    /// from exactly this for CFF fonts (tools/apple_stems.c: 36 of 36 system
+    /// CFF faces match round(StdHW * 1000 / upem)).
+    [[nodiscard]] float std_hw() const noexcept { return std_hw_; }
 
     [[nodiscard]] Outline load(std::uint16_t gid) const {
         Outline out;
@@ -1134,6 +1139,8 @@ class CffSource {
 
             if (const auto* dw = cff::dict_get(priv, 20); dw && !dw->empty()) default_width_ = (*dw)[0];
             if (const auto* nw = cff::dict_get(priv, 21); nw && !nw->empty()) nominal_width_ = (*nw)[0];
+            if (const auto* hw = cff::dict_get(priv, 10); hw && !hw->empty() && cff::dict_get(top_dict, 0x0C1E) == nullptr)
+                std_hw_ = (*hw)[0];
             if (const auto* ls = cff::dict_get(priv, 19); ls && !ls->empty()) {
                 local_subrs_ = cff::parse_index(r, off + static_cast<std::size_t>((*ls)[0]));
             }
@@ -1197,6 +1204,7 @@ class CffSource {
     std::size_t    fd_select_offset_ = 0;
     float          default_width_ = 0.0f;
     float          nominal_width_ = 0.0f;
+    float          std_hw_ = 0.0f;
     std::uint16_t  num_glyphs_ = 0;
     bool           is_cid_ = false;
 };
@@ -1606,6 +1614,9 @@ class GlyphSource {
     [[nodiscard]] bool header_box(std::uint16_t gid, std::int16_t box[4]) const noexcept {
         return kind_ == Kind::glyf && glyf_.header_box(gid, box);
     }
+
+    /// CFF only: the Private DICT's StdHW in font units, else 0.
+    [[nodiscard]] float cff_std_hw() const noexcept { return kind_ == Kind::cff ? cff_.std_hw() : 0.0f; }
 
     [[nodiscard]] Outline load(std::uint16_t gid) const {
         switch (kind_) {
