@@ -733,8 +733,10 @@ class MetalDevice {
         // Framebuffer fetch ([[color(0)]]) lets glyphs blend exactly as
         // CoreGraphics does (encoded-space lerp). Apple-family GPUs have it;
         // anything else (or a compile failure) uses the coverage-reshaping
-        // approximation.
-        const bool apple_gpu = msg<BOOL>(device_, sel("supportsFamily:"), static_cast<std::int64_t>(1001)) != NO;
+        // approximation. MAYAG_METAL_NO_FB_FETCH forces the latter so it can
+        // be tested on Apple hardware.
+        const bool apple_gpu = msg<BOOL>(device_, sel("supportsFamily:"), static_cast<std::int64_t>(1001)) != NO &&
+                               std::getenv("MAYAG_METAL_NO_FB_FETCH") == nullptr;
         id err = nullptr;
         id library = nullptr;
         if (apple_gpu)

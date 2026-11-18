@@ -480,6 +480,10 @@ if(MAYAG_BUILD_TESTS)
         target_link_libraries(mayag_metal_tests PRIVATE mayag)
         target_compile_options(mayag_metal_tests PRIVATE ${MAYAG_WARNINGS})
         add_test(NAME mayag_metal_tests COMMAND mayag_metal_tests)
+        # The coverage-reshaping blend non-Apple GPUs get, forced on Apple
+        # hardware so it stays tested.
+        add_test(NAME mayag_metal_tests_no_fb_fetch COMMAND mayag_metal_tests)
+        set_tests_properties(mayag_metal_tests_no_fb_fetch PROPERTIES ENVIRONMENT MAYAG_METAL_NO_FB_FETCH=1)
     endif()
 
     # The Vulkan backend, checked against the software rasteriser exactly like

@@ -290,7 +290,11 @@ int main() {
                 check(n > 500, "the text inked pixels");
                 // Bilinear vs analytic sampling of the SDF legitimately moves
                 // edge values a little; a missing correction moves them ~20.
-                check(std::abs(mean) < 2.5 && mad < 6.0,
+                // Without framebuffer fetch (non-Apple GPUs) the blend is
+                // reproduced by reshaping coverage against a black/white
+                // design backdrop, which is ~2.6/255 dark on a 0x15 backdrop.
+                const bool reshaped = std::getenv("MAYAG_METAL_NO_FB_FETCH") != nullptr;
+                check(std::abs(mean) < (reshaped ? 4.0 : 2.5) && mad < 6.0,
                       "GPU and CPU text agree per pixel (no missing coverage correction)");
             }
 
