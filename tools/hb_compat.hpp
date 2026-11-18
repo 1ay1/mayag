@@ -99,6 +99,7 @@ inline std::string shape(Face& face, const std::string& text, const Options& o) 
     const ot::Layout& layout = face.layout();
     ot::FontFuncs ff;
     ff.nominal = [&](char32_t c, std::uint16_t& g) { g = file.glyph_for(c); return g != 0; };
+    ff.num_glyphs = file.num_glyphs();
     ff.advance = [&](std::uint16_t g) { return face.advance_units(g); };
     ff.upem = file.units_per_em();
     ff.coords = face.coords();
@@ -118,7 +119,7 @@ inline std::string shape(Face& face, const std::string& text, const Options& o) 
     };
     const std::vector<std::uint32_t> langs = ot::ot_language_tags(o.language);
     const auto plan = ot::compile_plan(layout, script, b.direction, langs, o.features, ff, kern.has_legacy(),
-                                       file.has_table(ot::tag("kerx")));
+                                       file.has_table(ot::tag("kerx")), file.table(ot::tag("morx")));
     ot::shape(plan, layout, ff, b, o.features, o.bot);
 
     std::string out = "[";

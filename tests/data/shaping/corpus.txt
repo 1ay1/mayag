@@ -513,3 +513,49 @@
 /System/Library/Fonts/Avenir Next.ttc|IJsselmeer fi|--language=nl
 /System/Library/Fonts/Avenir Next.ttc|istanbul fi|--language=tr
 /System/Library/Fonts/NewYork.ttf|l·l IJ|--language=ca
+/System/Library/Fonts/Supplemental/Raanana.ttc|שָׁלוֹם|
+/System/Library/Fonts/Supplemental/Raanana.ttc|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/Supplemental/Raanana.ttc|שִׂמְחָה|
+/System/Library/Fonts/Supplemental/Raanana.ttc:1|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/Supplemental/Ayuthaya.ttf|น้ำ|
+/System/Library/Fonts/Supplemental/Ayuthaya.ttf|ปั้น|
+/System/Library/Fonts/Supplemental/Ayuthaya.ttf|ภาษาไทย|
+/System/Library/Fonts/Supplemental/Ayuthaya.ttf|ญู ฐุ ปี่|
+/System/Library/Fonts/Supplemental/Krungthep.ttf|น้ำ|
+/System/Library/Fonts/Supplemental/Krungthep.ttf|ปั้น|
+/System/Library/Fonts/Supplemental/Krungthep.ttf|ภาษาไทย|
+/System/Library/Fonts/Supplemental/Krungthep.ttf|ญู ฐุ ปี่|
+/System/Library/Fonts/Supplemental/Sathu.ttf|น้ำ|
+/System/Library/Fonts/Supplemental/Sathu.ttf|ปั้น|
+/System/Library/Fonts/Supplemental/Sathu.ttf|ภาษาไทย|
+/System/Library/Fonts/Supplemental/Sathu.ttf|ญู ฐุ ปี่|
+/System/Library/Fonts/Supplemental/Silom.ttf|น้ำ|
+/System/Library/Fonts/Supplemental/Silom.ttf|ปั้น|
+/System/Library/Fonts/Supplemental/Silom.ttf|ภาษาไทย|
+/System/Library/Fonts/Supplemental/Silom.ttf|ญู ฐุ ปี่|
+/System/Library/Fonts/Supplemental/AppleGothic.ttf|한국어|
+/System/Library/Fonts/Supplemental/AppleGothic.ttf|ᄒᆞᆫ|
+/System/Library/Fonts/Supplemental/AppleGothic.ttf|ᄀᆢ ᄫᅡ|
+/System/Library/Fonts/Supplemental/AppleGothic.ttf|안녕하세요|
+/System/Library/Fonts/Supplemental/Lao Sangam MN.ttf|ພາສາລາວ|
+/System/Library/Fonts/Supplemental/Lao Sangam MN.ttf|ກີ່ ຫຼ|
+/System/Library/Fonts/Supplemental/AlBayan.ttc|مرحبا بالعالم|
+/System/Library/Fonts/Supplemental/AlBayan.ttc|لا|
+/System/Library/Fonts/Supplemental/AlBayan.ttc|العربية|
+/System/Library/Fonts/Supplemental/Baghdad.ttc|لا|
+/System/Library/Fonts/Supplemental/Baghdad.ttc|العربية|
+/System/Library/Fonts/GeezaPro.ttc|لا لأ|
+/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc|क्ष|
+/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc|र्क|
+/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc|कि|
+/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc|हिन्दी|
+/System/Library/Fonts/Supplemental/Tamil MN.ttc|தமிழ்|
+/System/Library/Fonts/Supplemental/Zapfino.ttf|Zapfino|
+/System/Library/Fonts/Supplemental/Zapfino.ttf|Th ffi|
+/System/Library/Fonts/Supplemental/Apple Chancery.ttf|Th ct st fi ffl|
+/System/Library/Fonts/Supplemental/Hoefler Text.ttc|Th ct st fi ffl|
+/System/Library/Fonts/Supplemental/Mshtakan.ttc|Հայերեն ﬓ|
+/System/Library/Fonts/Apple Color Emoji.ttc|👨‍👩‍👧‍👦|
+/System/Library/Fonts/Apple Color Emoji.ttc|🇫🇷|
+/System/Library/Fonts/Apple Color Emoji.ttc|👍🏽|
+/System/Library/Fonts/Apple Color Emoji.ttc|🏳️‍🌈 ❤️|

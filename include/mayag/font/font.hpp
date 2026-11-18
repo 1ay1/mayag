@@ -805,6 +805,7 @@ class FontStack : public Shaper {
         const ot::FontFile& file = face.file();
         ot::FontFuncs ff;
         ff.nominal = [&](char32_t c, std::uint16_t& g) { g = file.glyph_for(c); return g != 0; };
+    ff.num_glyphs = file.num_glyphs();
         ff.advance = [&](std::uint16_t g) { return face.advance_units(g); };
         ff.upem = file.units_per_em();
         ff.coords = face.coords();
@@ -883,7 +884,8 @@ class FontStack : public Shaper {
             if (auto it = plans_.find(key); it != plans_.end()) return it->second;
         }
         auto plan = std::make_shared<const ot::ShapePlan>(
-            ot::compile_plan(layout, script, dir, languages, feats, ff, has_kern, face.file().has_table(ot::tag("kerx"))));
+            ot::compile_plan(layout, script, dir, languages, feats, ff, has_kern, face.file().has_table(ot::tag("kerx")),
+                             face.file().table(ot::tag("morx"))));
         std::lock_guard lock{plan_mutex_};
         if (plans_.size() > 512) plans_.clear();
         return plans_.emplace(key, std::move(plan)).first->second;

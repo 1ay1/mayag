@@ -32,6 +32,7 @@
 // THIRD_PARTY_NOTICES.md.
 
 #include "ot_layout.hpp"
+#include "aat_morx.hpp"
 #include "ot_language_table.hpp"
 #include "unicode_data.hpp"
 
@@ -53,6 +54,7 @@ namespace mayag::typo::ot {
 struct FontFuncs {
     /// Nominal glyph for a codepoint; false if the font does not map it.
     std::function<bool(char32_t, std::uint16_t&)> nominal;
+    unsigned num_glyphs = 65536;   ///< maxp numGlyphs (AAT lookup format 0)
     /// Glyph for a codepoint + variation selector (cmap format 14).
     std::function<bool(char32_t, char32_t, std::uint16_t&)> variation;
     /// Horizontal advance in font units, at the current instance.
@@ -396,6 +398,8 @@ struct ShapePlan {
     bool adjust_mark_positioning_when_zeroing = false;
     bool fallback_mark_positioning = false;
     bool fallback_glyph_classes = false;
+    bool apply_morx = false;              ///< AAT morx replaces GSUB
+    std::span<const std::uint8_t> morx;
 };
 
 /// What a GSUB/GPOS pause callback receives through `user`.
@@ -535,7 +539,8 @@ struct Feature {
 /// Compile a ShapePlan (hb_ot_shape_plan_t + hb_ot_shape_collect_features).
 inline ShapePlan compile_plan(const Layout& l, ucd::Script script, Direction dir, std::span<const std::uint32_t> languages,
                               std::span<const Feature> user, const FontFuncs& font,
-                              bool has_kern_table = false, bool has_kerx_table = false) {
+                              bool has_kern_table = false, bool has_kerx_table = false,
+                              std::span<const std::uint8_t> morx = {}) {
     const auto tags = ot_script_tags(script);
     Planner p{PlanBuilder{l, tags, languages, dir}, l, script, dir, {}};
     p.chosen_script[0] = p.map.chosen_script(table::gsub);
@@ -544,6 +549,14 @@ inline ShapePlan compile_plan(const Layout& l, ucd::Script script, Direction dir
     const ScriptShaper* shaper = &default_shaper();
     if (auto sel = shaper_selector())
         if (const ScriptShaper* s = sel(script, dir, p.chosen_script[0])) shaper = s;
+    // _hb_apply_morx: morx wins for horizontal text (we only shape horizontal).
+    const bool apply_morx = !morx.empty() && Reader{morx}.u32_at(0) != 0;
+    const bool script_zero_marks = shaper->zero_marks != ZeroMarks::none;
+    const bool script_fallback_position = shaper->fallback_position;
+    if (apply_morx && shaper != &default_shaper()) {   // _hb_ot_shaper_dumber
+        static const ScriptShaper dumber{.name = "dumber", .zero_marks = ZeroMarks::none, .fallback_position = false};
+        shaper = &dumber;
+    }
 
     auto& m = p.map;
     m.enable_feature(make_tag('r', 'v', 'r', 'n'));
@@ -592,13 +605,17 @@ inline ShapePlan compile_plan(const Layout& l, ucd::Script script, Direction dir
     // kern feature (HarfBuzz prefers it then). mayag does not apply kerx
     // yet, but the POLICY follows HarfBuzz: with kerx, marks keep their
     // advances and nothing falls back to the legacy kern table.
-    const bool kerx = has_kerx_table && (!(l.has_gsub() && gpos) || !has_gpos_kern);
-    sp.apply_gpos = gpos && !(has_kerx_table && !(l.has_gsub() && gpos));
+    const bool has_gsub = !apply_morx && l.has_gsub();
+    const bool kerx = has_kerx_table && (!(has_gsub && gpos) || !has_gpos_kern);
+    sp.apply_gpos = gpos && !(has_kerx_table && !(has_gsub && gpos));
     sp.apply_kern = !kerx && (!has_gpos_kern || !sp.apply_gpos) && has_kern_table && sp.kern_mask;
-    sp.zero_marks = shaper->zero_marks != ZeroMarks::none && !kerx;
+    sp.zero_marks = script_zero_marks && !kerx;
     sp.has_gpos_mark = sp.map.one_mask_of(make_tag('m', 'a', 'r', 'k')) != 0;
     sp.adjust_mark_positioning_when_zeroing = !sp.apply_gpos && !kerx;
-    sp.fallback_mark_positioning = sp.adjust_mark_positioning_when_zeroing && shaper->fallback_position;
+    sp.fallback_mark_positioning = sp.adjust_mark_positioning_when_zeroing && script_fallback_position;
+    sp.apply_morx = apply_morx;
+    if (apply_morx) sp.adjust_mark_positioning_when_zeroing = false;   // after fallback_mark_positioning
+    sp.morx = morx;
     if (shaper->data_create) sp.data = shaper->data_create(sp);
     return sp;
 }
@@ -1066,7 +1083,12 @@ inline void shape(const ShapePlan& plan, const Layout& l, const FontFuncs& font,
         }
     set_glyph_props(l, b);   // GDEF classes, or synthesized ones
     PauseContext pc{&plan, &font, &l};
-    substitute(l, plan.map, b, &pc, font.coords);
+    if (plan.apply_morx) {
+        typo::aat::substitute(plan.morx, b, font.num_glyphs);
+        if (plan.apply_gpos) typo::aat::remove_deleted_glyphs(b);
+    } else {
+        substitute(l, plan.map, b, &pc, font.coords);
+    }
 
     // ── position ──
     b.pos.assign(b.len(), GlyphPos{});
@@ -1090,6 +1112,7 @@ inline void shape(const ShapePlan& plan, const Layout& l, const FontFuncs& font,
     if (b.direction == Direction::rtl) b.reverse();
 
     // ── substitute_post ──
+    if (plan.apply_morx && !plan.apply_gpos) typo::aat::remove_deleted_glyphs(b);
     // Variation selectors that found no glyph and default-ignorables draw
     // as the space glyph with zero advance (hb_ot_hide_default_ignorables).
     std::uint16_t invisible = 0;
