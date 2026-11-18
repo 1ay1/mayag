@@ -116,13 +116,7 @@ inline std::string shape(Face& face, const std::string& text, const Options& o) 
     if (file.has_table(ot::tag("STAT"))) ff.tracking = face.track_table().at_exact(12.0f);
     if (o.ptem > 0) ff.tracking = face.track_table().at_exact(o.ptem);
     ff.extents = [&](std::uint16_t g, ot::FontFuncs::Extents& e) {
-        const Outline ol = face.outline(g);
-        if (ol.empty()) { e = {}; return true; }
-        const Rect r = ol.control_bounds();
-        e.x_bearing = static_cast<int>(std::lround(r.origin.x));
-        e.width = static_cast<int>(std::lround(r.origin.x + r.size.x)) - e.x_bearing;
-        e.y_bearing = static_cast<int>(std::lround(r.origin.y + r.size.y));
-        e.height = static_cast<int>(std::lround(r.origin.y)) - e.y_bearing;
+        if (!face.extents(g, e.x_bearing, e.y_bearing, e.width, e.height)) e = {};
         return true;
     };
     const std::vector<std::uint32_t> langs = ot::ot_language_tags(o.language);

@@ -304,6 +304,30 @@ class Face {
 
     // VARIATION_API_ANCHOR
 
+    /// Ink extents in font units, y-up: {x_bearing, y_bearing (top), width,
+    /// height (negative)}, exactly as hb_font_get_glyph_extents reports them
+    /// for hb-ot-font: a static TrueType glyph's STORED glyf bounding box
+    /// (x from hmtx's lsb), otherwise the outline's bounds. False if blank.
+    [[nodiscard]] bool extents(std::uint16_t gid, int& x_bearing, int& y_bearing, int& width, int& height) const {
+        std::int16_t box[4];
+        const bool default_instance = std::all_of(coords_.begin(), coords_.end(), [](float c) { return c == 0.0f; });
+        if (default_instance && glyphs_.header_box(gid, box)) {
+            x_bearing = file_.lsb(gid);
+            y_bearing = std::max(box[1], box[3]);
+            width = std::max(box[0], box[2]) - std::min(box[0], box[2]);
+            height = std::min(box[1], box[3]) - std::max(box[1], box[3]);
+            return true;
+        }
+        const Outline o = outline(gid);
+        if (o.empty()) { x_bearing = y_bearing = width = height = 0; return false; }
+        const Rect r = o.control_bounds();
+        x_bearing = static_cast<int>(std::lround(r.origin.x));
+        width = static_cast<int>(std::lround(r.origin.x + r.size.x)) - x_bearing;
+        y_bearing = static_cast<int>(std::lround(r.origin.y + r.size.y));
+        height = static_cast<int>(std::lround(r.origin.y)) - y_bearing;
+        return true;
+    }
+
     // == vector colour glyphs (COLR) ==
     /// True when `gid` has a COLR (layered/vector) colour representation.
     [[nodiscard]] bool has_colr(std::uint16_t gid) const noexcept {
@@ -839,13 +863,7 @@ class FontStack : public Shaper {
         ff.x_height = file.os2().x_height;
         ff.cap_height = file.os2().cap_height;
         ff.extents = [&](std::uint16_t g, ot::FontFuncs::Extents& e) {
-            const Outline o = face.outline(g);
-            if (o.empty()) { e = {}; return true; }
-            const Rect r = o.control_bounds();
-            e.x_bearing = static_cast<int>(std::lround(r.origin.x));
-            e.width = static_cast<int>(std::lround(r.origin.x + r.size.x)) - e.x_bearing;
-            e.y_bearing = static_cast<int>(std::lround(r.origin.y + r.size.y));
-            e.height = static_cast<int>(std::lround(r.origin.y)) - e.y_bearing;
+            if (!face.extents(g, e.x_bearing, e.y_bearing, e.width, e.height)) e = {};
             return true;
         };
 

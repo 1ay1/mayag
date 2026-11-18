@@ -667,3 +667,13 @@
 /System/Library/Fonts/Supplemental/Zapfino.ttf|ñ é|
 /System/Library/Fonts/Supplemental/Zapfino.ttf|q̧́|
 /System/Library/Fonts/Supplemental/Zapfino.ttf|Zöë|
+/System/Library/Fonts/Times.ttc|x̣́|
+/System/Library/Fonts/Times.ttc|x̣́|
+/System/Library/Fonts/Times.ttc|x̣̂|
+/System/Library/Fonts/Times.ttc|ậ|
+/System/Library/Fonts/Times.ttc|ệ|
+/System/Library/Fonts/Times.ttc|ớ|
+/System/Library/Fonts/Times.ttc|ǖ|
+/System/Library/Fonts/Times.ttc|ậ́|
+/System/Library/Fonts/Times.ttc|q̧́|
+/System/Library/Fonts/Times.ttc|Ağ ũ̀|

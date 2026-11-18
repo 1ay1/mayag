@@ -778,6 +778,24 @@ inline void normalize(const ShapePlan& plan, Buffer& b, const FontFuncs& font) {
         }
         b.sync();
     }
+
+    // CoreText composes canonically equivalent sequences (a + U+0302 +
+    // U+0323 -> U+1EAD in either order) but leaves marks it could NOT compose
+    // in INPUT order, and an AAT face's state machines see that order: Times
+    // ligates x + dot-below only when they are adjacent in the text
+    // (measured against CTLine). Undo the canonical reorder for morx faces.
+    if (!all_simple && plan.apply_morx) {
+        const std::size_t count = b.len();
+        for (std::size_t i = 0; i < count; ++i) {
+            if (b.info[i].mcc == 0) continue;
+            std::size_t end = i + 1;
+            while (end < count && b.info[end].mcc != 0) ++end;
+            std::stable_sort(b.info.begin() + static_cast<std::ptrdiff_t>(i),
+                             b.info.begin() + static_cast<std::ptrdiff_t>(end),
+                             [](const GlyphInfo& x, const GlyphInfo& y) { return x.aux < y.aux; });
+            i = end;
+        }
+    }
 }
 
 // ── the pipeline (hb_ot_shape_internal) ──────────────────────────────────────────────

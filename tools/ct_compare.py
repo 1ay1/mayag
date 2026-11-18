@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # ct_compare.py CASEFILE [MGS] : compare mayag (absolute positions) vs CoreText.
-import subprocess, sys, re
+# Build the oracle once:
+#   clang -O1 -framework CoreText -framework CoreFoundation -framework CoreGraphics \
+#         tools/ct_shape.c -o /tmp/ct_shape        (or set CT_SHAPE)
+# and mg_shape (tools/mg_shape.cpp) to /tmp/mgs. Lines marked
+# '[CT used fallback font]' are not comparable (CoreText swapped the face).
+import subprocess, sys, re, os
+CT_SHAPE = os.environ.get('CT_SHAPE', '/tmp/ct_shape')
 cases = sys.argv[1]
 mgs = sys.argv[2] if len(sys.argv) > 2 else '/tmp/mgs'
 tol = 1.5
@@ -42,7 +48,7 @@ for line in open(cases, encoding='utf-8'):
     font, text, extra = (line.split('|') + ['', ''])[:3]
     if extra.strip(): continue  # CT can't take hb feature args
     path, idx = (font.rsplit(':', 1) + ['0'])[:2] if re.search(r':\d+$', font) else (font, '0')
-    ct = subprocess.run(['/tmp/ct_shape', path, idx, text], capture_output=True, text=True).stdout
+    ct = subprocess.run([CT_SHAPE, path, idx, text], capture_output=True, text=True).stdout
     mg_args = [mgs, f'{path}:{idx}', text]
     mg = subprocess.run(mg_args, capture_output=True, text=True).stdout
     try:

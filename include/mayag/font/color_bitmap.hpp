@@ -71,14 +71,28 @@ struct BitmapLoc {
 };
 
 [[nodiscard]] inline BitmapLoc locate_cblc(std::span<const std::uint8_t> cblc,
-                                           std::uint16_t gid) {
+                                           std::uint16_t gid, int want_ppem = 1 << 30) {
     BitmapLoc loc;
     if (cblc.size() < 8) return loc;
 
     // CBLC header: version (u32) + numSizes (u32), then bitmapSizeTable[].
-    const std::uint32_t num_sizes = u32(cblc, 4);
+    // HarfBuzz CBLC::choose_strike: the smallest strike whose ppem is at
+    // least `want_ppem`, else the largest; at most 256 strikes considered.
+    const std::uint32_t num_sizes = std::min<std::uint32_t>(u32(cblc, 4), 256);
+    if (num_sizes == 0 || 8 + 48 > cblc.size()) return loc;
+    const auto ppem_of = [&](std::uint32_t s) {
+        const std::size_t rec = 8 + static_cast<std::size_t>(s) * 48;
+        return rec + 48 <= cblc.size() ? std::max<int>(cblc[rec + 44], cblc[rec + 45]) : 0;
+    };
+    const unsigned want = want_ppem > 0 ? static_cast<unsigned>(want_ppem) : 1u << 30;
+    std::uint32_t best = 0;
+    unsigned best_ppem = static_cast<unsigned>(ppem_of(0));
+    for (std::uint32_t s = 1; s < num_sizes; ++s) {
+        const unsigned p = static_cast<unsigned>(ppem_of(s));
+        if ((want <= p && p < best_ppem) || (want > best_ppem && p > best_ppem)) { best = s; best_ppem = p; }
+    }
     // Each BitmapSize record is 48 bytes.
-    for (std::uint32_t s = 0; s < num_sizes; ++s) {
+    for (std::uint32_t s = best; s == best; ++s) {
         const std::size_t rec = 8 + static_cast<std::size_t>(s) * 48;
         if (rec + 48 > cblc.size()) break;
         const std::uint32_t idx_array_off = u32(cblc, rec + 0);   // indexSubTableArrayOffset
@@ -310,7 +324,7 @@ struct BitmapLoc {
     const auto cblc = file.table(tags::cblc);
     const auto cbdt = file.table(tags::cbdt);
     if (!cblc.empty() && !cbdt.empty()) {
-        const BitmapLoc loc = locate_cblc(cblc, gid);
+        const BitmapLoc loc = locate_cblc(cblc, gid, want_ppem);
         if (loc.found && loc.cbdt_offset + loc.length <= cbdt.size() && loc.length > 0) {
             std::span<const std::uint8_t> entry{cbdt.data() + loc.cbdt_offset, loc.length};
             ColorBitmap bmp = decode_cbdt_entry(entry, loc.ppem, upem);

@@ -264,6 +264,19 @@ class GlyfSource {
         return {begin, std::min<std::uint32_t>(end, static_cast<std::uint32_t>(glyf_.size()))};
     }
 
+    /// The glyph's stored bounding box (xMin, yMin, xMax, yMax), which is
+    /// what HarfBuzz and CoreText report as extents at the default instance.
+    /// Fonts often pad it past the points (Times' acute claims 100 units more
+    /// below), and fallback mark placement measures against THIS box.
+    [[nodiscard]] bool header_box(std::uint16_t gid, std::int16_t box[4]) const noexcept {
+        if (!valid()) return false;
+        const auto [begin, end] = glyph_range(gid);
+        if (end < begin + 10) return false;
+        ot::Reader r{glyf_, begin + 2};
+        for (int i = 0; i < 4; ++i) box[i] = r.i16();
+        return !r.bad();
+    }
+
     [[nodiscard]] Outline load(std::uint16_t gid, int depth = 0) const {
         Outline out;
         if (!valid() || depth > detail::max_composite_depth) return out;
@@ -1536,6 +1549,12 @@ class GlyphSource {
 
     [[nodiscard]] bool valid() const noexcept { return kind_ != Kind::none; }
     [[nodiscard]] std::uint16_t units_per_em() const noexcept { return upem_; }
+
+    /// glyf only: the stored bounding box (HarfBuzz's default-instance
+    /// extents). CFF has none; callers fall back to outline bounds.
+    [[nodiscard]] bool header_box(std::uint16_t gid, std::int16_t box[4]) const noexcept {
+        return kind_ == Kind::glyf && glyf_.header_box(gid, box);
+    }
 
     [[nodiscard]] Outline load(std::uint16_t gid) const {
         switch (kind_) {

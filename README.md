@@ -516,9 +516,9 @@ HarfBuzz (tracking 15.1.0), and it is held to HarfBuzz's output exactly:
   layout for that script. Glyphs are stored in logical order, and each line
   is painted in visual order.
 
-`tests/test_shaping.cpp` replays **669 hb-shape (HarfBuzz 15.1.0) outputs**
-over about 200 system fonts and every script family. All 669 match, glyph for
-glyph and font unit for font unit, except 25 where mayag follows native
+`tests/test_shaping.cpp` replays **679 hb-shape (HarfBuzz 15.1.0) outputs**
+over about 200 system fonts and every script family. All 679 match, glyph for
+glyph and font unit for font unit, except 31 where mayag follows native
 CoreText instead (below). A fuzzer has shaped 100,000 strings on corrupted
 GSUB/GPOS/GDEF tables under ASan and UBSan with no failures. Shaping runs at
 about 290 ns/char for Latin and 470 ns/char for Devanagari, and results are
@@ -548,9 +548,19 @@ Where HarfBuzz and CoreText disagree, mayag takes CoreText's side:
 Two known differences remain, both inside CoreText's AAT engine rather than
 in anything the tables say: Geeza Pro forms its Allah ligature under
 fatha+shadda where CoreText does not (in the bismillah above), and
-Oriya/Gurmukhi MN form a Latin `fi` ligature that CoreText skips. Faces that
-only carry `morx`, like Geeza Pro, Raanana and Zapfino, join the fallback
-chain for every script they cover.
+Oriya/Gurmukhi MN form a Latin `fi` ligature that CoreText skips. Both were
+traced to the subtable: the ligature state machines accept the input, and
+CoreText applies the very same subtables to the faces' own scripts
+(all 109 Gurmukhi strings that subtable 9 changes match), so the rule is
+CoreText-internal. Neither occurs in practice: Latin text resolves to the UI
+font, never an Indic face. Faces that only carry `morx`, like Geeza Pro,
+Raanana and Zapfino, join the fallback chain for every script they cover.
+
+Two more CoreText behaviours mayag follows: marks CoreText cannot compose
+stay in INPUT order on `morx` faces (Times ligates x + dot-below only when
+they are adjacent in the text), and fallback marks measure against the
+glyph's STORED `glyf` bounding box, as HarfBuzz and CoreText both do, not
+its points (Times' acute claims 100 units more than it draws).
 
 ### Untrusted input
 
