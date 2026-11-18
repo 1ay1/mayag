@@ -247,12 +247,11 @@ struct BitmapLoc {
 
 }  // namespace colordetail
 
-/// Resample a straight-RGBA image to a new size the way CoreText draws a
-/// scaled emoji strike: a separable bicubic (Keys, a = -0.5) whose support
-/// widens with the reduction, so every source pixel contributes when
-/// shrinking (a 160 px flag's 1 px border survives at 13 px). Fitted against
-/// CTLineDraw on Apple Color Emoji: bicubic beats box, bilinear, Lanczos and
-/// Hamming at every size tried (e.g. 13 pt: 3.3 mean |dRGB| vs 4.4-5.1).
+/// Resample a straight-RGBA image to a new size exactly as CoreText draws a
+/// scaled emoji strike (CGContextDrawImage, kCGInterpolationHigh): shrinking
+/// is a separable Catmull-Rom whose support widens with the reduction, so
+/// every source pixel contributes (a 160 px flag's 1 px border survives at
+/// 13 px); enlarging is an eased bilinear. Within 0.3/255 of CoreGraphics.
 /// Done in PREMULTIPLIED space so transparent edges do not bleed their
 /// undefined colour into the image; results are clamped (bicubic rings).
 [[nodiscard]] inline std::vector<std::uint8_t> scale_rgba(
@@ -266,24 +265,54 @@ struct BitmapLoc {
         if (x < 2.0f) return (((x - 5.0f) * x + 8.0f) * x - 4.0f) * a;
         return 0.0f;
     };
-    // PIL's precompute_coeffs: per output index, a [first, first+n) window
-    // and normalised weights.
+    // CoreGraphics' kCGInterpolationHigh, measured texel by texel (a one-hot
+    // row through CGContextDrawImage, 8 size pairs from 20->18 to 160->20):
+    // Catmull-Rom whose sample CENTRES are corner-aligned, output i sampling
+    // source i * (in-1)/(out-1) (texel centres to texel centres, so the
+    // first and last output pixels sit exactly on the first and last
+    // texels), its support widened by that same step when shrinking, and
+    // edge texels clamped. Mean per-row error 0.056 vs 0.26 for PIL's
+    // pixel-area-aligned bicubic: the old fit drew every small emoji a
+    // quarter pixel too soft at its edges.
+    // Per output index: a [first, first+n) window and normalised weights.
     struct Taps { int first = 0; std::vector<float> w; };
     const auto taps = [&](int in, int outn) {
         std::vector<Taps> t(static_cast<std::size_t>(outn));
-        const float scale = static_cast<float>(in) / static_cast<float>(outn);
+        if (outn > in) {
+            // Enlarging is not cubic at all: CoreGraphics interpolates
+            // linearly between the two nearest texels (area-aligned centres,
+            // clamped at the edges), with the fraction snapped to eighths and
+            // eased through this table -- measured exactly, 6 size pairs.
+            static constexpr float ease[9] = {0.0f, 0.0625f, 0.125f, 0.25f, 0.5f, 0.75f, 0.875f, 0.9375f, 1.0f};
+            for (int i = 0; i < outn; ++i) {
+                const float c = std::clamp((static_cast<float>(i) + 0.5f) * static_cast<float>(in) / static_cast<float>(outn) - 0.5f,
+                                           0.0f, static_cast<float>(in - 1));
+                const int k = std::min(static_cast<int>(c), in - 1);
+                const int q = static_cast<int>(std::ceil((c - static_cast<float>(k)) * 8.0f - 0.5f));
+                const float w = ease[std::clamp(q, 0, 8)];
+                Taps& tp = t[static_cast<std::size_t>(i)];
+                tp.first = k;
+                tp.w = k + 1 < in ? std::vector<float>{1.0f - w, w} : std::vector<float>{1.0f};
+            }
+            return t;
+        }
+        const float scale = outn > 1 ? static_cast<float>(in - 1) / static_cast<float>(outn - 1)
+                                     : static_cast<float>(in);
         const float fscale = std::max(scale, 1.0f);
         const float support = 2.0f * fscale;
         for (int i = 0; i < outn; ++i) {
-            const float centre = (static_cast<float>(i) + 0.5f) * scale;
-            const int lo = std::max(static_cast<int>(centre - support + 0.5f), 0);
-            const int hi = std::min(static_cast<int>(centre + support + 0.5f), in);
+            const float centre = outn > 1 ? static_cast<float>(i) * scale + 0.5f : 0.5f * static_cast<float>(in);
+            const int lo = static_cast<int>(std::floor(centre - support - 0.5f));
+            const int hi = static_cast<int>(std::ceil(centre + support + 0.5f));
             Taps& tp = t[static_cast<std::size_t>(i)];
-            tp.first = lo;
+            const int first = std::clamp(lo, 0, in - 1), last = std::clamp(hi, 0, in - 1);
+            tp.first = first;
+            tp.w.assign(static_cast<std::size_t>(last - first + 1), 0.0f);
             float total = 0;
-            for (int x = lo; x < hi; ++x) {
+            for (int x = lo; x <= hi; ++x) {
                 const float w = keys((static_cast<float>(x) - centre + 0.5f) / fscale);
-                tp.w.push_back(w);
+                if (w == 0.0f) continue;
+                tp.w[static_cast<std::size_t>(std::clamp(x, 0, in - 1) - first)] += w;   // edge clamp
                 total += w;
             }
             if (total != 0) for (float& w : tp.w) w /= total;

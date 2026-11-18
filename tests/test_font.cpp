@@ -2184,6 +2184,28 @@ void test_apple_cascade() {
 /// face CTFontCreateUIFontForLanguage falls back to), measured on macOS.
 void test_emoji_placement() {
     section("emoji placement (vs CoreText)");
+    {
+        // scale_rgba is CoreGraphics' kCGInterpolationHigh, weights measured
+        // with one-hot rows through CGContextDrawImage: shrinking 20 -> 10,
+        // texel 8 lands 0.09 / 0.45 / -0.04 on outputs 3..5; enlarging
+        // 10 -> 16, texel 3 gives outputs 4, 5, 6 0.12, 0.94, 0.50.
+        const auto row = [](int sw, int dw, int k) {
+            std::vector<std::uint8_t> src(static_cast<std::size_t>(sw) * 4, 0);
+            for (int i = 0; i < sw; ++i) { src[i * 4 + 0] = i == k ? 228 : 128; src[i * 4 + 3] = 255; }
+            const auto o = mayag::typo::scale_rgba(src, sw, 1, dw, 1);
+            std::vector<float> w(static_cast<std::size_t>(dw));
+            for (int x = 0; x < dw; ++x) w[static_cast<std::size_t>(x)] = (static_cast<float>(o[x * 4]) - 128.0f) / 100.0f;
+            return w;
+        };
+        const auto d = row(20, 10, 8);
+        near(d[3], 0.09f, 0.025f, "shrink: Catmull-Rom tap on the near side");
+        near(d[4], 0.45f, 0.025f, "shrink: corner-aligned centre weight");
+        near(d[5], -0.04f, 0.025f, "shrink: negative lobe");
+        const auto u = row(10, 16, 3);
+        near(u[4], 0.12f, 0.02f, "enlarge: eased bilinear, 1/8 step");
+        near(u[5], 0.94f, 0.02f, "enlarge: eased bilinear, 15/16");
+        near(u[6], 0.50f, 0.02f, "enlarge: eased bilinear, half");
+    }
 #if defined(__APPLE__)
     using namespace mayag::typo;
     auto ui = Face::from_file("/System/Library/Fonts/Apple Color Emoji.ttc", 1);
