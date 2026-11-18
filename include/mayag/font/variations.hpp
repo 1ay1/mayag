@@ -384,7 +384,8 @@ struct GvarHeader {
 inline void apply_gvar(std::span<const std::uint8_t> gvar, const GvarHeader& h,
                        std::uint16_t gid, const Coords& coords,
                        std::vector<float>& xs, std::vector<float>& ys,
-                       const std::vector<std::uint16_t>& contour_ends) {
+                       const std::vector<std::uint16_t>& contour_ends,
+                       bool composite = false) {
     using namespace detail;
     if (!h.ok || gid >= h.glyph_count || coords.empty()) return;
     const std::size_t n_points = xs.size();
@@ -460,8 +461,10 @@ inline void apply_gvar(std::span<const std::uint8_t> gvar, const GvarHeader& h,
         // y run started inside them: every point moved vertically by a
         // neighbour's horizontal delta. Invisible at the default instance,
         // and it broke glyphs like `N` at heavier weights.
+        // A COMPOSITE's points are its component offsets plus the phantoms,
+        // and the caller passes them all (n_points already includes the 4).
         constexpr std::size_t kPhantoms = 4;
-        const std::size_t delta_count = all_points ? n_points + kPhantoms : points.size();
+        const std::size_t delta_count = all_points ? n_points + (composite ? 0 : kPhantoms) : points.size();
         std::vector<std::int32_t> pdx = read_packed_deltas(gvar, dpos, delta_count);
         std::vector<std::int32_t> pdy = read_packed_deltas(gvar, dpos, delta_count);
         serialized += var_data_size;
@@ -474,7 +477,10 @@ inline void apply_gvar(std::span<const std::uint8_t> gvar, const GvarHeader& h,
                 dy[i] += static_cast<float>(pdy[i]) * scalar;
             }
         } else {
-            // Sparse deltas: apply to referenced points, then IUP the rest.
+            // Sparse deltas: apply to referenced points, then IUP the rest —
+            // except in composites, where the spec gives untouched points
+            // (component offsets) a zero delta. Interpolating them moved SF
+            // Arabic's dots 11 units vertically at opsz 17.
             std::vector<Delta> sparse(n_points);
             std::vector<bool> touched(n_points, false);
             for (std::size_t i = 0; i < points.size() && i < pdx.size() && i < pdy.size(); ++i) {
@@ -484,7 +490,7 @@ inline void apply_gvar(std::span<const std::uint8_t> gvar, const GvarHeader& h,
                     touched[p] = true;
                 }
             }
-            iup(sparse, touched, xs, ys, contour_ends);
+            if (!composite) iup(sparse, touched, xs, ys, contour_ends);
             for (std::size_t i = 0; i < n_points; ++i) {
                 dx[i] += sparse[i].x * scalar;
                 dy[i] += sparse[i].y * scalar;

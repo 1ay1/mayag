@@ -219,7 +219,11 @@ vertex Varyings mayag_vertex(uint vid [[vertex_id]],
 fragment float4 mayag_fragment(Varyings v [[stage_in]],
                                texture2d<float> atlas [[texture(0)]],
                                texture2d<float> color_atlas [[texture(1)]],
-                               sampler smp [[sampler(0)]]) {
+                               sampler smp [[sampler(0)]]
+#if MG_FB_FETCH
+                               , float4 dst [[color(0)]]
+#endif
+                               ) {
     constexpr uint KIND_ROUNDED_BOX = 0u, KIND_RING = 2u, KIND_LINE = 3u;
     constexpr uint KIND_GLYPH = 4u, KIND_TEXTURE = 5u, KIND_SHADOW = 6u, KIND_ARC = 7u;
     constexpr uint KIND_COLOR_GLYPH = 8u;
@@ -271,6 +275,25 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
         cov = ((v.flags & FLAG_GLYPH_SDF) != 0u)
             ? smoothstep(edge - band, edge + band, raw)
             : raw;
+#if MG_FB_FETCH
+        // CoreGraphics' text blend, exactly (Framebuffer::blend_text): per
+        // channel a lerp in ENCODED values, enc(dst) + (enc(src) - enc(dst))
+        // * cov * alpha. The sRGB target hands us linear dst and encodes what
+        // we return; over an opaque destination we return the result with
+        // alpha 1, which the (1, 1-srcA) blend stores verbatim.
+        if (dst.a >= 0.999 && v.color.a > 0.0) {
+            if (cov <= 0.001) discard_fragment();
+            float t = clamp(cov * v.color.a, 0.0, 1.0);
+            float3 s = v.color.rgb / v.color.a;
+            float3 r;
+            for (int i = 0; i < 3; ++i) {
+                float ed = mg_linear_to_srgb(clamp(dst[i], 0.0, 1.0));
+                float es = mg_linear_to_srgb(clamp(s[i], 0.0, 1.0));
+                r[i] = mg_srgb_to_linear(ed + (es - ed) * t);
+            }
+            return float4(r, 1.0);
+        }
+#endif
         cov = mg_text_gamma(cov, v.color);
     } else {
         cov = mg_coverage(mg_rounded_box(v.local, v.half_size, v.radii), px);

@@ -727,12 +727,22 @@ class MetalDevice {
     [[nodiscard]] bool build_pipeline() {
         using namespace mtl;
 
-        const std::string source = std::string{render::shaders::msl_kernel} +
-                                   std::string{render::shaders::msl_shaders};
+        const std::string body = std::string{render::shaders::msl_kernel} +
+                                 std::string{render::shaders::msl_shaders};
 
+        // Framebuffer fetch ([[color(0)]]) lets glyphs blend exactly as
+        // CoreGraphics does (encoded-space lerp). Apple-family GPUs have it;
+        // anything else (or a compile failure) uses the coverage-reshaping
+        // approximation.
+        const bool apple_gpu = msg<BOOL>(device_, sel("supportsFamily:"), static_cast<std::int64_t>(1001)) != NO;
         id err = nullptr;
-        id library = msg<id>(device_, sel("newLibraryWithSource:options:error:"),
-                             nsstring(source), static_cast<id>(nullptr), &err);
+        id library = nullptr;
+        if (apple_gpu)
+            library = msg<id>(device_, sel("newLibraryWithSource:options:error:"),
+                              nsstring("#define MG_FB_FETCH 1\n" + body), static_cast<id>(nullptr), &err);
+        if (library == nullptr)
+            library = msg<id>(device_, sel("newLibraryWithSource:options:error:"),
+                              nsstring("#define MG_FB_FETCH 0\n" + body), static_cast<id>(nullptr), &err);
         if (library == nullptr) return false;
 
         id vfn = msg<id>(library, sel("newFunctionWithName:"), nsstring("mayag_vertex"));

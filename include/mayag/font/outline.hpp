@@ -204,6 +204,20 @@ class Outline {
         }
     }
 
+  public:
+    /// Apply `f` (Vec2 -> Vec2) to every point, on-curve and control alike.
+    template <typename F>
+    void map_points(F&& f) {
+        for (auto& c : contours) {
+            c.start = f(c.start);
+            for (auto& s : c.segments) {
+                if (s.kind != Segment::Kind::line) s.c0 = f(s.c0);
+                if (s.kind == Segment::Kind::cubic) s.c1 = f(s.c1);
+                s.to = f(s.to);
+            }
+        }
+    }
+
   private:
     /// The contour's points in drawing order, as pointers so a shift can be
     /// written back. The closing point is dropped when it repeats the start.
@@ -528,7 +542,7 @@ class GlyfSource {
             std::vector<float> fx(n + 4, 0.0f), fy(n + 4, 0.0f);
             for (std::size_t i = 0; i < n; ++i) { fx[i] = comps[i].dx; fy[i] = comps[i].dy; }
             std::vector<std::uint16_t> ends{static_cast<std::uint16_t>(n + 4 - 1)};
-            var::apply_gvar(gvar_, gvar_header_, gid, *coords_, fx, fy, ends);
+            var::apply_gvar(gvar_, gvar_header_, gid, *coords_, fx, fy, ends, /*composite=*/true);
             for (std::size_t i = 0; i < n; ++i) {
                 if (comps[i].args_are_xy) { comps[i].dx = fx[i]; comps[i].dy = fy[i]; }
             }

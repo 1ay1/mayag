@@ -13,8 +13,10 @@
 // `backend::CoverageSampler` (so the software rasteriser can read the atlas).
 // Those three interfaces already existed; the font engine just implements them.
 
+#include "apple_stems.hpp"
 #include "atlas.hpp"
 #include "bidi.hpp"
+#include "cg_autohint.hpp"
 #include "color_bitmap.hpp"
 #include "colr.hpp"
 #include "mapped_file.hpp"
@@ -292,6 +294,86 @@ class Face {
 
     // ── outlines ────────────────────────────────────────────────────────
 
+    /// How CoreText groups this face's glyphs when it draws a run
+    /// (EnumerateOverlappingGlyphs, read from CoreText): a face with a MERG
+    /// table merges per that table; one without merges the WHOLE run when
+    /// it "supports a connected language" (design languages in `meta`
+    /// dlng, else OS/2 Unicode ranges, for Arabic, NKo, Devanagari, Bengali,
+    /// Gurmukhi, Phags-pa, Syriac or Mongolian; SF and PingFang excluded by
+    /// name). Merged glyphs are drawn as one bitmap run, overlapping
+    /// coverage combined with max() instead of composited one over another,
+    /// which is what keeps cursive joins from darkening.
+    enum class MergeMode : std::uint8_t { none, all, table };
+    [[nodiscard]] MergeMode merge_mode() const {
+        std::lock_guard lock{mutex_};
+        if (merge_mode_valid_) return merge_mode_;
+        merge_mode_valid_ = true;
+        merge_mode_ = compute_merge_mode();
+        return merge_mode_;
+    }
+    /// MERG: whether the pair (prev, next) in LOGICAL order must be merged.
+    [[nodiscard]] bool merg_pair(std::uint16_t prev, std::uint16_t next, bool rtl) const {
+        const auto t = file_.table(ot::tag("MERG"));
+        if (t.size() < 10) return false;
+        const auto u16 = [&](std::size_t o) { return o + 2 <= t.size() ? static_cast<std::uint16_t>(t[o] << 8 | t[o + 1]) : std::uint16_t{0}; };
+        const std::uint16_t ncls = u16(2), data = u16(4), ncd = u16(6), cdo = u16(8);
+        const auto cls = [&](std::uint16_t g) -> std::uint16_t {
+            for (std::uint16_t i = 0; i < ncd; ++i) {
+                const std::size_t o = static_cast<std::size_t>(u16(static_cast<std::size_t>(cdo) + 2u * i));
+                if (o == 0) continue;
+                const std::uint16_t fmt = u16(o);
+                if (fmt == 1) {
+                    const std::uint16_t start = u16(o + 2), cnt = u16(o + 4);
+                    if (g >= start && g < start + cnt) return u16(o + 6 + 2u * (g - start));
+                } else if (fmt == 2) {
+                    const std::uint16_t n = u16(o + 2);
+                    for (std::uint16_t r = 0; r < n; ++r) {
+                        const std::size_t ro = o + 4 + 6u * r;
+                        if (g >= u16(ro) && g <= u16(ro + 2)) return u16(ro + 4);
+                    }
+                }
+            }
+            return 0;
+        };
+        const std::uint16_t a = cls(prev), b = cls(next);
+        if (a >= ncls || b >= ncls) return false;
+        const std::size_t e = static_cast<std::size_t>(data) + static_cast<std::size_t>(a) * ncls + b;
+        if (e >= t.size()) return false;
+        const std::uint8_t flags = t[e];
+        return (flags & (rtl ? 0x10 : 0x01)) != 0;
+    }
+
+    /// The metrics CoreGraphics' autohinter reads (font units): the top of
+    /// 'o' (x-height with overshoot) and of 'X' (cap height) at the CURRENT
+    /// variation instance, rounded OUTWARD (ceil) to whole units as
+    /// CGFontGetGlyphBBoxes reports them (PingFang's 'X' tops out at 714.01
+    /// and CoreGraphics hints with 715), and the font bbox top (head.yMax). nullopt when the
+    /// face lacks either glyph (CoreGraphics then does not hint).
+    struct CgHintMetrics { float xh = 0, cap = 0, asc = 0; };
+    [[nodiscard]] std::optional<CgHintMetrics> cg_hint_metrics() const {
+        {
+            std::lock_guard lock{mutex_};
+            if (cg_metrics_valid_) return cg_metrics_;
+        }
+        std::optional<CgHintMetrics> m;
+        const std::uint16_t go = glyph_for('o'), gx = glyph_for('X');
+        if (go != 0 && gx != 0) {
+            const auto top = [&](std::uint16_t g) {
+                const Outline o = outline(g);
+                float t = -1e30f;
+                for (const auto& c : o.contours) {
+                    t = std::max(t, c.start.y);
+                    for (const auto& s : c.segments) t = std::max(t, s.to.y);
+                }
+                return std::ceil(t - 1e-4f);
+            };
+            m = CgHintMetrics{top(go), top(gx), static_cast<float>(file_.head().y_max)};
+        }
+        std::lock_guard lock{mutex_};
+        cg_metrics_ = m;
+        cg_metrics_valid_ = true;
+        return m;
+    }
     [[nodiscard]] Outline outline(std::uint16_t gid) const {
         std::lock_guard lock{mutex_};
         auto it = outline_cache_.find(gid);
@@ -495,6 +577,7 @@ class Face {
         user_   = std::move(next_user);
         glyphs_.set_coords(&coords_);
         outline_cache_.clear();
+        cg_metrics_valid_ = false;
         // Derive the id from the position, not a running counter, so returning
         // to a weight we've drawn before reuses its atlas entries instead of
         // re-rasterising every glyph again.
@@ -551,6 +634,50 @@ class Face {
     mutable std::mutex                                 mutex_;
     mutable std::unordered_map<std::uint16_t, Outline> outline_cache_;
     mutable std::vector<float>                         adv_cache_;   // per gid, NaN = unknown
+    mutable std::optional<CgHintMetrics>               cg_metrics_;
+    mutable bool                                       cg_metrics_valid_ = false;
+    mutable MergeMode                                  merge_mode_ = MergeMode::none;
+    mutable bool                                       merge_mode_valid_ = false;
+
+    [[nodiscard]] MergeMode compute_merge_mode() const {
+        if (file_.has_table(ot::tag("MERG"))) return MergeMode::table;
+        const std::string& ps = file_.postscript_name();
+        const std::string& fam = file_.family();
+        if (fam == ".SFNS" || ps.rfind(".SFNS", 0) == 0 || ps.find("PingFang") != std::string::npos) return MergeMode::none;
+        // meta dlng: comma-separated ISO 15924 tags (maybe with -region).
+        const auto meta = file_.table(ot::tag("meta"));
+        if (meta.size() >= 16) {
+            const auto u32 = [&](std::size_t o) {
+                return o + 4 <= meta.size() ? static_cast<std::uint32_t>(meta[o] << 24 | meta[o + 1] << 16 | meta[o + 2] << 8 | meta[o + 3]) : 0u;
+            };
+            const std::uint32_t n = u32(12);
+            for (std::uint32_t i = 0; i < n && i < 64; ++i) {
+                const std::size_t r = 16 + 12u * i;
+                if (u32(r) != ot::tag("dlng")) continue;
+                const std::uint32_t off = u32(r + 4), len = u32(r + 8);
+                if (static_cast<std::size_t>(off) + len > meta.size()) break;
+                std::string_view s{reinterpret_cast<const char*>(meta.data() + off), len};
+                static constexpr std::string_view connected[] = {"Arab", "Beng", "Deva", "Guru", "Mong", "Syrc", "Nkoo",
+                                                                "Phag", "Mand", "Mani", "Rohg", "Adlm", "Sogd", "Hmnp"};
+                for (const auto c : connected) if (s.find(c) != std::string_view::npos) return MergeMode::all;
+                return MergeMode::none;
+            }
+        }
+        // OS/2 ulUnicodeRange bits CoreText checks: Arabic 13, NKo 14,
+        // Devanagari 15, Bengali 16, Gurmukhi 17, Phags-pa 53, Syriac 71,
+        // Mongolian 81.
+        const auto os2 = file_.table(ot::tag("OS/2"));
+        if (os2.size() >= 58) {
+            std::uint32_t r[4];
+            for (int k = 0; k < 4; ++k) {
+                const std::size_t o = 42 + 4u * static_cast<std::size_t>(k);
+                r[k] = static_cast<std::uint32_t>(os2[o] << 24 | os2[o + 1] << 16 | os2[o + 2] << 8 | os2[o + 3]);
+            }
+            for (const int bit : {13, 14, 15, 16, 17, 53, 71, 81})
+                if ((r[bit / 32] >> (bit % 32)) & 1u) return MergeMode::all;
+        }
+        return MergeMode::none;
+    }
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -595,21 +722,30 @@ struct FontConfig {
     /// SDF spread at the base tier, in pixels; scaled with each tier.
     float      sdf_spread      = 6.0f;
     int        atlas_size      = 1024;
-    /// Font smoothing: grow every glyph outline by this many DEVICE pixels
-    /// on each side, ramping up from 0 linearly until `smoothing_full_px`
-    /// (light text) or `smoothing_full_px_dark` (dark text).
+    /// Font smoothing: grow every glyph outline by up to this many DEVICE
+    /// pixels per side, as CoreGraphics does. The growth depends on the
+    /// size and on the text colour's luminance level (FontStack::
+    /// smoothing_px / smoothing_level).
     ///
     /// This is the "weight" macOS text has and FreeType-style text lacks.
     /// CoreGraphics font smoothing (on by default, Retina included) offsets
     /// glyph edges outward; measured gamma-independently on SF with straight
     /// stems at 64 subpixel offsets each, the growth is 0.30 px per side,
-    /// reached at ~20 device px for white-on-black and ~51 px for
-    /// black-on-white, proportionally less below. Without it, mayag's stems
-    /// came out 0.6 px thinner than every native Mac app's and body text read
-    /// thin and grey beside them. 0 turns it off.
+    /// CoreGraphics' own values (read from CGGlyphBuilder under lldb):
+    /// min(0.3, (0.0058 + 0.0025 * level) px per px) with level = round(4 *
+    /// luminance of the text colour), 0 (black) to 4 (white). Without it,
+    /// mayag's stems came out 0.6 px thinner than every native Mac app's and
+    /// body text read thin and grey beside them. 0 turns it off; other
+    /// values scale it.
     float      smoothing              = 0.30f;
-    float      smoothing_full_px      = 20.0f;
-    float      smoothing_full_px_dark = 51.0f;
+    /// CoreGraphics' vertical autohinter (cg_autohint.hpp): at integer device
+    /// ppem 7-18, x-height and cap height snap to whole pixels, as every
+    /// macOS app draws them.
+    bool       cg_autohint = true;
+    /// Flatten glyph curves exactly as CoreGraphics does (raster.hpp,
+    /// cg_glyph_flattening): macOS under-flattens, and its glyphs carry
+    /// that ink deficit (~4% on an SF 'o' at 24 px).
+    bool       cg_flattening = true;
     /// Glyphs untouched for this many frames become eviction candidates.
     std::uint64_t glyph_ttl_frames = 600;
 };
@@ -1116,19 +1252,93 @@ class FontStack : public Shaper {
 
     /// Split a pen x into the integer pixel a coverage glyph is drawn at and
     /// the phase (0..phases-1, in 1/phases px) it must be rasterised with.
+    /// CoreGraphics adds 0.001 px before flooring (measured: at 12 px the
+    /// 1/3 boundary sits at x = k + 0.33233, the next pixel starts at
+    /// k + 0.999), so a pen at 18.66601 — an advance sum a hair under 2/3 —
+    /// lands in phase 2 as on macOS, not phase 1.
     struct PenSplit { float pixel; int phase; };
     [[nodiscard]] static PenSplit split_pen(float x, int phases) noexcept {
         phases = std::clamp(phases, 1, max_subpixel_phases);
-        const float pixel = std::floor(x + 1e-4f);
-        const int phase = static_cast<int>(std::floor((x - pixel) * static_cast<float>(phases) + 1e-4f));
-        return {pixel, std::clamp(phase, 0, phases - 1)};
+        const double xb = static_cast<double>(x) + 0.001;
+        const double pixel = std::floor(xb);
+        const int phase = static_cast<int>(std::floor((xb - pixel) * static_cast<double>(phases)));
+        return {static_cast<float>(pixel), std::clamp(phase, 0, phases - 1)};
+    }
+
+    /// One glyph of a merged run: its glyph id and its pen position RELATIVE
+    /// to the run's first glyph pen, in device px.
+    struct MergedGlyph { std::uint16_t gid; Vec2 pos; };
+
+    /// A run of glyphs CoreText draws as ONE bitmap run (Face::merge_mode):
+    /// every glyph rasterised exactly as glyph() would (same phase, smoothing,
+    /// hint), then combined per pixel with max() into one entry whose origin
+    /// is the first glyph's whole-pixel pen. Cached by the run's content.
+    [[nodiscard]] const CachedGlyph* merged_run(std::size_t face_index, std::span<const MergedGlyph> run, float first_pen_x,
+                                                float size_px, float weight, std::span<const ShapeParams::Axis> axes,
+                                                bool italic, int smoothing) {
+        if (face_index >= faces_.size() || run.empty()) return nullptr;
+        const int phases = subpixel_phases_for(size_px);
+        std::uint64_t h = 1469598103934665603ull;
+        const auto mix = [&](std::uint64_t v) { h ^= v; h *= 1099511628211ull; };
+        struct Piece { const CachedGlyph* g; int px_x; int px_y; };
+        std::vector<Piece> pieces;
+        pieces.reserve(run.size());
+        const auto base = split_pen(first_pen_x, phases);
+        mix(static_cast<std::uint64_t>(base.phase));
+        mix(static_cast<std::uint64_t>(std::lround(size_px * 64.0f)));
+        mix(static_cast<std::uint64_t>(smoothing));
+        for (const auto& m : run) {
+            const auto sp = split_pen(first_pen_x + m.pos.x, phases);
+            const CachedGlyph* g = glyph(face_index, m.gid, size_px, weight, axes, italic, sp.phase, smoothing);
+            if (g == nullptr) return nullptr;
+            const int dx = static_cast<int>(sp.pixel - base.pixel);
+            const int dy = static_cast<int>(std::lround(m.pos.y));
+            pieces.push_back({g, dx, dy});
+            mix(m.gid);
+            mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(dx) + 65536) << 8 | static_cast<std::uint64_t>(sp.phase));
+            mix(static_cast<std::uint64_t>(dy + 4096));
+        }
+        GlyphKey key;
+        key.face_id = faces_[face_index]->id();
+        key.glyph_id = static_cast<std::uint16_t>(h);
+        key.size_bucket = static_cast<std::uint32_t>(h >> 16);
+        key.flags = static_cast<std::uint16_t>(0x8000u | ((h >> 48) & 0x7fffu));
+        if (const CachedGlyph* hit = atlas_.find(key)) return hit;
+        float l = 1e9f, t = 1e9f, r = -1e9f, b = -1e9f;
+        for (const auto& p : pieces) {
+            if (p.g->size.x <= 0.0f) continue;
+            l = num::min(l, static_cast<float>(p.px_x) + p.g->bearing.x);
+            t = num::min(t, static_cast<float>(p.px_y) + p.g->bearing.y);
+            r = num::max(r, static_cast<float>(p.px_x) + p.g->bearing.x + p.g->size.x);
+            b = num::max(b, static_cast<float>(p.px_y) + p.g->bearing.y + p.g->size.y);
+        }
+        if (r <= l || b <= t) return nullptr;
+        const int W = static_cast<int>(r - l), H = static_cast<int>(b - t);
+        Bitmap out{W, H};
+        // The atlas may move glyphs while inserting; copy all pieces' pixels
+        // first (they are resident: just looked up).
+        const auto& pix = atlas_.pixels();
+        const int aw = atlas_.width();
+        for (const auto& p : pieces) {
+            if (p.g->size.x <= 0.0f) continue;
+            const int ox = static_cast<int>(static_cast<float>(p.px_x) + p.g->bearing.x - l);
+            const int oy = static_cast<int>(static_cast<float>(p.px_y) + p.g->bearing.y - t);
+            const int ax = static_cast<int>(p.g->atlas_rect.left()), ay = static_cast<int>(p.g->atlas_rect.top());
+            for (int y = 0; y < static_cast<int>(p.g->size.y); ++y)
+                for (int x = 0; x < static_cast<int>(p.g->size.x); ++x) {
+                    const std::uint8_t v = pix[static_cast<std::size_t>((ay + y) * aw + ax + x)];
+                    std::uint8_t& d = out.pixels[static_cast<std::size_t>((oy + y) * W + ox + x)];
+                    d = std::max(d, v);
+                }
+        }
+        return atlas_.insert(key, out, Vec2{l, t}, 0.0f, pieces.front().g->raster_scale, 0.0f, false);
     }
 
     [[nodiscard]] const CachedGlyph* glyph(std::size_t face_index, std::uint16_t gid,
                                            float size_px, float weight = 400.0f,
                                            std::span<const ShapeParams::Axis> axes = {},
                                            bool italic = false, int x_phase = 0,
-                                           bool dark_text = false) {
+                                           int smoothing = 4) {
         if (face_index >= faces_.size()) return nullptr;
         const Face& face = *faces_[face_index];
         pin_variations(faces_[face_index].get(), weight, axes, italic);
@@ -1138,9 +1348,11 @@ class FontStack : public Shaper {
         // anyway, and colour bitmaps are scaled images.
         if (use_sdf || face.is_color() || face.has_colr(gid)) x_phase = 0;
         x_phase = std::clamp(x_phase, 0, subpixel_phases_for(size_px) - 1);
-        // Polarity only changes coverage rasters (SDF growth is per draw).
+        // The smoothing level only changes coverage rasters (SDF growth is
+        // applied per draw).
         if (use_sdf || face.is_color() || face.has_colr(gid) || config_.smoothing <= 0.0f)
-            dark_text = false;
+            smoothing = 0;
+        smoothing = std::clamp(smoothing, 0, 4);
 
         GlyphKey key;
         key.face_id  = face.id();
@@ -1149,14 +1361,17 @@ class FontStack : public Shaper {
         // (sdf_raster_px, sqrt(2) apart), so a field is minified rather than
         // magnified up to 4x the base raster, while a page with ten type
         // sizes still rasterises each glyph only a few times.
-        // Bitmap entries are rasterised for the size they are drawn at, and
-        // quantising to QUARTER pixels keeps the cache from exploding while
-        // staying far finer than the eye can resolve.
+        // Bitmap entries are rasterised for the size they are drawn at, to
+        // 1/64 px: CoreGraphics renders the exact size, and quarter-pixel
+        // buckets moved edges by up to 0.04 px at body sizes (a dash's top
+        // edge steps 0.08 px per 0.25 px of size), visible as coverage
+        // steps against macOS. UIs use a handful of sizes, so the cache
+        // cost is nil.
         const float sdf_px = use_sdf ? sdf_raster_px(size_px) : 0.0f;
         key.size_bucket = use_sdf
-            ? static_cast<std::uint16_t>(sdf_px)
-            : static_cast<std::uint16_t>(num::clamp(num::round(size_px * 4.0f),
-                                                    1.0f, 65000.0f));
+            ? static_cast<std::uint32_t>(sdf_px)
+            : static_cast<std::uint32_t>(num::clamp(num::round(size_px * 64.0f),
+                                                    1.0f, 16777216.0f));
         // Synthesise italic by shearing when the font can't slant itself
         // (static faces, or variable faces with no slnt/ital axis). Variable
         // faces WITH a slant axis already did it for real in pin_variations,
@@ -1173,7 +1388,18 @@ class FontStack : public Shaper {
         if (synth_italic) key.flags |= glyph_flags::synthetic_italic;
         if (synth_bold)   key.flags |= glyph_flags::synthetic_bold;
         key.flags |= glyph_flags::encode_phase(x_phase);
-        if (dark_text) key.flags |= glyph_flags::dark_text;
+        key.flags |= glyph_flags::encode_smoothing(smoothing);
+        // CoreGraphics' vertical autohint: only at integer device ppem 7-18
+        // and only for outline coverage.
+        std::optional<cg_autohint::Transform> hint;
+        if (config_.cg_autohint && !use_sdf && !face.is_color() && !face.has_colr(gid)) {
+            if (const auto m = face.cg_hint_metrics()) {
+                const double stem = apple::autohint_stem(face.file().postscript_name());
+                hint = cg_autohint::create(static_cast<double>(size_px), face.units_per_em(), m->xh, m->cap, m->asc,
+                                           stem, static_cast<double>(smoothing_px(size_px, smoothing)));
+            }
+        }
+        if (hint) key.flags |= glyph_flags::cg_hinted;
 
         if (const CachedGlyph* hit = atlas_.find(key)) return hit;
 
@@ -1269,25 +1495,29 @@ class FontStack : public Shaper {
 
         // Rasterise at the size the KEY represents, not the raw request, so
         // two calls that share a cache slot also share identical pixels.
-        const float quantised = static_cast<float>(key.size_bucket) * 0.25f;
+        const float quantised = static_cast<float>(key.size_bucket) / 64.0f;
         const float scale = face.scale_for(quantised);
-        if (const float grow = smoothing_px(quantised, dark_text); grow > 0.0f) {
-            // CoreGraphics' smoothing grows each side horizontally by `grow`
-            // but vertically grows the TOP by 2*grow and the bottom not at
-            // all (measured on straight SF stems and bars, 32-160 px): a
-            // symmetric dilation plus an upward shift of `grow`.
-            o.embolden(grow / scale, true);
-            o.transform(Affine{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, grow / scale});
+        const float grow = smoothing_px(quantised, smoothing);
+        // macOS's glyph pipeline, in device px (y up): the font-smoothing
+        // dilation (cg_autohint::dilate: each curve piece translated by a
+        // corner of [-g, g] x [0, 2g]), then the vertical autohint at integer
+        // ppem 7-18, then flattening the CoreGraphics way and exact-area
+        // coverage. Each step is ported from CoreGraphics.
+        o.transform(Affine{scale, 0.0f, 0.0f, scale, 0.0f, 0.0f});
+        if (grow > 0.0f) o = cg_autohint::dilate(o, grow, grow);
+        if (hint) {
+            o.map_points([&](Vec2 p) {
+                return Vec2{p.x, static_cast<float>(hint->apply(static_cast<double>(p.y)))};
+            });
         }
         if (x_phase != 0) {
-            // Bake the pen's fraction into the outline (font units, so divide
-            // the pixel shift by the scale). rasterize() floors the bounds, so
-            // the bitmap's offset stays integral and the shift lands in the
-            // coverage, where it belongs.
-            const float dx = static_cast<float>(x_phase) / static_cast<float>(subpixel_phases_for(size_px)) / scale;
+            // Bake the pen's fraction into the outline. rasterize() floors
+            // the bounds, so the bitmap's offset stays integral and the shift
+            // lands in the coverage, where it belongs.
+            const float dx = static_cast<float>(x_phase) / static_cast<float>(subpixel_phases_for(size_px));
             o.transform(Affine{1.0f, 0.0f, 0.0f, 1.0f, dx, 0.0f});
         }
-        auto r = rasterize(o, scale, 1);
+        auto r = rasterize(o, 1.0f, 1, config_.cg_flattening ? cg_glyph_flattening : 0.1f);
         if (synth_bold) {
             // Emboldening grows the bitmap by `pad` on every side; keep the
             // glyph visually centred by shifting the offset back by the same.
@@ -1357,17 +1587,26 @@ class FontStack : public Shaper {
     }
 
     /// Font-smoothing growth per side, in device pixels, for a glyph drawn
-    /// at `size_px` in light or dark text. See FontConfig::smoothing.
-    [[nodiscard]] float smoothing_px(float size_px, bool dark_text = false) const noexcept {
-        const float full = dark_text ? config_.smoothing_full_px_dark : config_.smoothing_full_px;
-        if (config_.smoothing <= 0.0f || full <= 0.0f) return 0.0f;
-        return config_.smoothing * num::clamp(size_px / full, 0.0f, 1.0f);
+    /// at `size_px` at smoothing `level` (0..4, smoothing_level): exactly
+    /// CoreGraphics' min(0.3, (0.0058 + 0.0025 * level) * size), scaled by
+    /// FontConfig::smoothing / 0.3 so 0 turns it off.
+    [[nodiscard]] float smoothing_px(float size_px, int level = 4) const noexcept {
+        if (config_.smoothing <= 0.0f) return 0.0f;
+        const float per_px = 0.0058f + 0.0025f * static_cast<float>(std::clamp(level, 0, 4));
+        return num::min(0.3f, per_px * num::max(size_px, 0.0f)) * (config_.smoothing / 0.3f);
     }
 
-    /// Whether text in `c` counts as dark for font smoothing: encoded
-    /// luminance below the midpoint, the same split apply_text_gamma uses.
-    [[nodiscard]] static bool is_dark_text(Color<Srgb> c) noexcept {
-        return 0.2126f * c.c0 + 0.7152f * c.c1 + 0.0722f * c.c2 < 0.5f;
+    /// CoreGraphics' font-smoothing level for text drawn in `c`: the colour's
+    /// linear-light luminance (BT.709 weights on decoded sRGB) in quarters,
+    /// round(4 L) — 0 for black, 4 for white (fitted on 72 colours against
+    /// CGFontGetDefaultDilationParameters: no mismatch). The background
+    /// plays no part.
+    [[nodiscard]] static int smoothing_level(Color<Srgb> c) noexcept {
+        const auto lin = [](float v) {
+            return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+        };
+        const float l = 0.2126f * lin(c.c0) + 0.7152f * lin(c.c1) + 0.0722f * lin(c.c2);
+        return std::clamp(static_cast<int>(std::lround(4.0f * l)), 0, 4);
     }
 
     [[nodiscard]] bool should_use_sdf(float size_px) const noexcept {
@@ -1380,6 +1619,8 @@ class FontStack : public Shaper {
     }
 
   public:
+    [[nodiscard]] bool should_use_sdf_public(float size_px) const noexcept { return should_use_sdf(size_px); }
+
     /// The pixel size an SDF entry for text drawn at `size_px` is rasterised
     /// at: sdf_raster_size stepped up by sqrt(2) (48, 68, 96, 136, 192 by
     /// default) to the first tier at least as large as the drawn size, so
@@ -1988,16 +2229,85 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             const std::size_t line_end = std::min(draw_end, shaped.glyphs.size());
             std::vector<std::size_t> order;
             detail::visual_glyph_order(s, shaped, line.begin, line_end, order);
+            // Positions first, so runs CoreText would merge (Face::merge_mode)
+            // can be drawn as one max()-combined bitmap.
+            struct Placed { std::size_t i; Vec2 pen; };
+            std::vector<Placed> placed;
+            placed.reserve(order.size());
             for (const std::size_t i : order) {
                 const auto& g = shaped.glyphs[i];
                 if (g.glyph_id == 0 && g.advance == 0.0f) continue;   // newline marker
-
-                place(dl, g.face_index, g.glyph_id, Vec2{pen_x, baseline_y} + g.offset, st, sp);
+                placed.push_back({i, Vec2{pen_x, baseline_y} + g.offset});
                 pen_x += g.advance;
                 if (word_gap > 0.0f && g.cluster < s.size() &&
                     (s[g.cluster] == ' ' || s[g.cluster] == '\t')) {
                     pen_x += word_gap;
                 }
+            }
+            std::vector<FontStack::MergedGlyph> group;
+            for (std::size_t k = 0; k < placed.size();) {
+                const auto& g0 = shaped.glyphs[placed[k].i];
+                const Face* face = stack_->face_at(g0.face_index);
+                std::size_t e = k + 1;
+                if (face != nullptr && face->merge_mode() != Face::MergeMode::none && !face->is_color()) {
+                    // Extend over the same face; MERG faces only while the
+                    // table asks for the pair to be merged.
+                    while (e < placed.size() && shaped.glyphs[placed[e].i].face_index == g0.face_index) {
+                        if (face->merge_mode() == Face::MergeMode::table &&
+                            !face->merg_pair(shaped.glyphs[placed[e - 1].i].glyph_id, shaped.glyphs[placed[e].i].glyph_id, false))
+                            break;
+                        ++e;
+                    }
+                    // max() and one-over-another compositing differ only
+                    // where glyph masks overlap: merge just the clusters of
+                    // glyphs whose bitmaps intersect (same pixels, small
+                    // atlas entries, Latin keeps one instance per glyph).
+                    if (e - k >= 2 && !stack_->should_use_sdf_public(st.size)) {
+                        const int phases = FontStack::subpixel_phases_for(st.size);
+                        const auto rect_of = [&](std::size_t j, Rect& out) {
+                            const auto sp2 = FontStack::split_pen(placed[j].pen.x, phases);
+                            const CachedGlyph* cg = stack_->glyph(g0.face_index, shaped.glyphs[placed[j].i].glyph_id, st.size,
+                                                                  st.effective_weight(), {sp.axes.data(), sp.axis_count}, sp.italic,
+                                                                  sp2.phase, FontStack::smoothing_level(st.color));
+                            if (cg == nullptr || cg->size.x <= 0.0f) return false;
+                            // Inset the 1 px empty margin rasterize() adds.
+                            out = Rect{sp2.pixel + cg->bearing.x + 1.0f, num::round(placed[j].pen.y) + cg->bearing.y + 1.0f,
+                                       num::max(cg->size.x - 2.0f, 0.0f), num::max(cg->size.y - 2.0f, 0.0f)};
+                            return true;
+                        };
+                        Rect u{};
+                        bool have = rect_of(k, u);
+                        std::size_t cut = k + 1;
+                        for (; cut < e; ++cut) {
+                            Rect r{};
+                            if (!rect_of(cut, r)) break;
+                            if (!have) { u = r; have = true; continue; }
+                            const bool overlaps = r.left() < u.right() && u.left() < r.right() && r.top() < u.bottom() && u.top() < r.bottom();
+                            if (!overlaps) break;
+                            const float l = num::min(u.left(), r.left()), t = num::min(u.top(), r.top());
+                            u = Rect{l, t, num::max(u.right(), r.right()) - l, num::max(u.bottom(), r.bottom()) - t};
+                        }
+                        e = cut;
+                    }
+                }
+                if (e - k >= 2 && !stack_->should_use_sdf_public(st.size)) {
+                    group.clear();
+                    const Vec2 p0 = placed[k].pen;
+                    for (std::size_t j = k; j < e; ++j)
+                        group.push_back({shaped.glyphs[placed[j].i].glyph_id, placed[j].pen - p0});
+                    const CachedGlyph* merged = stack_->merged_run(g0.face_index, group, p0.x, st.size, st.effective_weight(),
+                                                                {sp.axes.data(), sp.axis_count}, sp.italic,
+                                                                FontStack::smoothing_level(st.color));
+                    if (merged != nullptr && merged->size.x > 0.0f) {
+                        const auto split = FontStack::split_pen(p0.x, FontStack::subpixel_phases_for(st.size));
+                        emit(dl, *merged, Vec2{split.pixel, num::round(p0.y)}, st);
+                        k = e;
+                        continue;
+                    }
+                }
+                for (std::size_t j = k; j < e; ++j)
+                    place(dl, shaped.glyphs[placed[j].i].face_index, shaped.glyphs[placed[j].i].glyph_id, placed[j].pen, st, sp);
+                k = e;
             }
 
             // Draw the ellipsis glyph after the truncated run.
@@ -2040,7 +2350,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
         const auto split = FontStack::split_pen(pen.x, phases);
         const CachedGlyph* cached = stack_->glyph(face_index, gid, st.size, st.effective_weight(),
                                                    {sp.axes.data(), sp.axis_count}, sp.italic,
-                                                   split.phase, FontStack::is_dark_text(st.color));
+                                                   split.phase, FontStack::smoothing_level(st.color));
         if (cached == nullptr || cached->size.x <= 0.0f) return;
         Vec2 at = pen;
         if (cached->is_sdf && !cached->is_color)
@@ -2109,7 +2419,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             // Font smoothing: the same per-side growth the bitmap path bakes
             // into its outlines, as a threshold shift (per_px field units per
             // display pixel), so text keeps its weight across the threshold.
-            const float grow_px = stack_->smoothing_px(st.size, FontStack::is_dark_text(st.color));
+            const float grow_px = stack_->smoothing_px(st.size, FontStack::smoothing_level(st.color));
             const float grow = grow_px * per_px;
             // ...and CoreGraphics' vertical asymmetry: the top grows 2x, the
             // bottom not at all, i.e. the dilated glyph moves up by grow_px.

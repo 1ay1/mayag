@@ -1036,7 +1036,14 @@ void test_ellipsis() {
         DrawList dl;
         render::PaintOptions po; po.measurer = &measurer; po.glyphs = &glyphs;
         render::paint(root, dl, po);
-        check(dl.instances().size() == 2, "short text keeps all its glyphs, no ellipsis added");
+        // Arial merges overlapping glyphs into one bitmap run (as CoreText
+        // draws it), so count drawn ink width, not instances: "ok" must be
+        // drawn whole, with no ellipsis instance after it.
+        float right = 0.0f; std::size_t n = 0;
+        for (const auto& inst : dl.instances()) { ++n; right = num::max(right, inst.rect.x + inst.rect.z); }
+        const float ok_w = measurer.measure("ok", root.style().text, num::inf).x;
+        check(n >= 1 && n <= 2 && right <= ok_w + 3.0f && right >= ok_w - 3.0f,
+              "short text keeps all its glyphs, no ellipsis added");
     }
 
     // Multi-line ellipsis (line-clamp): a long paragraph clamped to 2 lines
@@ -1320,6 +1327,79 @@ void test_optical_size() {
     const float w_disp = m.measure("Login shell to run in new tabs", display, 1e9f).x;
     check(w_auto > w_disp, sf->family() + ": 13 px text uses its text design, not the default (" +
                            std::to_string(w_auto) + " vs " + std::to_string(w_disp) + " px wide)");
+}
+
+// CoreGraphics' vertical autohinter (cg_autohint.hpp): values captured from
+// the live evaluate_autohint_transform under lldb for SF at 12 and 13 px.
+void test_cg_autohint() {
+    section("CoreGraphics autohint");
+    // SF: 'o' top 1097, 'X' top 1443, head.yMax 1960, no registry stem.
+    const auto t12 = typo::cg_autohint::create(12.0, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0696);
+    check(t12.has_value(), "12 px is hinted");
+    if (t12) {
+        check(t12->w_xh == 7 && t12->w_cap == 9, "12 px targets: x-height 7, cap 9");
+        near(static_cast<float>(t12->bot_hi), 1.08327f, 1e-4f, "12 px baseline band top");
+        near(static_cast<float>(t12->s1), 1.07999f, 1e-4f, "12 px lower slope");
+        near(static_cast<float>(t12->s2), 0.96873f, 1e-4f, "12 px middle slope");
+        near(static_cast<float>(t12->s3), 0.86607f, 1e-4f, "12 px upper slope");
+        near(static_cast<float>(t12->apply(12.0 * 1443.0 / 2048.0 + 0.0696)), 8.9304f, 1e-3f, "cap height lands on 9 - dilation");
+    }
+    const auto t13 = typo::cg_autohint::create(13.0, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0754);
+    check(t13.has_value() && t13->s3 == 1.0, "13 px keeps the cap where it is (stretch guard)");
+    check(!typo::cg_autohint::create(12.002, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0).has_value(), "non-integer ppem is not hinted");
+    check(!typo::cg_autohint::create(19.0, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0).has_value(), "19 px is not hinted");
+    check(!typo::cg_autohint::create(6.0, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0).has_value(), "6 px is not hinted");
+}
+
+// Exact nonzero union: two overlapping contours each covering 0.6 of a
+// pixel column must give the union (0.8), not min(1, 0.6 + 0.6). Plus
+// CoreGraphics' glyph flattening.
+void test_union_coverage() {
+    section("overlap union coverage");
+    const auto rect = [](float x0, float y0, float x1, float y1) {
+        typo::Contour c; c.start = {x0, y0};
+        for (const Vec2 q : {Vec2{x0, y1}, Vec2{x1, y1}, Vec2{x1, y0}, Vec2{x0, y0}}) {
+            typo::Segment s; s.kind = typo::Segment::Kind::line; s.to = q; c.segments.push_back(s);
+        }
+        return c;
+    };
+    typo::Outline o;
+    o.contours.push_back(rect(10.1f, 0.0f, 10.7f, 10.0f));
+    o.contours.push_back(rect(10.3f, 0.0f, 10.9f, 10.0f));
+    const auto r = typo::rasterize(o, 1.0f, 1);
+    double total = 0.0;
+    for (const auto v : r.bitmap.pixels) total += v / 255.0;
+    near(static_cast<float>(total), 8.0f, 0.1f, "overlapping bars cover their union (8 px^2), not the clamped sum");
+
+    typo::Outline q;
+    typo::Contour c; c.start = {0.0f, 0.0f};
+    typo::Segment s; s.kind = typo::Segment::Kind::quad; s.c0 = {10.0f, 6.4f}; s.to = {20.0f, 0.0f};
+    c.segments.push_back(s);
+    typo::Segment l; l.kind = typo::Segment::Kind::line; l.to = {0.0f, 0.0f}; c.segments.push_back(l);
+    q.contours.push_back(c);
+    std::vector<std::pair<Vec2, Vec2>> e;
+    typo::flatten(q, Affine{}, typo::cg_glyph_flattening, e);
+    // aa_quadto halves until |P0 - 2C + P1| <= 0.8 px per component:
+    // 12.8 -> 3.2 -> 0.8, i.e. 4 chords (+ the closing line).
+    check(e.size() == 5, "a quad with |dd| 12.8 px flattens to 4 chords + the closing line (got " + std::to_string(e.size()) + ")");
+}
+
+// CoreText draws runs of 'connected language' faces as one bitmap run
+// (max-combined); others glyph by glyph.
+void test_merge_mode() {
+    section("glyph merge mode");
+    const auto mode = [](const char* p) {
+        auto f = typo::Face::from_file(p);
+        return f ? f->merge_mode() : typo::Face::MergeMode::none;
+    };
+    if (std::filesystem::exists("/System/Library/Fonts/SFArabic.ttf"))
+        check(mode("/System/Library/Fonts/SFArabic.ttf") == typo::Face::MergeMode::all, "SF Arabic merges its runs (dlng Arab)");
+    if (std::filesystem::exists("/System/Library/Fonts/Supplemental/Arial.ttf"))
+        check(mode("/System/Library/Fonts/Supplemental/Arial.ttf") == typo::Face::MergeMode::all, "Arial merges (OS/2 Arabic range, no dlng)");
+    if (std::filesystem::exists("/System/Library/Fonts/Supplemental/Georgia.ttf"))
+        check(mode("/System/Library/Fonts/Supplemental/Georgia.ttf") == typo::Face::MergeMode::none, "Georgia does not merge");
+    if (std::filesystem::exists("/System/Library/Fonts/SFNS.ttf"))
+        check(mode("/System/Library/Fonts/SFNS.ttf") == typo::Face::MergeMode::table, "SF uses its MERG table");
 }
 
 // CoreText truncates trak values toward zero: SF at 19.75 pt interpolates
@@ -1656,18 +1736,29 @@ void test_smoothing() {
         return sum / 255.0;
     };
 
-    // Smoothing grows the outline: a light 'l' carries more ink than with
-    // smoothing off, and a dark one (which macOS grows less at text sizes)
-    // sits between the two.
+    // Smoothing grows the outline: white text (level 4) carries more ink
+    // than with smoothing off, and black text (level 0, which macOS grows
+    // least) sits between the two.
     typo::FontConfig off = stack->config();
     off.smoothing = 0.0f;
     auto plain = typo::system::default_stack(off);
-    const double light = ink(stack->glyph(0, gid, 13.0f), *stack);
-    const double dark  = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, true), *stack);
+    const double light = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, 4), *stack);
+    const double dark  = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, 0), *stack);
     const double none  = ink(plain->glyph(0, gid, 13.0f), *plain);
     check(light > none * 1.05, "smoothing thickens light text (" + std::to_string(light) +
                                    " vs " + std::to_string(none) + ")");
     check(dark > none && dark < light, "dark text is grown less than light at 13 px");
+    // CoreGraphics' growth: min(0.3, (0.0058 + 0.0025 level) px per px), level =
+    // round(4 * linear luminance of the text colour).
+    near(stack->smoothing_px(16.0f, 0), 0.0928f, 1e-4f, "black text at 16 px grows 0.0928 px");
+    near(stack->smoothing_px(16.0f, 1), 0.1328f, 1e-4f, "level 1 at 16 px grows 0.1328 px");
+    near(stack->smoothing_px(60.0f, 4), 0.3f, 1e-4f, "growth caps at 0.3 px");
+    check(typo::FontStack::smoothing_level(rgb8(0x1C, 0x1F, 0x24)) == 0 &&
+              typo::FontStack::smoothing_level(rgb8(0x0A, 0x64, 0xDC)) == 1 &&
+              typo::FontStack::smoothing_level(rgb8(0xA8, 0xA8, 0xA8)) == 2 &&
+              typo::FontStack::smoothing_level(rgb8(0x00, 0xFF, 0x00)) == 3 &&
+              typo::FontStack::smoothing_level(rgb8(0xF8, 0xF8, 0xF8)) == 4,
+          "smoothing level follows the text colour's luminance quarters");
 
     // Subpixel phases: every quarter-pixel position is its own raster, and
     // the ink is the same at each (the glyph moved, it did not change).
@@ -2032,6 +2123,9 @@ int main() {
     test_variations();
     test_named_weights();
     test_tracking_rounding();
+    test_cg_autohint();
+    test_union_coverage();
+    test_merge_mode();
     test_square_embolden();
     test_hvgl();
     test_optical_size();

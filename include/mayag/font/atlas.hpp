@@ -42,8 +42,8 @@ namespace mayag::typo {
 struct GlyphKey {
     std::uint32_t face_id     = 0;
     std::uint16_t glyph_id    = 0;
-    std::uint16_t size_bucket = 0;
-    std::uint8_t  flags       = 0;   ///< see GlyphFlags
+    std::uint32_t size_bucket = 0;
+    std::uint16_t flags       = 0;   ///< see GlyphFlags
 
     friend constexpr bool operator==(const GlyphKey&, const GlyphKey&) = default;
 
@@ -54,7 +54,7 @@ struct GlyphKey {
             h *= 1099511628211ull;
         };
         mix(face_id);
-        mix(static_cast<std::uint64_t>(glyph_id) << 16 | size_bucket);
+        mix(static_cast<std::uint64_t>(glyph_id) << 32 | size_bucket);
         mix(flags);
         return h;
     }
@@ -74,9 +74,14 @@ inline constexpr std::uint8_t phase_mask  = (0x3 << phase_shift) | (1 << 7);
 [[nodiscard]] constexpr std::uint8_t encode_phase(int phase) noexcept {
     return static_cast<std::uint8_t>(((phase & 0x3) << phase_shift) | ((phase & 0x4) << 5));
 }
-/// Rasterised for DARK text: font smoothing grows dark glyphs less than
-/// light ones at small sizes (see FontConfig::smoothing).
-inline constexpr std::uint8_t dark_text   = 1 << 6;
+/// Rasterised with CoreGraphics' vertical autohint (integer ppem 7-18), so
+/// a 12.0 px entry never shares a slot with a 12.002 px one, which is not.
+inline constexpr std::uint16_t cg_hinted  = 1 << 8;
+/// The font-smoothing level (0..4, FontStack::smoothing_level) the entry
+/// was rasterised for, in bits 9-11.
+[[nodiscard]] constexpr std::uint16_t encode_smoothing(int level) noexcept {
+    return static_cast<std::uint16_t>((level & 0x7) << 9);
+}
 }  // namespace glyph_flags
 
 }  // namespace mayag::typo

@@ -113,11 +113,46 @@ namespace detail {
 
 }  // namespace detail
 
+/// A negative `tolerance` passed to flatten()/rasterize() selects
+/// CoreGraphics' glyph flattening (aa_quadto / aa_cubeto, read from
+/// CoreGraphics): a quadratic is halved until every component of its second
+/// difference P0 - 2C + P1 is at most 0.8 device px (so it becomes 2^k equal
+/// chords), a cubic is halved adaptively (de Casteljau) until both second
+/// differences are at most 4/15 px per component, depth <= 22. CoreText's
+/// glyph coverage is the exact area of THAT polygon — it deliberately
+/// under-flattens, so an SF 'o' at 24 px holds 4% less ink than its true
+/// outline, and matching macOS means flattening the same way.
+inline constexpr float cg_glyph_flattening = -1.0f;
+
+namespace detail {
+inline void cg_cubic(Vec2 a, Vec2 b, Vec2 c, Vec2 d, int depth, std::vector<std::pair<Vec2, Vec2>>& edges) {
+    const Vec2 d1 = a - b * 2.0f + c, d2 = b - c * 2.0f + d;
+    constexpr float t = 4.0f / 15.0f;
+    if (depth >= 22 || (std::abs(d1.x) <= t && std::abs(d1.y) <= t && std::abs(d2.x) <= t && std::abs(d2.y) <= t)) {
+        edges.emplace_back(a, d);
+        return;
+    }
+    const Vec2 ab = (a + b) * 0.5f, bc = (b + c) * 0.5f, cd = (c + d) * 0.5f;
+    const Vec2 abc = (ab + bc) * 0.5f, bcd = (bc + cd) * 0.5f, m = (abc + bcd) * 0.5f;
+    cg_cubic(a, ab, abc, m, depth + 1, edges);
+    cg_cubic(m, bcd, cd, d, depth + 1, edges);
+}
+[[nodiscard]] inline int cg_quad_steps(Vec2 p0, Vec2 c, Vec2 p1) noexcept {
+    const Vec2 dd = p0 - c * 2.0f + p1;
+    float m = std::max(std::abs(dd.x), std::abs(dd.y));
+    int n = 1;
+    for (int k = 0; k < 22 && m > 0.8f; ++k) { m *= 0.25f; n *= 2; }
+    return std::min(n, 1 << 12);
+}
+}  // namespace detail
+
 /// Flatten an outline into line segments under an affine transform.
 /// `tolerance` is the maximum deviation in DESTINATION pixels, so the
-/// subdivision adapts automatically to the render size.
+/// subdivision adapts automatically to the render size; a negative value
+/// (cg_glyph_flattening) selects CoreGraphics' glyph flattening instead.
 inline void flatten(const Outline& outline, const Affine& xf, float tolerance,
                     std::vector<std::pair<Vec2, Vec2>>& edges) {
+    const bool cg = tolerance < 0.0f;
     for (const auto& contour : outline.contours) {
         if (contour.empty()) continue;
 
@@ -133,10 +168,10 @@ inline void flatten(const Outline& outline, const Affine& xf, float tolerance,
 
                 case Segment::Kind::quad: {
                     const Vec2 c = xf.apply(seg.c0);
-                    const int n = detail::quad_steps(cursor, c, to, tolerance);
+                    const int n = cg ? detail::cg_quad_steps(cursor, c, to) : detail::quad_steps(cursor, c, to, tolerance);
                     Vec2 prev = cursor;
                     for (int i = 1; i <= n; ++i) {
-                        const Vec2 p = detail::quad_at(cursor, c, to,
+                        const Vec2 p = i == n ? to : detail::quad_at(cursor, c, to,
                                                        static_cast<float>(i) / static_cast<float>(n));
                         edges.emplace_back(prev, p);
                         prev = p;
@@ -147,6 +182,7 @@ inline void flatten(const Outline& outline, const Affine& xf, float tolerance,
                 case Segment::Kind::cubic: {
                     const Vec2 c0 = xf.apply(seg.c0);
                     const Vec2 c1 = xf.apply(seg.c1);
+                    if (cg) { detail::cg_cubic(cursor, c0, c1, to, 0, edges); break; }
                     const int n = detail::cubic_steps(cursor, c0, c1, to, tolerance);
                     Vec2 prev = cursor;
                     for (int i = 1; i <= n; ++i) {
@@ -319,6 +355,83 @@ struct RasterResult {
     Vec2   offset{};
 };
 
+namespace detail {
+
+/// Replace a polygon soup with the boundary of its NONZERO union, row by
+/// row: within every pixel row, split at edge endpoints and edge crossings
+/// into bands where the edges' left-to-right order is fixed, and keep only
+/// the band pieces where the winding number changes between 0 and nonzero.
+/// Accumulating those gives the exact union area per pixel, where summing
+/// every edge and clamping over-counts pixels that two overlapping contours
+/// both partly cover (0.6 + 0.6 -> 1.0 instead of the true union, e.g. 0.8).
+/// CoreGraphics' glyph rasteriser resolves overlaps exactly, and HVF glyphs
+/// (PingFang) and variable fonts are full of overlapping contours.
+/// Edges are in bitmap pixels, y down; `h` rows.
+inline void union_boundary(const std::vector<std::pair<Vec2, Vec2>>& in, int h,
+                           std::vector<std::pair<Vec2, Vec2>>& out) {
+    struct E { double xa, ya, xb, yb; int dir; };   // ya < yb; dir: +1 if original pointed down
+    std::vector<std::vector<std::uint32_t>> rows(static_cast<std::size_t>(std::max(h, 0)));
+    std::vector<E> es;
+    es.reserve(in.size());
+    for (const auto& [a, b] : in) {
+        if (a.y == b.y) continue;
+        const bool down = b.y > a.y;
+        const E e{down ? a.x : b.x, down ? a.y : b.y, down ? b.x : a.x, down ? b.y : a.y, down ? 1 : -1};
+        const int r0 = std::max(0, static_cast<int>(std::floor(e.ya)));
+        const int r1 = std::min(h - 1, static_cast<int>(std::ceil(e.yb)) - 1);
+        for (int r = r0; r <= r1; ++r) rows[static_cast<std::size_t>(r)].push_back(static_cast<std::uint32_t>(es.size()));
+        es.push_back(e);
+    }
+    const auto x_at = [](const E& e, double y) { return e.xa + (e.xb - e.xa) * (y - e.ya) / (e.yb - e.ya); };
+    std::vector<double> ev;
+    std::vector<std::pair<double, std::uint32_t>> order;
+    for (int r = 0; r < h; ++r) {
+        const auto& ids = rows[static_cast<std::size_t>(r)];
+        if (ids.empty()) continue;
+        const double top = r, bot = r + 1.0;
+        ev.assign({top, bot});
+        for (const auto i : ids) {
+            const E& e = es[i];
+            if (e.ya > top && e.ya < bot) ev.push_back(e.ya);
+            if (e.yb > top && e.yb < bot) ev.push_back(e.yb);
+        }
+        for (std::size_t p = 0; p < ids.size(); ++p)
+            for (std::size_t q = p + 1; q < ids.size(); ++q) {
+                const E& a = es[ids[p]];
+                const E& b = es[ids[q]];
+                const double lo = std::max({top, a.ya, b.ya}), hi = std::min({bot, a.yb, b.yb});
+                if (hi <= lo) continue;
+                const double da = x_at(a, lo) - x_at(b, lo), db = x_at(a, hi) - x_at(b, hi);
+                if ((da < 0.0) != (db < 0.0) && da != 0.0 && db != 0.0) ev.push_back(lo + (hi - lo) * da / (da - db));
+            }
+        std::sort(ev.begin(), ev.end());
+        for (std::size_t k = 0; k + 1 < ev.size(); ++k) {
+            const double y0 = ev[k], y1 = ev[k + 1];
+            if (y1 - y0 < 1e-9) continue;
+            const double ym = 0.5 * (y0 + y1);
+            order.clear();
+            for (const auto i : ids) {
+                const E& e = es[i];
+                if (e.ya <= y0 + 1e-12 && e.yb >= y1 - 1e-12) order.emplace_back(x_at(e, ym), i);
+            }
+            if (order.empty()) continue;
+            std::sort(order.begin(), order.end());
+            int w = 0;
+            for (const auto& [xm, i] : order) {
+                const E& e = es[i];
+                const int before = w;
+                w += e.dir;
+                if ((before == 0) == (w == 0)) continue;
+                const Vec2 p0{static_cast<float>(x_at(e, y0)), static_cast<float>(y0)};
+                const Vec2 p1{static_cast<float>(x_at(e, y1)), static_cast<float>(y1)};
+                if (e.dir > 0) out.emplace_back(p0, p1); else out.emplace_back(p1, p0);
+            }
+        }
+    }
+}
+
+}  // namespace detail
+
 /// Render an outline at `scale` (pixels per font unit), with `padding` pixels
 /// of empty margin on every side.
 ///
@@ -349,6 +462,14 @@ struct RasterResult {
     std::vector<std::pair<Vec2, Vec2>> edges;
     edges.reserve(outline.point_count() * 3);
     flatten(outline, xf, tolerance, edges);
+    // Exact nonzero union (overlapping contours): only for multi-contour
+    // outlines, a single simple contour cannot overlap itself in a glyph.
+    if (outline.contours.size() > 1) {
+        std::vector<std::pair<Vec2, Vec2>> u;
+        u.reserve(edges.size() * 2);
+        detail::union_boundary(edges, h, u);
+        edges.swap(u);
+    }
 
     Rasterizer r{w, h};
     r.add_edges(edges);
