@@ -22,20 +22,23 @@ namespace ot = mayag::typo::ot;
 inline constexpr std::uint16_t deleted_glyph = 0xFFFF;   ///< HarfBuzz DELETED_GLYPH
 inline constexpr std::uint8_t uflag_aat_deleted = 0x80;  ///< UPROPS_MASK_Cf_AAT_DELETED
 
-/// AAT Lookup<HBUINT16>::get_value (formats 0/2/4/6/8) and, when
-/// `allow_format10`, get_value_or_null's format 10.
-inline std::optional<std::uint16_t> lookup16(const ot::Reader& r, std::size_t t, std::uint16_t gid,
-                                             unsigned num_glyphs, bool allow_format10 = true) {
+/// AAT Lookup<T>::get_value (formats 0/2/4/6/8) and, when `allow_format10`,
+/// get_value_or_null's format 10. `W` is sizeof(T): 2 (HBUINT16) or 4 (HBUINT32).
+template <unsigned W>
+inline std::optional<std::uint32_t> lookup(const ot::Reader& r, std::size_t t, std::uint16_t gid,
+                                           unsigned num_glyphs, bool allow_format10 = true) {
+    static_assert(W == 2 || W == 4);
+    const auto value_at = [&](std::size_t p) -> std::uint32_t { return W == 2 ? r.u16_at(p) : r.u32_at(p); };
     const std::uint16_t format = r.u16_at(t);
     switch (format) {
     case 0:
         if (gid >= num_glyphs) return std::nullopt;
-        return r.u16_at(t + 2 + 2u * gid);
+        return value_at(t + 2 + std::size_t{W} * gid);
     case 2: case 4: case 6: {
         const std::size_t unit = r.u16_at(t + 2);
         std::size_t n = r.u16_at(t + 4);
         const std::size_t base = t + 12;
-        if (unit < (format == 6 ? 4u : 6u)) return std::nullopt;
+        if (unit < (format == 6 ? 2u + W : format == 2 ? 4u + W : 6u)) return std::nullopt;
         // last_is_terminator: 0xFFFF in the first 1 (single) or 2 (segment) words.
         if (n) {
             const std::size_t last = base + (n - 1) * unit;
@@ -58,30 +61,47 @@ inline std::optional<std::uint16_t> lookup16(const ot::Reader& r, std::size_t t,
             if (c < 0) hi = mid;
             else if (c > 0) lo = mid + 1;
             else {
-                if (format == 6) return r.u16_at(u + 2);
-                if (format == 2) return r.u16_at(u + 4);
+                if (format == 6) return value_at(u + 2);
+                if (format == 2) return value_at(u + 4);
                 const std::uint16_t first = r.u16_at(u + 2);
-                return r.u16_at(t + r.u16_at(u + 4) + 2u * (gid - first));
+                return value_at(t + r.u16_at(u + 4) + std::size_t{W} * (gid - first));
             }
         }
         return std::nullopt;
     }
     case 8: {
         const std::uint16_t first = r.u16_at(t + 2), count = r.u16_at(t + 4);
-        if (first <= gid && gid - first < count) return r.u16_at(t + 6 + 2u * (gid - first));
+        if (first <= gid && gid - first < count) return value_at(t + 6 + std::size_t{W} * (gid - first));
         return std::nullopt;
     }
     case 10: {
         if (!allow_format10) return std::nullopt;
         const std::uint16_t vs = r.u16_at(t + 2), first = r.u16_at(t + 4), count = r.u16_at(t + 6);
-        if (!(first <= gid && gid - first < count)) return std::uint16_t{0};
+        if (!(first <= gid && gid - first < count)) return std::uint32_t{0};
         std::uint32_t v = 0;
         const std::size_t p = t + 8 + std::size_t(gid - first) * vs;
         for (unsigned i = 0; i < vs && i < 4; ++i) v = (v << 8) | r.u8_at(p + i);
-        return static_cast<std::uint16_t>(v);
+        return v;
     }
     default: return std::nullopt;
     }
+}
+
+inline std::optional<std::uint16_t> lookup16(const ot::Reader& r, std::size_t t, std::uint16_t gid,
+                                             unsigned num_glyphs, bool allow_format10 = true) {
+    const auto v = lookup<2>(r, t, gid, num_glyphs, allow_format10);
+    if (!v) return std::nullopt;
+    return static_cast<std::uint16_t>(*v);
+}
+
+/// Lookup::collect_glyphs membership: does the lookup cover `gid`?
+template <unsigned W>
+[[nodiscard]] inline bool lookup_covers(const ot::Reader& r, std::size_t t, std::uint16_t gid, unsigned num_glyphs) {
+    if (r.u16_at(t) == 10) {
+        const std::uint16_t first = r.u16_at(t + 4), count = r.u16_at(t + 6);
+        return first <= gid && gid - first < count;
+    }
+    return lookup<W>(r, t, gid, num_glyphs, false).has_value();
 }
 
 inline constexpr unsigned class_end_of_text = 0, class_out_of_bounds = 1, class_deleted = 2;

@@ -495,16 +495,19 @@ HarfBuzz 11.2.1, and it is held to HarfBuzz's output exactly:
   layout for that script. Glyphs are stored in logical order, and each line
   is painted in visual order.
 
-`tests/test_shaping.cpp` replays **500 hb-shape outputs** over about 200 system
-fonts and every script family. All 500 match, glyph for glyph and font unit
+`tests/test_shaping.cpp` replays **629 hb-shape outputs** over about 200 system
+fonts and every script family. All 629 match, glyph for glyph and font unit
 for font unit. A fuzzer has shaped 100,000 strings on corrupted GSUB/GPOS/GDEF
 tables under ASan and UBSan with no failures. Shaping runs at about 290
 ns/char for Latin and 470 ns/char for Devanagari, and results are cached per
 string.
 
-The one thing left to HarfBuzz-on-macOS is Apple's `morx` (AAT) tables. Fonts
-that have only `morx` are passed over for complex scripts in favour of an
-OpenType face for the same script.
+Apple's AAT tables shape the way HarfBuzz-on-macOS shapes them: `morx`
+(rearrangement, contextual, ligature, noncontextual and insertion subtables)
+replaces GSUB, `kerx` (formats 0/1/2/4/6, with `ankr` anchors for marks) or
+Apple's `kern` (formats 0–3, cross-stream included) replaces GPOS, and `trak`
+adjusts the tracking. Faces that only carry `morx`, like Geeza Pro, Raanana
+and Zapfino, therefore join the fallback chain for every script they cover.
 
 ### Untrusted input
 

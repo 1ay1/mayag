@@ -105,6 +105,9 @@ inline std::string shape(Face& face, const std::string& text, const Options& o) 
     ff.coords = face.coords();
     const KernTable& kern = face.legacy_kern();
     if (kern.has_legacy()) ff.legacy_kern = [&](std::uint16_t a, std::uint16_t c) { return int(kern.legacy_lookup(a, c)); };
+    if (const auto kt = file.table(ot::tag("kern")); aat::has_kern(kt)) { ff.kern_table = kt; ff.num_glyphs = file.num_glyphs(); }
+    ff.kerx_table = file.table(ot::tag("kerx"));
+    ff.ankr_table = file.table(ot::tag("ankr"));
     // hb-shape applies `trak` at CoreText's default 12 pt when the font has STAT.
     if (file.has_table(ot::tag("STAT"))) ff.tracking = face.track_table().at_exact(12.0f);
     ff.extents = [&](std::uint16_t g, ot::FontFuncs::Extents& e) {
@@ -118,7 +121,7 @@ inline std::string shape(Face& face, const std::string& text, const Options& o) 
         return true;
     };
     const std::vector<std::uint32_t> langs = ot::ot_language_tags(o.language);
-    const auto plan = ot::compile_plan(layout, script, b.direction, langs, o.features, ff, kern.has_legacy(),
+    const auto plan = ot::compile_plan(layout, script, b.direction, langs, o.features, ff, kern.has_legacy() || !ff.kern_table.empty(),
                                        file.has_table(ot::tag("kerx")), file.table(ot::tag("morx")));
     ot::shape(plan, layout, ff, b, o.features, o.bot);
 

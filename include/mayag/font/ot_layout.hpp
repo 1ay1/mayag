@@ -189,6 +189,7 @@ struct Buffer {
     std::int64_t max_ops = 0;     ///< operation budget (set by substitute/position)
     std::size_t max_len = 0;      ///< growth cap (set by substitute)
     bool successful = true;       ///< false once a budget ran out: stop, keep what we have
+    bool has_attachment = false;  ///< HB_BUFFER_SCRATCH_FLAG_HAS_GPOS_ATTACHMENT, set by AAT cross-stream kern
     std::uint32_t random_state = 1;
 
     [[nodiscard]] std::size_t len() const noexcept { return info.size(); }
@@ -2211,6 +2212,7 @@ inline void position(const Layout& l, const Plan& plan, Buffer& b, const std::ve
                      const std::function<void(Buffer&)>& after_gpos = {}) {
     if (b.pos.size() != b.info.size()) b.pos.resize(b.info.size());
     for (auto& p : b.pos) { p.attach_chain = 0; p.attach_type = 0; }
+    b.has_attachment = false;
     b.remove_output();
     set_budget(b);
     if (zero == ZeroMarks::early) zero_mark_advances(b, adjust_offsets_when_zeroing);
@@ -2232,7 +2234,7 @@ inline void position(const Layout& l, const Plan& plan, Buffer& b, const std::ve
             GlyphPos& p = b.pos[i];
             p.x_advance = p.y_advance = p.x_offset = p.y_offset = 0;
         }
-    if (c.has_attachment) propagate_attachments(b, b.direction);
+    if (c.has_attachment || b.has_attachment) propagate_attachments(b, b.direction);
 }
 
 }  // namespace mayag::typo::ot

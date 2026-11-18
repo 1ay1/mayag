@@ -31,6 +31,8 @@
 // hb-ot-shape-fallback.cc; HarfBuzz is "Old MIT" licensed, see
 // THIRD_PARTY_NOTICES.md.
 
+#include "aat_kern.hpp"
+#include "aat_kerx.hpp"
 #include "ot_layout.hpp"
 #include "aat_morx.hpp"
 #include "ot_language_table.hpp"
@@ -63,6 +65,12 @@ struct FontFuncs {
     std::uint16_t upem = 1000;
     /// Legacy `kern` table pair value in font units (null: font has none).
     std::function<int(std::uint16_t, std::uint16_t)> legacy_kern;
+    /// The raw `kern` table: when set, the kern pass runs HarfBuzz's full
+    /// KernTable::apply (both dialects, formats 0/2/3, cross-stream, RTL
+    /// visual order) instead of the format-0 pair callback above.
+    std::span<const std::uint8_t> kern_table;
+    /// The raw AAT `kerx` and `ankr` tables (empty when absent).
+    std::span<const std::uint8_t> kerx_table, ankr_table;
     /// Tracking added to each grapheme's advance, font units (Apple `trak`;
     /// the caller resolves it for the point size).
     float tracking = 0.0f;
@@ -393,6 +401,7 @@ struct ShapePlan {
     bool has_frac = false;
     bool apply_gpos = false;
     bool apply_kern = false;            ///< legacy `kern` table (no GPOS kern feature)
+    bool apply_kerx = false;            ///< AAT `kerx` (runs only when GPOS does not)
     bool zero_marks = false;
     bool has_gpos_mark = false;
     bool adjust_mark_positioning_when_zeroing = false;
@@ -609,9 +618,14 @@ inline ShapePlan compile_plan(const Layout& l, ucd::Script script, Direction dir
     const bool kerx = has_kerx_table && (!(has_gsub && gpos) || !has_gpos_kern);
     sp.apply_gpos = gpos && !(has_kerx_table && !(has_gsub && gpos));
     sp.apply_kern = !kerx && (!has_gpos_kern || !sp.apply_gpos) && has_kern_table && sp.kern_mask;
-    sp.zero_marks = script_zero_marks && !kerx;
+    sp.apply_kerx = kerx;
+    // A state-machine `kern` positions marks itself; cross-stream kern
+    // moves them vertically: either way HarfBuzz leaves marks alone.
+    const bool machine_kern = sp.apply_kern && aat::has_machine_kern(font.kern_table);
+    const bool cross_kern = sp.apply_kern && aat::has_cross_kern(font.kern_table);
+    sp.zero_marks = script_zero_marks && !kerx && !machine_kern;
     sp.has_gpos_mark = sp.map.one_mask_of(make_tag('m', 'a', 'r', 'k')) != 0;
-    sp.adjust_mark_positioning_when_zeroing = !sp.apply_gpos && !kerx;
+    sp.adjust_mark_positioning_when_zeroing = !sp.apply_gpos && !kerx && !cross_kern;
     sp.fallback_mark_positioning = sp.adjust_mark_positioning_when_zeroing && script_fallback_position;
     sp.apply_morx = apply_morx;
     if (apply_morx) sp.adjust_mark_positioning_when_zeroing = false;   // after fallback_mark_positioning
@@ -797,9 +811,42 @@ inline void set_masks(Buffer& b, std::uint32_t value, std::uint32_t mask, std::u
         if (g.cluster >= start && g.cluster < end) g.mask = (g.mask & ~mask) | (value & mask);
 }
 
+/// hb_aat_layout_position: the `kerx` pass, with the kern skippy for pairs.
+inline void kerx_pass(const Layout& l, Buffer& b, std::uint32_t kern_mask, const FontFuncs& font) {
+    const std::vector<float> no_coords;
+    ApplyContext c{l, table::gpos, b, no_coords};
+    c.lookup_mask = kern_mask;
+    c.set_lookup_props(lookup_flag::ignore_marks);
+    Skippy& it = c.iter_input;
+    aat::apply_kerx(font.kerx_table, font.ankr_table, b, kern_mask, font.num_glyphs, [&](std::size_t i) -> std::size_t {
+        it.reset(i);
+        it.set_match(Skippy::Kind::none);
+        return it.next() ? it.idx : static_cast<std::size_t>(-1);
+    });
+}
+
 /// The legacy `kern` table pass (hb_kern_machine_t): pairs skip marks, and
 /// each kern value splits between the two glyphs like HarfBuzz.
 inline void kern_machine(const Layout& l, Buffer& b, std::uint32_t kern_mask, const FontFuncs& font) {
+    if (!font.kern_table.empty()) {
+        const std::vector<float> no_coords;
+        ApplyContext c{l, table::gpos, b, no_coords};
+        c.lookup_mask = kern_mask;
+        c.set_lookup_props(lookup_flag::ignore_marks);
+        Skippy& it = c.iter_input;
+        aat::apply_kern(font.kern_table, b, kern_mask, font.num_glyphs, [&](std::size_t i) -> std::size_t {
+            it.reset(i);
+            it.set_match(Skippy::Kind::none);
+            return it.next() ? it.idx : static_cast<std::size_t>(-1);
+        });
+        return;
+    }
+    // A `kern` subtable is read in its own order: forward unless it sets
+    // Backwards (no OT subtable can), so an RTL buffer is kerned VISUALLY,
+    // reversed and back (KerxTable::apply's `reverse`). Kerning an Arabic
+    // run in logical order applied every pair to the wrong neighbours.
+    const bool reverse = b.direction == Direction::rtl;
+    if (reverse) b.reverse();
     const std::vector<float> no_coords;
     ApplyContext c{l, table::gpos, b, no_coords};
     c.lookup_mask = kern_mask;
@@ -820,6 +867,7 @@ inline void kern_machine(const Layout& l, Buffer& b, std::uint32_t kern_mask, co
         }
         idx = j;
     }
+    if (reverse) b.reverse();
 }
 
 /// Space fallback widths (_hb_ot_shape_fallback_spaces), in font units.
@@ -1097,7 +1145,8 @@ inline void shape(const ShapePlan& plan, const Layout& l, const FontFuncs& font,
     const bool adjust = plan.adjust_mark_positioning_when_zeroing && b.direction == Direction::ltr;
     const ZeroMarks zero = plan.zero_marks ? plan.shaper->zero_marks : ZeroMarks::none;
     position(l, plan.map, b, font.coords, zero, adjust, &pc, plan.apply_gpos, [&](Buffer& buf) {
-        if (plan.apply_kern && font.legacy_kern) detail::kern_machine(l, buf, plan.kern_mask, font);
+        if (!plan.apply_gpos && plan.apply_kerx && !font.kerx_table.empty()) detail::kerx_pass(l, buf, plan.kern_mask, font);
+        if (plan.apply_kern && (font.legacy_kern || !font.kern_table.empty())) detail::kern_machine(l, buf, plan.kern_mask, font);
         if (font.tracking != 0.0f) {   // hb_aat_layout_track: once per grapheme
             const std::size_t n = buf.len();
             std::size_t start = 0;

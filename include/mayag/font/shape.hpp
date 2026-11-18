@@ -316,18 +316,27 @@ class KernTable {
         if (data.size() < 4) return {};
         const ot::Reader r{data};
         // Microsoft's header (version 0, u16 counts) or Apple's (32-bit 1.0).
+        // Subtable headers differ too:
+        //   OT:  u16 version, u16 length, u8 format, u8 coverage   (6 bytes)
+        //   AAT: u32 length, u8 coverage, u8 format, u16 tupleIndex (8 bytes)
+        // with coverage bits OT 0x01 horizontal / 0x04 cross-stream, AAT
+        // 0x80 vertical / 0x40 cross-stream / 0x20 variation. Reading AAT's
+        // coverage at the wrong offset made every Apple-header table (Hoefler
+        // Text, Zapfino, Baghdad...) look unusable: they lost all kerning.
         const std::uint16_t version = r.u16_at(0);
-        std::size_t pos = version == 0 ? 4 : 8;
-        const std::uint32_t n_tables = version == 0 ? r.u16_at(2) : r.u32_at(4);
+        const bool apple = version == 1;
+        std::size_t pos = apple ? 8 : 4;
+        const std::uint32_t n_tables = apple ? r.u32_at(4) : r.u16_at(2);
         for (std::uint32_t t = 0; t < n_tables && pos + 6 <= data.size(); ++t) {
-            const std::uint32_t length = version == 0 ? r.u16_at(pos + 2) : r.u32_at(pos + 4);
-            const std::uint16_t coverage = version == 0 ? r.u16_at(pos + 4) : r.u16_at(pos + 8);
-            const std::size_t sub = version == 0 ? pos + 6 : pos + 8;
-            const bool horizontal = version == 0 ? (coverage & 0x0001) != 0 : true;
-            const std::uint8_t format = version == 0 ? static_cast<std::uint8_t>(coverage >> 8)
-                                                     : static_cast<std::uint8_t>(coverage & 0xFF);
-            // Format 0 is the only one worth supporting; 1-3 are Apple state machines.
-            if (horizontal && format == 0 && sub + 8 <= data.size()) {
+            const std::uint32_t length = apple ? r.u32_at(pos) : r.u16_at(pos + 2);
+            const std::uint8_t coverage = apple ? r.u8_at(pos + 4) : r.u8_at(pos + 5);
+            const std::uint8_t format = apple ? r.u8_at(pos + 5) : r.u8_at(pos + 4);
+            const std::size_t sub = apple ? pos + 8 : pos + 6;
+            const bool horizontal = apple ? (coverage & 0x80) == 0 : (coverage & 0x01) != 0;
+            const bool cross = apple ? (coverage & 0x40) != 0 : (coverage & 0x04) != 0;
+            const bool variation = apple && (coverage & 0x20) != 0;
+            // Format 0 pairs; 1-3 are Apple state machines / class tables.
+            if (horizontal && !cross && !variation && format == 0 && sub + 8 <= data.size()) {
                 const std::size_t n = r.u16_at(sub);
                 const std::size_t first = sub + 8;
                 const std::size_t avail = (data.size() - first) / 6;

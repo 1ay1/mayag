@@ -812,6 +812,11 @@ class FontStack : public Shaper {
         const KernTable& legacy = face.legacy_kern();
         if (params.kerning && legacy.has_legacy())
             ff.legacy_kern = [&](std::uint16_t a, std::uint16_t b) { return int(legacy.legacy_lookup(a, b)); };
+        if (params.kerning)
+            if (const auto kt = file.table(ot::tag("kern")); aat::has_kern(kt)) { ff.kern_table = kt; ff.num_glyphs = file.num_glyphs(); }
+        ff.kerx_table = file.table(ot::tag("kerx"));   // kern=0 masks its pair kerning, as in HarfBuzz
+        ff.ankr_table = file.table(ot::tag("ankr"));
+        ff.num_glyphs = file.num_glyphs();
         ff.extents = [&](std::uint16_t g, ot::FontFuncs::Extents& e) {
             const Outline o = face.outline(g);
             if (o.empty()) { e = {}; return true; }
@@ -833,7 +838,7 @@ class FontStack : public Shaper {
         const auto plan_lang = std::span<const std::uint32_t>{params.languages.data(),
             static_cast<std::size_t>(std::count_if(params.languages.begin(), params.languages.end(),
                                                    [](std::uint32_t t) { return t != 0; }))};
-        const auto& plan = plan_for(face, layout, script, dir, feats, ff, legacy.has_legacy(), plan_lang);
+        const auto& plan = plan_for(face, layout, script, dir, feats, ff, legacy.has_legacy() || !ff.kern_table.empty(), plan_lang);
 
         ot::Buffer b;
         b.info.reserve((end - begin) + 8);

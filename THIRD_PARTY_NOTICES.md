@@ -3,7 +3,8 @@ Third-party notices
 
 mayag's OpenType shaping stack (include/mayag/font/ot_layout.hpp,
 ot_shape.hpp, ot_shapers.hpp, ot_shaper_*.hpp, ot_syllabic.hpp,
-ot_vowel_constraints.hpp) is a port of HarfBuzz 11.2.1
+ot_vowel_constraints.hpp) and its AAT layout (aat_morx.hpp, aat_kern.hpp,
+aat_kerx.hpp) are a port of HarfBuzz 11.2.1
 (https://github.com/harfbuzz/harfbuzz). Several of those files carry
 tables generated from HarfBuzz sources. HarfBuzz's license follows.
 

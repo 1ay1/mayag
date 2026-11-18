@@ -713,6 +713,7 @@ class FontFile {
     /// Advance width in font units.
     [[nodiscard]] std::uint16_t advance(std::uint16_t gid) const noexcept {
         if (hmtx_.empty() || hhea_.number_of_h_metrics == 0) return 0;
+        if (num_glyphs() && gid >= num_glyphs()) return 0;   // e.g. AAT's deleted glyph 0xFFFF (HarfBuzz hmtx)
         const std::uint16_t n = hhea_.number_of_h_metrics;
         // Glyphs past `numberOfHMetrics` all share the last advance; only
         // their left side bearings differ. This is how monospace-tail fonts

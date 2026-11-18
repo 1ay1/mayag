@@ -559,3 +559,71 @@
 /System/Library/Fonts/Apple Color Emoji.ttc|🇫🇷|
 /System/Library/Fonts/Apple Color Emoji.ttc|👍🏽|
 /System/Library/Fonts/Apple Color Emoji.ttc|🏳️‍🌈 ❤️|
+/System/Library/Fonts/Supplemental/Baghdad.ttc|مرحبا بالعالم|
+/System/Library/Fonts/GeezaPro.ttc|مرحبا بالعالم|
+/System/Library/Fonts/GeezaPro.ttc|بِسْمِ اللَّهِ|
+/System/Library/Fonts/Supplemental/Tamil MN.ttc|கொ கௌ|
+/System/Library/Fonts/Supplemental/Zapfino.ttf|The quick brown fox|
+/System/Library/Fonts/Supplemental/Apple Chancery.ttf|Quick Zebra|
+/System/Library/Fonts/Supplemental/Hoefler Text.ttc|office affluent|
+/System/Library/Fonts/Supplemental/Hoefler Text.ttc|1/2 Q.|
+/System/Library/Fonts/ArialHB.ttc:0|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/ArialHB.ttc:0|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/ArialHB.ttc:1|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/ArialHB.ttc:1|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/ArialHB.ttc:2|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/ArialHB.ttc:2|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/ArialHB.ttc:3|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/ArialHB.ttc:3|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/ArialHB.ttc:4|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/ArialHB.ttc:4|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/ArialHB.ttc:5|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/ArialHB.ttc:5|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/ArialHB.ttc:6|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/ArialHB.ttc:6|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/ArialHB.ttc:7|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/ArialHB.ttc:7|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/ArialHB.ttc:8|שָׁלוֹם עוֹלָם|
+/System/Library/Fonts/ArialHB.ttc:8|בְּרֵאשִׁית בָּרָא|
+/System/Library/Fonts/Helvetica.ttc:4|AVATAR Toyota WAVE|
+/System/Library/Fonts/Helvetica.ttc:4|Type 'LAW' F.P.|
+/System/Library/Fonts/Helvetica.ttc:5|AVATAR Toyota WAVE|
+/System/Library/Fonts/Helvetica.ttc:5|Type 'LAW' F.P.|
+/System/Library/Fonts/HelveticaNeue.ttc:1|AVATAR Toyota WAVE|
+/System/Library/Fonts/HelveticaNeue.ttc:1|Yo, To. LT Vw|
+/System/Library/Fonts/HelveticaNeue.ttc:2|AVATAR Toyota WAVE|
+/System/Library/Fonts/HelveticaNeue.ttc:2|Yo, To. LT Vw|
+/System/Library/Fonts/HelveticaNeue.ttc:3|AVATAR Toyota WAVE|
+/System/Library/Fonts/HelveticaNeue.ttc:3|Yo, To. LT Vw|
+/System/Library/Fonts/HelveticaNeue.ttc:4|AVATAR Toyota WAVE|
+/System/Library/Fonts/HelveticaNeue.ttc:4|Yo, To. LT Vw|
+/System/Library/Fonts/HelveticaNeue.ttc:6|AVATAR Toyota WAVE|
+/System/Library/Fonts/HelveticaNeue.ttc:6|Yo, To. LT Vw|
+/System/Library/Fonts/HelveticaNeue.ttc:7|AVATAR Toyota WAVE|
+/System/Library/Fonts/HelveticaNeue.ttc:7|Yo, To. LT Vw|
+/System/Library/Fonts/HelveticaNeue.ttc:8|AVATAR Toyota WAVE|
+/System/Library/Fonts/HelveticaNeue.ttc:8|Yo, To. LT Vw|
+/System/Library/Fonts/HelveticaNeue.ttc:9|AVATAR Toyota WAVE|
+/System/Library/Fonts/HelveticaNeue.ttc:9|Yo, To. LT Vw|
+/System/Library/Fonts/Supplemental/Bangla MN.ttc|বাংলা ভাষা কি|
+/System/Library/Fonts/Supplemental/Bangla MN.ttc|স্বাধীনতা রবীন্দ্রনাথ|
+/System/Library/Fonts/Supplemental/Bangla Sangam MN.ttc|বাংলা ভাষা কি|
+/System/Library/Fonts/Supplemental/Bangla Sangam MN.ttc|স্বাধীনতা রবীন্দ্রনাথ|
+/System/Library/Fonts/Supplemental/Gujarati Sangam MN.ttc|ગુજરાતી ભાષા|
+/System/Library/Fonts/Supplemental/Kannada MN.ttc|ಕನ್ನಡ ಭಾಷೆ ಕ್ಷ|
+/System/Library/Fonts/Supplemental/Kannada Sangam MN.ttc|ಕನ್ನಡ ಭಾಷೆ ಕ್ಷ|
+/System/Library/Fonts/Supplemental/Malayalam MN.ttc|മലയാളം ഭാഷ ക്ഷ|
+/System/Library/Fonts/Supplemental/Malayalam Sangam MN.ttc|മലയാളം ഭാഷ ക്ഷ|
+/System/Library/Fonts/Supplemental/Myanmar MN.ttc|မြန်မာ ဘာသာ|
+/System/Library/Fonts/Supplemental/Myanmar MN.ttc|ကြိုး ကျွန်|
+/System/Library/Fonts/Supplemental/Myanmar Sangam MN.ttc|မြန်မာ ဘာသာ|
+/System/Library/Fonts/Supplemental/Myanmar Sangam MN.ttc|ကြိုး ကျွန်|
+/System/Library/Fonts/Supplemental/Oriya MN.ttc|ଓଡ଼ିଆ ଭାଷା କ୍ଷ|
+/System/Library/Fonts/Supplemental/Oriya Sangam MN.ttc|ଓଡ଼ିଆ ଭାଷା କ୍ଷ|
+/System/Library/Fonts/Supplemental/Tamil MN.ttc|கொ கௌ|
+/System/Library/Fonts/Supplemental/Tamil MN.ttc|தமிழ் மொழி கோ|
+/System/Library/Fonts/Supplemental/Telugu MN.ttc|తెలుగు భాష క్ష|
+/System/Library/Fonts/Supplemental/Telugu MN.ttc|కృష్ణ స్త్రీ|
+/System/Library/Fonts/Supplemental/Telugu Sangam MN.ttc|తెలుగు భాష క్ష|
+/System/Library/Fonts/Supplemental/Telugu Sangam MN.ttc|కృష్ణ స్త్రీ|
+/System/Library/Fonts/ヒラギノ角ゴシック W8.ttc|Type AVATAR 日本語|

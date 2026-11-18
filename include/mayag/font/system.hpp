@@ -204,6 +204,10 @@ inline constexpr ScriptProbe script_probes[] = {
 /// under one of their OpenType tags. (Thai and Hebrew shape acceptably
 /// with their fallbacks, but a face that encodes them in GSUB still wins.)
 [[nodiscard]] inline ScriptSet shapeable_scripts(const ot::FontFile& f, ScriptSet covered) {
+    // A live `morx` drives shaping on its own (HarfBuzz's apply_morx, ported
+    // in aat_morx.hpp), so an AAT face shapes everything it covers.
+    if (const auto morx = f.table(ot::tag("morx")); morx.size() >= 8 && ot::Reader{morx}.u32_at(0) != 0)
+        return covered;
     std::vector<std::uint32_t> tags;
     for (const std::uint32_t t : {ot::tags::gsub, ot::tags::gpos}) {
         const auto data = f.table(t);
@@ -247,10 +251,10 @@ struct FontEntry {
     /// point of the rewrite: a complete answer instead of five booleans.
     ScriptSet     scripts = 0;
     /// Scripts this face can SHAPE: it covers them and has OpenType layout
-    /// (GSUB/GPOS) for them, or they need none. A face with only Apple `morx`
-    /// tables (Al Bayan, Raanana) draws Arabic, Hebrew or Thai as isolated,
-    /// unjoined letters with mayag's OpenType shaper, so for scripts that
-    /// need contextual forms such a face must lose to one that has them.
+    /// (GSUB/GPOS) or a live Apple `morx` for them, or they need none. A
+    /// face with neither draws Arabic, Hebrew or Thai as isolated, unjoined
+    /// letters, so for scripts that need contextual forms such a face must
+    /// lose to one that has them.
     ScriptSet     shapes = 0;
 
     [[nodiscard]] bool can_shape(Script s) const noexcept { return (shapes & script_bit(s)) != 0; }
@@ -397,7 +401,7 @@ namespace detail {
 // directory's mtime is unchanged. MAYAG_FONT_CACHE=0 turns it off.
 
 inline constexpr std::uint32_t kCacheMagic = 0x4D464331;   // "MFC1"
-inline constexpr std::uint32_t kCacheVersion = 2;          // 2: + shapes
+inline constexpr std::uint32_t kCacheVersion = 3;          // 2: + shapes, 3: morx shapes
 
 [[nodiscard]] inline std::int64_t mtime_ns(const std::filesystem::path& p) {
     std::error_code ec;
