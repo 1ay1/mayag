@@ -1322,6 +1322,50 @@ void test_optical_size() {
                            std::to_string(w_auto) + " vs " + std::to_string(w_disp) + " px wide)");
 }
 
+// CoreText truncates trak values toward zero: SF at 19.75 pt interpolates
+// to -46.5 units, drawn as -46 (flooring gave -47, so every glyph was one
+// unit tight between 17 and 24 pt).
+void test_tracking_rounding() {
+    section("trak rounding");
+    auto sf = typo::Face::from_file("/System/Library/Fonts/SFNS.ttf");
+    if (!sf) { check(true, "no SF — skipping"); return; }
+    const float upem = static_cast<float>(sf->units_per_em());
+    const auto units = [&](float pt) { return sf->tracking(pt, upem); };   // size_px = upem: 1 px per unit
+    near(units(19.75f), -46.0f, 0.01f, "SF 19.75 pt tracks -46 units (-46.5 truncated, not floored)");
+    near(units(18.5f), -49.0f, 0.01f, "SF 18.5 pt tracks -49 units (-49.0 exact)");
+    near(units(20.0f), -46.0f, 0.01f, "SF 20 pt tracks -46 units (table value)");
+    near(units(10.5f), 18.0f, 0.01f, "SF 10.5 pt tracks 18 units (positive values truncate too)");
+}
+
+// CoreGraphics font smoothing dilates with a SQUARE kernel: an edge moves
+// by d (|nx| + |ny|), so a 45-degree edge moves d*sqrt(2), not d.
+void test_square_embolden() {
+    section("square-kernel embolden");
+    const auto diamond = [] {
+        typo::Outline o;
+        typo::Contour c;
+        c.start = {0.0f, 100.0f};
+        for (const Vec2 q : {Vec2{100.0f, 0.0f}, Vec2{0.0f, -100.0f}, Vec2{-100.0f, 0.0f}, Vec2{0.0f, 100.0f}}) {
+            typo::Segment s;
+            s.kind = typo::Segment::Kind::line;
+            s.to = q;
+            c.segments.push_back(s);
+        }
+        o.contours.push_back(c);
+        return o;
+    };
+    auto round = diamond(), square = diamond();
+    round.embolden(5.0f);
+    square.embolden(5.0f, true);
+    const float a0 = num::abs(diamond().contours[0].signed_area()) * 0.5f;
+    const float ar = num::abs(round.contours[0].signed_area()) * 0.5f;
+    const float as = num::abs(square.contours[0].signed_area()) * 0.5f;
+    // Square vs round on 45-degree edges: sqrt(2) times the growth.
+    const float gr = ar - a0, gs = as - a0;
+    check(gr > 0.0f, "round kernel grows the diamond");
+    near(gs / gr, std::sqrt(2.0f), 0.05f, "square kernel moves a 45-degree edge sqrt(2)x further than round");
+}
+
 // CoreText draws a CSS weight at the face's NAMED instance of that class:
 // CJK Symbols Fallback's "Regular" sits at wght 542, so weight 400 must pin
 // 542 there, while SF (Regular at 400) keeps the requested value verbatim.
@@ -1987,6 +2031,8 @@ int main() {
     test_rendering();
     test_variations();
     test_named_weights();
+    test_tracking_rounding();
+    test_square_embolden();
     test_hvgl();
     test_optical_size();
     test_caret();

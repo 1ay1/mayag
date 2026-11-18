@@ -1262,7 +1262,7 @@ class FontStack : public Shaper {
             // Spread scales with the tier so the field covers the same
             // DISPLAY distance (smoothing growth, the edge band) at every tier.
             const float spread = config_.sdf_spread * sdf_px / num::max(config_.sdf_raster_size, 1.0f);
-            auto r = rasterize_sdf(o, raster_scale, spread, 2, embolden_px);
+            auto r = rasterize_sdf(o, raster_scale, spread, 2, embolden_px, /*chebyshev=*/true);
             return atlas_.insert(key, r.bitmap, r.offset, advance,
                                  raster_scale, spread, true);
         }
@@ -1276,7 +1276,7 @@ class FontStack : public Shaper {
             // but vertically grows the TOP by 2*grow and the bottom not at
             // all (measured on straight SF stems and bars, 32-160 px): a
             // symmetric dilation plus an upward shift of `grow`.
-            o.embolden(grow / scale);
+            o.embolden(grow / scale, true);
             o.transform(Affine{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, grow / scale});
         }
         if (x_phase != 0) {
@@ -2099,10 +2099,13 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             // 1/(2*spread*k) per display pixel. Size the smoothstep half-band
             // to about one display pixel so a magnified glyph (k>1) gets a
             // thin crisp edge instead of a fat blur, and a shrunk one still
-            // antialiases. Clamp so a texel-scale ramp never vanishes.
+            // antialiases. Clamp so a texel-scale ramp never vanishes. 0.6 px
+            // is the smoothstep half-band whose ramp best matches box-filtered
+            // coverage (fitted against CoreText at 60-120 px: 0.75 softened
+            // edges, ~1 point of error).
             const float spread = g.spread > 0.0f ? g.spread : 4.0f;
             const float per_px = 1.0f / (2.0f * spread * num::max(k, 0.01f));
-            const float edge = num::clamp(per_px * 0.75f, 0.01f, 0.25f);
+            const float edge = num::clamp(per_px * 0.6f, 0.01f, 0.25f);
             // Font smoothing: the same per-side growth the bitmap path bakes
             // into its outlines, as a threshold shift (per_px field units per
             // display pixel), so text keeps its weight across the threshold.

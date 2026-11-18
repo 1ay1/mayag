@@ -566,12 +566,14 @@ class TrackTable {
         return a + t * (b - a);
     }
 
-    /// Tracking in font units per glyph at `point_size`, FLOORED to whole
-    /// font units. CoreText floors (measured: 67.3 -> 67, 52.7 -> 52,
-    /// 3.5 -> 3), and matching it is what makes a line's width agree to the
-    /// 1/1000 px.
+    /// Tracking in font units per glyph at `point_size`, TRUNCATED toward
+    /// zero to whole font units, as CoreText does (67.3 -> 67, 3.5 -> 3,
+    /// -46.5 -> -46; flooring negatives was one unit tight at SF sizes
+    /// between 17 and 24 pt; verified at 120 random sizes 6-60 pt). Matching
+    /// it is what makes a line's width agree to the 1/1000 px.
     [[nodiscard]] float at(float point_size) const noexcept {
-        return std::floor(at_exact(point_size) + 1e-4f);
+        const float v = at_exact(point_size);
+        return v >= 0.0f ? std::floor(v + 1e-4f) : std::ceil(v - 1e-4f);
     }
 
   private:

@@ -126,7 +126,15 @@ class Outline {
     /// cannot fold over, and corners sharper than ~160 degrees are left alone
     /// instead of shooting out a spike. Advance and bearings are unchanged:
     /// this is a rendering correction, not a different design.
-    void embolden(float d) {
+    ///
+    /// `square` selects a SQUARE (axis-aligned) dilation kernel instead of a
+    /// round one: an edge with unit normal n moves by d * (|n.x| + |n.y|),
+    /// i.e. horizontal and vertical edges by d and a 30-degree edge by 1.37 d.
+    /// That is what CoreGraphics font smoothing does (measured on a rotated
+    /// SF dash at 120 px: growth 0.294, 0.342, 0.378, 0.403 px at 0, 10, 20,
+    /// 30 degrees = 0.294 * (|cos| + |sin|)); with a round kernel curves and
+    /// diagonals came out ~0.08 px per side too thin.
+    void embolden(float d, bool square = false) {
         if (d <= 0.0f || contours.empty()) return;
         // Outward is decided once for the whole glyph, from its total winding:
         // TrueType winds ink clockwise, CFF counter-clockwise, and holes wind
@@ -161,6 +169,27 @@ class Outline {
                 const float cosine = dot(in, out);
                 if (cosine <= -0.94f) continue;          // a hairpin: no shift
                 const float denom = 1.0f + cosine;
+                if (square) {
+                    // Each neighbouring edge moves by its own distance
+                    // d * (|nx| + |ny|); solve n_in.s = d_in, n_out.s = d_out.
+                    const Vec2 nin = Vec2{in.y, -in.x} * side, nout = Vec2{out.y, -out.x} * side;
+                    const float din = d * (std::abs(nin.x) + std::abs(nin.y));
+                    const float dout = d * (std::abs(nout.x) + std::abs(nout.y));
+                    const float det = nin.x * nout.y - nin.y * nout.x;
+                    Vec2 s;
+                    if (std::abs(det) < 1e-3f) {
+                        s = (nin + nout) * (0.25f * (din + dout));   // (nearly) collinear
+                    } else {
+                        s = Vec2{(din * nout.y - dout * nin.y) / det, (nin.x * dout - nout.x * din) / det};
+                    }
+                    // Same fold-over cap as the round case.
+                    const float l = std::min(lin, lout);
+                    const float len = s.length();
+                    const float cap = 2.0f * l;
+                    if (len > cap && len > 0.0f) s = s * (cap / len);
+                    shift[i] = s;
+                    continue;
+                }
                 // Sum of the two outward normals; scaled by d/(1+cos) it moves
                 // both edges exactly d.
                 const Vec2 normal = Vec2{in.y + out.y, -(in.x + out.x)} * side;

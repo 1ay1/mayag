@@ -591,6 +591,24 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
     return out;
 }
 
+/// Squared L-infinity distance from (px, py) to segment ab: the minimum over
+/// t of max(|dx(t)|, |dy(t)|), squared. dx and dy are linear in t, so the
+/// minimum is at an end or where |dx| = |dy| (dx = dy or dx = -dy).
+[[nodiscard]] inline float linf2_to_segment(float px, float py, Vec2 a, Vec2 b) noexcept {
+    const float ax = a.x - px, ay = a.y - py, ex = b.x - a.x, ey = b.y - a.y;
+    const auto at = [&](float t) { return num::max(std::abs(ax + t * ex), std::abs(ay + t * ey)); };
+    float m = num::min(at(0.0f), at(1.0f));
+    if (const float den = ex - ey; std::abs(den) > 1e-12f) {          // ax + t ex = ay + t ey
+        const float t = (ay - ax) / den;
+        if (t > 0.0f && t < 1.0f) m = num::min(m, at(t));
+    }
+    if (const float den = ex + ey; std::abs(den) > 1e-12f) {          // ax + t ex = -(ay + t ey)
+        const float t = -(ax + ay) / den;
+        if (t > 0.0f && t < 1.0f) m = num::min(m, at(t));
+    }
+    return m * m;
+}
+
 /// Render straight to an EXACT signed distance field.
 ///
 /// Every texel centre stores its true Euclidean distance to the outline
@@ -602,9 +620,16 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
 /// (`embolden_px`) grows the outline by exactly that distance.
 ///
 /// `supersample` is accepted for API compatibility and ignored.
+///
+/// `chebyshev` measures L-infinity distance (max(|dx|, |dy|)) instead of
+/// Euclidean. Both are exact AT the outline, so the 0.5 iso-line is the same
+/// glyph; but a threshold shift of g then dilates by a SQUARE kernel, every
+/// edge moving g * (|nx| + |ny|), which is CoreGraphics' font-smoothing
+/// growth (see Outline::embolden's `square`). Glyph SDFs use it so text
+/// keeps CoreText's weight on curves and diagonals.
 [[nodiscard]] inline RasterResult rasterize_sdf(const Outline& outline, float scale,
                                                 float spread = 4.0f, int supersample = 2,
-                                                float embolden_px = 0.0f) {
+                                                float embolden_px = 0.0f, bool chebyshev = false) {
     (void)supersample;
     RasterResult result;
     if (outline.empty() || scale <= 0.0f || spread <= 0.0f) return result;
@@ -706,9 +731,14 @@ inline void edt_pass(std::vector<DistPoint>& g, int w, int h) {
             float* row = d2.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
             for (int x = bx0; x <= bx1; ++x) {
                 const float px = static_cast<float>(x) + 0.5f;
-                const float t = num::clamp(((px - a.x) * ex + (py - a.y) * ey) * inv, 0.0f, 1.0f);
-                const float dx = px - (a.x + t * ex), dy = py - (a.y + t * ey);
-                const float dd = dx * dx + dy * dy;
+                float dd;
+                if (chebyshev) {
+                    dd = linf2_to_segment(px, py, a, b);
+                } else {
+                    const float t = num::clamp(((px - a.x) * ex + (py - a.y) * ey) * inv, 0.0f, 1.0f);
+                    const float dx = px - (a.x + t * ex), dy = py - (a.y + t * ey);
+                    dd = dx * dx + dy * dy;
+                }
                 if (dd < row[x]) row[x] = dd;
             }
         }
