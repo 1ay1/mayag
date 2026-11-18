@@ -833,6 +833,20 @@ class Database {
                 stack->add_sibling(0, std::move(face), e.weight, e.italic);
             }
         }
+    } else if (stack->face_count() > 0) {
+        // A variable UI font still has a separate italic design (SF ->
+        // SFNSItalic.ttf, its own variable font with true italic glyphs),
+        // which CoreText uses for italic instead of shearing the upright.
+        const std::string fam = stack->primary()->family();
+        const bool up = !stack->primary()->is_italic();
+        for (const auto& e : db.entries()) {
+            if (e.family != fam || e.italic != up || already(&e)) continue;
+            auto face = Face::from_file(e.path, e.face_index);
+            if (face == nullptr || !face->is_variable()) continue;
+            added.emplace_back(e.path, e.face_index);
+            stack->add_sibling(0, std::move(face), e.weight, e.italic);
+            break;
+        }
     }
 
     // 1b. macOS: the UI font's REAL fallback order, measured from CoreText

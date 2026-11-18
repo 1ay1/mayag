@@ -1519,6 +1519,24 @@ void test_named_weights() {
     if (auto ar = typo::Face::from_file("/System/Library/Fonts/SFArabic.ttf")) {
         near(ar->wght_for(700.0f), 711.111f, 0.01f, "SF Arabic Bold sits at wght 711.1, not SF's 700");
     }
+    if (auto it = typo::Face::from_file("/System/Library/Fonts/SFNSItalic.ttf")) {
+        // SF Italic's weights also move YAXS: Bold Italic is YAXS 430.
+        float yaxs = 0.0f;
+        it->weight_axes_for(700.0f, [&](std::uint32_t tag, float v) { if (tag == typo::ot::tag("YAXS")) yaxs = v; });
+        near(yaxs, 430.0f, 0.01f, "SF Bold Italic pins YAXS 430 with its weight");
+        near(it->wght_for(400.0f), 400.0f, 0.01f, "'Regular Italic' is the 400 instance");
+    }
+    // Italic SF uses the real italic design (SFNSItalic.ttf), as CoreText
+    // does, not a sheared upright.
+    if (auto stack = typo::system::default_stack(typo::FontConfig::coregraphics());
+        stack && stack->face_count() > 0 && stack->primary()->family() == "System Font") {
+        TextStyle ts;
+        ts.size = 16.0f;
+        ts.italic = true;
+        const auto r = stack->shaped("Hamburg", typo::detail::shape_params_of(ts));
+        check(!r->glyphs.empty() && stack->face_at(r->glyphs[0].face_index)->is_italic(),
+              "italic SF text is set in SF Italic");
+    }
 }
 
 // Apple HVF ('hvgl') outlines: PingFang UI Display, 沙 (gid 1669) at wght 700.

@@ -407,6 +407,32 @@ class Face {
         return css_weight;
     }
 
+    /// The other axes a named weight instance moves besides wght, at
+    /// `css_weight`: SF Italic's Bold Italic sits at YAXS 430, its Medium
+    /// Italic at 436, and CoreText draws them there. Interpolated between
+    /// named weights like wght_for. Calls emit(tag, value) per axis.
+    template <typename F>
+    void weight_axes_for(float css_weight, F&& emit) const {
+        if (weight_axis_tags_.empty() || weight_map_.empty()) return;
+        const auto& m = weight_map_;
+        std::size_t lo = 0, hi = 0;
+        float t = 0.0f;
+        if (css_weight <= m.front().first) lo = hi = 0;
+        else if (css_weight >= m.back().first) lo = hi = m.size() - 1;
+        else
+            for (std::size_t i = 1; i < m.size(); ++i)
+                if (css_weight <= m[i].first) {
+                    lo = i - 1; hi = i;
+                    t = (css_weight - m[lo].first) / (m[hi].first - m[lo].first);
+                    break;
+                }
+        const std::size_t k = weight_axis_tags_.size();
+        for (std::size_t a = 0; a < k; ++a) {
+            const float v0 = weight_axis_vals_[lo * k + a], v1 = weight_axis_vals_[hi * k + a];
+            emit(weight_axis_tags_[a], v0 + t * (v1 - v0));
+        }
+    }
+
     /// Ink extents in font units, y-up: {x_bearing, y_bearing (top), width,
     /// height (negative)}, exactly as hb_font_get_glyph_extents reports them
     /// for hb-ot-font: a static TrueType glyph's STORED glyf bounding box
@@ -514,6 +540,10 @@ class Face {
     // CSS weight of a named instance's subfamily ("Regular", "Bold", ...);
     // 0 for anything else ("Condensed Bold", "Regular G1").
     static float css_weight_of(std::string_view s) noexcept {
+        // An italic face names its weights "Bold Italic", "Italic" (Regular).
+        for (const std::string_view suffix : {std::string_view{" Italic"}, std::string_view{" Oblique"}})
+            if (s.size() > suffix.size() && s.substr(s.size() - suffix.size()) == suffix) s.remove_suffix(suffix.size());
+        if (s == "Italic" || s == "Oblique" || s == "Regular Italic") return 400;
         static constexpr std::pair<std::string_view, float> names[] = {
             {"Thin", 100}, {"Ultralight", 200}, {"ExtraLight", 200}, {"Extra Light", 200},
             {"Light", 300}, {"Regular", 400}, {"Medium", 500}, {"Semibold", 600},
@@ -533,36 +563,56 @@ class Face {
     // verbatim.
     void build_weight_map() {
         weight_map_.clear();
+        weight_axis_tags_.clear();
+        weight_axis_vals_.clear();
         std::size_t wi = axes_.size();
         for (std::size_t a = 0; a < axes_.size(); ++a) if (axes_[a].tag == var::tag_wght) wi = a;
         if (wi == axes_.size()) return;
-        std::vector<std::pair<float, float>> m;
+        // Axes a weight instance must leave at their default: the ones that
+        // mean something else (a Condensed Bold is not a Bold). Any other
+        // axis it moves (SF Italic's YAXS) is part of that weight.
+        const auto fixed = [](std::uint32_t tag) {
+            return tag == var::tag_opsz || tag == var::tag_wdth || tag == var::tag_slnt || tag == var::tag_ital;
+        };
+        struct Inst { float css; std::vector<float> coords; };
+        std::vector<Inst> m;
         for (const auto& in : var::parse_fvar_instances(file_.table(ot::tags::fvar))) {
             if (in.coords.size() != axes_.size()) continue;
             bool others_default = true;
             for (std::size_t a = 0; a < axes_.size(); ++a)
-                if (a != wi && std::abs(in.coords[a] - axes_[a].def) > 1e-3f) others_default = false;
+                if (a != wi && fixed(axes_[a].tag) && std::abs(in.coords[a] - axes_[a].def) > 1e-3f) others_default = false;
             if (!others_default) continue;
             const float css = css_weight_of(file_.name(in.name_id));
             if (css <= 0.0f) continue;
-            if (std::none_of(m.begin(), m.end(), [&](const auto& p) { return p.first == css; }))
-                m.emplace_back(css, in.coords[wi]);
+            if (std::none_of(m.begin(), m.end(), [&](const Inst& p) { return p.css == css; }))
+                m.push_back(Inst{css, in.coords});
         }
         // Apple names its lightest weight Ultralight and the next Thin
         // (NSFontWeightUltraLight < NSFontWeightThin), the reverse of CSS's
         // Thin 100 / Extra Light 200. Order the two by where they actually sit.
         const auto at = [&](float css) {
-            return std::find_if(m.begin(), m.end(), [&](const auto& p) { return p.first == css; });
+            return std::find_if(m.begin(), m.end(), [&](const Inst& p) { return p.css == css; });
         };
-        if (const auto t = at(100.0f), u = at(200.0f); t != m.end() && u != m.end() && u->second < t->second)
-            std::swap(t->second, u->second);
+        if (const auto t = at(100.0f), u = at(200.0f); t != m.end() && u != m.end() && u->coords[wi] < t->coords[wi])
+            std::swap(t->coords, u->coords);
         for (std::size_t i = 1; i < m.size(); ++i)   // insertion sort: <= ~10 entries
-            for (std::size_t j = i; j > 0 && m[j].first < m[j - 1].first; --j) std::swap(m[j], m[j - 1]);
+            for (std::size_t j = i; j > 0 && m[j].css < m[j - 1].css; --j) std::swap(m[j], m[j - 1]);
         if (at(400.0f) == m.end() || m.size() < 2) return;
-        for (std::size_t i = 1; i < m.size(); ++i) if (m[i].second <= m[i - 1].second) return;  // not monotone
-        if (std::all_of(m.begin(), m.end(), [](const auto& p) { return std::abs(p.second - p.first) < 0.5f; }))
-            return;
-        weight_map_ = std::move(m);
+        for (std::size_t i = 1; i < m.size(); ++i) if (m[i].coords[wi] <= m[i - 1].coords[wi]) return;  // not monotone
+        // Free axes some weight instance moves off its default.
+        for (std::size_t a = 0; a < axes_.size(); ++a) {
+            if (a == wi || fixed(axes_[a].tag)) continue;
+            if (std::any_of(m.begin(), m.end(), [&](const Inst& p) { return std::abs(p.coords[a] - axes_[a].def) > 1e-3f; }))
+                weight_axis_tags_.push_back(axes_[a].tag);
+        }
+        const bool identity = std::all_of(m.begin(), m.end(), [&](const Inst& p) { return std::abs(p.coords[wi] - p.css) < 0.5f; });
+        if (identity && weight_axis_tags_.empty()) return;
+        for (const auto& p : m) {
+            weight_map_.emplace_back(p.css, p.coords[wi]);
+            for (const auto tag : weight_axis_tags_)
+                for (std::size_t a = 0; a < axes_.size(); ++a)
+                    if (axes_[a].tag == tag) weight_axis_vals_.push_back(p.coords[a]);
+        }
     }
 
     // Re-derive the normalised coords from a set of user-unit axis values,
@@ -636,6 +686,8 @@ class Face {
     // ── variable-font state ─────────────────────────────────────────────
     std::vector<var::Axis>        axes_;      // fvar axes (empty ⇒ static font)
     std::vector<std::pair<float, float>> weight_map_;   ///< css weight -> wght, from named instances
+    std::vector<std::uint32_t>    weight_axis_tags_;   ///< other axes the weight instances move (YAXS)
+    std::vector<float>            weight_axis_vals_;   ///< [instance][axis] values for weight_axis_tags_
     std::span<const std::uint8_t> avar_{};    // optional axis remap table
     var::Coords                   coords_;    // current normalised position
     std::vector<float>            user_;      // current value per axis, USER units
@@ -734,6 +786,7 @@ struct FontConfig {
         c.smoothing     = 0.30f;
         c.cg_flattening = true;
         c.cg_autohint   = true;
+        c.oblique_fallback = false;
         return c;
     }
     /// The FreeType/DirectWrite look regardless of platform: exact outlines
@@ -745,6 +798,7 @@ struct FontConfig {
         c.smoothing     = 0.0f;
         c.cg_flattening = false;
         c.cg_autohint   = true;
+        c.oblique_fallback = true;
         return c;
     }
 
@@ -795,6 +849,11 @@ struct FontConfig {
     /// cg_glyph_flattening): macOS under-flattens, and its glyphs carry
     /// that ink deficit (~4% on an SF 'o' at 24 px).
     bool       cg_flattening = coregraphics_text_default;
+    /// Shear fallback faces when an italic run falls back to a face with no
+    /// italic of its own (SF Arabic or PingFang inside italic SF text).
+    /// Browsers and Pango do; CoreText leaves them upright, so the macOS
+    /// look does too.
+    bool       oblique_fallback = !coregraphics_text_default;
     /// Glyphs untouched for this many frames become eviction candidates.
     std::uint64_t glyph_ttl_frames = 600;
 };
@@ -866,6 +925,12 @@ class FontStack : public Shaper {
         clear_shape_cache();
     }
 
+    /// True when face `i` is a weight/style sibling (or size variant) of `of`.
+    [[nodiscard]] bool is_sibling_of(std::size_t of, std::size_t i) const noexcept {
+        return std::any_of(siblings_.begin(), siblings_.end(),
+                           [&](const Sibling& s) { return s.of == of && s.at == i; });
+    }
+
     /// Register `face` as the design `base` switches to from `min_pt` (logical
     /// points) up -- CoreText's PingFang UI Text/Display split at 20 pt. It
     /// inherits the base's coverage limits and never takes part in fallback.
@@ -893,13 +958,18 @@ class FontStack : public Shaper {
     }
 
     [[nodiscard]] std::size_t face_for_weight(std::size_t base, float weight, bool italic) const noexcept {
-        if (siblings_.empty() || base >= faces_.size() || faces_[base]->is_variable()) return base;
+        if (siblings_.empty() || base >= faces_.size()) return base;
+        // A variable face reaches every weight on its own axis, so between
+        // two variable faces only the slant decides (SF -> SF Italic).
+        const bool var_base = faces_[base]->is_variable();
+        const auto dist = [&](const Face& f, float w, bool it) {
+            return (var_base && f.is_variable() ? 0.0f : num::abs(w - weight)) + (it != italic ? 1000.0f : 0.0f);
+        };
         std::size_t best = base;
-        float best_d = num::abs(static_cast<float>(faces_[base]->weight()) - weight) +
-                       (faces_[base]->is_italic() != italic ? 1000.0f : 0.0f);
+        float best_d = dist(*faces_[base], static_cast<float>(faces_[base]->weight()), faces_[base]->is_italic());
         for (const auto& s : siblings_) {
             if (s.of != base || s.min_pt > 0.0f) continue;
-            const float d = num::abs(static_cast<float>(s.weight) - weight) + (s.italic != italic ? 1000.0f : 0.0f);
+            const float d = dist(*faces_[s.at], static_cast<float>(s.weight), s.italic);
             if (d < best_d) { best_d = d; best = s.at; }
         }
         return best;
@@ -1424,8 +1494,12 @@ class FontStack : public Shaper {
         // Synthesise italic by shearing when the font can't slant itself
         // (static faces, or variable faces with no slnt/ital axis). Variable
         // faces WITH a slant axis already did it for real in pin_variations,
-        // so we must not shear those on top.
-        const bool synth_italic = italic && !face.has_slant_axis();
+        // so we must not shear those on top. Fallback faces (SF Arabic, PingFang
+        // under an italic SF run) stay upright on macOS, as CoreText draws
+        // them; browsers and Pango shear them, which is the portable default.
+        const bool fallback_face = face_index != 0 && !is_sibling_of(0, face_index);
+        const bool synth_italic = italic && !face.has_slant_axis() && !face.is_italic() &&
+                                  (!fallback_face || config_.oblique_fallback);
 
         // Synthesise bold by emboldening the coverage when the font can't reach
         // the requested weight itself — a static face (no wght axis) asked for
@@ -1514,7 +1588,10 @@ class FontStack : public Shaper {
                 // box.bottom em and centres the image in its tracked advance.
                 Vec2 bearing{cb.bearing_x * scale, -cb.bearing_y * scale};
                 if (box.scale != 1.0f || box.bottom != 0.0f) {
-                    bearing.y = -(static_cast<float>(dh) + box.bottom * size_px);
+                    // CoreText puts the image's bottom on a whole pixel,
+                    // rounding half up (y-up): -2.5 px at 10 pt draws at -2,
+                    // so emoji at 10 and 14 pt sat a pixel low without it.
+                    bearing.y = -(static_cast<float>(dh) + std::floor(box.bottom * size_px + 0.5f));
                     bearing.x += face.tracking(pt, size_px) * 0.4f * box.scale;   // CoreText, measured
                 }
                 return atlas_.insert_color(key, pixels, dw, dh, bearing, advance);
@@ -1609,9 +1686,12 @@ class FontStack : public Shaper {
                                std::span<const ShapeParams::Axis> axes,
                                bool italic = false) {
         if (face == nullptr || !face->is_variable()) return;
-        std::array<std::pair<std::uint32_t, float>, ShapeParams::max_axes + 2> vals;
+        std::array<std::pair<std::uint32_t, float>, ShapeParams::max_axes + 4> vals;
         std::size_t n = 0;
         vals[n++] = {var::tag_wght, face->wght_for(weight)};
+        face->weight_axes_for(weight, [&](std::uint32_t tag, float v) {
+            if (n < vals.size()) vals[n++] = {tag, v};
+        });
 
         // Real oblique from the font when italic is asked for and the face has
         // a slant/italic axis (true masters beat any synthetic shear).
