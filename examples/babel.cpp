@@ -41,10 +41,10 @@ using namespace mayag::dsl;
 
 namespace {
 
-struct Lang { const char* hello; const char* name; const char* script; };
+struct Greeting { const char* hello; const char* name; const char* script; };
 
 // One greeting per script family the engine shapes. Order is the orbit's.
-constexpr std::array<Lang, 26> langs{{
+constexpr std::array<Greeting, 26> langs{{
     {"Hello, world",          "English",    "Latin"},
     {"مرحبا بالعالم",          "العربية",    "Arabic · joining"},
     {"नमस्ते दुनिया",            "हिन्दी",      "Devanagari · conjuncts"},
@@ -260,7 +260,7 @@ struct Babel {
     // The stage: the hero greeting typing itself out, breathing in weight.
     static Node hero(const Model& m, Color<Srgb> base, Vec2 vp) {
         const bool own = !m.typed.empty();
-        const Lang& l = langs[static_cast<std::size_t>(m.hero)];
+        const Greeting& l = langs[static_cast<std::size_t>(m.hero)];
         std::string shown;
         if (own) {
             shown = m.typed;
