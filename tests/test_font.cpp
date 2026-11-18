@@ -1544,6 +1544,16 @@ void test_named_weights() {
         it->weight_axes_for(700.0f, [&](std::uint32_t tag, float v) { if (tag == typo::ot::tag("YAXS")) yaxs = v; });
         near(yaxs, 430.0f, 0.01f, "SF Bold Italic pins YAXS 430 with its weight");
         near(it->wght_for(400.0f), 400.0f, 0.01f, "'Regular Italic' is the 400 instance");
+        // gvar output stays fractional (CoreText: 'o' top 1127.25 at
+        // Bold Italic, opsz 17), never rounded to font units.
+        it->set_variations({{typo::var::tag_wght, 700.0f}, {typo::var::tag_opsz, 17.0f}, {typo::ot::tag("YAXS"), 430.0f}});
+        const auto o = it->outline(it->glyph_for('o'));
+        float top = -1e9f;
+        for (const auto& c : o.contours) {
+            top = std::max(top, c.start.y);
+            for (const auto& sg : c.segments) top = std::max(top, sg.to.y);
+        }
+        near(top, 1127.25f, 0.01f, "varied glyf points keep their fraction (SF Bold Italic 'o' top 1127.25)");
     }
     // Italic SF uses the real italic design (SFNSItalic.ttf), as CoreText
     // does, not a sheared upright.
