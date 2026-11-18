@@ -247,65 +247,84 @@ struct BitmapLoc {
 
 }  // namespace colordetail
 
-/// Resample a straight-RGBA image to a new size, the way CoreGraphics draws a
-/// scaled bitmap: each output pixel is the AREA average of the source pixels
-/// it covers (a box filter, exact at any ratio -- bilinear skips source
-/// pixels when shrinking more than 2x and turned a 160 px flag's 1 px border
-/// into broken dashes at 13 px), done in PREMULTIPLIED space so transparent
-/// edges do not bleed their undefined colour into the image. Upscaling falls
-/// back to bilinear (the box would just replicate pixels).
+/// Resample a straight-RGBA image to a new size the way CoreText draws a
+/// scaled emoji strike: a separable bicubic (Keys, a = -0.5) whose support
+/// widens with the reduction, so every source pixel contributes when
+/// shrinking (a 160 px flag's 1 px border survives at 13 px). Fitted against
+/// CTLineDraw on Apple Color Emoji: bicubic beats box, bilinear, Lanczos and
+/// Hamming at every size tried (e.g. 13 pt: 3.3 mean |dRGB| vs 4.4-5.1).
+/// Done in PREMULTIPLIED space so transparent edges do not bleed their
+/// undefined colour into the image; results are clamped (bicubic rings).
 [[nodiscard]] inline std::vector<std::uint8_t> scale_rgba(
         const std::vector<std::uint8_t>& src, int sw, int sh, int dw, int dh) {
     std::vector<std::uint8_t> out(static_cast<std::size_t>(dw) * dh * 4);
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return out;
-    const float fx = static_cast<float>(sw) / static_cast<float>(dw);
-    const float fy = static_cast<float>(sh) / static_cast<float>(dh);
-    const auto px = [&](int x, int y, float acc[4], float w) {
-        const std::uint8_t* s = src.data() + (static_cast<std::size_t>(y) * sw + x) * 4;
-        const float a = static_cast<float>(s[3]) * w;
-        acc[0] += static_cast<float>(s[0]) * a; acc[1] += static_cast<float>(s[1]) * a;
-        acc[2] += static_cast<float>(s[2]) * a; acc[3] += a;
+    const auto keys = [](float x) {
+        constexpr float a = -0.5f;
+        x = std::fabs(x);
+        if (x < 1.0f) return ((a + 2.0f) * x - (a + 3.0f)) * x * x + 1.0f;
+        if (x < 2.0f) return (((x - 5.0f) * x + 8.0f) * x - 4.0f) * a;
+        return 0.0f;
     };
-    const auto store = [&](int x, int y, const float acc[4], float total) {
-        std::uint8_t* d = out.data() + (static_cast<std::size_t>(y) * dw + x) * 4;
-        const float a = total > 0 ? acc[3] / total : 0.0f;
-        for (int c = 0; c < 3; ++c)
-            d[c] = acc[3] > 0 ? static_cast<std::uint8_t>(std::min(255.0f, acc[c] / acc[3] + 0.5f)) : 0;
-        d[3] = static_cast<std::uint8_t>(std::min(255.0f, a + 0.5f));
+    // PIL's precompute_coeffs: per output index, a [first, first+n) window
+    // and normalised weights.
+    struct Taps { int first = 0; std::vector<float> w; };
+    const auto taps = [&](int in, int outn) {
+        std::vector<Taps> t(static_cast<std::size_t>(outn));
+        const float scale = static_cast<float>(in) / static_cast<float>(outn);
+        const float fscale = std::max(scale, 1.0f);
+        const float support = 2.0f * fscale;
+        for (int i = 0; i < outn; ++i) {
+            const float centre = (static_cast<float>(i) + 0.5f) * scale;
+            const int lo = std::max(static_cast<int>(centre - support + 0.5f), 0);
+            const int hi = std::min(static_cast<int>(centre + support + 0.5f), in);
+            Taps& tp = t[static_cast<std::size_t>(i)];
+            tp.first = lo;
+            float total = 0;
+            for (int x = lo; x < hi; ++x) {
+                const float w = keys((static_cast<float>(x) - centre + 0.5f) / fscale);
+                tp.w.push_back(w);
+                total += w;
+            }
+            if (total != 0) for (float& w : tp.w) w /= total;
+        }
+        return t;
     };
-    if (fx >= 1.0f && fy >= 1.0f) {   // shrinking: exact box filter
-        for (int y = 0; y < dh; ++y) {
-            const float y0 = static_cast<float>(y) * fy, y1 = y0 + fy;
-            for (int x = 0; x < dw; ++x) {
-                const float x0 = static_cast<float>(x) * fx, x1 = x0 + fx;
-                float acc[4] = {0, 0, 0, 0}, total = 0;
-                for (int sy = static_cast<int>(y0); sy < sh && static_cast<float>(sy) < y1; ++sy) {
-                    const float wy = std::min(y1, static_cast<float>(sy + 1)) - std::max(y0, static_cast<float>(sy));
-                    for (int sx = static_cast<int>(x0); sx < sw && static_cast<float>(sx) < x1; ++sx) {
-                        const float w = wy * (std::min(x1, static_cast<float>(sx + 1)) - std::max(x0, static_cast<float>(sx)));
-                        px(sx, sy, acc, w);
-                        total += w;
-                    }
-                }
-                store(x, y, acc, total);
+    const auto tx = taps(sw, dw), ty = taps(sh, dh);
+    // premultiply into floats
+    std::vector<float> pm(static_cast<std::size_t>(sw) * sh * 4);
+    for (std::size_t i = 0; i < pm.size(); i += 4) {
+        const float a = static_cast<float>(src[i + 3]) / 255.0f;
+        pm[i + 0] = static_cast<float>(src[i + 0]) * a;
+        pm[i + 1] = static_cast<float>(src[i + 1]) * a;
+        pm[i + 2] = static_cast<float>(src[i + 2]) * a;
+        pm[i + 3] = static_cast<float>(src[i + 3]);
+    }
+    // horizontal pass
+    std::vector<float> mid(static_cast<std::size_t>(dw) * sh * 4, 0.0f);
+    for (int y = 0; y < sh; ++y)
+        for (int x = 0; x < dw; ++x) {
+            const Taps& tp = tx[static_cast<std::size_t>(x)];
+            float* m = &mid[(static_cast<std::size_t>(y) * dw + x) * 4];
+            for (std::size_t k = 0; k < tp.w.size(); ++k) {
+                const float* s = &pm[(static_cast<std::size_t>(y) * sw + tp.first + static_cast<int>(k)) * 4];
+                for (int c = 0; c < 4; ++c) m[c] += s[c] * tp.w[k];
             }
         }
-        return out;
-    }
-    for (int y = 0; y < dh; ++y) {   // enlarging: premultiplied bilinear
-        const float syf = (static_cast<float>(y) + 0.5f) * fy - 0.5f;
-        int y0 = static_cast<int>(std::floor(syf)); float ty = syf - static_cast<float>(y0);
-        if (y0 < 0) { y0 = 0; ty = 0.0f; }
-        const int y1 = y0 + 1 < sh ? y0 + 1 : sh - 1;
+    // vertical pass, unpremultiply, clamp
+    for (int y = 0; y < dh; ++y) {
+        const Taps& tp = ty[static_cast<std::size_t>(y)];
         for (int x = 0; x < dw; ++x) {
-            const float sxf = (static_cast<float>(x) + 0.5f) * fx - 0.5f;
-            int x0 = static_cast<int>(std::floor(sxf)); float tx = sxf - static_cast<float>(x0);
-            if (x0 < 0) { x0 = 0; tx = 0.0f; }
-            const int x1 = x0 + 1 < sw ? x0 + 1 : sw - 1;
             float acc[4] = {0, 0, 0, 0};
-            px(x0, y0, acc, (1 - tx) * (1 - ty)); px(x1, y0, acc, tx * (1 - ty));
-            px(x0, y1, acc, (1 - tx) * ty);       px(x1, y1, acc, tx * ty);
-            store(x, y, acc, 1.0f);
+            for (std::size_t k = 0; k < tp.w.size(); ++k) {
+                const float* s = &mid[(static_cast<std::size_t>(tp.first + static_cast<int>(k)) * dw + x) * 4];
+                for (int c = 0; c < 4; ++c) acc[c] += s[c] * tp.w[k];
+            }
+            std::uint8_t* d = out.data() + (static_cast<std::size_t>(y) * dw + x) * 4;
+            const float a = std::clamp(acc[3], 0.0f, 255.0f);
+            d[3] = static_cast<std::uint8_t>(a + 0.5f);
+            for (int c = 0; c < 3; ++c)
+                d[c] = a > 0.5f ? static_cast<std::uint8_t>(std::clamp(acc[c] / (a / 255.0f), 0.0f, 255.0f) + 0.5f) : 0;
         }
     }
     return out;

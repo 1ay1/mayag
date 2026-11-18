@@ -438,14 +438,21 @@ glyph as a PNG (Google's `CBDT`/`CBLC`, Apple's `sbix`), so the engine:
 2. **parses `CBLC`/`CBDT` and `sbix`** to locate a glyph's strike and read its
    PNG bytes and placement metrics, choosing strikes the way HarfBuzz does
    (the smallest at least as large as the drawn size, `dupe` entries
-   followed) and shrinking them with an exact area filter in premultiplied
-   space, so a flag's 1 px border survives a 160 → 13 px reduction;
+   followed) and shrinking them with the same bicubic CoreText uses (fitted
+   against `CTLineDraw`: closer than box, bilinear, Lanczos or Hamming at
+   every size), its support widened with the reduction and done in
+   premultiplied space, so a flag's 1 px border survives a 160 → 13 px
+   reduction;
 3. **packs the RGBA into a colour plane** of the same atlas as coverage glyphs,
    so a 😀 is cached, packed and evicted through the one glyph path; and
-4. **blends it as the image it is** — a colour glyph is a distinct draw kind
-   that samples the RGBA atlas, decodes it from sRGB like any image and
-   blends in linear light, tinted only by the run's opacity, never by the
-   text colour. `CPU 温度 🔥` renders every character, and the fire is orange.
+4. **blends it as macOS does** — a colour glyph is a distinct draw kind that
+   samples the RGBA atlas, tinted only by the run's opacity, never by the
+   text colour. CoreText composites emoji in sRGB-encoded space, so the
+   software rasteriser does too (it has the backdrop: encode, blend, decode),
+   and at 48 px an emoji matches CoreText's pixels to a mean of 0.03/255;
+   the GPU backends decode the texels and blend in linear light, which
+   differs only in edge pixels. `CPU 温度 🔥` renders every character, and
+   the fire is orange.
 
 Emoji sit where macOS puts them. Apple Color Emoji's bitmaps carry no
 placement CoreText honours: CoreText draws them 1.25 em tall below 16 pt,
@@ -515,6 +522,18 @@ HarfBuzz (tracking 15.1.0), and it is held to HarfBuzz's output exactly:
   For complex scripts the fallback chain prefers faces that carry OpenType
   layout for that script. Glyphs are stored in logical order, and each line
   is painted in visual order.
+- **The macOS fallback cascade, measured.** CoreText's UI-font cascade is
+  partly virtual (`.AppleIndicFont`, `.AppleSimplifiedChineseFont`) and
+  partly hidden in private frameworks, so mayag asked CoreText which face it
+  uses for every one of 140,343 assigned codepoints and solved for the flat
+  order plus 191 range exceptions that reproduce it (`apple_cascade.hpp`,
+  `tools/derive_cascade.py`): 99.4% of codepoints fall back to CoreText's own
+  face — SF Arabic, SF Hebrew, the nine SF India faces, Apple SD Gothic NeoI,
+  Apple Braille, STIX Two Math. The one face mayag cannot read is PingFang UI,
+  stored in Apple's undocumented `hvgl` outline format; Heiti SC, its
+  predecessor, stands in, limited to exactly the codepoints PingFang serves.
+  Faces in a collection (SF India) keep their default optical size, as
+  CoreText leaves them, so Devanagari sets to CoreText's advances exactly.
 
 `tests/test_shaping.cpp` replays **679 hb-shape (HarfBuzz 15.1.0) outputs**
 over about 200 system fonts and every script family. All 679 match, glyph for
@@ -1296,9 +1315,15 @@ hardest Latin font a UI meets).
   23-glyph line drifted up to 7.5 px.
 - **Subpixel positioning.** Bitmap glyphs must sit on the pixel grid to stay
   sharp, but snapping the pen moves each glyph up to half a pixel and the eye
-  reads that as uneven spacing. mayag rasterises each glyph at four horizontal
-  phases (as Skia does) and draws it at the pen's whole pixel: sharp texels
-  *and* placement within 1/8 px. Measured column-profile drift against
+  reads that as uneven spacing. mayag rasterises each glyph at the pen's
+  subpixel phase and draws it at the pen's whole pixel, quantising exactly as
+  CoreGraphics does (measured by drawing a glyph at every 1/96 px offset):
+  the fraction is floored to 1/N px with N = 1 + ⌊100 / 3s⌋ for an s px font
+  (quarters below 11.1 px, thirds to 16.7, halves to 33.3, whole pixels
+  above, at most 5). Against `CTLineDraw` the line's coverage now differs by
+  about 5% of its ink at 11–40 px, down from 10–19% with Skia-style rounding
+  to quarters, and fractional sizes set to CoreText's width exactly (the
+  optical-size axis follows the size continuously, as CoreText's does). Measured column-profile drift against
   CoreText went from 0.9–2.6 px RMS to 0.00.
 - **Font smoothing.** macOS grows glyph outlines; that is why native Mac text
   has weight. Measured gamma-independently (straight stems at 64 subpixel

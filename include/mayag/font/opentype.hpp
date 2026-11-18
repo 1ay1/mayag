@@ -680,6 +680,8 @@ class FontFile {
     /// Which outline format this face uses. Both are supported; they take
     /// different code paths in `outline.hpp`.
     [[nodiscard]] bool is_cff() const noexcept { return is_cff_; }
+    /// True for a face read out of a .ttc/.otc collection.
+    [[nodiscard]] bool in_collection() const noexcept { return in_collection_; }
     [[nodiscard]] bool is_truetype() const noexcept { return !is_cff_; }
 
     /// True when the face carries vector outlines (glyf / CFF). Emoji and
@@ -759,6 +761,7 @@ class FontFile {
     std::span<const std::uint8_t> hmtx_;
     std::string              family_, subfamily_, full_name_, ps_name_;
     bool                     is_cff_ = false;
+    bool                     in_collection_ = false;
 };
 
 inline std::optional<FontFile> FontFile::parse(std::span<const std::uint8_t> data,
@@ -793,6 +796,7 @@ inline std::optional<FontFile> FontFile::parse(std::span<const std::uint8_t> dat
     FontFile f;
     f.reader_ = r;
     f.is_cff_ = (version == sfnt_otto);
+    f.in_collection_ = r.u32_at(0) == sfnt_ttcf;
 
     const std::uint16_t num_tables = r.u16_at(dir_offset + 4);
     // Sanity: the directory itself must fit.

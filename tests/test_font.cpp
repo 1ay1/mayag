@@ -1241,7 +1241,7 @@ void test_optical_size() {
     FontVariations v;
     v.auto_optical_size(13.4f);
     check(v.has(FontVariations::tag_opsz), "auto optical size pins opsz");
-    check(v.count == 1 && v.axes[0].value == 13.0f, "to the logical size, rounded to whole points");
+    check(v.count == 1 && v.axes[0].value == 13.4f, "to the logical size, continuously (CoreText: 16.5 pt sets halfway between 16 and 17)");
     FontVariations chosen;
     chosen.set(FontVariations::tag_opsz, 40.0f);
     chosen.auto_optical_size(12.0f);
@@ -1522,13 +1522,21 @@ void test_smoothing() {
     near(static_cast<float>(p2), static_cast<float>(p0), static_cast<float>(p0) * 0.02f,
          "a phase shift moves the glyph without changing its ink");
 
-    // split_pen: pixel + phase reassemble the pen to within 1/8 px.
-    for (float x : {0.0f, 0.12f, 0.13f, 0.5f, 0.88f, 3.37f, -1.3f}) {
-        const auto sp = typo::FontStack::split_pen(x);
-        check(sp.phase >= 0 && sp.phase < typo::FontStack::subpixel_phases &&
-                  num::abs(sp.pixel + static_cast<float>(sp.phase) / 4.0f - x) <= 0.125f + 1e-5f,
-              "split_pen(" + std::to_string(x) + ") reassembles");
-    }
+    // split_pen: the pen's fraction is FLOORED to the size's phase grid,
+    // CoreGraphics' rule (measured): quarters <= 11.1 px, thirds <= 16.7 px,
+    // halves <= 33.3 px, whole pixels above, at most 5 below 8.4 px.
+    check(typo::FontStack::subpixel_phases_for(11.0f) == 4 && typo::FontStack::subpixel_phases_for(12.0f) == 3 &&
+              typo::FontStack::subpixel_phases_for(16.0f) == 3 && typo::FontStack::subpixel_phases_for(17.0f) == 2 &&
+              typo::FontStack::subpixel_phases_for(33.0f) == 2 && typo::FontStack::subpixel_phases_for(34.0f) == 1 &&
+              typo::FontStack::subpixel_phases_for(6.0f) == 5,
+          "subpixel phases per size follow CoreGraphics");
+    for (float x : {0.0f, 0.12f, 0.13f, 0.5f, 0.88f, 3.37f, -1.3f})
+        for (int n : {1, 2, 3, 4, 5}) {
+            const auto sp = typo::FontStack::split_pen(x, n);
+            const float back = sp.pixel + static_cast<float>(sp.phase) / static_cast<float>(n);
+            check(sp.phase >= 0 && sp.phase < n && back <= x + 1e-3f && x - back < 1.0f / static_cast<float>(n) + 1e-3f,
+                  "split_pen(" + std::to_string(x) + ", " + std::to_string(n) + ") floors to the grid");
+        }
 }
 
 void test_cff2() {
@@ -1783,6 +1791,32 @@ void test_language() {
     check(typo::ot::ot_language_tags("tr-TR").front() == typo::ot::make_tag('T', 'R', 'K', ' '), "tr-TR maps to TRK");
 }
 
+/// The default stack resolves characters to the face CoreText's UI-font
+/// fallback picks (CTFontCreateForString, measured), not just any face that
+/// covers them.
+void test_apple_cascade() {
+    section("macOS fallback cascade (vs CoreText)");
+#if defined(__APPLE__)
+    auto stack = typo::system::default_stack();
+    struct Want { char32_t cp; const char* family; };
+    for (const Want w : {Want{0x5D0, ".SF Hebrew"}, Want{0x627, ".SF Arabic"}, Want{0x915, ".SF Devanagari"},
+                         Want{0xB95, ".SF Tamil"}, Want{0x531, ".SF Armenian"}, Want{0x10D0, ".SF Georgian"},
+                         Want{0xAC00, ".Apple SD Gothic NeoI"}, Want{0x2800 + 0x03, "Apple Braille"},
+                         Want{0x1D400, "STIX Two Math"}, Want{0x1F600, ".Apple Color Emoji UI"}}) {
+        const auto [fi, g] = stack->resolve(w.cp);
+        const auto* f = stack->face_at(fi);
+        const std::string got = g != 0 && f != nullptr ? f->family() : "(none)";
+        check(got == w.family,
+              "U+" + std::to_string(static_cast<unsigned>(w.cp)) + " falls back to " + w.family + " (got " + got + ")");
+    }
+    // Hebrew points stay with the SF Hebrew base (an exception range).
+    const auto [hb, hg] = stack->resolve(0x5B8);
+    check(hg != 0 && stack->face_at(hb)->family() == ".SF Hebrew", "Hebrew points come from SF Hebrew, like CoreText");
+#else
+    check(true, "CoreText cascade is macOS-only: skipped");
+#endif
+}
+
 /// Emoji land where CoreText puts them. The numbers are CTFontGetBounding-
 /// RectsForGlyphs / CTRunGetAdvances for U+1F600 in .AppleColorEmojiUI (the
 /// face CTFontCreateUIFontForLanguage falls back to), measured on macOS.
@@ -1849,6 +1883,7 @@ int main() {
     test_ligatures();
     test_color_glyphs();
     test_emoji_placement();
+    test_apple_cascade();
     test_coretext_parity();
     test_smoothing();
     test_complex_text();

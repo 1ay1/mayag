@@ -220,11 +220,13 @@ struct FontVariations {
     /// opsz-28 "Display" cut, whose narrow letterforms and tight spacing are
     /// drawn for headlines, so 12 px body text came out cramped and thin.
     /// LOGICAL size, never device pixels: 13 pt on a 2x display is still
-    /// 13 pt type, and must not switch to the 26 pt design. Rounded to whole
-    /// points: the design does not visibly change within one, and every
-    /// distinct value is its own instance (and its own glyph-cache entries).
+    /// 13 pt type, and must not switch to the 26 pt design. Continuous, as
+    /// CoreText applies it: SF's advance at 16.5 pt is exactly halfway
+    /// between 16 and 17 pt (rounding to whole points made 16.5 pt text
+    /// set 2.3 px narrower per line than macOS). It costs no extra cache
+    /// entries -- the glyph key already carries the size, which opsz tracks.
     constexpr void auto_optical_size(float logical_size) noexcept {
-        if (!has(tag_opsz)) set(tag_opsz, static_cast<float>(static_cast<int>(logical_size + 0.5f)));
+        if (!has(tag_opsz)) set(tag_opsz, logical_size);
     }
 };
 

@@ -421,13 +421,23 @@ class Software {
                     const Vec4 texel = sampler->sample_rgba(inst.texture_slot, su, sv);
                     const float a = texel.w * op;
                     if (a <= 0.001f) continue;
-                    // Emoji bitmaps are sRGB-encoded like any image; the
-                    // framebuffer blends in linear light. Blending the raw
-                    // values washed every emoji out (159 drew as 205).
-                    const float r = kernel::srgb_to_linear(texel.x), g = kernel::srgb_to_linear(texel.y),
-                                bl = kernel::srgb_to_linear(texel.z);
-                    // Straight -> premultiplied, honouring opacity.
-                    fb.blend(x, y, Vec4{r * a, g * a, bl * a, a}, 1.0f);
+                    // Emoji are sRGB images, and CoreText composites them in
+                    // ENCODED space (an image over an sRGB bitmap context is
+                    // blended without linearising): an orange edge pixel over
+                    // white keeps blue 113, where a linear-light blend gives
+                    // 160 and a pale halo. The rasteriser has the backdrop, so
+                    // reproduce that exactly: encode it, blend, decode.
+                    Vec4& dst = fb.at(x, y);
+                    const auto enc = [](float c) { return kernel::linear_to_srgb(c); };
+                    const float da = dst.w;
+                    const float out_a = a + da * (1.0f - a);
+                    if (out_a <= 0.0f) continue;
+                    const auto ch = [&](float s, float d_pre) {
+                        const float d_enc = da > 1e-6f ? enc(d_pre / da) : 0.0f;
+                        const float o = (s * a + d_enc * da * (1.0f - a)) / out_a;   // straight, encoded
+                        return kernel::srgb_to_linear(o) * out_a;
+                    };
+                    dst = Vec4{ch(texel.x, dst.x), ch(texel.y, dst.y), ch(texel.z, dst.z), out_a};
                 }
             }
             return;

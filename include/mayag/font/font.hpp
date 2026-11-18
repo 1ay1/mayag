@@ -31,6 +31,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -571,6 +572,38 @@ class FontStack : public Shaper {
         clear_shape_cache();
     }
 
+    /// Append a fallback face that may serve ONLY codepoints in `only`
+    /// (sorted, inclusive [lo, hi] ranges) -- a stand-in for a face mayag
+    /// cannot read, limited to what that face covered.
+    void add_limited(std::shared_ptr<Face> face, std::span<const std::array<char32_t, 2>> only) {
+        if (face == nullptr) return;
+        if (limits_.size() < faces_.size()) limits_.resize(faces_.size());
+        faces_.push_back(std::move(face));
+        limits_.emplace_back(only.begin(), only.end());
+        clear_shape_cache();
+    }
+
+    /// Route codepoints [lo, hi] to face `face` first (when it serves them),
+    /// ahead of the normal first-covering order: the per-range exceptions of
+    /// a measured platform cascade. Ranges must not overlap.
+    void prefer_range(char32_t lo, char32_t hi, std::size_t face) {
+        auto it = std::lower_bound(preferred_.begin(), preferred_.end(), lo,
+                                   [](const Preferred& p, char32_t c) { return p.lo < c; });
+        preferred_.insert(it, Preferred{lo, hi, face});
+        clear_shape_cache();
+    }
+
+    /// True when face `i` maps `cp` and is allowed to serve it.
+    [[nodiscard]] bool serves(std::size_t i, char32_t cp) const noexcept {
+        if (i < limits_.size() && !limits_[i].empty()) {
+            const auto& r = limits_[i];
+            auto it = std::upper_bound(r.begin(), r.end(), cp,
+                                       [](char32_t c, const std::array<char32_t, 2>& x) { return c < x[0]; });
+            if (it == r.begin() || cp > (it - 1)->at(1)) return false;
+        }
+        return faces_[i]->glyph_for(cp) != 0;
+    }
+
     /// Register another weight/style of an already-added face (Menlo Bold for
     /// Menlo Regular). It never takes part in fallback: shaping swaps it in
     /// for `of` when a run asks for a weight closer to its own, which is what
@@ -628,10 +661,12 @@ class FontStack : public Shaper {
     /// Which face can render `codepoint`, and its glyph id.
     [[nodiscard]] std::pair<std::size_t, std::uint16_t>
     resolve(std::uint32_t codepoint) const noexcept {
+        if (const std::size_t p = preferred_face(codepoint); p < faces_.size() && serves(p, codepoint))
+            return {p, faces_[p]->glyph_for(codepoint)};
         for (std::size_t i = 0; i < faces_.size(); ++i) {
             if (!siblings_.empty() && is_sibling(i)) continue;   // siblings stand in for a face, never fall back
-            const std::uint16_t g = faces_[i]->glyph_for(codepoint);
-            if (g != 0) return {i, g};
+            if (!serves(i, codepoint)) continue;
+            return {i, faces_[i]->glyph_for(codepoint)};
         }
         return {0, 0};
     }
@@ -786,13 +821,16 @@ class FontStack : public Shaper {
                 // The face that covers the whole grapheme, else the base's face.
                 std::size_t fi = resolve(cps[i]).first;
                 if (j > i + 1) {
-                    for (std::size_t f = 0; f < faces_.size(); ++f) {
-                        if (!siblings_.empty() && is_sibling(f)) continue;
-                        bool all = true;
-                        for (std::size_t k = i; k < j && all; ++k)
-                            all = ucd::is_default_ignorable(cps[k]) || faces_[f]->glyph_for(cps[k]) != 0;
-                        if (all) { fi = f; break; }
-                    }
+                    const auto covers_all = [&](std::size_t f) {
+                        for (std::size_t k = i; k < j; ++k)
+                            if (!ucd::is_default_ignorable(cps[k]) && !serves(f, cps[k])) return false;
+                        return true;
+                    };
+                    if (!covers_all(fi))
+                        for (std::size_t f = 0; f < faces_.size(); ++f) {
+                            if (!siblings_.empty() && is_sibling(f)) continue;
+                            if (covers_all(f)) { fi = f; break; }
+                        }
                 }
                 if (cps[i] == '\n' || cps[i] == '\r') fi = 0;
                 for (std::size_t k = i; k < j; ++k) face_of[k] = static_cast<std::uint16_t>(fi);
@@ -838,7 +876,7 @@ class FontStack : public Shaper {
         if (const std::size_t w = face_for_weight(face_idx, params.weight, params.italic); w != face_idx) {
             bool covers = true;
             for (std::size_t k = begin; k < end && covers; ++k)
-                covers = ucd::is_default_ignorable(cps[k]) || faces_[w]->glyph_for(cps[k]) != 0;
+                covers = ucd::is_default_ignorable(cps[k]) || serves(w, cps[k]);
             if (covers) face_idx = w;
         }
         Face& face = *faces_[face_idx];
@@ -964,18 +1002,33 @@ class FontStack : public Shaper {
     /// bilinear fetch blurs it), but snapping the PEN to whole pixels moves
     /// each glyph up to half a pixel from where the shaper put it, and the
     /// eye reads that as uneven spacing ("rn" crowding, "il" gaps). So the
-    /// glyph is rasterised with the pen's fraction baked into its outline,
-    /// quantised to quarters, and drawn at the integer part: sharp texels AND
-    /// placement within 1/8 px. Four phases is what Skia/Chrome use.
-    static constexpr int subpixel_phases = 4;
+    /// glyph is rasterised with the pen's fraction baked into its outline and
+    /// drawn at the integer part: sharp texels AND placement on the grid the
+    /// shaper asked for.
+    ///
+    /// How finely: exactly as CoreGraphics quantises glyph positions
+    /// (CGContextSetShouldSubpixelQuantizeFonts, the macOS default), measured
+    /// by drawing a glyph at every 1/96 px offset and finding where its ink
+    /// jumps: the fraction is FLOORED to 1/N px with N = 1 + floor(100 / 3s)
+    /// for an s px font, at most 5 -- quarters below 11.1 px, thirds to
+    /// 16.7 px, halves to 33.3 px, whole pixels above. Rounding to quarters
+    /// at every size (Skia's choice) put every SF glyph ~0.15 px right of
+    /// where macOS draws it.
+    static constexpr int max_subpixel_phases = 5;
+    [[nodiscard]] static int subpixel_phases_for(float size_px) noexcept {
+        if (!(size_px > 0.0f)) return 1;
+        const int n = 1 + static_cast<int>(std::floor(100.0f / (3.0f * size_px) + 1e-4f));
+        return std::clamp(n, 1, max_subpixel_phases);
+    }
 
     /// Split a pen x into the integer pixel a coverage glyph is drawn at and
-    /// the phase (0..subpixel_phases-1) it must be rasterised with.
+    /// the phase (0..phases-1, in 1/phases px) it must be rasterised with.
     struct PenSplit { float pixel; int phase; };
-    [[nodiscard]] static PenSplit split_pen(float x) noexcept {
-        const float q = std::floor(x * subpixel_phases + 0.5f);
-        const float pixel = std::floor(q / subpixel_phases);
-        return {pixel, static_cast<int>(q - pixel * subpixel_phases)};
+    [[nodiscard]] static PenSplit split_pen(float x, int phases) noexcept {
+        phases = std::clamp(phases, 1, max_subpixel_phases);
+        const float pixel = std::floor(x + 1e-4f);
+        const int phase = static_cast<int>(std::floor((x - pixel) * static_cast<float>(phases) + 1e-4f));
+        return {pixel, std::clamp(phase, 0, phases - 1)};
     }
 
     [[nodiscard]] const CachedGlyph* glyph(std::size_t face_index, std::uint16_t gid,
@@ -991,7 +1044,7 @@ class FontStack : public Shaper {
         // Phases only mean something for outline coverage: an SDF is resampled
         // anyway, and colour bitmaps are scaled images.
         if (use_sdf || face.is_color() || face.has_colr(gid)) x_phase = 0;
-        x_phase = std::clamp(x_phase, 0, subpixel_phases - 1);
+        x_phase = std::clamp(x_phase, 0, subpixel_phases_for(size_px) - 1);
         // Polarity only changes coverage rasters (SDF growth is per draw).
         if (use_sdf || face.is_color() || face.has_colr(gid) || config_.smoothing <= 0.0f)
             dark_text = false;
@@ -1024,7 +1077,7 @@ class FontStack : public Shaper {
         key.flags = use_sdf ? glyph_flags::sdf : glyph_flags::none;
         if (synth_italic) key.flags |= glyph_flags::synthetic_italic;
         if (synth_bold)   key.flags |= glyph_flags::synthetic_bold;
-        key.flags |= static_cast<std::uint8_t>(x_phase << glyph_flags::phase_shift);
+        key.flags |= glyph_flags::encode_phase(x_phase);
         if (dark_text) key.flags |= glyph_flags::dark_text;
 
         if (const CachedGlyph* hit = atlas_.find(key)) return hit;
@@ -1126,7 +1179,7 @@ class FontStack : public Shaper {
             // the pixel shift by the scale). rasterize() floors the bounds, so
             // the bitmap's offset stays integral and the shift lands in the
             // coverage, where it belongs.
-            const float dx = static_cast<float>(x_phase) / static_cast<float>(subpixel_phases) / scale;
+            const float dx = static_cast<float>(x_phase) / static_cast<float>(subpixel_phases_for(size_px)) / scale;
             o.transform(Affine{1.0f, 0.0f, 0.0f, 1.0f, dx, 0.0f});
         }
         auto r = rasterize(o, scale, 1);
@@ -1172,6 +1225,12 @@ class FontStack : public Shaper {
 
         for (const auto& a : axes) {
             if (n >= vals.size()) break;
+            // CoreText's automatic optical sizing skips variable faces that
+            // live in a collection: SF India and CJK Symbols Fallback draw at
+            // their default opsz at every size (CTFontCopyVariation reports no
+            // opsz; SF Devanagari's advances match opsz 28 at 12 pt), while
+            // standalone SF Arabic/Hebrew/Armenian follow the size.
+            if (a.tag == var::tag_opsz && face->file().in_collection()) continue;
             bool merged = false;
             for (std::size_t j = 0; j < n; ++j)
                 if (vals[j].first == a.tag) { vals[j].second = a.value; merged = true; break; }
@@ -1219,6 +1278,17 @@ class FontStack : public Shaper {
     FontConfig                          config_;
     Atlas                               atlas_;
     std::vector<std::shared_ptr<Face>>  faces_;
+    std::vector<std::vector<std::array<char32_t, 2>>> limits_;   ///< per face; empty = unlimited
+    struct Preferred { char32_t lo, hi; std::size_t face; };
+    std::vector<Preferred> preferred_;   ///< sorted by lo
+    [[nodiscard]] std::size_t preferred_face(char32_t cp) const noexcept {
+        if (preferred_.empty()) return static_cast<std::size_t>(-1);
+        auto it = std::upper_bound(preferred_.begin(), preferred_.end(), cp,
+                                   [](char32_t c, const Preferred& p) { return c < p.lo; });
+        if (it == preferred_.begin()) return static_cast<std::size_t>(-1);
+        --it;
+        return cp <= it->hi ? it->face : static_cast<std::size_t>(-1);
+    }
 
     // Shape cache: keyed by text + every ShapeParams field, aged by frame.
     struct ShapeKey {
@@ -1837,12 +1907,12 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
     /// Fetch and emit one glyph whose origin the shaper put at `pen`.
     ///
     /// A coverage glyph is drawn at the pen's whole pixel with the fraction
-    /// rasterised into its bitmap (FontStack::subpixel_phases), so it is
+    /// rasterised into its bitmap (FontStack::subpixel_phases_for), so it is
     /// sharp AND where the shaper put it. SDF and colour glyphs are resampled
     /// images with no phases; they take the pen as is.
     void place(DrawList& dl, std::size_t face_index, std::uint16_t gid, Vec2 pen,
                const TextStyle& st, const ShapeParams& sp) const {
-        const auto split = FontStack::split_pen(pen.x);
+        const auto split = FontStack::split_pen(pen.x, FontStack::subpixel_phases_for(st.size));
         const CachedGlyph* cached = stack_->glyph(face_index, gid, st.size, st.effective_weight(),
                                                    {sp.axes.data(), sp.axis_count}, sp.italic,
                                                    split.phase, FontStack::is_dark_text(st.color));

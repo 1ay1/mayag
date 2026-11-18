@@ -18,6 +18,9 @@
 #include "font.hpp"
 #include "mapped_file.hpp"
 #include "last_resort.hpp"
+#if defined(__APPLE__)
+#include "apple_cascade.hpp"
+#endif
 
 #include <jaal/kernel/pool.hpp>
 
@@ -831,6 +834,66 @@ class Database {
             }
         }
     }
+
+    // 1b. macOS: the UI font's REAL fallback order, measured from CoreText
+    //     (apple_cascade.hpp): PingFang UI for Chinese, SF Arabic/Hebrew/
+    //     India for those scripts, Apple SD Gothic NeoI for Hangul, Apple
+    //     Symbols, STIX Two Math... 97.8% of all assigned codepoints resolve
+    //     to the very face CTFontCreateForString picks. Faces are found by
+    //     PostScript family (variable fonts list named instances, so the
+    //     measured index is not a face index), so a moved file still matches.
+#if defined(__APPLE__)
+    if (primary.empty()) {
+        const auto family_of = [](std::string_view ps) {
+            const auto dash = ps.rfind('-');
+            return dash == std::string_view::npos ? ps : ps.substr(0, dash);
+        };
+        // stack face index per ui_cascade entry, for the exception ranges
+        std::vector<std::size_t> face_at_entry(std::size(apple::ui_cascade), static_cast<std::size_t>(-1));
+        std::size_t entry_no = 0;
+        for (const auto& c : apple::ui_cascade) {
+            const std::size_t this_entry = entry_no++;
+            const std::string path{c.path};
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec)) continue;
+            const std::string_view want = family_of(c.postscript);
+            // Most files hold one face, or keep the measured index; try it
+            // first, then every face of the collection.
+            std::uint32_t found = UINT32_MAX;
+            const auto matches = [&](std::uint32_t idx) {
+                auto f = Face::from_file(path, idx);
+                return f != nullptr && family_of(f->file().postscript_name()) == want;
+            };
+            if (matches(c.face_index)) found = c.face_index;
+            else
+                for (std::uint32_t idx = 0; idx < 64 && found == UINT32_MAX; ++idx)
+                    if (Face::from_file(path, idx) == nullptr) break;
+                    else if (matches(idx)) found = idx;
+            if (found == UINT32_MAX) continue;
+            FontEntry e;
+            e.path = path;
+            e.face_index = found;
+            if (already(&e)) {
+                for (std::size_t k = 0; k < stack->face_count(); ++k)
+                    if (const Face* f = stack->face_at(k);
+                        f != nullptr && f->file().postscript_name() == Face::from_file(path, found)->file().postscript_name()) {
+                        face_at_entry[this_entry] = k;
+                        break;
+                    }
+                continue;
+            }
+            if (auto face = Face::from_file(path, found)) {
+                face_at_entry[this_entry] = stack->face_count();
+                added.emplace_back(path, found);
+                if (c.only.empty()) stack->add(std::move(face));
+                else stack->add_limited(std::move(face), c.only);
+            }
+        }
+        for (const auto& x : apple::ui_exceptions)
+            if (x.entry < face_at_entry.size() && face_at_entry[x.entry] != static_cast<std::size_t>(-1))
+                stack->prefer_range(x.lo, x.hi, face_at_entry[x.entry]);
+    }
+#endif
 
     // 2. One covering face for EVERY script the machine has a font for. This
     //    is what makes tofu structurally impossible: if any installed face

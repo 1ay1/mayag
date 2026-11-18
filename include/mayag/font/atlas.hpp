@@ -66,10 +66,14 @@ inline constexpr std::uint8_t sdf       = 1 << 0;   ///< distance field, not cov
 inline constexpr std::uint8_t subpixel  = 1 << 1;   ///< RGB subpixel positioned
 inline constexpr std::uint8_t synthetic_bold   = 1 << 2;
 inline constexpr std::uint8_t synthetic_italic = 1 << 3;
-/// Bits 4-5: the horizontal subpixel phase (0..3, in quarter pixels) a
-/// coverage bitmap was rasterised at. See FontStack::subpixel_phases.
+/// Bits 4-5 and 7: the horizontal subpixel phase (0..4, in 1/N px for the
+/// size's N) a coverage bitmap was rasterised at. N is a function of the
+/// size, which the key already holds. See FontStack::subpixel_phases_for.
 inline constexpr std::uint8_t phase_shift = 4;
-inline constexpr std::uint8_t phase_mask  = 0x3 << phase_shift;
+inline constexpr std::uint8_t phase_mask  = (0x3 << phase_shift) | (1 << 7);
+[[nodiscard]] constexpr std::uint8_t encode_phase(int phase) noexcept {
+    return static_cast<std::uint8_t>(((phase & 0x3) << phase_shift) | ((phase & 0x4) << 5));
+}
 /// Rasterised for DARK text: font smoothing grows dark glyphs less than
 /// light ones at small sizes (see FontConfig::smoothing).
 inline constexpr std::uint8_t dark_text   = 1 << 6;
