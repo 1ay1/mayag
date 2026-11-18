@@ -693,6 +693,115 @@ if(MAYAG_BUILD_TESTS)
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────
+# Shared precompiled header WITH generated code (clang -fpch-codegen)
+#
+# mayag is header-only, so every one of ~90 examples/tests used to parse
+# 66k lines and then optimise the same inline functions again: ~5 s of
+# parsing and most of the backend time per file, repeated 90 times. Here
+# mayag.hpp is precompiled ONCE per flag set, its inline code is compiled
+# ONCE into an object, and every consumer reads the PCH and links that object
+# (measured: test_app.cpp 24.4 s -> 16.9 s, hello.cpp 15.5 s -> 7.9 s).
+#
+# Requires upstream clang >= 17. AppleClang is excluded: its PCH reader
+# (clang-2100) rejects jaal's Program concept with "substitution into
+# constraint expression resulted in a non-constant expression".
+# Variants: GUI and headless (MAYAG_PLATFORM_HEADLESS changes the header, and
+# clang does NOT reject a PCH built with different defines, so the variants
+# must never be mixed). Targets that must parse headers themselves
+# (widget_header_tests checks each header is self-contained) or that use
+# sanitizers are left alone.
+# ─────────────────────────────────────────────────────────────────────────
+option(MAYAG_PCH "Share one precompiled mayag.hpp with generated code (upstream clang)" ON)
+set(MAYAG_PCH_ACTIVE OFF)
+if(MAYAG_PCH AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 17
+   AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(MAYAG_PCH_ACTIVE ON)
+endif()
+# Upstream (Homebrew) clang on macOS ships newer libc++ HEADERS than the
+# system libc++ it links against; code compiled from them references symbols
+# the OS library does not have (std::__get_locale_encoding). Compile against
+# the SDK's libc++ headers, which match the library actually linked.
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_OSX_SYSROOT
+   AND EXISTS "${CMAKE_OSX_SYSROOT}/usr/include/c++/v1")
+    target_compile_options(mayag INTERFACE
+        "SHELL:-stdlib++-isystem ${CMAKE_OSX_SYSROOT}/usr/include/c++/v1")
+endif()
+
+function(mayag_pch_variant name)
+    set(hdr ${CMAKE_CURRENT_BINARY_DIR}/mayag_pch/${name}.hxx)
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/mayag_pch)
+    file(CONFIGURE OUTPUT ${hdr} CONTENT "#include <mayag/mayag.hpp>\n")
+    # 1. The PCH: the header compiled AS a header by an object library, so it
+    #    inherits exactly the flags mayag gives its consumers.
+    add_library(mayag_pch_${name} OBJECT ${hdr})
+    set_source_files_properties(${hdr} PROPERTIES LANGUAGE CXX)
+    target_link_libraries(mayag_pch_${name} PRIVATE mayag)
+    target_compile_options(mayag_pch_${name} PRIVATE ${MAYAG_WARNINGS}
+        -x c++-header -fpch-instantiate-templates -fpch-codegen
+        # Reproducible PCH bytes, so ccache can hash consumers by content.
+        "SHELL:-Xclang -fno-pch-timestamp")
+    target_compile_definitions(mayag_pch_${name} PRIVATE ${ARGN})
+    # 2. Its generated code, compiled once. clang picks the input kind from
+    #    the extension, so copy the PCH to a .pch name first.
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" cfg)
+    separate_arguments(opt UNIX_COMMAND "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${cfg}}")
+    set(pch_copy ${CMAKE_CURRENT_BINARY_DIR}/mayag_pch/${name}.pch)
+    set(code ${CMAKE_CURRENT_BINARY_DIR}/mayag_pch/${name}_code.o)
+    add_custom_command(
+        OUTPUT ${code}
+        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_OBJECTS:mayag_pch_${name}> ${pch_copy}
+        COMMAND ${CMAKE_CXX_COMPILER} ${opt} -c ${pch_copy} -o ${code}
+        DEPENDS mayag_pch_${name} $<TARGET_OBJECTS:mayag_pch_${name}>
+        COMMENT "mayag: compiling the shared PCH's code (${name})"
+        VERBATIM)
+    add_custom_target(mayag_pch_${name}_code DEPENDS ${code})
+endfunction()
+
+function(mayag_use_pch target name)
+    add_dependencies(${target} mayag_pch_${name}_code)
+    target_compile_options(${target} PRIVATE "SHELL:-include-pch $<TARGET_OBJECTS:mayag_pch_${name}>")
+    set(code ${CMAKE_CURRENT_BINARY_DIR}/mayag_pch/${name}_code.o)
+    set_source_files_properties(${code} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    target_sources(${target} PRIVATE ${code})
+    # No explicit dependency on the PCH needed: clang's -MD depfile lists the
+    # PCH, so ninja recompiles consumers whenever it is rebuilt.
+endfunction()
+
+if(MAYAG_PCH_ACTIVE)
+    mayag_pch_variant(gui)
+    mayag_pch_variant(headless MAYAG_PLATFORM_HEADLESS)
+    get_property(mayag_all_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    set(mayag_pch_users 0)
+    foreach(t IN LISTS mayag_all_targets)
+        get_target_property(type ${t} TYPE)
+        if(NOT type STREQUAL "EXECUTABLE" OR t MATCHES "^mayag_pch_"
+           OR t STREQUAL "mayag_widget_header_tests")
+            continue()
+        endif()
+        get_target_property(libs ${t} LINK_LIBRARIES)
+        if(NOT "mayag" IN_LIST libs AND NOT "mayag::mayag" IN_LIST libs)
+            continue()
+        endif()
+        get_target_property(opts ${t} COMPILE_OPTIONS)
+        if(opts MATCHES "fsanitize")
+            continue()
+        endif()
+        get_target_property(defs ${t} COMPILE_DEFINITIONS)
+        if("MAYAG_PLATFORM_HEADLESS" IN_LIST defs)
+            mayag_use_pch(${t} headless)
+        else()
+            mayag_use_pch(${t} gui)
+        endif()
+        math(EXPR mayag_pch_users "${mayag_pch_users} + 1")
+    endforeach()
+    message(STATUS "mayag: shared PCH with codegen for ${mayag_pch_users} targets")
+elseif(MAYAG_PCH AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    message(STATUS "mayag: AppleClang cannot read mayag's PCH; for ~2x faster builds use "
+                   "upstream clang: -DCMAKE_CXX_COMPILER=$(brew --prefix llvm)/bin/clang++")
+endif()
+
+# ─────────────────────────────────────────────────────────────────────────
 # Install
 # ─────────────────────────────────────────────────────────────────────────
 include(GNUInstallDirs)

@@ -1,0 +1,38 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "fast",
+      "displayName": "Fast build: upstream clang + shared PCH with codegen",
+      "description": "Homebrew LLVM (brew install llvm). mayag.hpp is precompiled once with its code compiled once; ~115 s cold on an 8-core M-series, 9 s to rebuild one example.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-fast",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++",
+        "MAYAG_PCH": "ON"
+      }
+    },
+    {
+      "name": "gcc",
+      "displayName": "GCC (Homebrew g++-16)",
+      "description": "The CI macOS-gcc configuration. No shared PCH; ~4x slower to build than 'fast'.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "g++-16"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "fast", "configurePreset": "fast" },
+    { "name": "gcc", "configurePreset": "gcc" }
+  ],
+  "testPresets": [
+    { "name": "fast", "configurePreset": "fast", "output": { "outputOnFailure": true }, "execution": { "jobs": 6 } },
+    { "name": "gcc", "configurePreset": "gcc", "output": { "outputOnFailure": true }, "execution": { "jobs": 6 } }
+  ]
+}

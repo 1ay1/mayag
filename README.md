@@ -1500,12 +1500,28 @@ add_subdirectory(mayag)
 target_link_libraries(my_app PRIVATE mayag::mayag)
 ```
 
-**C++26** is used for P2741 `static_assert` messages. GCC 15+, Clang 20+. Apple Clang doesn't support it — use Homebrew GCC:
+**C++26** is used for P2741 `static_assert` messages. GCC 15+, Clang 20+.
+
+Fastest build on macOS: upstream clang with the shared precompiled header
+(mayag.hpp is parsed once and its inline code compiled once, instead of once
+per example/test). About 115 s cold on an 8-core M-series, against ~200 s with
+Apple Clang and ~8 min with GCC; rebuilding one example takes ~9 s:
+
+```bash
+brew install llvm cmake ninja ccache
+cmake --preset fast && cmake --build --preset fast && ctest --preset fast
+```
+
+GCC works too (the CI configuration), just slower:
 
 ```bash
 brew install gcc cmake ninja
-cmake -B build -DCMAKE_CXX_COMPILER=g++-16
+cmake --preset gcc && cmake --build --preset gcc
 ```
+
+Apple Clang builds mayag, but can't use the shared precompiled header (a bug in
+its PCH reader). Set `ccache -M 30G`: the default 5 GB fills after a few full
+builds and evicts entries before they are reused.
 
 MSVC falls back to C++23; everything works, but DSL errors degrade to a generic message.
 
