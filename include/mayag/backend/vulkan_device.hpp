@@ -304,6 +304,11 @@ class VulkanDevice {
         return rebuild_swapchain_ || content_changed_ || acquire_failed_;
     }
 
+    /// Run `f` once every frame submitted so far has finished on the GPU:
+    /// the moment memory those frames sampled may be written again. Collected
+    /// at the next frame or by poll_retired(), whichever comes first.
+    void after_gpu(std::function<void()> f) { reclaim_.retire(frames_completed_ + 1, std::move(f)); }
+
     /// Free what is retired, if the last frame has finished, WITHOUT waiting.
     ///
     /// Retirement is normally collected when the next frame starts. A
@@ -663,30 +668,9 @@ class VulkanDevice {
             return std::unexpected(ImportError::invalid_buffer);
         }
 
-        // The client wrote these pixels on ITS queue, outside this device.
-        // Ownership must be ACQUIRED from the foreign queue family, from
-        // GENERAL: transitioning from UNDEFINED tells the driver the contents
-        // are garbage, and with a compressed modifier (NVIDIA's tiled ones)
-        // it throws them away -- the window draws, but blank.
-        // VK_QUEUE_FAMILY_FOREIGN_EXT where the device has it, else
-        // VK_QUEUE_FAMILY_EXTERNAL (core 1.1 external memory).
-        one_shot([&](vk::VkCommandBuffer cb) {
-            constexpr vk::Flags kShaderRead = 0x00000020;   // ACCESS_SHADER_READ_BIT
-            constexpr vk::Flags kTopOfPipe  = 0x00000001;   // STAGE_TOP_OF_PIPE_BIT
-            constexpr vk::Flags kFragment   = 0x00000080;   // STAGE_FRAGMENT_SHADER_BIT
-            constexpr int kGeneral = 1;                      // VK_IMAGE_LAYOUT_GENERAL
-            vk::VkImageMemoryBarrier b{};
-            b.sType = vk::VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            b.srcAccessMask = 0;
-            b.dstAccessMask = kShaderRead;
-            b.oldLayout = kGeneral;
-            b.newLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            b.srcQueueFamilyIndex = foreign_queue_ ? 0xFFFF'FFFDu : 0xFFFF'FFFEu;
-            b.dstQueueFamilyIndex = queue_family_;
-            b.image = image;
-            b.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            api_->CmdPipelineBarrier(cb, kTopOfPipe, kFragment, 0, 0, nullptr, 0, nullptr, 1, &b);
-        });
+        // No barrier here: ownership is taken from the client's queue in the
+        // frame that samples it (foreign_barriers), every frame, so an import
+        // costs no submit and no wait.
 
         const std::uint32_t slot = next_import_slot_++;
         Texture t;
@@ -2166,6 +2150,10 @@ class VulkanDevice {
                      Color<Srgb> clear, std::uint32_t vw, std::uint32_t vh,
                      vk::VkFramebuffer text_fb = nullptr) {
         if (atlas_dirty_binding_) update_atlas_descriptor();
+        // Client buffers this frame samples: acquired from the foreign queue
+        // now, released back to it after the last pass (foreign_barriers).
+        const auto foreign = foreign_textures(list);
+        foreign_barriers(cb, foreign, /*acquire=*/true);
 
         const auto& insts = list.instances();
         const auto& batches = list.batches();
@@ -2261,6 +2249,50 @@ class VulkanDevice {
             begin(started ? render_pass_load_ : render_pass_, fb, pipeline_);
             api_->CmdEndRenderPass(cb);
         }
+        foreign_barriers(cb, foreign, /*acquire=*/false);
+    }
+
+    /// The imported (client-owned) images a draw list samples, once each.
+    [[nodiscard]] std::vector<vk::VkImage> foreign_textures(const DrawList& list) const {
+        std::vector<vk::VkImage> out;
+        for (const auto& b : list.batches()) {
+            const auto it = textures_.find(b.texture);
+            if (it == textures_.end() || !it->second.imported) continue;
+            if (std::find(out.begin(), out.end(), it->second.image) == out.end()) out.push_back(it->second.image);
+        }
+        return out;
+    }
+
+    /// Queue-family ownership of client buffers, per frame, the way a
+    /// compositor must hold them: ACQUIRED from the foreign queue (from
+    /// GENERAL, so the driver keeps the contents the client wrote -- with a
+    /// compressed modifier, UNDEFINED would discard them) before sampling,
+    /// and RELEASED back after, so the client's next write is ordered after
+    /// our reads. Recorded into the frame itself: no extra submit, no wait.
+    void foreign_barriers(vk::VkCommandBuffer cb, const std::vector<vk::VkImage>& images, bool acquire) {
+        if (images.empty()) return;
+        constexpr vk::Flags kShaderRead = 0x00000020;   // ACCESS_SHADER_READ_BIT
+        constexpr vk::Flags kTop = 0x00000001, kFragment = 0x00000080, kBottom = 0x00002000;
+        constexpr int kGeneral = 1;
+        const std::uint32_t foreign = foreign_queue_ ? 0xFFFF'FFFDu : 0xFFFF'FFFEu;
+        std::vector<vk::VkImageMemoryBarrier> bs(images.size());
+        for (std::size_t i = 0; i < images.size(); ++i) {
+            auto& b = bs[i];
+            b.sType = vk::VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.image = images[i];
+            b.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            if (acquire) {
+                b.srcAccessMask = 0; b.dstAccessMask = kShaderRead;
+                b.oldLayout = kGeneral; b.newLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                b.srcQueueFamilyIndex = foreign; b.dstQueueFamilyIndex = queue_family_;
+            } else {
+                b.srcAccessMask = kShaderRead; b.dstAccessMask = 0;
+                b.oldLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b.newLayout = kGeneral;
+                b.srcQueueFamilyIndex = queue_family_; b.dstQueueFamilyIndex = foreign;
+            }
+        }
+        api_->CmdPipelineBarrier(cb, acquire ? kTop : kFragment, acquire ? kFragment : kBottom, 0, 0, nullptr, 0,
+                                 nullptr, static_cast<std::uint32_t>(bs.size()), bs.data());
     }
 
     /// Pixels a backdrop reads: its rect, plus the blur taps (+-r) and the

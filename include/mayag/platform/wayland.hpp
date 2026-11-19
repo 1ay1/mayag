@@ -983,6 +983,11 @@ class WaylandWindow {
     /// the next frame (see VulkanDevice::poll_retired). True while some are
     /// still in flight, so the caller polls again soon.
     bool poll_gpu_retired() { return gpu_active_ && gpu_->poll_retired(); }
+    /// `f` once the frames already submitted have finished (see VulkanDevice).
+    void after_gpu(std::function<void()> f) {
+        if (gpu_active_) gpu_->after_gpu(std::move(f));
+        else if (f) f();
+    }
     [[nodiscard]] std::span<const FormatModifier> importable_formats() const {
         return gpu_active_ ? gpu_->importable_formats() : std::span<const FormatModifier>{};
     }
@@ -2439,6 +2444,8 @@ class WaylandWindow {
     [[nodiscard]] bool can_import_images() const noexcept { return p_->can_import_images(); }
     [[nodiscard]] std::span<const FormatModifier> importable_formats() const { return p_->importable_formats(); }
     bool poll_gpu_retired() { return p_->poll_gpu_retired(); }
+    void after_gpu(std::function<void()> f) { p_->after_gpu(std::move(f)); }
+    void release_texture(std::uint32_t id) { p_->release_image(id); }
 #endif
 
     void set_coverage_sampler(const backend::CoverageSampler* s) {
