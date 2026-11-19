@@ -631,7 +631,11 @@ template <Child... Kids>
                 for (auto& n : kid.nodes) pin_node(n);
             } else {
                 for (auto& x : kid) {
-                    if constexpr (requires { x.style(); }) pin_node(x);
+                    // Spelled on the TYPE, not the local: MSVC instantiated the
+                    // discarded branch of a requires-on-a-local inside this
+                    // generic lambda (C2228 on Node::style.mut()).
+                    using X = std::remove_cvref_t<decltype(x)>;
+                    if constexpr (requires(X& y) { y.style(); }) pin_node(x);
                     else { if (!first) x.style.mut().layout.position = Positioning::absolute; first = false; }
                 }
             }

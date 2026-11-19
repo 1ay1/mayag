@@ -100,7 +100,7 @@ jobs:
       - name: Install compositor and toolchain
         run: |
           sh .github/ci/install-linux.sh gcc
-          sudo apt-get install -y weston \
+          sudo apt-get install -y weston gdb \
             libwayland-client0 libxkbcommon0 \
             glslc mesa-vulkan-drivers libvulkan1 vulkan-tools
       - name: Configure
@@ -109,11 +109,14 @@ jobs:
         run: cmake --build build -j --target mayag_wayland_tests mayag_vulkan_tests mayag_counter
 
       # No compositor: the backend must degrade, not crash. This is the
-      # property that lets the same binary ship to every Linux box.
+      # property that lets the same binary ship to every Linux box. Run
+      # under gdb so a crash leaves a backtrace in the log.
       - name: Degrades without a compositor
         run: |
-          env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET ./build/mayag_wayland_tests
-          env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET ./build/examples/mayag_counter --headless
+          unset WAYLAND_DISPLAY WAYLAND_SOCKET
+          gdbrun() { gdb -q -batch -return-child-result -ex run -ex 'thread apply all bt 20' --args "$@"; }
+          gdbrun ./build/mayag_wayland_tests
+          gdbrun ./build/examples/mayag_counter --headless
 
       # The GPU-vs-software equivalence test, against Mesa's software Vulkan
       # device (lavapipe). Proves the Vulkan backend produces the reference
