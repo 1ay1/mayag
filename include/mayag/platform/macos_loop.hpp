@@ -317,7 +317,9 @@ class RunLoop {
         id center = msg_cls<id>(objc_getClass("NSNotificationCenter"), sel("defaultCenter"));
         for (const char* name : {"NSWindowDidResizeNotification",
                                  "NSWindowDidChangeBackingPropertiesNotification",
-                                 "NSWindowDidChangeScreenNotification"}) {
+                                 "NSWindowDidChangeScreenNotification",
+                                 "NSWindowDidChangeOcclusionStateNotification",
+                                 "NSWindowDidDeminiaturizeNotification"}) {
             msg<void>(center, sel("addObserver:selector:name:object:"), target_,
                       sel("mayagChanged:"), nsstring(name), win_.ns_window());
         }

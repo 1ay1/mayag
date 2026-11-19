@@ -66,6 +66,50 @@ struct SrgbEncodeTable {
 /// compile time rather than during static initialisation.
 constinit inline const SrgbEncodeTable srgb_encode{};
 
+/// The sRGB transfer both ways in float, as linearly interpolated tables:
+/// the text blend needs nine pows per pixel (decode three, encode six), the
+/// single biggest cost of a text-heavy software frame. 1024 intervals keep
+/// the error under 1e-4 everywhere -- forty times finer than an 8-bit step,
+/// so the pixels are identical -- and the dark toe is linear, so the
+/// interpolation is exact there.
+struct SrgbFloatTables {
+    static constexpr std::size_t n = 1024;
+    std::array<float, n + 2> to_enc{}, to_lin{};
+    SrgbFloatTables() {
+        for (std::size_t i = 0; i <= n + 1; ++i) {
+            const float x = std::min(static_cast<float>(i) / static_cast<float>(n), 1.0f);
+            to_enc[i] = ::mayag::detail::linear_to_srgb(x);
+            to_lin[i] = ::mayag::detail::srgb_to_linear(x);
+        }
+    }
+    [[nodiscard]] static float lerp(const std::array<float, n + 2>& t, float v) noexcept {
+        const float x = num::saturate(v) * static_cast<float>(n);
+        const auto i = static_cast<std::size_t>(x);
+        const float f = x - static_cast<float>(i);
+        return t[i] + (t[i + 1] - t[i]) * f;
+    }
+    [[nodiscard]] float enc(float v) const noexcept { return lerp(to_enc, v); }
+    [[nodiscard]] float dec(float v) const noexcept { return lerp(to_lin, v); }
+};
+
+}  // namespace detail
+
+[[nodiscard]] inline const detail::SrgbFloatTables& srgb_lut() noexcept {
+    static const detail::SrgbFloatTables t;
+    return t;
+}
+
+/// kernel::encoded_text_source with the table encode: the same formula.
+[[nodiscard]] inline Vec4 fast_text_source(float cov, Vec4 c) noexcept {
+    const float a = c.w;
+    if (a <= 1e-6f) return Vec4{0.0f, 0.0f, 0.0f, 0.0f};
+    const float t = num::saturate(cov * a);
+    const auto& l = srgb_lut();
+    return Vec4{l.enc(c.x / a) * t, l.enc(c.y / a) * t, l.enc(c.z / a) * t, t};
+}
+
+namespace detail {
+
 }  // namespace detail
 
 /// A linear-light RGBA framebuffer. Compositing happens here, in linear space,
@@ -81,6 +125,25 @@ class Framebuffer {
         const auto l = c.to<Linear>();
         const Vec4 pre{l.c0 * l.a, l.c1 * l.a, l.c2 * l.a, l.a};
         for (auto& p : pixels_) p = pre;
+        invalidate_tiles();
+    }
+
+    /// Damage memory for the tiled rasteriser: per tile, a key of everything
+    /// that decided its pixels last frame (0 = unknown), and whether this
+    /// frame changed it. A frame whose tile has the same key keeps the
+    /// pixels it already has. Anything that writes pixels OUTSIDE
+    /// Tiled::render must call invalidate_tiles().
+    struct TileMemory {
+        std::vector<std::uint64_t> keys;
+        std::vector<std::uint8_t>  dirty;   ///< 1 = re-shaded by the last render
+        int tiles_x = 0, tiles_y = 0;
+        bool valid = false;                 ///< `dirty` describes the last render
+    };
+    [[nodiscard]] TileMemory& tile_memory() noexcept { return tiles_; }
+    [[nodiscard]] const TileMemory& tile_memory() const noexcept { return tiles_; }
+    void invalidate_tiles() noexcept {
+        std::fill(tiles_.keys.begin(), tiles_.keys.end(), 0);
+        tiles_.valid = false;
     }
 
     [[nodiscard]] Vec4& at(int x, int y) noexcept {
@@ -116,9 +179,9 @@ class Framebuffer {
         // fixed-function blend applies on a UNORM view. Here the same "over"
         // is done in software on the encoded destination, so CPU and GPU
         // cannot disagree on the blend.
-        const Vec4 s = kernel::encoded_text_source(cov, src_premul);
-        const auto enc = [](float v) { return kernel::linear_to_srgb(num::saturate(v)); };
-        const auto dec = [](float v) { return kernel::srgb_to_linear(num::saturate(v)); };
+        const Vec4 s = fast_text_source(cov, src_premul);
+        const auto enc = [](float v) { return srgb_lut().enc(v); };
+        const auto dec = [](float v) { return srgb_lut().dec(v); };
         // Destination is premultiplied over an opaque backdrop in practice;
         // un-premultiply defensively so a translucent layer still blends its
         // colour, then keep its alpha moving toward the source's.
@@ -180,6 +243,7 @@ class Framebuffer {
   private:
     int width_, height_;
     std::vector<Vec4> pixels_;
+    TileMemory tiles_;
 };
 
 /// Coverage source for glyph instances — the software path's tiny font hook.
@@ -209,6 +273,13 @@ class CoverageSampler {
     [[nodiscard]] virtual Vec4 sample_texture(float /*u*/, float /*v*/) const {
         return Vec4{1.0f, 1.0f, 1.0f, 1.0f};
     }
+
+    /// Changes whenever what the sampler returns for some (slot, u, v) may
+    /// have changed (an atlas repacked, an image re-uploaded). The tiled
+    /// rasteriser keys its reuse of unchanged tiles on it, so a sampler
+    /// whose texels can change in place MUST bump it. 0 = unknown: the
+    /// rasteriser then re-shades every tile, every frame (always correct).
+    [[nodiscard]] virtual std::uint64_t version() const noexcept { return 0; }
 };
 
 /// A user image the software path can sample for KIND_TEXTURE instances.
@@ -276,17 +347,19 @@ class ImageStore final : public CoverageSampler {
         if (!img) return;
         images_[id] = std::move(img);
         bound_ = id;
+        ++version_;
     }
 
     void release(std::uint32_t id) {
         images_.erase(id);
         if (bound_ == id) bound_ = 0;
+        ++version_;
     }
 
     /// Which image `sample_texture` reads. mayag binds ONE image at a time
     /// (see VulkanDevice::upload_texture for why), so the most recent upload
     /// wins -- exactly the video case, where one id is refreshed per frame.
-    void bind(std::uint32_t id) noexcept { bound_ = id; }
+    void bind(std::uint32_t id) noexcept { if (bound_ != id) ++version_; bound_ = id; }
 
     [[nodiscard]] bool empty() const noexcept { return images_.empty(); }
     /// Every image, by id: what a GPU that comes up late re-uploads.
@@ -321,10 +394,16 @@ class ImageStore final : public CoverageSampler {
         TextureSource src{img.rgba.data(), img.width, img.height};
         return src.sample(u, v);
     }
+    [[nodiscard]] std::uint64_t version() const noexcept override {
+        if (glyphs_ != nullptr && glyphs_->version() == 0) return 0;   // the glyphs can't tell: no reuse
+        return ((version_ + 1) << 32) ^ (glyphs_ != nullptr ? glyphs_->version() : 0) ^
+               (static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(glyphs_)) * 0x9E3779B97F4A7C15ull);
+    }
 
   private:
     std::unordered_map<std::uint32_t, std::shared_ptr<const ImageData>> images_;
     std::uint32_t bound_ = 0;
+    std::uint64_t version_ = 0;
     const CoverageSampler* glyphs_ = nullptr;
 };
 
@@ -334,6 +413,7 @@ class Software {
     /// order (back to front); each is clipped to its batch's scissor rect.
     static void render(const DrawList& dl, Framebuffer& fb,
                        const CoverageSampler* sampler = nullptr) {
+        fb.invalidate_tiles();   // pixels written outside the tiled path
         for (const Batch& batch : dl.batches()) {
             const Rect scissor = clamp_scissor(batch.clip, fb);
             if (scissor.empty()) continue;

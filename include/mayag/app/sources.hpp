@@ -20,6 +20,8 @@
 #include "../core/color.hpp"
 #include "../core/geometry.hpp"
 #include "../core/event.hpp"
+#include "gestures.hpp"
+#include "handlers.hpp"
 #include "interaction.hpp"
 
 #include <jaal/jaal.hpp>
@@ -38,31 +40,45 @@
 
 namespace mayag {
 
-// ── gestures, as events ─────────────────────────────────────────────────
-// What the host derives from the pointer and focus against the laid-out
-// tree. Each names the node it happened on. `count` on Clicked is 1 for a
-// single click, 2 for a double, ... Enter/Space on the focused node is
-// Activated, not Clicked: a program opts into keyboard activation by
-// handling it, and the key falls through to on(KeyEvent) when nothing does.
+// ── child windows ─────────────────────────────────────────────────────────
+//
+// A program can own more windows than its main one -- a settings window, an
+// inspector, a detached panel. They are DECLARED, like everything else that
+// follows from the model:
+//
+//     static std::vector<mayag::WindowSpec> windows(const Model& m) {
+//         if (!m.settings_open) return {};
+//         return {{.id = kSettings, .title = "Settings", .size = {860, 620}}};
+//     }
+//     static Node window_view(const Model& m, std::uint64_t id);   // its content
+//     static std::optional<Msg> on(const Model&, const mayag::WindowEvent&);
+//
+// The host opens a window when its id appears, retitles it when the title
+// changes and closes it when the id goes away. Each child is a full
+// surface: its own layout, hover, overlays (menus open INSIDE it), inline
+// handlers and transitions, drawn in the program's theme. Gestures in it
+// (Clicked, Pressed, Dragged, Left, ...) arrive exactly like the main
+// window's -- node ids are the program's own -- and its RAW input (keys,
+// text, scrolls, resize, focus, the close button) arrives wrapped in a
+// WindowEvent naming the window. The close button only reports; the window
+// goes when the program stops declaring it.
 
-struct Clicked {
-    std::uint64_t node = 0;
-    Vec2          local{};        ///< relative to the node's frame
-    int           count = 1;
-    MouseButton   button = MouseButton::left;
-    Mods          mods{};         ///< held at the press
+/// One child window, as the program declares it.
+struct WindowSpec {
+    std::uint64_t id = 0;          ///< the program's name for it (non-zero, stable)
+    std::string   title;
+    Vec2          size{820.0f, 600.0f};   ///< initial logical size
+    bool          resizable = true;
+    friend bool operator==(const WindowSpec&, const WindowSpec&) = default;
 };
-struct Activated { std::uint64_t node = 0; };
-/// `count` is the press's place in a multi-click sequence (2 on the second
-/// press of a double click), known AT the press -- so an editor can select
-/// the word on the second press, as every editor does, not on its release.
-struct Pressed  { std::uint64_t node = 0; Vec2 local{}; MouseButton button = MouseButton::left;
-                  int count = 1; Mods mods{}; };
-struct Released { std::uint64_t node = 0; Vec2 local{}; MouseButton button = MouseButton::left; };
-struct Entered  { std::uint64_t node = 0; };
-struct Left     { std::uint64_t node = 0; };
-struct Dragged  { std::uint64_t node = 0; Vec2 local{}; Vec2 delta{}; };
-struct Scrolled { std::uint64_t node = 0; Vec2 local{}; Vec2 delta{}; };
+
+/// Raw input from a child window: `event` is any Event (KeyEvent,
+/// TextEvent, ScrollEvent, MouseMove, ResizeEvent, FocusEvent,
+/// CloseRequest ...), `window` the WindowSpec id it came from.
+struct WindowEvent {
+    std::uint64_t window = 0;
+    Event         event;
+};
 
 /// Everything the window host emits. Raw input (KeyEvent, TextEvent,
 /// MouseMove, ...) comes through as-is; gestures come after the raw event
@@ -71,7 +87,7 @@ using window_events = std::variant<
     KeyEvent, TextEvent, ComposeEvent, ComposeEndEvent,
     MouseMove, MouseDown, MouseUp, ScrollEvent,
     ResizeEvent, FocusEvent, CloseRequest,
-    Clicked, Activated, Pressed, Released, Entered, Left, Dragged, Scrolled>;
+    Clicked, Activated, Pressed, Released, Entered, Left, Dragged, Scrolled, WindowEvent>;
 
 // ── the frame clock ─────────────────────────────────────────────────────
 
@@ -215,6 +231,12 @@ class keymap {
 };
 
 }  // namespace mayag
+
+/// An Edit owns its callable outright (cloned on copy), so moving one to
+/// another thread shares nothing: safe as a message.
+template <class Model>
+inline constexpr bool jaal::sendable_opt_in<mayag::Edit<Model>> = true;
+
 
 // mayag's geometry and colour are plain values (floats, no pointers), so a
 // Msg may carry them across threads. jaal can't see inside a class with

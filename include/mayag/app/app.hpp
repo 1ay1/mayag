@@ -66,7 +66,7 @@ namespace detail {
         .title = cfg.title, .size = cfg.size,
         .resizable = cfg.resizable, .decorated = cfg.decorated,
         .transparent = cfg.transparent, .vsync = cfg.vsync,
-        .background = cfg.theme.background,
+        .background = cfg.theme.background, .option_as_alt = cfg.option_as_alt,
     };
 }
 

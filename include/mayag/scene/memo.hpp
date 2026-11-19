@@ -134,6 +134,7 @@ class MemoCache {
     /// After paint: forget subtrees nobody asked for this frame.
     void end_frame() {
         std::erase_if(entries_, [this](const auto& kv) { return kv.second.frame != frame_; });
+        if (sites_.size() > 4096) std::erase_if(sites_, [this](const auto& kv) { return frame_ - kv.second.frame > 600; });
     }
 
     // ── view side (memo()) ──────────────────────────────────────────────
@@ -180,6 +181,29 @@ class MemoCache {
     }
 
     void forget(std::uint64_t key) { entries_.erase(key); }
+
+    // ── churn: memo sites whose key changes every frame ─────────────────────────
+    //
+    // Storing a subtree costs copies of it (built, then cascaded). Worth it
+    // when the next frame reuses it; pure overhead when the key changes
+    // every frame (a minimap while output streams). A SITE (one memo call
+    // in the code, whatever its key) that misses several frames running
+    // stops storing -- it just builds -- and tries again every few frames,
+    // so it resumes caching as soon as its content settles.
+
+    /// Should this site store what it builds this frame?
+    [[nodiscard]] bool worth_storing(std::uint64_t site) {
+        Site& s = sites_[site];
+        if (s.misses < kChurnAfter) return true;
+        return (frame_ - s.last_try) >= kRetryEvery;   // a probe: maybe it settled
+    }
+    void site_hit(std::uint64_t site) { Site& s = sites_[site]; s.misses = 0; s.frame = frame_; }
+    void site_miss(std::uint64_t site, bool stored) {
+        Site& s = sites_[site];
+        if (s.frame != frame_) ++s.misses;   // count frames, not calls
+        s.frame = frame_;
+        if (stored) s.last_try = frame_;
+    }
 
     // ── cascade side ────────────────────────────────────────────────────
 
@@ -241,7 +265,16 @@ class MemoCache {
         for (const auto& k : n.children()) collect_ids(k, out, starting);
     }
 
+    struct Site {
+        std::uint32_t misses = 0;     ///< frames in a row without a hit
+        std::uint64_t frame = 0;      ///< last frame it was seen
+        std::uint64_t last_try = 0;   ///< last frame it stored
+    };
+    static constexpr std::uint32_t kChurnAfter = 3;
+    static constexpr std::uint64_t kRetryEvery = 8;
+
     std::unordered_map<std::uint64_t, Entry> entries_;
+    std::unordered_map<std::uint64_t, Site> sites_;
     std::vector<std::pair<Node*, std::uint64_t>> live_;
     std::uint64_t frame_ = 0;
 };

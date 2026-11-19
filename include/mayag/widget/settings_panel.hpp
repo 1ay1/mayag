@@ -38,6 +38,7 @@
 //   if (auto op = settings_panel_left(m.panel, "settings", node)) return Panel{*op};
 
 #include "control.hpp"
+#include "icons.hpp"
 #include "key_hint.hpp"
 #include "knob.hpp"
 #include "scroll_view.hpp"
@@ -70,8 +71,12 @@ struct SettingSpec {
         choice,   ///< a few options: segmented
         cycle,    ///< many options: a searchable select
     };
-    std::string section;            ///< group ("font")
+    std::string section;            ///< group ("font"): a heading on its page
     std::string section_icon;       ///< a glyph for the group (Nerd Font / any)
+    /// The sidebar entry this row lives on ("Appearance"). Rows of one page
+    /// must be contiguous. Empty everywhere: one page per section, as before.
+    std::string page;
+    Icon        page_icon = Icon::count_;   ///< drawn in the sidebar; count_ = none
     std::string key;                ///< config key ("line_height"); unique within its section
     std::string label;              ///< display title; empty: derived from key ("Line height")
     std::string hint;
@@ -122,11 +127,14 @@ struct SettingsPanelProps {
     std::optional<Node> logo;       ///< a drawn logo instead of the glyph tile (any size)
     std::string footer;             ///< e.g. the config file path
     float       width = 900.0f, height = 620.0f;
+    /// The panel IS a window (a settings window): it fills it edge to edge,
+    /// no card radius, border or shadow -- the window frame is the frame.
+    bool        windowed = false;
 };
 
 // ── geometry (fixed, so selection can be scrolled into view exactly) ──────
 
-inline constexpr float kSetRowH = 46.0f, kSetHeadH = 34.0f, kSetCloseH = 2.0f, kSetGap = 16.0f, kSetCardPad = 0.0f,
+inline constexpr float kSetRowH = 52.0f, kSetHeadH = 36.0f, kSetCloseH = 2.0f, kSetGap = 14.0f, kSetCardPad = 0.0f,
                        kSetTop = 12.0f;
 inline constexpr float kSetSidebarW = 180.0f, kSetCtlW = 248.0f, kSetValueW = 58.0f;
 inline constexpr float kSetKnobW = kSetCtlW - kSetValueW - 10.0f, kSetSelectW = kSetCtlW;
@@ -159,16 +167,51 @@ inline constexpr std::size_t kSetMenuPart = 0x7FFF0000u;
     return true;
 }
 
+/// The sidebar entry of row `i`: its page, or its section when there are no pages.
+[[nodiscard]] inline const std::string& setting_page(const std::vector<SettingSpec>& specs, std::size_t i) {
+    return specs[i].page.empty() ? specs[i].section : specs[i].page;
+}
+
+/// Every row in display order: grouped by page, then by section within it,
+/// each in the order it first appears -- stable, so rows keep their own order.
+/// The app's table can list rows however it likes (a new row appended at the
+/// end of the file) and a page or section still shows ONCE, not split in two.
+[[nodiscard]] inline std::vector<std::size_t> settings_order(const std::vector<SettingSpec>& specs) {
+    std::vector<std::string_view> pages, sections;
+    const auto rank = [](std::vector<std::string_view>& seen, std::string_view k) {
+        const auto it = std::find(seen.begin(), seen.end(), k);
+        if (it != seen.end()) return static_cast<std::size_t>(it - seen.begin());
+        seen.push_back(k);
+        return seen.size() - 1;
+    };
+    std::vector<std::pair<std::size_t, std::size_t>> key(specs.size());
+    for (std::size_t i = 0; i < specs.size(); ++i) key[i] = {rank(pages, setting_page(specs, i)), rank(sections, specs[i].section)};
+    std::vector<std::size_t> v(specs.size());
+    for (std::size_t i = 0; i < v.size(); ++i) v[i] = i;
+    std::stable_sort(v.begin(), v.end(), [&](std::size_t a, std::size_t b) { return key[a] < key[b]; });
+    return v;
+}
+
 [[nodiscard]] inline std::vector<std::size_t> settings_visible(const std::vector<SettingSpec>& specs, std::string_view q) {
     std::vector<std::size_t> v;
-    for (std::size_t i = 0; i < specs.size(); ++i) if (setting_matches(specs[i], q)) v.push_back(i);
+    for (const std::size_t i : settings_order(specs)) if (setting_matches(specs[i], q)) v.push_back(i);
+    return v;
+}
+
+/// What the body shows: while searching, every match across all pages;
+/// otherwise the selected row's page only -- one page at a time.
+[[nodiscard]] inline std::vector<std::size_t> settings_shown(const std::vector<SettingSpec>& specs, std::string_view q, int selected) {
+    if (!q.empty() || specs.empty()) return settings_visible(specs, q);
+    const std::string& page = setting_page(specs, static_cast<std::size_t>(std::clamp(selected, 0, static_cast<int>(specs.size()) - 1)));
+    std::vector<std::size_t> v;
+    for (const std::size_t i : settings_order(specs)) if (setting_page(specs, i) == page) v.push_back(i);
     return v;
 }
 
 /// Top of row `index` inside the scrolling content.
 [[nodiscard]] inline float settings_row_y(const std::vector<SettingSpec>& specs, const std::vector<std::size_t>& vis,
                                           std::size_t index) {
-    float y = kSetTop;
+    float y = 4.0f + 40.0f + kSetGap;   // the content pad, the page title, the gap after it
     std::size_t k = 0;
     while (k < vis.size()) {
         const std::string& sec = specs[vis[k]].section;
@@ -182,7 +225,7 @@ inline constexpr std::size_t kSetMenuPart = 0x7FFF0000u;
 }
 
 inline void settings_reveal(SettingsPanelState& st, const std::vector<SettingSpec>& specs) {
-    const auto vis = settings_visible(specs, st.query);
+    const auto vis = settings_shown(specs, st.query, st.selected);
     const float y = settings_row_y(specs, vis, static_cast<std::size_t>(std::max(st.selected, 0)));
     const float view = st.scroll.viewport.y > 0.0f ? st.scroll.viewport.y : 420.0f;
     const bool first_in_section = [&] {
@@ -269,19 +312,25 @@ inline void menu_move(SettingsPanelState& st, const std::vector<SettingSpec>& sp
         st.out.push_back({E::Op::set, static_cast<std::size_t>(st.menu), static_cast<float>(f[static_cast<std::size_t>(st.menu_hot)]), 0});
 }
 inline void jump_section(SettingsPanelState& st, const std::vector<SettingSpec>& specs, int d) {
-    const auto vis = settings_visible(specs, st.query);
+    // not searching: the next PAGE; searching: the next section among the matches
+    const bool pages = st.query.empty();
+    const auto vis = pages ? settings_visible(specs, "") : settings_shown(specs, st.query, st.selected);
     if (vis.empty()) return;
-    std::vector<std::size_t> firsts;
+    const auto key = [&](std::size_t i) -> const std::string& { return pages ? setting_page(specs, i) : specs[i].section; };
+    std::vector<std::size_t> firsts;   // positions in vis where a group starts
     for (std::size_t k = 0; k < vis.size(); ++k)
-        if (k == 0 || specs[vis[k]].section != specs[vis[k - 1]].section) firsts.push_back(vis[k]);
+        if (k == 0 || key(vis[k]) != key(vis[k - 1])) firsts.push_back(k);
+    const auto pos = std::find(vis.begin(), vis.end(), static_cast<std::size_t>(std::max(st.selected, 0)));
+    const std::size_t p = pos == vis.end() ? 0 : static_cast<std::size_t>(pos - vis.begin());
     long at = 0;
     for (std::size_t k = 0; k < firsts.size(); ++k)
-        if (static_cast<std::size_t>(std::max(st.selected, 0)) >= firsts[k]) at = static_cast<long>(k);
+        if (p >= firsts[k]) at = static_cast<long>(k);
     const long n = static_cast<long>(firsts.size());
-    select(st, specs, firsts[static_cast<std::size_t>(((at + d) % n + n) % n)]);
+    if (pages) st.scroll.offset.y = 0.0f;
+    select(st, specs, vis[firsts[static_cast<std::size_t>(((at + d) % n + n) % n)]]);
 }
 inline void ensure_visible_selection(SettingsPanelState& st, const std::vector<SettingSpec>& specs) {
-    const auto vis = settings_visible(specs, st.query);
+    const auto vis = settings_shown(specs, st.query, st.selected);
     if (vis.empty()) return;
     if (std::find(vis.begin(), vis.end(), static_cast<std::size_t>(std::max(st.selected, 0))) == vis.end())
         st.selected = static_cast<int>(vis.front());
@@ -328,7 +377,7 @@ inline void ensure_visible_selection(SettingsPanelState& st, const std::vector<S
                 o::ensure_visible_selection(s, *sp);
             }};
     }
-    const auto vis = settings_visible(specs, st.query);
+    const auto vis = settings_shown(specs, st.query, st.selected);
     const auto at_it = std::find(vis.begin(), vis.end(), static_cast<std::size_t>(std::max(st.selected, 0)));
     const long at = at_it == vis.end() ? -1 : static_cast<long>(at_it - vis.begin());
     const auto move = [&](long d) -> std::optional<SettingsOp> {
@@ -418,45 +467,50 @@ template <ControlContext C, class On>
     const Theme& t = c.theme;
     const float fs = t.font_size;
     const std::string base{id};
-    const auto vis = settings_visible(specs, st.query);
+    const auto vis = settings_shown(specs, st.query, st.selected);
     auto sp = std::make_shared<const std::vector<SettingSpec>>(specs);
     const auto emit = [](std::size_t i, E::Op op, float v = 0.0f, int d = 0) {
         return [i, op, v, d](SettingsPanelState& s) { s.selected = static_cast<int>(i); s.out.push_back({op, i, v, d}); };
     };
     const bool has_sel = st.selected >= 0 && static_cast<std::size_t>(st.selected) < specs.size();
-    const std::string selected_section = has_sel ? specs[static_cast<std::size_t>(st.selected)].section : "";
+    const std::string selected_page = has_sel ? setting_page(specs, static_cast<std::size_t>(st.selected)) : "";
     std::size_t modified = 0;
     for (const auto& s : specs) modified += s.modified ? 1 : 0;
     const auto line = mix(t.background, t.text_primary, 0.09f);      // hairlines
-    const auto card = mix(t.background, t.text_primary, 0.025f);     // section cards
     const auto muted = mix(t.text_primary, t.background, 0.45f);
     const auto cap = [](std::string s) {
         if (!s.empty()) s[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(s[0])));
         return s;
     };
+    const bool searching = st.filtering || !st.query.empty();
 
-    // ── sidebar ──────────────────────────────────────────────────────────
+    // ── sidebar: one entry per page ─────────────────────────────────────────────────────────────────────────
     std::vector<Node> nav;
-    for (std::size_t i = 0; i < specs.size(); ++i) {
-        if (i > 0 && specs[i].section == specs[i - 1].section) continue;
-        const std::string& sec = specs[i].section;
+    const auto order = settings_order(specs);
+    for (std::size_t oi = 0; oi < order.size(); ++oi) {
+        const std::size_t i = order[oi];
+        const std::string& page = setting_page(specs, i);
+        if (oi > 0 && setting_page(specs, order[oi - 1]) == page) continue;   // the page's first row stands for it
         std::size_t mods = 0;
-        for (std::size_t k = i; k < specs.size() && specs[k].section == sec; ++k) mods += specs[k].modified ? 1 : 0;
-        const bool on_ = sec == selected_section;
+        for (std::size_t k = 0; k < specs.size(); ++k) mods += setting_page(specs, k) == page && specs[k].modified ? 1 : 0;
+        const bool on_ = !searching && page == selected_page;
         const bool hov = c.hovered(part_id(base + ".nav", i));
-        nav.push_back((h(text_owned(specs[i].section_icon) | font(fs * 0.95f) | width(18.0f) | text_center
-                             | fg(on_ ? t.accent : muted),
-                         text_owned(cap(sec)) | font(fs) | grow() | fg(on_ || hov ? t.text_primary : t.text_secondary),
-                         text_owned(mods ? std::to_string(mods) : std::string{}) | font(fs * 0.78f) | fg(t.accent))
-                       | gap(10.0f) | align(Align::center) | height(30.0f) | pad(0, 10.0f) | radius(t.rounded(5.0f))
+        const Color<Srgb> ink = on_ || hov ? t.text_primary : t.text_secondary;
+        std::vector<Node> parts;
+        if (specs[i].page_icon != Icon::count_) parts.push_back(icon_node(specs[i].page_icon, 15.0f, on_ ? t.accent : muted));
+        parts.push_back((text_owned(cap(page)) | font(fs * 0.95f) | grow() | fg(ink)
+                         | (on_ ? weight(FontWeight::medium) : weight(FontWeight::regular))).build());
+        if (mods) parts.push_back((h(text_owned(std::to_string(mods)) | font(fs * 0.72f) | fg(t.accent))
+                                   | height(16.0f) | pad(0, 5.0f) | center | radius(t.rounded(8.0f)) | bg(t.accent.fade(0.14f))).build());
+        nav.push_back((h_list(std::move(parts), 10.0f) | align(Align::center) | height(30.0f) | pad(0, 10.0f) | radius(t.rounded(6.0f))
                        | bg(on_ ? mix(t.background, t.text_primary, 0.08f) : hov ? mix(t.background, t.text_primary, 0.04f)
                                 : t.background.fade(0.0f))
-                       | pointer_cursor | role(a11y::Role::tab) | selected(on_) | label(sec) | id_of(base + ".nav", i)
+                       | pointer_cursor | role(a11y::Role::tab) | selected(on_) | label(page) | id_of(base + ".nav", i)
                        | on_click([on, sp, i] {
                              return on(SettingsOp{[sp, i](SettingsPanelState& s) {
                                  s.query.clear(); s.filtering = false;
                                  o::select(s, *sp, i);
-                                 s.scroll.offset.y = std::max(0.0f, settings_row_y(*sp, settings_visible(*sp, ""), i) - kSetHeadH - kSetTop);
+                                 s.scroll.offset.y = 0.0f;   // a page starts at its top
                              }});
                          })).build());
     }
@@ -474,9 +528,8 @@ template <ControlContext C, class On>
                  | inner_shadow(0.0f, line, {-1.0f, 0.0f});
 
     // ── header: search, modified, reset ──────────────────────────────────
-    const bool searching = st.filtering || !st.query.empty();
     std::vector<Node> field;
-    field.push_back((text_owned(std::string{ui_glyph(t, "\uF002", "/")}) | font(fs * 0.85f) | fg(searching ? t.accent : muted)).build());
+    field.push_back(icon_node(Icon::search, 14.0f, searching ? t.accent : muted));
     if (st.query.empty() && !st.filtering) field.push_back((text_owned("Search settings") | font(fs) | fg(muted) | grow()).build());
     else {
         field.push_back((text_owned(st.query) | font(fs) | fg(t.text_primary)).build());
@@ -494,19 +547,21 @@ template <ControlContext C, class On>
     const auto rid_all = node_id(base + ".reset_all");
     const bool rh = modified && c.hovered(rid_all);
     auto header = h(std::move(search),
-                    h(text_owned(modified ? std::to_string(modified) + " changed" : "Defaults") | font(fs * 0.85f)
-                          | fg(modified ? t.accent : muted))
-                        | height(32.0f) | center,
-                    h(text_owned("Reset") | font(fs * 0.85f) | fg(!modified ? muted : rh ? t.text_primary : t.text_secondary))
-                        | height(28.0f) | pad(0, 12.0f) | center | radius(t.rounded(6.0f))
+                    h(text_owned("Reset all") | font(fs * 0.85f) | fg(!modified ? muted.fade(0.5f) : rh ? t.text_primary : t.text_secondary))
+                        | height(30.0f) | pad(0, 12.0f) | center | radius(t.rounded(6.0f))
                         | bg(rh ? mix(t.background, t.text_primary, 0.08f) : t.background.fade(0.0f))
                         | border(t.stroke(1), modified ? line : line.fade(0.0f))
-                        | pointer_cursor | id_of(base + ".reset_all")
+                        | when(modified > 0, pointer_cursor) | tooltip(modified ? std::to_string(modified) + " changed from the defaults" : std::string{})
+                        | id_of(base + ".reset_all")
                         | on_click([on] { return on(SettingsOp{[](SettingsPanelState& s) { s.out.push_back({E::Op::reset_all, 0, 0.0f, 0}); }}); }))
-                | gap(12.0f) | align(Align::center) | width(pct(100)) | height(52.0f) | pad(0, 20.0f);
+                | gap(12.0f) | align(Align::center) | width(pct(100)) | height(56.0f) | pad(0, 24.0f);
 
-    // ── body ─────────────────────────────────────────────────────────────
+    // ── body ───────────────────────────────────────────────────────────────────────
     std::vector<Node> blocks;
+    // the page's title (or, searching, what was found)
+    blocks.push_back((h(text_owned(searching ? std::to_string(vis.size()) + (vis.size() == 1 ? " setting" : " settings")
+                                             : cap(selected_page)) | font(fs * 1.5f) | semibold | fg(t.text_primary))
+                      | height(40.0f) | align(Align::center) | pad(0, 12.0f)).build());
     std::size_t k = 0;
     while (k < vis.size()) {
         const SettingSpec& first = specs[vis[k]];
@@ -602,38 +657,46 @@ template <ControlContext C, class On>
             }
 
             const auto xid = part_id(rid, 9);
-            auto reset = h(text_owned(s.modified ? std::string{ui_glyph(t, "\uF0E2", "\u21BA")} : std::string{})
-                               | font(fs * 0.8f) | fg(c.hovered(xid) ? t.text_primary : muted))
-                       | size(22.0f, 22.0f) | center | radius(t.rounded(5.0f))
-                       | bg(s.modified && c.hovered(xid) ? mix(t.background, t.text_primary, 0.08f) : t.background.fade(0.0f))
-                       | pointer_cursor | id_of(rid, 9)
-                       | on_click([on, f = emit(i, E::Op::reset)] { return on(SettingsOp{f}); });
+            // Changed from the default: a dot beside the label. Pointing at the
+            // row turns it into ↺, which resets -- next to what it resets,
+            // not in a column of its own pushing the controls off the edge.
+            const bool xh = c.hovered(xid);
+            Node mark = s.modified
+                ? (h(node(sel || hov ? icon_node(Icon::undo, 12.0f, xh ? t.text_primary : t.accent)
+                                     : (box() | size(6.0f, 6.0f) | radius(t.rounded(3.0f)) | bg(t.accent)).build()))
+                   | size(20.0f, 20.0f) | center | radius(t.rounded(5.0f))
+                   | bg(xh ? mix(t.background, t.text_primary, 0.10f) : t.background.fade(0.0f))
+                   | pointer_cursor | tooltip("reset to default") | label("reset " + setting_title(s)) | id_of(rid, 9)
+                   | on_click([on, f = emit(i, E::Op::reset)] { return on(SettingsOp{f}); })).build()
+                : (box() | size(20.0f, 20.0f)).build();
 
-            auto title = h(text_owned(setting_title(s)) | font(fs) | fg(t.text_primary),
-                           box() | size(5.0f, 5.0f) | radius(t.rounded(2.5f)) | bg(s.modified ? t.accent : t.accent.fade(0.0f)))
-                       | gap(6.0f) | align(Align::center);
-            rows.push_back((h(v(std::move(title), text_owned(s.hint) | font(fs * 0.82f) | fg(muted) | ellipsis | width(pct(100)))
+            auto title = h(text_owned(setting_title(s)) | font(fs) | fg(t.text_primary) | (s.modified ? weight(FontWeight::medium) : weight(FontWeight::regular)),
+                           node(std::move(mark)))
+                       | gap(4.0f) | align(Align::center) | height(20.0f);
+            rows.push_back((h(v(std::move(title), text_owned(s.hint) | font(fs * 0.84f) | fg(muted) | ellipsis | width(pct(100)))
                                   | gap(2.0f) | grow() | min_size(0, 0),
-                              node(std::move(ctl)), std::move(reset))
-                            | gap(14.0f) | align(Align::center) | height(kSetRowH) | width(pct(100))
-                            | pad(0, 6.0f, 0, 14.0f)
-                            | bg(sel ? mix(card, t.accent, 0.08f) : hov ? mix(card, t.text_primary, 0.025f) : card)
-                            | inner_shadow(0.0f, first_row ? line.fade(0.0f) : line, {0.0f, 1.0f})
+                              node(std::move(ctl)))
+                            | gap(18.0f) | align(Align::center) | height(kSetRowH) | width(pct(100))
+                            | pad(0, 12.0f) | radius(sel || hov ? t.rounded(6.0f) : 0.0f)
+                            // the page, not a card: the selected row a soft wash with an accent edge
+                            | bg(sel ? mix(t.background, t.text_primary, 0.045f) : hov ? mix(t.background, t.text_primary, 0.025f) : t.background.fade(0.0f))
+                            | when(sel, inner_shadow(0.0f, t.accent, {2.0f, 0.0f}))
+                            | when(!sel, inner_shadow(0.0f, first_row || hov ? line.fade(0.0f) : line.fade(0.6f), {0.0f, 1.0f}))
                             | id_of(base, i)
                             | on_click([on, sp, i] { return on(SettingsOp{[sp, i](SettingsPanelState& x) { settings_ops::select(x, *sp, i); }}); }))
                                .build());
         }
-        auto head = h(text_owned(cap(first.section)) | font(fs * 0.9f) | semibold | fg(t.text_secondary))
-                  | align(Align::center) | height(kSetHeadH) | pad(0, 4.0f);
-        blocks.push_back((v(std::move(head),
-                            v(std::move(rows)) | width(pct(100)) | radius(t.rounded(8.0f)) | clip | border(t.stroke(1), line))
+        // a group heading within the page (quiet: the page title is the loud one)
+        auto head = h(text_owned(cap(first.section)) | font(fs * 0.8f) | semibold | tracking(0.6f) | fg(muted))
+                  | align(Align::end) | height(kSetHeadH) | pad(0, 12.0f, 8.0f, 12.0f);
+        blocks.push_back((v(std::move(head), v(std::move(rows)) | width(pct(100)))
                           | width(pct(100))).build());
     }
     if (vis.empty())
         blocks.push_back((v(text_owned("No settings match \u201C" + st.query + "\u201D") | font(fs) | fg(t.text_secondary),
                             text_owned("Press esc to clear the search") | font(fs * 0.85f) | fg(muted))
                           | gap(6.0f) | align(Align::center) | width(pct(100)) | pad(48.0f, 0)).build());
-    auto content = v(std::move(blocks)) | gap(kSetGap) | pad(0.0f, 20.0f, 20.0f, 20.0f) | width(pct(100));
+    auto content = v(std::move(blocks)) | gap(kSetGap) | pad(4.0f, 24.0f, 28.0f, 24.0f) | width(pct(100));
     Node body = scroll_view(c, base + ".rows", st.scroll, std::move(content),
                             [on](ScrollOp op) { return on(SettingsOp{[op](SettingsPanelState& s) { op(s.scroll); }}); });
 
@@ -658,12 +721,15 @@ template <ControlContext C, class On>
                 | gap(12.0f) | align(Align::center) | height(36.0f) | width(pct(100)) | pad(0, 20.0f)
                 | inner_shadow(0.0f, line, {0.0f, 1.0f});
 
-    return (h(std::move(sidebar),
+    Node panel = (h(std::move(sidebar),
               v(std::move(header), node(std::move(body)) | grow() | min_size(0, 0) | width(pct(100)), std::move(footer))
                   | grow() | height(pct(100)) | min_size(0, 0))
+            | width(pct(100)) | height(pct(100)) | role(a11y::Role::dialog) | label(p.title)).build();
+    if (p.windowed)
+        return (node(std::move(panel)) | width(pct(100)) | height(pct(100)) | clip | bg(t.background)).build();
+    return (node(std::move(panel))
             | size(p.width, p.height) | clip | bg(t.background) | border(t.stroke(1), mix(t.background, t.text_primary, 0.16f))
-            | radius(t.rounded(10.0f)) | shadow(40.0f, rgba<0x00000090>, {0.0f, 16.0f})
-            | role(a11y::Role::dialog) | label(p.title)).build();
+            | radius(t.rounded(10.0f)) | shadow(40.0f, rgba<0x00000090>, {0.0f, 16.0f})).build();
 }
 
 }  // namespace mayag::dsl

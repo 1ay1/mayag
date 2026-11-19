@@ -21,7 +21,7 @@
 // on(Clicked) still sees every gesture; handlers are purely additive.
 
 #include "../dsl/dsl.hpp"
-#include "sources.hpp"
+#include "gestures.hpp"
 
 #include <algorithm>
 #include <concepts>
@@ -216,14 +216,6 @@ template <class Model, class T>
     };
 }
 
-}  // namespace mayag
-
-/// An Edit owns its callable outright (cloned on copy), so moving one to
-/// another thread shares nothing: safe as a message.
-template <class Model>
-inline constexpr bool jaal::sendable_opt_in<mayag::Edit<Model>> = true;
-
-namespace mayag {
 
 /// Turn a handler's message into the program's Msg, or nothing when the
 /// type is not one of Msg's alternatives (a programming error the host

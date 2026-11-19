@@ -1,7 +1,7 @@
 #pragma once
 // mayag::widget text_field — a single-line text field with caret and selection
 
-#include "../app/host.hpp"
+#include "../app/context.hpp"
 #include "../dsl/dsl.hpp"
 #include "../core/text_edit.hpp"
 #include "../style/theme.hpp"

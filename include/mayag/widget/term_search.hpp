@@ -3,7 +3,7 @@
 //
 //   term_search(c, "search", m.query, m.case_sensitive, m.regex, index, count)
 //
-// A compact bar that floats over the terminal's top-right corner (posted as
+// A compact bar that floats over the terminal's bottom-left corner (posted as
 // an overlay anchored to the terminal node, so it never reflows the grid):
 // query, Aa / .* toggles, "3/41", up/down, close.
 //
@@ -49,9 +49,12 @@ inline void term_search(const C& c, std::string_view id, std::uint64_t anchor, c
                     | bg(mix(t.background, t.text_primary, 0.06f))).build(),
         .id = part_id(id, part_menu),
         .anchor_id = anchor,
-        .placement = Placement::below_end,
+        // bottom-left, inside the terminal: clear of a scrollbar / minimap on
+        // the right and of toasts in the bottom-right corner
+        .placement = Placement::below_start,
         .dismiss = Dismiss::never,
-        .offset = -40.0f,
+        .offset = -std::round(fs * 1.75f) - 12.0f,
+        .shift = {12.0f, 0.0f},
         .layer = 6,
     });
 }

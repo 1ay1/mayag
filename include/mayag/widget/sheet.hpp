@@ -30,14 +30,13 @@
 // is a pointer copy; the cascade applies it like any other class, and it
 // was built exactly once, when the sheet was made.
 
-#include "../app/host.hpp"
+#include "../app/context.hpp"
 #include "../dsl/dsl.hpp"
 #include "../style/theme.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <memory>
-#include <mutex>
 #include <unordered_map>
 #include <utility>
 
@@ -598,11 +597,11 @@ namespace detail {
 }
 
 /// A Sheet built from knobs (see SheetKnobs). Stable address per knob set,
-/// so `Theme::sheet` may point at it.
+/// so `Theme::sheet` may point at it. Called from view()/theme(), which jaal
+/// runs on the loop thread only -- so the cache needs no lock (and a widget
+/// holding a raw mutex is exactly what the runtime banlist forbids).
 [[nodiscard]] inline const Sheet& tuned(const SheetKnobs& k) {
-    static std::mutex mu;
     static std::unordered_map<std::uint64_t, std::unique_ptr<Sheet>> cache;
-    std::lock_guard lock{mu};
     auto& slot = cache[k.key()];
     if (!slot) slot = std::make_unique<Sheet>(detail::build_tuned(k));
     return *slot;

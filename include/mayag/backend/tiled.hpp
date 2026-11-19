@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace mayag::backend {
@@ -44,10 +45,33 @@ inline constexpr int tile_size = 64;
 struct TiledStats {
     int  tiles = 0;
     int  tiles_skipped = 0;      ///< had no instances at all
+    int  tiles_reused = 0;       ///< unchanged since the last frame: not touched
     long instance_refs = 0;      ///< total (tile, instance) pairs after binning
     long instances_culled = 0;   ///< dropped by occlusion
     unsigned threads = 1;
 };
+
+namespace tile_hash {
+/// 64-bit mix (wyhash-style multiply-fold). Cheap next to shading even one
+/// glyph, and good enough that two different tiles colliding is not a
+/// practical concern (2^-64 per tile per frame).
+[[nodiscard]] inline std::uint64_t mix(std::uint64_t a, std::uint64_t b) noexcept {
+    const __uint128_t r = static_cast<__uint128_t>(a ^ 0xA0761D6478BD642Full) * (b ^ 0xE7037ED1A0B428DBull);
+    return static_cast<std::uint64_t>(r) ^ static_cast<std::uint64_t>(r >> 64);
+}
+inline void bytes(std::uint64_t& h, const void* p, std::size_t n) noexcept {
+    const auto* c = static_cast<const unsigned char*>(p);
+    std::size_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        std::uint64_t a, b;
+        std::memcpy(&a, c + i, 8);
+        std::memcpy(&b, c + i + 8, 8);
+        h = mix(h ^ a, b ^ 0x8EBC6AF09C88C6E3ull);
+    }
+    for (; i + 8 <= n; i += 8) { std::uint64_t a; std::memcpy(&a, c + i, 8); h = mix(h, a); }
+    for (; i < n; ++i) h = mix(h, c[i]);
+}
+}  // namespace tile_hash
 
 class Tiled {
   public:
@@ -159,8 +183,38 @@ class Tiled {
             }
             run_phase(lo, static_cast<std::uint32_t>(dl.instances().size()), first);
             for (const auto& b : bins) if (b.empty()) ++stats.tiles_skipped;
+            fb.invalidate_tiles();   // a backdrop reads across tiles: no per-tile reuse this frame
             return stats;
         }
+
+        // ── damage ───────────────────────────────────────────────────────────
+        //
+        // A tile's pixels are a pure function of: the clear colour, the
+        // instances that reach it (from the occluder on), each one's scissor
+        // within the tile, texture and blend, and what the sampler returns.
+        // Hash exactly that; a tile whose hash matches last frame's already
+        // HOLDS the right pixels -- no clear, no shading, no encode. Typing
+        // one character re-shades the one or two tiles under the cursor,
+        // not the whole window. Bit-identical by construction: either the
+        // same inputs, or a full re-shade.
+        auto& mem = fb.tile_memory();
+        if (mem.tiles_x != tiles_x || mem.tiles_y != tiles_y || mem.keys.size() != static_cast<std::size_t>(n_tiles)) {
+            mem.keys.assign(static_cast<std::size_t>(n_tiles), 0);
+            mem.tiles_x = tiles_x;
+            mem.tiles_y = tiles_y;
+        }
+        mem.dirty.assign(static_cast<std::size_t>(n_tiles), 1);
+        const std::uint64_t sver = sampler != nullptr ? sampler->version() : 1;
+        const bool reuse_ok = sver != 0;   // a sampler that can't version: always re-shade
+        std::uint64_t frame_seed = 0x9E3779B97F4A7C15ull;
+        {
+            const auto l = clear.to<Linear>();
+            const float cc[4] = {l.c0, l.c1, l.c2, l.a};
+            tile_hash::bytes(frame_seed, cc, sizeof cc);
+            frame_seed = tile_hash::mix(frame_seed, sver);
+            frame_seed = tile_hash::mix(frame_seed, static_cast<std::uint64_t>(fb.width()) << 32 | static_cast<std::uint32_t>(fb.height()));
+        }
+        std::vector<int> reused(static_cast<std::size_t>(n_tiles), 0);
 
         const auto render_tile = [&](std::size_t index) {
             const int tx = static_cast<int>(index) % tiles_x;
@@ -173,13 +227,6 @@ class Tiled {
 
             auto& list = bins[index];
 
-            // Clear this tile. Doing it here rather than in a separate full
-            // -framebuffer pass keeps the pixels in cache for the shading
-            // that immediately follows.
-            fill_tile(fb, tile, clear);
-
-            if (list.empty()) return;
-
             // Occlusion: scan backwards for the last instance that covers the
             // whole tile opaquely, and drop everything before it.
             std::size_t start = 0;
@@ -190,6 +237,33 @@ class Tiled {
                 }
             }
             if (start > 0) culled[index] = static_cast<long>(start);
+
+            // what decides this tile's pixels, and is it what it was?
+            std::uint64_t key = tile_hash::mix(frame_seed, index);
+            for (std::size_t k = start; k < list.size(); ++k) {
+                const std::uint32_t gi = list[k];
+                const Batch& batch = dl.batches()[owner[gi]];
+                const Rect scissor = clamp_scissor(batch.clip, fb).intersect(tile);
+                if (scissor.empty()) continue;
+                tile_hash::bytes(key, &dl.instances()[gi], sizeof(Instance));
+                const float sc[4] = {scissor.origin.x, scissor.origin.y, scissor.size.x, scissor.size.y};
+                tile_hash::bytes(key, sc, sizeof sc);
+                key = tile_hash::mix(key, (static_cast<std::uint64_t>(batch.texture) << 8) | static_cast<std::uint64_t>(batch.blend));
+            }
+            key |= 1;   // never 0 (0 = unknown)
+            if (reuse_ok && mem.keys[index] == key) {
+                mem.dirty[index] = 0;
+                reused[index] = 1;
+                return;
+            }
+            mem.keys[index] = reuse_ok ? key : 0;
+
+            // Clear this tile. Doing it here rather than in a separate full
+            // -framebuffer pass keeps the pixels in cache for the shading
+            // that immediately follows.
+            fill_tile(fb, tile, clear);
+
+            if (list.empty()) return;
 
             for (std::size_t k = start; k < list.size(); ++k) {
                 const std::uint32_t gi = list[k];
@@ -210,7 +284,44 @@ class Tiled {
 
         for (const auto& b : bins) if (b.empty()) ++stats.tiles_skipped;
         for (const long c : culled) stats.instances_culled += c;
+        for (const int r : reused) stats.tiles_reused += r;
+        mem.valid = true;
         return stats;
+    }
+
+    /// Encode only the tiles the last render() changed, into `out`, which
+    /// must hold this framebuffer's previous encode (same size). Falls back
+    /// to a full encode when it can't know. What a window that keeps its
+    /// pixel buffer between frames calls instead of encode_parallel.
+    static void encode_damaged(const Framebuffer& fb, std::vector<std::uint8_t>& out, ThreadPool* pool) {
+        const std::size_t n = static_cast<std::size_t>(fb.width()) * fb.height();
+        const auto& mem = fb.tile_memory();
+        if (!mem.valid || out.size() != n * 4 || mem.dirty.size() != static_cast<std::size_t>(mem.tiles_x) * mem.tiles_y) {
+            encode_parallel(fb, out, pool);
+            return;
+        }
+        std::vector<std::uint32_t> todo;
+        for (std::uint32_t i = 0; i < mem.dirty.size(); ++i) if (mem.dirty[i]) todo.push_back(i);
+        if (todo.empty()) return;
+        const auto encode_tile = [&](std::size_t k) {
+            const int tx = static_cast<int>(todo[k]) % mem.tiles_x, ty = static_cast<int>(todo[k]) / mem.tiles_x;
+            const int x0 = tx * tile_size, y0 = ty * tile_size;
+            const int w = num::min(tile_size, fb.width() - x0), y1 = num::min(y0 + tile_size, fb.height());
+            for (int y = y0; y < y1; ++y)
+                Framebuffer::encode_span(&fb.at(x0, y), out.data() + (static_cast<std::size_t>(y) * fb.width() + x0) * 4,
+                                         static_cast<std::size_t>(w));
+        };
+        if (pool != nullptr && todo.size() > 4) pool->parallel_for(todo.size(), encode_tile);
+        else for (std::size_t k = 0; k < todo.size(); ++k) encode_tile(k);
+    }
+
+    /// Whether the last render() changed any pixel (false: the frame is the
+    /// one already on screen -- a host may skip presenting it).
+    [[nodiscard]] static bool any_damage(const Framebuffer& fb) noexcept {
+        const auto& mem = fb.tile_memory();
+        if (!mem.valid) return true;
+        for (const auto d : mem.dirty) if (d) return true;
+        return false;
     }
 
     /// Encode straight to RGBA8, in parallel, tile by tile.

@@ -37,13 +37,17 @@
 #include <objc/objc.h>
 #include <objc/runtime.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 // ── CoreGraphics, declared by hand ──────────────────────────────────────
@@ -154,6 +158,7 @@ class MacWindow {
         // never takes keyboard focus, which looks exactly like a hang.
         id app = msg_cls<id>(objc_getClass("NSApplication"), sel("sharedApplication"));
         if (app == nullptr) return std::nullopt;
+        if (!cfg.child) {
         msg<BOOL>(app, sel("setActivationPolicy:"), static_cast<long>(0));  // Regular
 
         // `finishLaunching` is NOT optional when you drive the run loop
@@ -162,26 +167,58 @@ class MacWindow {
         // never mapped by the window server — the process sits there alive,
         // consuming events, showing nothing. Costly to diagnose, one line to fix.
         msg<void>(app, sel("finishLaunching"));
+        }
 
-        unsigned long style = style_titled | style_closable | style_miniaturizable;
+        // Undecorated: no title bar, no buttons, square corners -- the app draws
+        // its own (a tab strip with window controls). Borderless + resizable
+        // still resizes from its edges; miniaturizable lets it minimise.
+        unsigned long style = cfg.decorated ? (style_titled | style_closable | style_miniaturizable) : style_miniaturizable;
         if (cfg.resizable) style |= style_resizable;
 
         const CGRect frame = mayag_cgrect(0, 0, static_cast<double>(cfg.size.x), static_cast<double>(cfg.size.y));
 
-        id win = msg_cls<id>(objc_getClass("NSWindow"), sel("alloc"));
+        id win = msg_cls<id>(window_class(), sel("alloc"));
         win = msg<id>(win, sel("initWithContentRect:styleMask:backing:defer:"),
                       frame, style, static_cast<unsigned long>(2) /* Buffered */,
                       static_cast<BOOL>(NO));
         if (win == nullptr) return std::nullopt;
 
         msg<void>(win, sel("setTitle:"), nsstring(cfg.title));
-        msg<void>(win, sel("center"));
+        if (!cfg.decorated) msg<void>(win, sel("setHasShadow:"), static_cast<BOOL>(YES));
+        if (cfg.child) {
+            // beside the window that asked for it, the way a preferences
+            // window opens over its app, not in a fixed corner of the screen
+            id key = msg<id>(app, sel("keyWindow"));
+            if (key != nullptr) {
+                const CGRect kf = msg<CGRect>(key, sel("frame"));
+                const CGRect wf = msg<CGRect>(win, sel("frame"));
+                const CGPoint at{kf.origin.x + (kf.size.width - wf.size.width) * 0.5,
+                                 kf.origin.y + (kf.size.height - wf.size.height) * 0.5 - 24.0};
+                msg<void>(win, sel("setFrameOrigin:"), at);
+            } else {
+                msg<void>(win, sel("center"));
+            }
+            // hidden with the app, kept above nothing: a real window, not a panel
+            msg<void>(win, sel("setTabbingMode:"), static_cast<long>(2));   // NSWindowTabbingModeDisallowed
+        } else {
+            msg<void>(win, sel("center"));
+        }
         msg<void>(win, sel("setReleasedWhenClosed:"), static_cast<BOOL>(NO));
         msg<void>(win, sel("setAcceptsMouseMovedEvents:"), static_cast<BOOL>(YES));
         msg<void>(win, sel("makeKeyAndOrderFront:"), nullptr);
-        msg<void>(app, sel("activateIgnoringOtherApps:"), static_cast<BOOL>(YES));
+        if (!cfg.child) msg<void>(app, sel("activateIgnoringOtherApps:"), static_cast<BOOL>(YES));
 
         // A layer-backed content view is what we blit the framebuffer into.
+        // It is mayag's own NSView: the window's first responder and an
+        // NSTextInputClient, so keys go through the system input method
+        // (Japanese, Chinese, Korean, emoji, dead keys) and nothing beeps.
+        {
+            id own = msg<id>(msg_cls<id>(view_class(), sel("alloc")), sel("initWithFrame:"), frame);
+            msg<void>(win, sel("setContentView:"), own);
+            msg<void>(own, sel("release"));
+            msg<void>(win, sel("makeFirstResponder:"), own);
+        }
+        if (!cfg.child) install_app_menu(cfg.title);
         id view = msg<id>(win, sel("contentView"));
         msg<void>(view, sel("setWantsLayer:"), static_cast<BOOL>(YES));
 
@@ -241,6 +278,10 @@ class MacWindow {
         w.window_ = win;
         w.view_  = view;
         w.size_  = cfg.size;
+        w.ime_->view = view;
+        w.ime_->option_as_alt = cfg.option_as_alt;
+        ti_slot(view) = w.ime_.get();
+        if (!cfg.child) primary_window() = win;
 
         // Render at the display's NATIVE scale.
         //
@@ -300,7 +341,10 @@ class MacWindow {
     [[nodiscard]] bool gpu_active() const noexcept { return gpu_enabled_; }
 
     void close() {
-        if (window_ != nullptr) objc::msg<void>(window_, objc::sel("close"));
+        unenroll();
+        if (view_ != nullptr) ti_slot(view_) = nullptr;   // the view may outlive us in AppKit's pools
+        if (window_ != nullptr && primary_window() == window_) primary_window() = nullptr;
+        if (window_ != nullptr) { objc::msg<void>(window_, objc::sel("close")); (void)take_close(window_); }
         window_ = nullptr;
         open_ = false;
     }
@@ -378,20 +422,70 @@ class MacWindow {
                 id ev = msg<id>(app_, sel("nextEventMatchingMask:untilDate:inMode:dequeue:"),
                                 any_event_mask, until, mode, static_cast<BOOL>(YES));
                 if (ev == nullptr) break;
-                translate(ev, out);
+                feed(ev);
                 msg<void>(app_, sel("sendEvent:"), ev);
             }
         }
+        out.insert(out.end(), std::make_move_iterator(fed_.begin()), std::make_move_iterator(fed_.end()));
+        fed_.clear();
+        // what the input method said outside a key press (a candidate picked
+        // with the mouse, a composition ended because the input source changed)
+        if (!ime_->out.empty()) {
+            out.insert(out.end(), std::make_move_iterator(ime_->out.begin()), std::make_move_iterator(ime_->out.end()));
+            ime_->out.clear();
+        }
 
-        if (!msg<BOOL>(window_, sel("isVisible"))) {
-            open_ = false;
-            out.push_back(CloseRequest{});
+        // key focus moved between our windows (or away from the app)
+        if (window_ != nullptr) {
+            const bool key = msg<BOOL>(window_, sel("isKeyWindow")) != 0;
+            if (key != was_key_) { was_key_ = key; out.push_back(FocusEvent{key}); }
+            // Occlusion: minimised, on another Space, hidden (cmd-H) or fully
+            // covered. No frames while so -- CAMetalLayer's nextDrawable would
+            // block up to a second per frame on a window nobody can see -- and
+            // a fresh one the moment it shows again (a resize event at the
+            // same size: the host lays out and paints).
+            constexpr unsigned long occlusion_visible = 1ul << 1;   // NSWindowOcclusionStateVisible
+            const bool vis = (msg<unsigned long>(window_, sel("occlusionState")) & occlusion_visible) != 0;
+            if (vis != visible_) {
+                visible_ = vis;
+                if (vis) out.push_back(ResizeEvent{size_, dpi_});
+            }
+        }
+
+        // Closed is what the window was TOLD (its close button, or close),
+        // never inferred from visibility: a minimised window, one whose app
+        // is hidden (cmd-H), or one mid-way through the minimise animation
+        // is not visible either -- and reading that as "closed" quit the app
+        // when you minimised it.
+        if (open_) {
+            const int bits = take_close(window_);
+            if (bits & close_done) open_ = false;                     // gone: the host stops
+            if (bits) out.push_back(CloseRequest{});                  // a request: the app decides
         }
         return out;
     }
 
     /// The run loop hands over each event it dequeued, before sendEvent:.
-    void feed(id ev) { translate(ev, fed_); }
+    /// Events of another window (a child window, a panel) are not ours:
+    /// they go to that window, and app-wide ones (no window) to the key one.
+    void feed(id ev) {
+        using namespace objc;
+        id w = msg<id>(ev, sel("window"));
+        const auto type = msg<unsigned long>(ev, sel("type"));
+        const bool keyish = type == ev_key_down || type == ev_key_up || type == ev_flags_changed;
+        if (w == nullptr && keyish) w = msg<id>(app_, sel("keyWindow"));
+        if (w == nullptr || w == window_) { translate(ev, fed_); return; }
+        for (MacWindow* o : registry()) if (o != this && o->window_ == w) { o->translate(ev, o->fed_); return; }
+    }
+    /// Every open MacWindow, so one run loop can feed them all.
+    [[nodiscard]] static std::vector<MacWindow*>& registry() { static std::vector<MacWindow*> r; return r; }
+    /// Register this window at its final address (after it has been moved
+    /// into place); a host does this once. Idempotent.
+    void enroll() {
+        auto& r = registry();
+        if (std::find(r.begin(), r.end(), this) == r.end()) r.push_back(this);
+    }
+    void unenroll() { std::erase(registry(), this); }
 
     /// Off under the Cocoa run loop: events come through feed(), and pulling
     /// from inside a live-resize callback would re-enter AppKit.
@@ -401,12 +495,27 @@ class MacWindow {
     [[nodiscard]] id ns_window() const noexcept { return window_; }
     [[nodiscard]] id ns_view() const noexcept { return view_; }
 
+    /// A text field has keyboard focus (`on`), its caret at `caret` (logical
+    /// px): the input method's candidate window opens at the caret. When
+    /// focus leaves text entry mid-composition, the composition is dropped.
+    void set_text_input(bool on, Rect caret) {
+        ime_->want = on;
+        if (on) { ime_->caret = caret; ime_->view_h = size_.y; }
+        if (!on && ime_->marked && view_ != nullptr) {
+            using namespace objc;
+            if (id ctx = msg<id>(view_, sel("inputContext"))) msg<void>(ctx, sel("discardMarkedText"));
+            ime_->marked = false;
+            ime_->marked_text.clear();
+            ime_->out.push_back(ComposeEndEvent{});
+        }
+    }
+
     // ── presentation ────────────────────────────────────────────────────
 
     void present(const DrawList& dl, Color<Srgb> clear) {
         const int w = static_cast<int>(size_.x * dpi_);
         const int h = static_cast<int>(size_.y * dpi_);
-        if (w <= 0 || h <= 0) return;
+        if (w <= 0 || h <= 0 || !visible_) return;   // nobody can see it: no work, no blocking
 
 #if defined(MAYAG_WITH_METAL)
         if (gpu_enabled_) {
@@ -428,14 +537,19 @@ class MacWindow {
             fb_ = backend::Framebuffer{w, h};
             pixels_.assign(static_cast<std::size_t>(w) * h * 4, 0);
             release_context();
+            blitted_ = false;
         }
 
         // Tiled + parallel: the clear is folded into each tile (so the pixels
         // are already hot in cache when shading starts), and the sRGB encode
-        // runs on the same threads that just produced those rows.
+        // runs on the same threads that just produced those rows. Tiles whose
+        // inputs did not change keep their pixels -- shaded, encoded and all
+        // -- and a frame that changed nothing is not handed to the compositor.
         backend::Tiled::render(dl, fb_, sampler_, &backend::shared_pool(), clear);
-        backend::Tiled::encode_parallel(fb_, pixels_, &backend::shared_pool());
+        if (!backend::Tiled::any_damage(fb_) && blitted_) return;
+        backend::Tiled::encode_damaged(fb_, pixels_, &backend::shared_pool());
         blit(w, h);
+        blitted_ = true;
     }
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() { return fb_.to_rgba8(); }
@@ -502,6 +616,36 @@ class MacWindow {
     }
 
     // ── services ────────────────────────────────────────────────────────
+
+    // ── window actions (an undecorated window's own title area) ─────────────
+
+    /// Move the window with the pointer, from the press being handled now.
+    void begin_move() {
+        using namespace objc;
+        if (window_ == nullptr) return;
+        id ev = msg<id>(app_, sel("currentEvent"));
+        if (ev != nullptr) msg<void>(window_, sel("performWindowDragWithEvent:"), ev);
+    }
+    void minimize() {
+        if (window_ != nullptr) objc::msg<void>(window_, objc::sel("miniaturize:"), static_cast<id>(nullptr));
+    }
+    /// Fill the screen's usable area, or go back. A borderless window has no
+    /// zoom button for AppKit to drive, so it is done by hand.
+    void toggle_maximize() {
+        using namespace objc;
+        if (window_ == nullptr) return;
+        if (maximized_) {
+            msg<void>(window_, sel("setFrame:display:animate:"), restore_frame_, static_cast<BOOL>(YES), static_cast<BOOL>(YES));
+            maximized_ = false;
+            return;
+        }
+        id screen = msg<id>(window_, sel("screen"));
+        if (screen == nullptr) return;
+        restore_frame_ = msg<CGRect>(window_, sel("frame"));
+        const CGRect vis = msg<CGRect>(screen, sel("visibleFrame"));
+        msg<void>(window_, sel("setFrame:display:animate:"), vis, static_cast<BOOL>(YES), static_cast<BOOL>(YES));
+        maximized_ = true;
+    }
 
     void set_title(std::string_view t) {
         objc::msg<void>(window_, objc::sel("setTitle:"), objc::nsstring(t));
@@ -979,39 +1123,21 @@ class MacWindow {
                 const auto code = msg<unsigned short>(ev, sel("keyCode"));
                 const bool repeat = msg<BOOL>(ev, sel("isARepeat")) != 0;
                 if (!repeat) raw_key(ev, true, mods);
-                out.push_back(KeyEvent{key_from_code(code), mods, repeat});
-
-                // Printable input arrives separately, so a shortcut and the
-                // character it would type never both fire.
-                //
-                // NOTE ON INPUT METHODS: reading `characters` directly gives
-                // the Latin keystrokes and BYPASSES the input manager, which
-                // is why CJK cannot be typed this way — `konnichiwa` arrives
-                // as ten ASCII letters and the conversion to こんにちは never
-                // happens. A complete implementation routes the event through
-                // `interpretKeyEvents:` on an NSTextInputClient view, which
-                // calls back with `insertText:` and `setMarkedText:`.
-                //
-                // That requires registering a custom NSView subclass through
-                // the Objective-C runtime, which is a substantial amount of
-                // class-pair plumbing. The EVENT MODEL is what matters and it
-                // is complete: ComposeEvent / ComposeEndEvent flow through
-                // the runtime, TextEditState holds preedit separately from
-                // committed text, and the headless backend can script a full
-                // composition — so CJK input is testable today and the Cocoa
-                // bridge is a contained piece of work rather than a redesign.
-                if (!mods.super && !mods.ctrl) {
-                    const std::string s = from_nsstring(msg<id>(ev, sel("characters")));
-                    // Arrows, F-keys, Home/End... report characters in Apple's
-                    // private-use block U+F700..U+F8FF (UTF-8 EF 9C 80 ..
-                    // EF A3 BF). They are keys, not text: an editor that
-                    // inserted them would type a box on every arrow press.
-                    const auto u = [&](std::size_t i) { return static_cast<unsigned char>(s[i]); };
-                    const bool function_key = s.size() >= 3 && u(0) == 0xEF && u(1) >= 0x9C && u(1) <= 0xA3;
-                    if (!s.empty() && u(0) >= 0x20 && u(0) != 0x7F && !function_key) {
-                        out.push_back(TextEvent{s});
-                    }
-                }
+                // While the input method composes, this key is its own (Enter
+                // picks the candidate, Escape cancels): not the app's.
+                const Key key = key_from_code(code);
+                Mods km = mods;
+                // ⌥ types characters (the Mac way): ⌥e is text, not Alt+e --
+                // a terminal must not ALSO send ESC e. Keys that type nothing
+                // (arrows, Delete, Return) keep their ⌥.
+                if (km.alt && !ime_->option_as_alt && !km.ctrl && !km.super && types_text(key)) km.alt = false;
+                if (!ime_->marked) out.push_back(KeyEvent{key, km, repeat});
+                // Text does NOT come from `characters`: AppKit is about to
+                // hand this key to the content view (sendEvent:), whose input
+                // method commits text with insertText: -- so a dead key (´ e
+                // → é) or a CJK composition (konnichiwa → こんにちは) types what
+                // the user meant, not its Latin keystrokes. A shortcut and the
+                // character it would type still never both fire.
                 break;
             }
             case ev_key_up:
@@ -1033,6 +1159,15 @@ class MacWindow {
             default:
                 break;
         }
+    }
+
+    /// Virtual key codes are POSITIONAL on macOS (they describe where the key
+    /// is, not what it prints), so this table is layout-independent.
+    [[nodiscard]] static bool types_text(Key k) {
+        const auto v = static_cast<int>(k);
+        return (v >= static_cast<int>(Key::a) && v <= static_cast<int>(Key::z)) ||
+               (v >= static_cast<int>(Key::n0) && v <= static_cast<int>(Key::n9)) ||
+               (v >= static_cast<int>(Key::minus) && v <= static_cast<int>(Key::grave)) || k == Key::space;
     }
 
     /// Virtual key codes are POSITIONAL on macOS (they describe where the key
@@ -1086,6 +1221,302 @@ class MacWindow {
     float native_dpi_ = 1.0f;   ///< what the display actually offers
     bool  dpi_forced_ = false;  ///< MAYAG_DPI pins the scale; display changes are ignored
     bool  announced_ = false;   ///< the first dispatch() reports the real geometry
+    bool  was_key_ = true;      ///< last reported keyboard focus
+    bool  maximized_ = false;   ///< toggle_maximize's state, and where it came from
+    bool  visible_ = true;      ///< on screen (not minimised / hidden / covered)
+    CGRect restore_frame_{};
+
+    /// What happened to each window since the last dispatch: its close button
+    /// was pressed (a request), or it was really closed (by AppKit, or by
+    /// someone calling close). AppKit runs on one thread; so does this.
+    enum : int { close_requested = 1, close_done = 2 };
+    static std::vector<std::pair<id, int>>& close_notes() { static std::vector<std::pair<id, int>> v; return v; }
+    static void note_close(id w, int what) {
+        for (auto& [win, bits] : close_notes()) if (win == w) { bits |= what; return; }
+        close_notes().emplace_back(w, what);
+    }
+    static int take_close(id w) {
+        auto& v = close_notes();
+        for (auto it = v.begin(); it != v.end(); ++it)
+            if (it->first == w) { const int bits = it->second; v.erase(it); return bits; }
+        return 0;
+    }
+
+    // ── text input: the system input method ──────────────────────────────────
+    //
+    // Keys reach the content view (keyDown:), which hands them to AppKit's
+    // input manager (interpretKeyEvents:). That calls back as an
+    // NSTextInputClient: insertText: is committed text, setMarkedText: a
+    // composition (こん on the way to こんにちは, ´ waiting for its e),
+    // doCommandBySelector: a key that is a command -- swallowed, because mayag
+    // reads keys from the event stream and NSView's default for an unknown
+    // command is the alert beep. While something is composing the keys are
+    // the input method's: no KeyEvent goes out for them.
+
+    struct NSRangeM { unsigned long location, length; };
+    static constexpr unsigned long kNotFound = 0x7fffffffffffffffUL;   // NSNotFound
+
+    struct Ime {
+        id view = nullptr;
+        std::vector<Event> out;   ///< what it said since the last dispatch
+        bool marked = false;      ///< composing
+        std::string marked_text;
+        bool want = false;        ///< a text field has focus
+        bool option_as_alt = false;
+        Rect caret{};             ///< its caret, logical px from the top-left
+        float view_h = 0.0f;
+    };
+    std::unique_ptr<Ime> ime_ = std::make_unique<Ime>();
+
+    static std::unordered_map<id, Ime*>& ti_table() { static std::unordered_map<id, Ime*> t; return t; }
+    static Ime*& ti_slot(id view) { return ti_table()[view]; }
+    static Ime* ime_of(id view) {
+        const auto it = ti_table().find(view);
+        return it == ti_table().end() ? nullptr : it->second;
+    }
+
+    /// The NSString in an NSString or NSAttributedString.
+    static std::string text_of(id s) {
+        using namespace objc;
+        if (s == nullptr) return {};
+        if (msg<BOOL>(s, sel("isKindOfClass:"), objc_getClass("NSAttributedString"))) s = msg<id>(s, sel("string"));
+        return from_nsstring(s);
+    }
+    /// UTF-16 offset (what AppKit counts in) -> byte offset in UTF-8.
+    static std::uint32_t byte_at(const std::string& s, unsigned long u16) {
+        std::size_t i = 0;
+        unsigned long n = 0;
+        while (i < s.size() && n < u16) {
+            const auto c = static_cast<unsigned char>(s[i]);
+            const std::size_t len = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+            n += len == 4 ? 2 : 1;
+            i += len;
+        }
+        return static_cast<std::uint32_t>(std::min(i, s.size()));
+    }
+    static unsigned long u16_len(const std::string& s) {
+        unsigned long n = 0;
+        for (std::size_t i = 0; i < s.size();) {
+            const auto c = static_cast<unsigned char>(s[i]);
+            const std::size_t len = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+            n += len == 4 ? 2 : 1;
+            i += len;
+        }
+        return n;
+    }
+    static bool is_text(const std::string& s) {
+        if (s.empty()) return false;
+        const auto u = [&](std::size_t i) { return static_cast<unsigned char>(s[i]); };
+        // Arrows, F-keys, Home/End report characters in Apple's private-use
+        // block U+F700..U+F8FF: keys, not text.
+        const bool function_key = s.size() >= 3 && u(0) == 0xEF && u(1) >= 0x9C && u(1) <= 0xA3;
+        return u(0) >= 0x20 && u(0) != 0x7F && !function_key;
+    }
+    static void ime_commit(Ime& m, const std::string& s) {
+        if (m.marked) { m.marked = false; m.marked_text.clear(); m.out.push_back(ComposeEndEvent{}); }
+        if (is_text(s)) m.out.push_back(TextEvent{s});
+    }
+
+    static Class view_class() {
+        static Class cls = [] {
+            using namespace objc;
+            if (Class existing = objc_getClass("MayagView")) return existing;
+            Class c = objc_allocateClassPair(objc_getClass("NSView"), "MayagView", 0);
+            if (Protocol* p = objc_getProtocol("NSTextInputClient")) class_addProtocol(c, p);
+            const auto yes = +[](id, SEL) -> BOOL { return YES; };
+            const auto key_down = +[](id self, SEL, id ev) {
+                Ime* m = ime_of(self);
+                if (m == nullptr) return;
+                constexpr unsigned long cmd = 1ul << 20, ctrl = 1ul << 18, opt = 1ul << 19;
+                const auto flags = msg<unsigned long>(ev, sel("modifierFlags"));
+                // ⌘/⌃ chords (and ⌥ ones, when ⌥ is Alt) are shortcuts, not
+                // text -- unless composing, when every key is the input method's
+                const unsigned long chord = cmd | ctrl | (m->option_as_alt ? opt : 0ul);
+                if (!m->marked && (flags & chord) != 0) return;
+                id arr = msg_cls<id>(objc_getClass("NSArray"), sel("arrayWithObject:"), ev);
+                msg<void>(self, sel("interpretKeyEvents:"), arr);
+            };
+            const auto swallow = +[](id, SEL, id) {};
+            const auto do_command = +[](id, SEL, SEL) {};   // never the beep
+            const auto insert2 = +[](id self, SEL, id s, NSRangeM) {
+                if (Ime* m = ime_of(self)) ime_commit(*m, text_of(s));
+            };
+            const auto insert1 = +[](id self, SEL, id s) {
+                if (Ime* m = ime_of(self)) ime_commit(*m, text_of(s));
+            };
+            const auto set_marked = +[](id self, SEL, id s, NSRangeM sel_r, NSRangeM) {
+                Ime* m = ime_of(self);
+                if (m == nullptr) return;
+                std::string t = text_of(s);
+                if (t.empty()) {
+                    if (m->marked) { m->marked = false; m->marked_text.clear(); m->out.push_back(ComposeEndEvent{}); }
+                    return;
+                }
+                m->marked = true;
+                const std::uint32_t a = byte_at(t, sel_r.location), b = byte_at(t, sel_r.location + sel_r.length);
+                m->marked_text = t;
+                m->out.push_back(ComposeEvent{std::move(t), a, b, sel_r.length > 0 ? b : a});
+            };
+            const auto unmark = +[](id self, SEL) {
+                Ime* m = ime_of(self);
+                if (m == nullptr || !m->marked) return;
+                const std::string t = m->marked_text;   // accepted as it stands
+                ime_commit(*m, t);
+            };
+            const auto has_marked = +[](id self, SEL) -> BOOL { const Ime* m = ime_of(self); return m && m->marked ? YES : NO; };
+            const auto marked_range = +[](id self, SEL) -> NSRangeM {
+                const Ime* m = ime_of(self);
+                return m && m->marked ? NSRangeM{0, u16_len(m->marked_text)} : NSRangeM{kNotFound, 0};
+            };
+            const auto selected_range = +[](id, SEL) -> NSRangeM { return NSRangeM{0, 0}; };
+            const auto valid_attrs = +[](id, SEL) -> id { return msg_cls<id>(objc_getClass("NSArray"), sel("array")); };
+            const auto substring = +[](id, SEL, NSRangeM, NSRangeM*) -> id { return nullptr; };
+            const auto char_index = +[](id, SEL, CGPoint) -> unsigned long { return kNotFound; };
+            const auto first_rect = +[](id self, SEL, NSRangeM, NSRangeM* actual) -> CGRect {
+                // the candidate window opens under the caret
+                if (actual != nullptr) *actual = NSRangeM{kNotFound, 0};
+                const Ime* m = ime_of(self);
+                Rect c = m ? m->caret : Rect{};
+                const float vh = m ? m->view_h : 0.0f;
+                const CGRect local = mayag_cgrect(c.origin.x, vh - c.origin.y - std::max(c.size.y, 1.0f),
+                                                  std::max(c.size.x, 1.0f), std::max(c.size.y, 1.0f));
+                const CGRect in_win = msg<CGRect>(self, sel("convertRect:toView:"), local, static_cast<id>(nullptr));
+                id win = msg<id>(self, sel("window"));
+                return win ? msg<CGRect>(win, sel("convertRectToScreen:"), in_win) : in_win;
+            };
+            class_addMethod(c, sel("acceptsFirstResponder"), reinterpret_cast<IMP>(+yes), "c@:");
+            class_addMethod(c, sel("keyDown:"), reinterpret_cast<IMP>(+key_down), "v@:@");
+            class_addMethod(c, sel("keyUp:"), reinterpret_cast<IMP>(+swallow), "v@:@");
+            class_addMethod(c, sel("doCommandBySelector:"), reinterpret_cast<IMP>(+do_command), "v@::");
+            class_addMethod(c, sel("insertText:replacementRange:"), reinterpret_cast<IMP>(+insert2), "v@:@{_NSRange=QQ}");
+            class_addMethod(c, sel("insertText:"), reinterpret_cast<IMP>(+insert1), "v@:@");
+            class_addMethod(c, sel("setMarkedText:selectedRange:replacementRange:"), reinterpret_cast<IMP>(+set_marked),
+                            "v@:@{_NSRange=QQ}{_NSRange=QQ}");
+            class_addMethod(c, sel("unmarkText"), reinterpret_cast<IMP>(+unmark), "v@:");
+            class_addMethod(c, sel("hasMarkedText"), reinterpret_cast<IMP>(+has_marked), "c@:");
+            class_addMethod(c, sel("markedRange"), reinterpret_cast<IMP>(+marked_range), "{_NSRange=QQ}@:");
+            class_addMethod(c, sel("selectedRange"), reinterpret_cast<IMP>(+selected_range), "{_NSRange=QQ}@:");
+            class_addMethod(c, sel("validAttributesForMarkedText"), reinterpret_cast<IMP>(+valid_attrs), "@@:");
+            class_addMethod(c, sel("attributedSubstringForProposedRange:actualRange:"), reinterpret_cast<IMP>(+substring),
+                            "@@:{_NSRange=QQ}^{_NSRange=QQ}");
+            class_addMethod(c, sel("characterIndexForPoint:"), reinterpret_cast<IMP>(+char_index), "Q@:{CGPoint=dd}");
+            class_addMethod(c, sel("firstRectForCharacterRange:actualRange:"), reinterpret_cast<IMP>(+first_rect),
+                            "{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}");
+            objc_registerClassPair(c);
+            return c;
+        }();
+        return cls;
+    }
+
+    // ── the app: its menu, and quitting ─────────────────────────────────────────────
+
+    /// The app's main window: where an app-wide quit (⌘Q, the Dock's Quit,
+    /// logging out) is delivered, as a close request the app can answer.
+    static id& primary_window() { static id w = nullptr; return w; }
+
+    /// A macOS app without a menu bar is not a macOS app: ⌘Q, ⌘H and ⌘M do
+    /// nothing and the menu bar shows a stranger's menus. The standard ones,
+    /// built once. Quit goes through the delegate below, so it can be refused.
+    static void install_app_menu(std::string_view title) {
+        using namespace objc;
+        static bool done = false;
+        if (done) return;
+        done = true;
+        id app = msg_cls<id>(objc_getClass("NSApplication"), sel("sharedApplication"));
+        if (msg<id>(app, sel("mainMenu")) != nullptr) return;   // the host app has its own
+        const auto make = [](const char* cls) { return msg<id>(msg_cls<id>(objc_getClass(cls), sel("alloc")), sel("init")); };
+        const auto item = [](id menu, const std::string& t, const char* action, const char* key, unsigned long mods = 1ul << 20) {
+            id it = msg<id>(menu, sel("addItemWithTitle:action:keyEquivalent:"), nsstring(t), sel(action), nsstring(key));
+            if (*key != '\0') msg<void>(it, sel("setKeyEquivalentModifierMask:"), mods);
+            return it;
+        };
+        const auto separator = [](id menu) { msg<void>(menu, sel("addItem:"), msg_cls<id>(objc_getClass("NSMenuItem"), sel("separatorItem"))); };
+        const std::string name{title.empty() ? std::string_view{"mayag"} : title};
+        id bar = make("NSMenu");
+        id app_item = make("NSMenuItem");
+        msg<void>(bar, sel("addItem:"), app_item);
+        id app_menu = msg<id>(msg_cls<id>(objc_getClass("NSMenu"), sel("alloc")), sel("initWithTitle:"), nsstring(name));
+        item(app_menu, "About " + name, "orderFrontStandardAboutPanel:", "");
+        separator(app_menu);
+        item(app_menu, "Hide " + name, "hide:", "h");
+        item(app_menu, "Hide Others", "hideOtherApplications:", "h", (1ul << 20) | (1ul << 19));
+        item(app_menu, "Show All", "unhideAllApplications:", "");
+        separator(app_menu);
+        item(app_menu, "Quit " + name, "terminate:", "q");
+        msg<void>(app_item, sel("setSubmenu:"), app_menu);
+
+        id win_item = make("NSMenuItem");
+        msg<void>(bar, sel("addItem:"), win_item);
+        id win_menu = msg<id>(msg_cls<id>(objc_getClass("NSMenu"), sel("alloc")), sel("initWithTitle:"), nsstring("Window"));
+        item(win_menu, "Minimize", "miniaturize:", "m");
+        item(win_menu, "Enter Full Screen", "toggleFullScreen:", "f", (1ul << 20) | (1ul << 18));
+        separator(win_menu);
+        item(win_menu, "Bring All to Front", "arrangeInFront:", "");
+        msg<void>(win_item, sel("setSubmenu:"), win_menu);
+
+        msg<void>(app, sel("setMainMenu:"), bar);
+        msg<void>(app, sel("setWindowsMenu:"), win_menu);
+        msg<void>(app, sel("setDelegate:"), make(delegate_class_name()));   // kept: the delegate is weak
+    }
+
+    static const char* delegate_class_name() {
+        static const char* name = [] {
+            using namespace objc;
+            if (objc_getClass("MayagAppDelegate") != nullptr) return "MayagAppDelegate";
+            Class c = objc_allocateClassPair(objc_getClass("NSObject"), "MayagAppDelegate", 0);
+            // ⌘Q, the Dock's Quit, logout: ask the main window's app (it may
+            // have a running command to confirm), never die on the spot
+            const auto should_terminate = +[](id, SEL, id app) -> unsigned long {
+                id w = primary_window();
+                if (w == nullptr) return 1;   // NSTerminateNow: nothing to ask
+                note_close(w, close_requested);
+                // wake the loop: a quit from the Dock arrives as an Apple event,
+                // not an NSEvent, and would otherwise wait for the next input
+                id ev = msg_cls<id>(objc_getClass("NSEvent"),
+                    sel("otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:"),
+                    static_cast<unsigned long>(15), CGPoint{0, 0}, 0ul, 0.0, 0l, static_cast<id>(nullptr),
+                    static_cast<short>(0), 0l, 0l);
+                if (ev != nullptr) msg<void>(app, sel("postEvent:atStart:"), ev, static_cast<BOOL>(NO));
+                return 0;   // NSTerminateCancel
+            };
+            const auto no = +[](id, SEL, id) -> BOOL { return NO; };
+            class_addMethod(c, sel("applicationShouldTerminate:"), reinterpret_cast<IMP>(+should_terminate), "Q@:@");
+            class_addMethod(c, sel("applicationShouldTerminateAfterLastWindowClosed:"), reinterpret_cast<IMP>(+no), "c@:@");
+            objc_registerClassPair(c);
+            return "MayagAppDelegate";
+        }();
+        return name;
+    }
+
+    /// mayag's NSWindow: it may become key without a title bar, and it
+    /// SWALLOWS key events. mayag reads keys from the event stream itself;
+    /// left to NSWindow, every key reaches the end of the responder chain
+    /// and AppKit plays the "nobody handled that" alert -- a beep per keypress.
+    /// Its close button does not close it: it asks (a CloseRequest), and the
+    /// app decides -- it may have a running command to confirm first.
+    static Class window_class() {
+        static Class cls = [] {
+            if (Class existing = objc_getClass("MayagWindow")) return existing;
+            Class c = objc_allocateClassPair(objc_getClass("NSWindow"), "MayagWindow", 0);
+            const auto yes = +[](id, SEL) -> BOOL { return YES; };
+            const auto swallow = +[](id, SEL, id) {};
+            const auto ask_close = +[](id self, SEL, id) { note_close(self, close_requested); };
+            const auto close = +[](id self, SEL s) {
+                note_close(self, close_done);
+                objc_super sup{self, objc_getClass("NSWindow")};
+                reinterpret_cast<void (*)(objc_super*, SEL)>(objc_msgSendSuper)(&sup, s);
+            };
+            class_addMethod(c, objc::sel("canBecomeKeyWindow"), reinterpret_cast<IMP>(+yes), "c@:");
+            class_addMethod(c, objc::sel("canBecomeMainWindow"), reinterpret_cast<IMP>(+yes), "c@:");
+            class_addMethod(c, objc::sel("keyDown:"), reinterpret_cast<IMP>(+swallow), "v@:@");
+            class_addMethod(c, objc::sel("keyUp:"), reinterpret_cast<IMP>(+swallow), "v@:@");
+            class_addMethod(c, objc::sel("performClose:"), reinterpret_cast<IMP>(+ask_close), "v@:@");
+            class_addMethod(c, objc::sel("close"), reinterpret_cast<IMP>(+close), "v@:");
+            objc_registerClassPair(c);
+            return c;
+        }();
+        return cls;
+    }
     Vec2  last_mouse_{};
     bool  pull_ = true;
     std::vector<Event> fed_;
@@ -1097,6 +1528,7 @@ class MacWindow {
 
     backend::Framebuffer      fb_{1, 1};
     std::vector<std::uint8_t> pixels_;
+    bool                      blitted_ = false;   ///< pixels_ is on screen (a frame with no damage need not be)
     const backend::CoverageSampler* sampler_ = nullptr;
     backend::ImageStore images_;          // image(id) for the software path
     std::function<void(const RawInput&)> raw_;

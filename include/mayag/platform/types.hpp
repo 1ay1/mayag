@@ -38,6 +38,14 @@ struct WindowConfig {
     bool        transparent = false;
     bool        vsync       = true;
     Color<Srgb> background  = rgb<0x0B0D10>;
+    /// A secondary window of an app that already has one: no app-level setup
+    /// (activation, launch handshake), placed near the main window.
+    bool        child       = false;
+    /// macOS: ⌥ is Alt/Meta for the app (⌥b = Alt+b) instead of typing
+    /// characters (⌥e ´ then e = é, ⌥2 = ™). Off is the Mac convention;
+    /// terminals offer it for readline/emacs. ⌥ with keys that type nothing
+    /// (arrows, Delete) is Alt either way.
+    bool        option_as_alt = false;
 };
 
 }  // namespace mayag::platform

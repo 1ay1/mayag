@@ -14,7 +14,7 @@
 # Ambient per-frame context: which Ctx view() is building for. Per-thread
 # because a headless test and a window may render on different threads; it
 # is never shared, only scoped (detail::ctx_scope).
-app/host.hpp: thread_local
+app/context.hpp: thread_local
 
 # Set during one view pass by a widget mid-animation, read right after by
 # the same thread. Per-thread for the same reason as the frame context.

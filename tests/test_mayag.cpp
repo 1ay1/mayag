@@ -1253,9 +1253,59 @@ void test_clipped_away_shapes() {
     }
 }
 
+/// The tiled rasteriser keeps tiles whose inputs did not change. A frame
+/// drawn into a REUSED framebuffer must be bit-identical to the same frame
+/// drawn from scratch -- through scrolling, typing, colour changes, a clear
+/// colour change and a text sampler whose atlas changes under it.
+void test_tiled_damage() {
+    std::printf("\n-- tiled damage tracking --\n");
+    constexpr int W = 300, H = 200;
+    struct Atlasy final : backend::CoverageSampler {
+        std::uint64_t ver = 1;
+        float bias = 0.5f;
+        [[nodiscard]] float sample(std::uint32_t, float u, float v) const override { return num::saturate(bias + 0.3f * (u - v)); }
+        [[nodiscard]] std::uint64_t version() const noexcept override { return ver; }
+    } atlas;
+    backend::Framebuffer kept{W, H};
+    bool all_same = true;
+    int reused_total = 0;
+    for (int f = 0; f < 12; ++f) {
+        DrawList dl;
+        const float scroll = static_cast<float>((f / 3) * 17);
+        for (int r = 0; r < 10; ++r)
+            dl.fill_rect(Rect{Vec2{0.0f, r * 20.0f - scroll}, Vec2{280.0f, 18.0f}}, r % 2 ? rgb<0x223344> : rgb<0x334455>);
+        dl.fill_rect(Rect{Vec2{10.0f + static_cast<float>(f % 3) * 7.0f, 150.0f}, Vec2{8.0f, 14.0f}}, rgb<0xFFCC00>);   // the cursor
+        dl.glyph(Rect{Vec2{40.0f, 40.0f}, Vec2{12.0f, 16.0f}}, Rect{Vec2{0.0f, 0.0f}, Vec2{1.0f, 1.0f}}, rgb<0xEEEEEE>, false, 0.0f, 0.0f);
+        if (f == 7) atlas.ver++, atlas.bias = 0.8f;   // the atlas changed: every glyph tile must re-shade
+        const Color<Srgb> clear = f >= 10 ? rgb<0x000000> : rgb<0x101418>;
+        const auto st = backend::Tiled::render(dl, kept, &atlas, &backend::shared_pool(), clear);
+        reused_total += st.tiles_reused;
+        backend::Framebuffer fresh{W, H};
+        backend::Tiled::render(dl, fresh, &atlas, &backend::shared_pool(), clear);
+        if (kept.to_rgba8() != fresh.to_rgba8()) { all_same = false; std::printf("    frame %d differs\n", f); }
+    }
+    check(all_same, "a reused framebuffer matches a fresh render, every frame");
+    check(reused_total > 0, "unchanged tiles are actually reused");
+    // encode_damaged keeps an encoded buffer equal to a full encode
+    {
+        backend::Framebuffer fb{W, H};
+        std::vector<std::uint8_t> px;
+        bool ok = true;
+        for (int f = 0; f < 5; ++f) {
+            DrawList dl;
+            dl.fill_rect(Rect{Vec2{static_cast<float>(f * 30), 20.0f}, Vec2{20.0f, 20.0f}}, rgb<0x44AA88>);
+            backend::Tiled::render(dl, fb, nullptr, &backend::shared_pool(), rgb<0x101418>);
+            backend::Tiled::encode_damaged(fb, px, &backend::shared_pool());
+            if (px != fb.to_rgba8()) ok = false;
+        }
+        check(ok, "encoding only the damaged tiles gives the full encode");
+    }
+}
+
 int main() {
     std::printf("mayag test suite\n================");
     test_clipped_away_shapes();
+    test_tiled_damage();
 
     test_color();
     test_sdf();

@@ -35,7 +35,6 @@
 
 #include "../core/geometry.hpp"
 
-#include <jaal/platform/clock.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -222,7 +221,7 @@ class BusyLoopDetector {
 
 /// Scoped timer writing into a double, in milliseconds.
 class ScopedTimer {
-    using clock = jaal::platform::steady_clock;   // the runtime's clock
+    using clock = std::chrono::steady_clock;
 
   public:
     explicit ScopedTimer(double& out) noexcept

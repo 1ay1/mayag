@@ -277,6 +277,7 @@ class Atlas {
         // GPUs treat as a clamp boundary.
         dirty_ = Rect{};
         ++generation_;
+        ++content_;
     }
 
     [[nodiscard]] int width()  const noexcept { return width_; }
@@ -287,10 +288,18 @@ class Atlas {
     /// Bumped whenever the texture is reallocated, so a backend knows to
     /// re-upload everything rather than a dirty rect.
     [[nodiscard]] std::uint32_t generation() const noexcept { return generation_; }
+    /// Bumped on EVERY texel write (a glyph added, a repack): what a software
+    /// renderer that reuses unchanged pixels between frames keys on.
+    [[nodiscard]] std::uint64_t content_version() const noexcept { return content_; }
 
     /// Region changed since the last `clear_dirty()`. Empty when nothing moved.
     [[nodiscard]] const Rect& dirty_region() const noexcept { return dirty_; }
     void clear_dirty() noexcept { dirty_ = Rect{}; }
+    /// Re-mark regions as needing upload. A host with several GPU windows
+    /// (one texture each) keeps what each still owes and hands it back here
+    /// before that window presents.
+    void mark_dirty(const Rect& r) noexcept { if (!r.empty()) dirty_ = dirty_.empty() ? r : dirty_.unite(r); }
+    void mark_color_dirty(const Rect& r) noexcept { if (!r.empty()) color_dirty_ = color_dirty_.empty() ? r : color_dirty_.unite(r); }
 
     /// The RGBA colour plane (emoji). Empty until the first colour glyph is
     /// inserted; a GPU backend uploads it as a second texture.
@@ -403,6 +412,7 @@ class Atlas {
         const Rect touched{static_cast<float>(x), static_cast<float>(y),
                            static_cast<float>(w), static_cast<float>(h)};
         color_dirty_ = color_dirty_.empty() ? touched : color_dirty_.unite(touched);
+        ++content_;
         auto [it, _] = entries_.insert_or_assign(key, g);
         return &it->second;
     }
@@ -519,6 +529,7 @@ class Atlas {
         const Rect touched{static_cast<float>(dx), static_cast<float>(dy),
                            static_cast<float>(bmp.width), static_cast<float>(bmp.height)};
         dirty_ = dirty_.empty() ? touched : dirty_.unite(touched);
+        ++content_;
     }
 
     /// Mid-frame, the atlas is full: compact to what this and the previous
@@ -586,6 +597,7 @@ class Atlas {
         dirty_ = Rect{0, 0, static_cast<float>(width_), static_cast<float>(height_)};
         if (!color_.empty()) color_dirty_ = dirty_;
         ++generation_;
+        ++content_;
         moved_ = true;
     }
 
@@ -607,6 +619,7 @@ class Atlas {
     Rect                      dirty_{};
     std::uint64_t             frame_ = 0;
     std::uint32_t             generation_ = 0;
+    std::uint64_t             content_ = 0;     ///< bumped on every texel write (see content_version)
     bool                      moved_ = false;   ///< glyphs moved since take_moved()
     std::uint64_t             last_repack_frame_ = 0;
 };

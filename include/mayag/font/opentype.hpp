@@ -697,16 +697,12 @@ class FontFile {
     /// and for those `outline(gid)` returns empty. Callers that need to know
     /// whether a glyph will actually be drawn (rather than merely measured)
     /// consult this.
-    [[nodiscard]] bool has_outlines() const noexcept {
-        return has_table(tags::glyf) || has_table(tags::cff) ||
-               has_table(tags::cff2) || has_table(tags::hvgl);
-    }
+    [[nodiscard]] bool has_outlines() const noexcept { return has_outlines_; }
 
-    /// True when the face carries colour or bitmap glyphs.
-    [[nodiscard]] bool has_color() const noexcept {
-        return has_table(tags::colr) || has_table(tags::cbdt) ||
-               has_table(tags::sbix) || has_table(tags::ebdt);
-    }
+    /// True when the face carries colour or bitmap glyphs. Asked once per
+    /// glyph drawn, so it is decided once, at parse -- not four scans of the
+    /// table directory per glyph.
+    [[nodiscard]] bool has_color() const noexcept { return has_color_; }
 
     [[nodiscard]] bool is_bold() const noexcept {
         return os2_.present ? os2_.bold() : head_.bold_flag();
@@ -770,6 +766,8 @@ class FontFile {
     std::string              family_, subfamily_, full_name_, ps_name_;
     bool                     is_cff_ = false;
     bool                     in_collection_ = false;
+    bool                     has_color_ = false;
+    bool                     has_outlines_ = false;
 };
 
 inline std::optional<FontFile> FontFile::parse(std::span<const std::uint8_t> data,
@@ -824,6 +822,8 @@ inline std::optional<FontFile> FontFile::parse(std::span<const std::uint8_t> dat
         // later, so every `table()` result is guaranteed in-bounds.
         if (tr.offset < data.size()) f.tables_.push_back(tr);
     }
+    f.has_color_ = f.has_table(tags::colr) || f.has_table(tags::cbdt) || f.has_table(tags::sbix) || f.has_table(tags::ebdt);
+    f.has_outlines_ = f.has_table(tags::glyf) || f.has_table(tags::cff) || f.has_table(tags::cff2) || f.has_table(tags::hvgl);
 
     // ---- head ----
     const auto head_data = f.table(tags::head);

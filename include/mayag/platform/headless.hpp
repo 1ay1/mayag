@@ -24,6 +24,8 @@
 #include "types.hpp"
 
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <optional>
 #include <string>
@@ -78,7 +80,21 @@ class Headless {
         if (fb_.width() != w || fb_.height() != h) {
             fb_ = backend::Framebuffer{w, h};
         }
-        backend::Tiled::render(dl, fb_, sampler_, &backend::shared_pool(), clear);
+        const auto st = backend::Tiled::render(dl, fb_, sampler_, &backend::shared_pool(), clear);
+        tiles_total_ += static_cast<std::uint64_t>(st.tiles);
+        tiles_reused_ += static_cast<std::uint64_t>(st.tiles_reused);
+        // MAYAG_VERIFY_DAMAGE=1: every frame drawn into the reused buffer is
+        // checked against the same frame drawn from scratch. Any difference
+        // is a damage-tracking bug, reported with the frame number.
+        static const bool verify = [] { const char* v = std::getenv("MAYAG_VERIFY_DAMAGE"); return v && *v && *v != '0'; }();
+        if (verify) {
+            backend::Framebuffer fresh{w, h};
+            backend::Tiled::render(dl, fresh, sampler_, &backend::shared_pool(), clear);
+            if (fresh.to_rgba8() != fb_.to_rgba8()) {
+                ++damage_mismatches_;
+                std::fprintf(stderr, "mayag: DAMAGE MISMATCH on frame %llu\n", static_cast<unsigned long long>(frames_presented_));
+            }
+        }
 
         if (!record_dir_.empty()) {
             const auto path = record_dir_ + "/frame_" + pad6(frames_presented_) + ".png";
@@ -88,6 +104,15 @@ class Headless {
     }
 
     [[nodiscard]] double now() const noexcept { return time_; }
+    /// Tiles rendered / reused by damage tracking, and frames whose reused
+    /// pixels disagreed with a fresh render (MAYAG_VERIFY_DAMAGE).
+    [[nodiscard]] std::uint64_t tiles_total() const noexcept { return tiles_total_; }
+    [[nodiscard]] std::uint64_t tiles_reused() const noexcept { return tiles_reused_; }
+    [[nodiscard]] std::uint64_t damage_mismatches() const noexcept { return damage_mismatches_; }
+    /// The framebuffer's size in pixels (what read_pixels() returns).
+    [[nodiscard]] Vec2 pixel_size() const noexcept {
+        return Vec2{static_cast<float>(fb_.width()), static_cast<float>(fb_.height())};
+    }
 
     /// Headless reports the conventional default; tests that care set it.
     [[nodiscard]] double double_click_interval() const noexcept { return 0.5; }
@@ -292,6 +317,7 @@ class Headless {
     bool        maximized_ = false;
     Vec2        last_pos_{};
     std::uint64_t frames_presented_ = 0;
+    std::uint64_t tiles_total_ = 0, tiles_reused_ = 0, damage_mismatches_ = 0;
     bool        text_input_ = false;
     Rect        text_caret_{};
 };

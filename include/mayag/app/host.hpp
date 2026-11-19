@@ -35,6 +35,7 @@
 #include "../scene/memo.hpp"
 #include "../scene/node.hpp"
 #include "../scene/overlay.hpp"
+#include "context.hpp"
 #include "../scene/cascade.hpp"
 #include "../style/theme.hpp"
 #include "effects.hpp"
@@ -62,86 +63,7 @@
 
 namespace mayag {
 
-// ── what view() may know ────────────────────────────────────────────────
-
-/// Everything `view()` may know about the outside world, besides the model.
-/// The view reads hover/press/focus from here instead of storing them, and
-/// posts overlays and tracked springs into it.
-struct Ctx {
-    Vec2   size{};
-    float  dpi_scale = 1.0f;
-    double time = 0.0;          ///< seconds since start
-    Theme  theme = themes::midnight;
-
-    /// Last frames' measured budget, so an app can draw its own latency.
-    const LatencyStats* latency = nullptr;
-
-    /// Measured input to photon (the compositor's presentation feedback),
-    /// when the window can report it.
-    platform::PhotonStats photon{};
-
-    const layout::TextMeasurer* text_measurer = nullptr;
-    [[nodiscard]] const layout::TextMeasurer& measurer() const {
-        return text_measurer != nullptr ? *text_measurer : layout::default_measurer();
-    }
-
-    TrackedSet*  tracked  = nullptr;
-    OverlayList* overlays = nullptr;
-    const Interaction* input = nullptr;
-    /// The host's memo cache; null outside a live window.
-    MemoCache* memos = nullptr;
-
-    /// Follow a node's measured rect with a spring.
-    void track(const Tracked& t, std::uint64_t node) const {
-        t.follow(node);
-        if (tracked != nullptr) tracked->register_tracked(&t);
-        if (t.animating()) request_animation_frame();
-    }
-    /// Post a menu, modal or tooltip from anywhere in the view.
-    void overlay(Overlay o) const {
-        if (overlays != nullptr) overlays->add(std::move(o));
-    }
-
-    [[nodiscard]] bool hovered(std::uint64_t id) const noexcept { note_read(); return input && input->is_hovered(id); }
-    [[nodiscard]] bool pressed(std::uint64_t id) const noexcept { note_read(); return input && input->is_pressed(id); }
-    [[nodiscard]] bool focused(std::uint64_t id) const noexcept { note_read(); return input && input->is_focused(id); }
-    /// Counts hover/press/focus questions this frame, shared by every copy of
-    /// the frame's Ctx; memo() uses it to see whether a subtree depends on them.
-    std::uint64_t* interaction_reads = nullptr;
-    void note_read() const noexcept { if (interaction_reads != nullptr) ++*interaction_reads; }
-    [[nodiscard]] std::uint64_t reads() const noexcept { return interaction_reads != nullptr ? *interaction_reads : 0; }
-
-    /// memo() against this context (its theme, its cache): what a widget
-    /// calls on the context it was handed. See mayag::memo below.
-    template <class F>
-    [[nodiscard]] Node memoize(std::uint64_t key, F&& build) const;
-    template <dsl::fixed_string Name>
-    [[nodiscard]] bool hovered() const noexcept { return hovered(dsl::node_id(Name.view())); }
-    template <dsl::fixed_string Name>
-    [[nodiscard]] bool pressed() const noexcept { return pressed(dsl::node_id(Name.view())); }
-    template <dsl::fixed_string Name>
-    [[nodiscard]] bool focused() const noexcept { return focused(dsl::node_id(Name.view())); }
-};
-
-// ── the program shape ───────────────────────────────────────────────────
-//
-// jaal's view hook is `static Out view(const Model&)`. The window facts a
-// view may read (size, theme, hover, ...) are ambient: `mayag::ctx()` inside
-// view() returns the frame's Ctx. Outside a frame it returns a default one,
-// so calling view() directly in a test still works.
-
 namespace detail {
-inline thread_local const Ctx* current_ctx = nullptr;
-
-/// Installs a Ctx for the duration of one view() call.
-struct ctx_scope {
-    const Ctx* saved;
-    explicit ctx_scope(const Ctx& c) noexcept : saved(current_ctx) { current_ctx = &c; }
-    ~ctx_scope() { current_ctx = saved; }
-    ctx_scope(const ctx_scope&) = delete;
-    ctx_scope& operator=(const ctx_scope&) = delete;
-};
-
 /// The three font adapters layout and the painter read through. Held by
 /// value so the pointers handed out stay valid for the host's lifetime.
 struct StackBindings {
@@ -152,12 +74,6 @@ struct StackBindings {
 };
 }  // namespace detail
 
-/// The current frame's Ctx. Call it from view().
-[[nodiscard]] inline const Ctx& ctx() noexcept {
-    static const Ctx fallback{};
-    return detail::current_ctx != nullptr ? *detail::current_ctx : fallback;
-}
-
 /// A jaal program mayag can draw: `static Node view(const Model&)`.
 template <class P>
 concept Program = jaal::Program<P> && jaal::Viewable<P, Node>;
@@ -167,95 +83,6 @@ template <Program P>
 [[nodiscard]] Node view_of(const typename P::Model& m, const Ctx& c) {
     detail::ctx_scope scope{c};
     return P::view(m);
-}
-
-/// Build a subtree in another theme -- ALL of it, every widget included.
-///
-///     themed(themes::daylight, [&] { return settings_panel(m); })
-///     themed(brutal, [&](const Ctx& c) { return slider(c, "vol", m.vol, 120); })
-///
-/// Inside `build`, `ctx().theme` IS `t`, so widgets that read the theme
-/// directly draw in it; and the result is scoped with `| theme(t)`, so every
-/// token, sheet look and motion below resolves against it too. The one call
-/// that makes "this part of the app looks different" true for everything.
-template <class F>
-[[nodiscard]] auto themed(const Theme& t, F&& build) {
-    Ctx c = ctx();
-    c.theme = t;
-    Node n = [&] {
-        detail::ctx_scope scope{c};
-        if constexpr (std::invocable<F&, const Ctx&>) return Node(build(c));
-        else return Node(build());
-    }();
-    return dsl::node(std::move(n)) | dsl::theme(t);
-}
-
-namespace detail {
-using mayag::memo_mix;
-/// The Ctx facts a subtree can read without them being in its key.
-[[nodiscard]] inline std::uint64_t ctx_fingerprint(const Ctx& c) noexcept {
-    std::uint64_t h = 0;
-    std::uint32_t u;
-    for (float f : {c.size.x, c.size.y, c.dpi_scale}) { std::memcpy(&u, &f, 4); h = memo_mix(h, u); }
-    const auto* b = reinterpret_cast<const unsigned char*>(&c.theme);
-    for (std::size_t i = 0; i < sizeof(Theme); i += 8) {
-        std::uint64_t w = 0;
-        std::memcpy(&w, b + i, std::min<std::size_t>(8, sizeof(Theme) - i));
-        h = memo_mix(h, w);
-    }
-    return h;
-}
-}  // namespace detail
-
-
-/// Reuse a subtree across frames while `key` is unchanged.
-///
-///     memo(MemoKey{}.add(m.rows_version), [&] { return big_list(m); })
-///
-/// On a hit the subtree comes back already styled and laid out, and the
-/// cascade and layout skip it unless something around it changed (theme,
-/// inherited text, hover or focus inside it, the space it's given). `key`
-/// must cover everything `build` reads from the model, and anything it
-/// reads from ctx() besides size, dpi, theme and hover/press/focus (those
-/// are tracked: a subtree that asks about hover is rebuilt when it moves).
-/// A subtree that posts overlays, tracks a spring or asks for animation
-/// frames while building isn't kept.
-/// The result is the subtree itself, so it lays out exactly as `build()`'s
-/// root would. Styles piped onto it (`node(memo(...)) | width(300)`) go on a
-/// plain box around it, never on the cached root.
-/// Outside a live window (one-shot renders, tests) it just calls `build`.
-template <class F>
-[[nodiscard]] Node memo(std::uint64_t key, F&& build) {
-    return ctx().memoize(key, std::forward<F>(build));
-}
-
-template <class F>
-Node Ctx::memoize(std::uint64_t key, F&& build) const {
-    const Ctx& c = *this;
-    const std::uint64_t k = detail::memo_mix(detail::memo_mix(key, detail::ctx_fingerprint(c)), 1) | 1u;
-    MemoCache* cache = c.memos;
-    // A subtree that asked about hover/press/focus while building depends on
-    // them, so a hit also needs them unchanged.
-    const std::uint64_t interaction = c.input != nullptr
-        ? detail::memo_mix(detail::memo_mix(detail::memo_mix(c.input->hovered(), c.input->pressed()),
-                                            c.input->focused()), c.input->press_inside())
-        : 0;
-    if (cache != nullptr) {
-        if (auto hit = cache->take(k, interaction)) { hit->set_memo_result(true); return std::move(*hit); }
-    }
-    const std::uint64_t reads0 = c.reads();
-    const std::size_t overlays0 = c.overlays != nullptr ? c.overlays->size() : 0;
-    const std::size_t tracked0 = c.tracked != nullptr ? c.tracked->size() : 0;
-    const bool anim0 = animation_was_requested();
-    clear_animation_request();
-    Node n = Node(build());
-    const bool side_effects = (c.overlays != nullptr && c.overlays->size() != overlays0) ||
-                              (c.tracked != nullptr && c.tracked->size() != tracked0) || animation_was_requested();
-    if (anim0) request_animation_frame();
-    const bool reads_interaction = c.reads() != reads0;
-    if (cache != nullptr && !side_effects && cache->store_built(k, n, reads_interaction, interaction)) n.set_memo_key(k);
-    n.set_memo_result(true);
-    return n;
 }
 
 /// The theme a program renders in for `m`: its `static Theme theme(const
@@ -289,17 +116,6 @@ template <Program P>
     return root;
 }
 
-/// Which node id is a click on? `is(c, "save")` reads like the button name.
-template <class G>
-[[nodiscard]] bool is(const G& g, std::string_view name) noexcept {
-    return g.node == dsl::node_id(name);
-}
-/// Indexed twin: `is(c, "row", i)` matches `id_of("row", i)` in the view.
-template <class G>
-[[nodiscard]] bool is(const G& g, std::string_view base, std::size_t index) noexcept {
-    return g.node == dsl::node_id(base, index);
-}
-
 // ── configuration ───────────────────────────────────────────────────────
 
 struct AppConfig {
@@ -313,6 +129,9 @@ struct AppConfig {
     bool        decorated   = true;
     /// An alpha-capable surface, for apps whose background is translucent.
     bool        transparent = false;
+    /// macOS: ⌥ is Alt for the app instead of typing characters (see
+    /// platform::WindowConfig::option_as_alt).
+    bool        option_as_alt = false;
     Theme       theme     = themes::midnight;
     /// Animate theme changes: when `P::theme(model)` changes, the WHOLE UI
     /// morphs from the old theme to the new one -- colours in Oklab, radii,
@@ -422,6 +241,7 @@ class window_host {
             handle_event(cx, events[i]);
         }
         if (!window_.is_open()) cx.stop(0);
+        pump_children(cx);
     }
 
     template <class K>
@@ -431,7 +251,7 @@ class window_host {
         // A window with no fd (Cocoa) is read here on a short poll. When the
         // poll was the only reason we were called, draw only if it brought
         // something; the messages it routed are already folded.
-        if (poll_window_ && cx_ && now_() >= next_poll_) {
+        if ((poll_window_ || !children_.empty()) && cx_ && now_() >= next_poll_) {
             next_poll_ = now_() + kPollPeriod;
             const auto before = emitted_;
             pump_erased();
@@ -548,7 +368,7 @@ class window_host {
         // fd-less window: time to look. Remembered so present() can skip the
         // draw when the look finds nothing. (jaal skips this call when the
         // model changed, so a stale flag can't suppress a real frame.)
-        poll_only_ = poll_window_ && now >= next_poll_;
+        poll_only_ = (poll_window_ || !children_.empty()) && now >= next_poll_;
         // A held key's repeat is due (Wayland repeats client-side): pump.
         if (window_repeat_in() == 0.0) poll_only_ = true;
         return poll_only_;
@@ -583,7 +403,7 @@ class window_host {
         if (!animating()) {
             // Wayland wakes us through its fd. A window with none (Cocoa)
             // has to be asked: poll it often enough that input feels instant.
-            if (!poll_window_) return std::nullopt;
+            if (!poll_window_ && children_.empty()) return std::nullopt;
             return kPollPeriod;
         }
         // Nanoseconds, so a late-latch wake lands on time, not up to 1 ms late.
@@ -678,7 +498,293 @@ class window_host {
         }
     }
 
-    void release() { reg_.reset(); cx_ = nullptr; stop_ = nullptr; }
+    void release() { reg_.reset(); cx_ = nullptr; stop_ = nullptr; children_.clear(); }
+
+    // ── child windows ────────────────────────────────────────────────────────────
+    //
+    // A program that declares `windows(model)` gets one Surface per
+    // WindowSpec: a window of the same platform type, with its own tree,
+    // overlays, interaction state and transitions. See sources.hpp.
+
+    static constexpr bool has_children = requires(const typename P::Model& m) {
+        { P::windows(m) } -> std::convertible_to<std::vector<WindowSpec>>;
+        { P::window_view(m, std::uint64_t{}) } -> std::convertible_to<Node>;
+    };
+
+    struct Surface {
+        WindowSpec    spec;
+        W             win;
+        Node          tree{};
+        DrawList      draws{};
+        Interaction   input{};
+        OverlayList   overlays;
+        TrackedSet    tracked;
+        StyleMotion   motion{};
+        std::unordered_set<std::uint64_t> seen{};
+        bool          seen_valid = false;
+        std::optional<std::uint64_t> press_layer;
+        CursorShape   cursor = CursorShape::arrow;
+        Vec2          size{};
+        float         dpi = 1.0f;
+        bool          dirty = true;
+        bool          moving = false;   ///< transitions / tracked springs in flight
+        double        motion_dt = 0.0;
+        Rect          atlas_owed{}, color_owed{};   ///< glyph uploads this window's GPU still needs
+        std::uint32_t atlas_gen = 0;
+        explicit Surface(WindowSpec s, W w) : spec(std::move(s)), win(std::move(w)) {}
+    };
+
+    [[nodiscard]] std::size_t child_count() const noexcept { return children_.size(); }
+    /// A child window by its WindowSpec id (tests, screenshots).
+    [[nodiscard]] W* child_window(std::uint64_t id) noexcept {
+        for (auto& s : children_) if (s->spec.id == id) return &s->win;
+        return nullptr;
+    }
+    [[nodiscard]] std::optional<Rect> child_node_rect(std::uint64_t id, std::uint64_t node) const {
+        for (const auto& s : children_) {
+            if (s->spec.id != id) continue;
+            for (const auto& o : s->overlays.items()) if (const Node* n = o.content.find(node)) return n->frame();
+            if (const Node* n = s->tree.find(node)) return n->frame();
+        }
+        return std::nullopt;
+    }
+    [[nodiscard]] bool children_animating() const noexcept {
+        for (const auto& s : children_) if (s->moving) return true;
+        return false;
+    }
+
+  private:
+    /// Open / retitle / close child windows to match the model.
+    void reconcile_children(const typename P::Model& model) {
+        if constexpr (has_children) {
+            const std::vector<WindowSpec> want = P::windows(model);
+            std::erase_if(children_, [&](const std::unique_ptr<Surface>& s) {
+                const bool keep = std::ranges::any_of(want, [&](const WindowSpec& w) { return w.id == s->spec.id; });
+                if (!keep) s->win.close();
+                return !keep;
+            });
+            for (const auto& w : want) {
+                if (w.id == 0) continue;
+                auto it = std::ranges::find_if(children_, [&](const auto& s) { return s->spec.id == w.id; });
+                if (it != children_.end()) {
+                    if ((*it)->spec.title != w.title) { (*it)->win.set_title(w.title); (*it)->spec.title = w.title; }
+                    continue;
+                }
+                auto opened = W::open(platform::WindowConfig{.title = w.title, .size = w.size, .resizable = w.resizable,
+                                                             .decorated = true, .transparent = false, .vsync = cfg_.vsync,
+                                                             .background = theme_.background, .child = true});
+                if (!opened) continue;
+                auto s = std::make_unique<Surface>(w, std::move(*opened));
+                // the main window's loop reads the app's event queue and hands
+                // each event to the window it belongs to
+                if constexpr (requires { window_.enroll(); s->win.set_pull(false); }) {
+                    window_.enroll();
+                    s->win.set_pull(false);
+                    s->win.enroll();
+                }
+                s->win.set_atlas_source(&cfg_.fonts->atlas());
+                s->win.set_coverage_sampler(&bindings_->sampler);
+                s->input.set_multi_click_interval(s->win.double_click_interval());
+                s->size = s->win.size();
+                s->dpi = s->win.dpi_scale();
+                // a new GPU texture: the whole atlas is owed
+                const auto& a = cfg_.fonts->atlas();
+                s->atlas_owed = Rect{0, 0, static_cast<float>(a.width()), static_cast<float>(a.height())};
+                s->color_owed = s->atlas_owed;
+                s->atlas_gen = a.generation();
+                children_.push_back(std::move(s));
+                dirty_ = true;
+            }
+        }
+    }
+
+    /// Child-window input: gestures against its tree, raw events wrapped.
+    template <class Cx>
+    void pump_children(Cx& cx) {
+        if constexpr (has_children) {
+            for (std::size_t k = 0; k < children_.size(); ++k) {
+                Surface* s = children_[k].get();
+                std::vector<Event> evs = s->win.dispatch();
+                std::size_t last_move = evs.size();
+                for (std::size_t i = evs.size(); i-- > 0;)
+                    if (std::holds_alternative<MouseMove>(evs[i])) { last_move = i; break; }
+                const std::uint64_t id = s->spec.id;
+                for (std::size_t i = 0; i < evs.size(); ++i) {
+                    if (std::holds_alternative<MouseMove>(evs[i]) && i != last_move) continue;
+                    // the program may close it from inside a handler: look it up again
+                    auto it = std::ranges::find_if(children_, [&](const auto& c) { return c->spec.id == id; });
+                    if (it == children_.end()) break;
+                    child_event(cx, **it, evs[i]);
+                }
+            }
+        }
+    }
+
+    template <class Cx>
+    void child_event(Cx& cx, Surface& s, const Event& ev) {
+        if (const auto* r = std::get_if<ResizeEvent>(&ev)) { s.size = r->size; s.dpi = r->dpi_scale; s.dirty = true; }
+        if (std::holds_alternative<FrameEvent>(ev)) return;
+        const std::uint64_t id = s.spec.id;
+        const auto wrap = [&](const Event& e) { (void)emit(cx, WindowEvent{id, e}); };
+        if (!event_position(ev)) { wrap(ev); dirty_ = s.dirty = true; return; }
+        // pointer: the layer that took the press keeps it; overlays first
+        const Node* layer = &s.tree;
+        const bool held = s.input.pressed() != 0 && s.press_layer.has_value();
+        if (held && !std::holds_alternative<MouseDown>(ev)) {
+            if (*s.press_layer != 0)
+                for (const auto& o : s.overlays.items()) if (o.id == *s.press_layer) { layer = &o.content; break; }
+        } else {
+            if (std::holds_alternative<MouseDown>(ev)) s.press_layer = 0;
+            const auto pos = *event_position(ev);
+            if (const Overlay* over = s.overlays.empty() ? nullptr : s.overlays.hit(pos)) {
+                layer = &over->content;
+                if (std::holds_alternative<MouseDown>(ev)) s.press_layer = over->id;
+            } else if (std::holds_alternative<MouseDown>(ev) && !s.overlays.empty()) {
+                auto gone = s.overlays.dismissed_by(pos);
+                if (!gone.empty()) {
+                    for (std::uint64_t oid : gone) (void)emit(cx, Left{oid});
+                    s.dirty = dirty_ = true;
+                    return;
+                }
+                if (s.overlays.captures_input()) return;
+            }
+        }
+        const auto h0 = s.input.hovered(), p0 = s.input.pressed(), f0 = s.input.focused();
+        const auto gestures = s.input.handle(ev, *layer, s.win.now());
+        if (!gestures.empty() || s.input.hovered() != h0 || s.input.pressed() != p0 || s.input.focused() != f0)
+            s.dirty = dirty_ = true;
+        wrap(ev);
+        emit_gestures(cx, gestures, &s.tree, &s.overlays);
+        if (std::holds_alternative<MouseUp>(ev)) s.press_layer.reset();
+        // the pointer's shape over this window
+        const CursorShape want = [&] {
+            if (const Overlay* o = s.overlays.empty() ? nullptr : s.overlays.hit(s.input.cursor())) return cursor_at(o->content, s.input.cursor());
+            return cursor_at(s.tree, s.input.cursor());
+        }();
+        if (want != s.cursor) { s.cursor = want; s.win.set_cursor(want); }
+    }
+
+    /// Draw every child window that changed (or animates).
+    void draw_children(const typename P::Model& model, double dt) {
+        if constexpr (has_children) {
+            for (auto& sp : children_) {
+                Surface& s = *sp;
+                if (!s.dirty && !s.moving && !dirty_children_) continue;
+                s.dirty = false;
+                s.size = s.win.size();
+                s.dpi = s.win.dpi_scale();
+                s.overlays.clear();
+                s.tracked.clear();
+                Ctx ctx{s.size, s.dpi, time_, theme_, &latency_, {}, &bindings_->measurer, &s.tracked, &s.overlays, &s.input};
+                try {
+                    detail::ctx_scope scope{ctx};
+                    s.tree = P::window_view(model, s.spec.id);
+                } catch (...) {
+                    continue;
+                }
+                const auto& measurer = bindings_->measurer;
+                CascadeInput ci{};
+                ci.theme = &theme_;
+                ci.viewport = s.size;
+                ci.hovered = s.input.hovered();
+                ci.pressed = s.input.pressed();
+                ci.press_inside = s.input.press_inside();
+                ci.focused = s.input.focused();
+                ci.focus_visible = s.input.focus_visible();
+                ci.previous_ids = s.seen_valid ? &s.seen : nullptr;
+                CascadeResult cr = cascade(s.tree, ci);
+                for (auto& o : s.overlays.items()) {
+                    const CascadeResult r = cascade(o.content, ci);
+                    cr.transitions = cr.transitions || r.transitions;
+                }
+                s.seen.clear();
+                collect_starting_ids(s.tree, s.seen);
+                for (const auto& o : s.overlays.items()) collect_starting_ids(o.content, s.seen);
+                s.seen_valid = true;
+                layout::layout_tree(s.tree, s.size, measurer);
+                s.tracked.observe_all(s.tree);
+                std::vector<const Node*> placed;
+                auto& items = s.overlays.items();
+                std::stable_sort(items.begin(), items.end(), [](const Overlay& a, const Overlay& b) { return a.layer < b.layer; });
+                for (auto& o : items) {
+                    const Node* a = o.anchor_id != 0 ? s.tree.find(o.anchor_id) : nullptr;
+                    for (std::size_t k = 0; a == nullptr && o.anchor_id != 0 && k < placed.size(); ++k) a = placed[k]->find(o.anchor_id);
+                    const Rect anchor = o.anchor_id != 0 ? (a ? a->frame() : Rect{}) : Rect{Vec2{}, s.size};
+                    const Vec2 natural = layout::measure(o.content, layout::Constraints{s.size.x, s.size.y}, measurer);
+                    Rect placed_r = overlay::resolve(o.placement, anchor, natural, s.size, o.offset, o.at.value_or(s.input.cursor()));
+                    placed_r.origin = placed_r.origin + o.shift;
+                    layout::arrange(o.content, placed_r, measurer);
+                    placed.push_back(&o.content);
+                }
+                s.motion.begin_frame();
+                if (cr.transitions || s.motion.size() > 0) {
+                    const double mdt = std::exchange(s.motion_dt, 0.0) + dt;
+                    s.motion.visit_root(s.tree, mdt);
+                    std::uint64_t salt = 0;
+                    for (auto& o : items) s.motion.visit_root(o.content, mdt, o.id != 0 ? o.id : ++salt);
+                }
+                s.motion.end_frame();
+                if (s.tracked.animating()) s.tracked.step_all(dt);
+                s.moving = s.motion.animating() || s.tracked.animating();
+                // re-resolve hover against the new layout (a menu closed, a list scrolled)
+                {
+                    const Overlay* over = s.overlays.empty() ? nullptr : s.overlays.hit(s.input.cursor());
+                    (void)s.input.rehover(over ? over->content : s.tree);
+                }
+                const auto paint_all = [&] {
+                    s.draws.clear();
+                    render::PaintOptions po{};
+                    po.dpi_scale = s.dpi;
+                    po.measurer = &measurer;
+                    po.glyphs = &bindings_->glyphs;
+                    po.clear_color = theme_.background;
+                    render::paint(s.tree, s.draws, po);
+                    for (const auto& o : items) {
+                        if (o.scrim > 0.0f) s.draws.fill_rect(Rect{Vec2{}, s.size * s.dpi}, colors::black.fade(o.scrim));
+                        render::paint(o.content, s.draws, po);
+                    }
+                };
+                paint_all();
+                if (cfg_.fonts->atlas_moved()) paint_all();
+                present_child(s);
+            }
+            dirty_children_ = false;
+        }
+    }
+
+    /// One shared glyph atlas, one texture per GPU window: each window
+    /// presents with exactly the regions it has not uploaded yet.
+    void present_child(Surface& s) {
+        auto& a = cfg_.fonts->atlas();
+        const Rect own = a.dirty_region(), own_c = a.color_dirty_region();
+        if (a.generation() != s.atlas_gen) {
+            s.atlas_gen = a.generation();
+            s.atlas_owed = s.color_owed = Rect{0, 0, static_cast<float>(a.width()), static_cast<float>(a.height())};
+        }
+        a.mark_dirty(s.atlas_owed);
+        a.mark_color_dirty(s.color_owed);
+        s.win.present(s.draws, theme_.background);
+        s.atlas_owed = s.color_owed = Rect{};
+        // what the main window has not uploaded yet stays owed to it
+        a.clear_dirty();
+        a.clear_color_dirty();
+        a.mark_dirty(own);
+        a.mark_color_dirty(own_c);
+    }
+
+    /// After the main window presented: whatever it uploaded is owed to every child.
+    void note_main_uploads(const Rect& cov, const Rect& col) {
+        for (auto& s : children_) {
+            if (!cov.empty()) s->atlas_owed = s->atlas_owed.empty() ? cov : s->atlas_owed.unite(cov);
+            if (!col.empty()) s->color_owed = s->color_owed.empty() ? col : s->color_owed.unite(col);
+        }
+    }
+
+    std::vector<std::unique_ptr<Surface>> children_;
+    bool dirty_children_ = false;   ///< redraw every child (the model changed)
+    double child_time_ = 0.0;
+
+  public:
 
     // ── introspection (tests, examples) ─────────────────────────────────
 
@@ -846,7 +952,7 @@ class window_host {
     }
 
     [[nodiscard]] bool animating() const noexcept {
-        return frames_on_ || motion_pending_ || tracked_.animating() || motion_.animating() || morphing_;
+        return frames_on_ || motion_pending_ || tracked_.animating() || motion_.animating() || morphing_ || children_animating();
     }
 
     // ── input → gestures ────────────────────────────────────────────────
@@ -1011,10 +1117,11 @@ class window_host {
     }
 
     template <class Cx>
-    void emit_gestures(Cx& cx, const std::vector<Gesture>& gestures) {
+    void emit_gestures(Cx& cx, const std::vector<Gesture>& gestures, const Node* root = nullptr,
+                       const OverlayList* ovs = nullptr) {
         using K = Gesture::Kind;
         for (const auto& g : gestures) {
-            collect_handlers(g);
+            collect_handlers(g, root, ovs);
             switch (g.kind) {
                 case K::click:    (void)emit(cx, Clicked{g.node_id, g.local, g.click_count, g.button, g.mods}); break;
                 case K::activate: (void)emit(cx, Activated{g.node_id}); break;
@@ -1041,8 +1148,10 @@ class window_host {
 
     /// Run the handlers on the gesture's node; their messages wait in
     /// handled_ until a kernel is at hand (flush_handled).
-    void collect_handlers(const Gesture& g) {
+    void collect_handlers(const Gesture& g, const Node* root = nullptr, const OverlayList* ovs = nullptr) {
         using K = Gesture::Kind;
+        const Node& in_tree = root != nullptr ? *root : tree_;
+        const OverlayList& in_ovs = ovs != nullptr ? *ovs : overlays_;
         // BUBBLING, as in the DOM: a gesture runs the handlers of the node
         // it landed on, else of its nearest ancestor that handles that kind
         // of gesture. A widget can wrap a control and own its interaction
@@ -1058,8 +1167,8 @@ class window_host {
             path.pop_back();
             return false;
         };
-        if (!find_path(find_path, tree_)) {
-            for (const auto& o : overlays_.items()) {
+        if (!find_path(find_path, in_tree)) {
+            for (const auto& o : in_ovs.items()) {
                 path.clear();
                 if (find_path(find_path, o.content)) break;
             }
@@ -1423,8 +1532,9 @@ class window_host {
                 a = placed_roots[k]->find(o.anchor_id);
             const Rect anchor = o.anchor_id != 0 ? (a ? a->frame() : Rect{}) : Rect{Vec2{}, size_};
             const Vec2 natural = layout::measure(o.content, layout::Constraints{size_.x, size_.y}, measurer);
-            const Rect placed = overlay::resolve(o.placement, anchor, natural, size_,
-                                                 o.offset, o.at.value_or(input_.cursor()));
+            Rect placed = overlay::resolve(o.placement, anchor, natural, size_,
+                                           o.offset, o.at.value_or(input_.cursor()));
+            placed.origin = placed.origin + o.shift;
             layout::arrange(o.content, placed, measurer);
             placed_roots.push_back(&o.content);
         }
@@ -1513,7 +1623,18 @@ class window_host {
 
         frame.instances  = static_cast<std::uint32_t>(draws_.size());
         frame.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
-        { ScopedTimer t{frame.render_ms}; window_.present(draws_, theme_.background.fade(theme_.window_opacity)); }
+        { ScopedTimer t{frame.render_ms};
+          // what the main window's GPU is about to upload, so every child window gets it too
+          const Rect cov = cfg_.fonts->atlas().dirty_region(), col = cfg_.fonts->atlas().color_dirty_region();
+          window_.present(draws_, theme_.background.fade(theme_.window_opacity));
+          note_main_uploads(cov, col); }
+        // child windows follow the model on the same frame
+        reconcile_children(model);
+        if (!children_.empty()) {
+            dirty_children_ = true;
+            const double cdt = std::clamp(time_ - std::exchange(child_time_, time_), 0.0, 0.1);
+            draw_children(model, cdt);
+        }
         sync_text_input();
         if (frame_counter_ == 1 && startup::enabled()) {
             std::fprintf(stderr, "mayag: startup first frame: view %.1f cascade %.1f layout %.1f paint %.1f render %.1f ms\n",

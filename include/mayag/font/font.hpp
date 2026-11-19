@@ -2762,6 +2762,7 @@ class StackSampler final : public backend::CoverageSampler {
     [[nodiscard]] Vec4 sample_rgba(std::uint32_t, float u, float v) const override {
         return stack_->atlas().sample_color(u, v);
     }
+    [[nodiscard]] std::uint64_t version() const noexcept override { return stack_->atlas().content_version() + 1; }
 
   private:
     const FontStack* stack_;

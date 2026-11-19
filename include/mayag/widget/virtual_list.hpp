@@ -20,7 +20,7 @@
 // The callback is invoked only for visible indices.
 
 #include "../dsl/dsl.hpp"
-#include "../app/host.hpp"
+#include "../app/context.hpp"
 #include "../core/scroll_state.hpp"
 #include "../layout/flex.hpp"
 

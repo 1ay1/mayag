@@ -20,6 +20,7 @@
 #include "../style/style.hpp"
 #include "text_metrics.hpp"
 
+#include <array>
 #include <span>
 #include <vector>
 
@@ -381,35 +382,82 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
             shrink_sum += kids[it.index].style().layout.shrink;
         }
 
-        // ---- pass 2: resolve flexible lengths --------------------------
-        const float free = avail_main - used;
-
-        if (free > 0.0f && grow_sum > 0.0f) {
-            for (auto& it : items) {
-                const float g = kids[it.index].style().layout.grow;
-                if (g > 0.0f) it.main += free * (g / grow_sum);
-            }
-        } else if (free < 0.0f && shrink_sum > 0.0f) {
-            // Weight shrinkage by base size, per spec: a big item absorbs more
-            // of the overflow than a small one with the same shrink factor.
-            float weighted = 0.0f;
-            for (const auto& it : items)
-                weighted += kids[it.index].style().layout.shrink * it.main;
-            if (weighted > 0.0f) {
-                for (auto& it : items) {
-                    const float s = kids[it.index].style().layout.shrink;
-                    it.main = num::max(it.main + free * (s * it.main / weighted), 0.0f);
+        // ---- pass 2+3: resolve flexible lengths, then clamp ---------------
+        // CSS's algorithm (css-flexbox §9.7): distribute the free space over
+        // the flexible items; any item its min/max clamps is FROZEN at that
+        // size, and the space it could not take is distributed again over the
+        // rest. Without the loop, space a max-width tab refuses is simply lost
+        // -- a spacer beside it never receives it and whatever follows the
+        // spacer (window buttons) stops short of the edge.
+        const auto clamp_item = [&](const Item& it, float v) {
+            const LayoutStyle& kl = kids[it.index].style().layout;
+            return (ax == Axis::horizontal) ? clamp_axis(v, kl.min_width, kl.max_width, avail_main)
+                                            : clamp_axis(v, kl.min_height, kl.max_height, avail_main);
+        };
+        {
+            const float initial_free = avail_main - used;
+            const bool growing = initial_free > 0.0f && grow_sum > 0.0f;
+            const bool shrinking = initial_free < 0.0f && shrink_sum > 0.0f;
+            if (growing || shrinking) {
+                // base sizes stay as measured; `target` is the flexed size, `frozen` once clamped
+                constexpr std::size_t kInline = 32;
+                std::array<float, kInline> base_s{};
+                std::array<bool, kInline> frozen_s{};
+                std::vector<float> base_h;
+                std::vector<char> frozen_h;
+                float* base = base_s.data();
+                bool* frozen_b = frozen_s.data();
+                char* frozen_c = nullptr;
+                if (items.size() > kInline) {
+                    base_h.resize(items.size());
+                    frozen_h.assign(items.size(), 0);
+                    base = base_h.data();
+                    frozen_c = frozen_h.data();
+                }
+                const auto is_frozen = [&](std::size_t k) { return frozen_c ? frozen_c[k] != 0 : frozen_b[k]; };
+                const auto freeze = [&](std::size_t k) { if (frozen_c) frozen_c[k] = 1; else frozen_b[k] = true; };
+                for (std::size_t k = 0; k < items.size(); ++k) {
+                    base[k] = items[k].main;
+                    const auto& kl = kids[items[k].index].style().layout;
+                    if ((growing && kl.grow <= 0.0f) || (shrinking && kl.shrink <= 0.0f)) freeze(k);
+                }
+                for (std::size_t round = 0; round <= items.size(); ++round) {
+                    // free space against the frozen items' final sizes and the others' bases
+                    float occupied = gaps, factor = 0.0f;
+                    for (std::size_t k = 0; k < items.size(); ++k) {
+                        occupied += main_of(items[k].margin.total(), ax) + (is_frozen(k) ? items[k].main : base[k]);
+                        if (!is_frozen(k)) {
+                            const auto& kl = kids[items[k].index].style().layout;
+                            factor += growing ? kl.grow : kl.shrink * base[k];
+                        }
+                    }
+                    const float free = avail_main - occupied;
+                    if (factor <= 0.0f) break;
+                    float violation = 0.0f;
+                    for (std::size_t k = 0; k < items.size(); ++k) {
+                        if (is_frozen(k)) continue;
+                        const auto& kl = kids[items[k].index].style().layout;
+                        const float target = growing ? base[k] + free * (kl.grow / factor)
+                                                     : num::max(base[k] + free * (kl.shrink * base[k] / factor), 0.0f);
+                        items[k].main = clamp_item(items[k], target);
+                        violation += items[k].main - target;
+                    }
+                    // freeze the clamped ones (all max-violators, or all min-violators, per spec)
+                    if (num::abs(violation) < 0.01f) break;
+                    bool any = false;
+                    for (std::size_t k = 0; k < items.size(); ++k) {
+                        if (is_frozen(k)) continue;
+                        const auto& kl = kids[items[k].index].style().layout;
+                        const float target = growing ? base[k] + free * (kl.grow / factor)
+                                                     : num::max(base[k] + free * (kl.shrink * base[k] / factor), 0.0f);
+                        const float d = items[k].main - target;
+                        if ((violation < 0.0f && d < -0.01f) || (violation > 0.0f && d > 0.01f)) { freeze(k); any = true; }
+                    }
+                    if (!any) break;
                 }
             }
         }
-
-        // ---- pass 3: clamp after flexing (spec order) ------------------
-        for (auto& it : items) {
-            const LayoutStyle& kl = kids[it.index].style().layout;
-            it.main = (ax == Axis::horizontal)
-                ? clamp_axis(it.main, kl.min_width,  kl.max_width,  avail_main)
-                : clamp_axis(it.main, kl.min_height, kl.max_height, avail_main);
-        }
+        for (auto& it : items) it.main = clamp_item(it, it.main);
 
         // ---- pass 4: position ------------------------------------------
         float consumed = gaps;

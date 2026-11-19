@@ -65,6 +65,9 @@ struct Overlay {
     /// Gap between the anchor and the overlay.
     float offset = 4.0f;
 
+    /// Moved by this after placement (an inset from the anchor's edge, say).
+    Vec2 shift{};
+
     /// Painted in ascending order, so a submenu declared later covers its
     /// parent menu without the caller managing z explicitly.
     int layer = 0;

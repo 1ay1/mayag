@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,10 @@ struct ScrollbackInfo {
     // the minimap proper (optional): runs per bucket, command spans
     int                          buckets = 0;   ///< rows the runs were binned into (0: no runs)
     std::vector<ScrollbackRun>   runs;
+    /// Changes whenever `runs` does (0 = unknown: the run layer is rebuilt
+    /// every frame). With it, the hundreds of run bars are built once per
+    /// content change, not per frame -- the bar redraws on hover and scroll.
+    std::uint64_t runs_version = 0;
     std::vector<ScrollbackSpan>  spans;
     bool  expanded = false;
     float width = 84.0f;     ///< when expanded
@@ -105,18 +110,40 @@ template <ControlContext C>
     parts.push_back((box() | size(1.0f, height_px) | absolute(0.0f, 0.0f)
                      | bg(mix(paper, ink, open ? 0.16f : 0.07f))).build());
 
-    // text runs
+    // text runs: one bar per minimap row -- hundreds of nodes. Built once per
+    // content change (memo), not every frame: scrolling and hovering redraw
+    // the frame and marks over the same layer.
     const float x_l = open ? 7.0f : 4.0f, x_r = w - (open ? 6.0f : 3.0f);
     if (s.buckets > 0) {
         const float bh = used / static_cast<float>(s.buckets);
         // a line is a thin bar however spread out the history is: text, not blocks
         const float row_h = std::clamp(bh - (bh >= 2.0f ? 0.6f : 0.0f), 0.7f, 2.5f);
         const int vis0 = static_cast<int>(vy / std::max(bh, 0.001f)), vis1 = static_cast<int>((vy + vh) / std::max(bh, 0.001f));
-        for (const auto& r : s.runs) {
-            const bool in_view = r.row >= vis0 && r.row <= vis1;
-            const float a = open ? (in_view ? 0.95f : 0.55f) : (in_view ? 0.55f : 0.22f);
-            const float x0 = x_l + r.x0 * (x_r - x_l), x1 = std::max(x_l + r.x1 * (x_r - x_l), x0 + 1.0f);
-            parts.push_back((box() | size(x1 - x0, row_h) | absolute(x0, static_cast<float>(r.row) * bh) | bg(rgb(r.rgb, a))).build());
+        const auto build_runs = [&] {
+            std::vector<Node> bars;
+            bars.reserve(s.runs.size());
+            for (const auto& r : s.runs) {
+                const bool in_view = r.row >= vis0 && r.row <= vis1;
+                const float a = open ? (in_view ? 0.95f : 0.55f) : (in_view ? 0.55f : 0.22f);
+                const float x0 = x_l + r.x0 * (x_r - x_l), x1 = std::max(x_l + r.x1 * (x_r - x_l), x0 + 1.0f);
+                bars.push_back((box() | size(x1 - x0, row_h) | absolute(x0, static_cast<float>(r.row) * bh) | bg(rgb(r.rgb, a))).build());
+            }
+            return (z(std::move(bars)) | size(w, height_px) | absolute(0.0f, 0.0f)).build();
+        };
+        if constexpr (requires { c.memoize(std::uint64_t{}, std::uint64_t{}, build_runs); }) {
+            if (s.runs_version != 0) {
+                std::uint64_t key = memo_mix(s.runs_version, static_cast<std::uint64_t>(vis0) << 32 | static_cast<std::uint32_t>(vis1));
+                std::uint32_t u;
+                for (const float f : {w, height_px, bh, row_h}) { std::memcpy(&u, &f, 4); key = memo_mix(key, u); }
+                key = memo_mix(key, (open ? 1u : 0u) | static_cast<std::uint64_t>(s.runs.size()) << 1);
+                // the site: while output streams the key changes every frame,
+                // and the cache stops paying to keep what it can't reuse
+                parts.push_back(c.memoize(memo_mix(node_id(id), 0x5C0B), memo_mix(key, node_id(id)), build_runs));
+            } else {
+                parts.push_back(build_runs());
+            }
+        } else {
+            parts.push_back(build_runs());
         }
     }
     // command spans: a status stripe down the left edge
@@ -165,6 +192,12 @@ template <ControlContext C>
     }
     return (z(std::move(parts)) | size(w, height_px) | clip | pointer_cursor
             | role(a11y::Role::slider) | label("scrollback") | id_of(id)).build();
+}
+
+/// The bar docked on the right edge of a `width`-wide view (a terminal's minimap).
+template <ControlContext C>
+[[nodiscard]] inline Node scrollback_dock(const C& c, std::string_view id, const ScrollbackInfo& s, Vec2 view) {
+    return (node(scrollback_bar(c, id, s, view.y)) | absolute(view.x - s.width, 0.0f)).build();
 }
 
 }  // namespace mayag::dsl
