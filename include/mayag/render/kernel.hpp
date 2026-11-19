@@ -315,6 +315,26 @@ inline constexpr u32 FLAG_GLYPH_SDF = 128u;
     return mg::clamp(mg::mix(on_white, on_black, t), 0.0f, 1.0f);
 }
 
+/// The same reshaping against the ACTUAL backdrop, when the painter knows
+/// it (`backdrop` = the opaque linear colour the text sits on, w = 1; w = 0
+/// means unknown and falls back to the black/white design backdrops). For a
+/// luminance pair (S text, D backdrop) the encoded-space blend gives
+/// dec(enc(D) + (enc(S) - enc(D)) c); the linear hardware blend gives
+/// D + (S - D) c', so c' = (that - D) / (S - D), exact for that pair. Text
+/// on a dark grey (0x15) panel was off by 2.6/255 with the design backdrop.
+[[nodiscard]] inline f32 apply_text_gamma(f32 cov, vec4 premul_color, vec4 backdrop) noexcept {
+    if (backdrop.w < 0.5f) return apply_text_gamma(cov, premul_color);
+    if (cov <= 0.0f || cov >= 1.0f) return cov;
+    const f32 a = premul_color.w > 1e-4f ? premul_color.w : 1.0f;
+    const f32 s = mg::clamp((0.2126f * premul_color.x + 0.7152f * premul_color.y + 0.0722f * premul_color.z) / a,
+                            0.0f, 1.0f);
+    const f32 d = mg::clamp(0.2126f * backdrop.x + 0.7152f * backdrop.y + 0.0722f * backdrop.z, 0.0f, 1.0f);
+    if (mg::abs(s - d) < 0.02f) return apply_text_gamma(cov, premul_color);   // no contrast to solve for
+    const f32 es = linear_to_srgb(s), ed = linear_to_srgb(d);
+    const f32 want = srgb_to_linear(ed + (es - ed) * cov);
+    return mg::clamp((want - d) / (s - d), 0.0f, 1.0f);
+}
+
 /// Fallback half-width of the SDF threshold band, in normalised field units,
 /// used when the glyph emitter supplied none. It must be at least half the
 /// field's change across ONE texel or the smoothstep lands entirely between
@@ -539,7 +559,7 @@ struct Env {
         } else {
             cov = raw;   // bitmap entry: already coverage
         }
-        cov = apply_text_gamma(cov, f.color);
+        cov = apply_text_gamma(cov, f.color, f.color2);   // color2 = backdrop (w=1) or unknown
     } else {
         cov = shape_coverage(f);
     }

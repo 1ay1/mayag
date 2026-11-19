@@ -234,23 +234,23 @@ struct Babel {
     static void add_orbit(std::vector<Node>& layers, const Model& m, Vec2 vp, bool front) {
         for (const Orb& o : orbit_positions(m, vp)) {
             if ((o.depth > 0.0f) != front) continue;
-            const float near = 0.5f + 0.5f * o.depth;          // 0 far .. 1 near
+            const float nearness = 0.5f + 0.5f * o.depth;          // 0 far .. 1 near
             // Whole-pixel sizes and wght in steps of 50: a greeting sweeping
             // through depth then reuses ~13 x 6 cached shapes and rasters
             // instead of shaping and rasterising a new instance every frame.
-            const float size = std::round(12.0f + near * 13.0f);
-            const float wght = 400.0f + std::round(near * 5.0f) * 50.0f;
+            const float size = std::round(12.0f + nearness * 13.0f);
+            const float wght = 400.0f + std::round(nearness * 5.0f) * 50.0f;
             const auto tone = Color<Oklch>{0.78f, 0.12f, hue_of(o.i)}.to<Srgb>();
-            const float a = 0.22f + near * 0.78f;
+            const float a = 0.22f + nearness * 0.78f;
             const float w = 360.0f;
             layers.push_back(
                 (v(h(text_owned(langs[static_cast<std::size_t>(o.i)].hello) | font(size)
                          | weight(wght) | fg(colors::white.fade(a)))
                        | pad(size * 0.35f, size * 0.8f)
                        | radius(size * 1.2f)
-                       | bg(tone.fade(0.06f + near * 0.16f))
-                       | border(1.0f, tone.fade(0.10f + near * 0.45f))
-                       | shadow(near * 26.0f, tone.fade(near * near * 0.55f), {0.0f, 0.0f})
+                       | bg(tone.fade(0.06f + nearness * 0.16f))
+                       | border(1.0f, tone.fade(0.10f + nearness * 0.45f))
+                       | shadow(nearness * 26.0f, tone.fade(nearness * nearness * 0.55f), {0.0f, 0.0f})
                        | dsl::Id{lang_id(o.i)})
                    | center | width(px(w))
                    | absolute(o.x - w * 0.5f, o.y - size)).build());

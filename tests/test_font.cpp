@@ -18,6 +18,8 @@
 #include <mayag/mayag.hpp>
 #include <mayag/widget/text_field.hpp>
 
+#include "font_fingerprint.hpp"
+
 #include <fstream>
 
 #include <cstdio>
@@ -46,6 +48,18 @@ void near(float got, float want, float eps, const std::string& what) {
     }
 }
 void section(const char* n) { std::printf("\n%s\n", n); }
+
+/// Values measured from CoreText or from specific font files on the Mac the
+/// tests were written on only hold for those very files: another macOS
+/// release ships other builds at the same paths (CJK Symbols Fallback's Bold
+/// moves, PingFang's paths change, the fallback cascade differs).
+/// tests/data/fonts.txt pins them (tools/font_fingerprints.py).
+[[nodiscard]] bool captured(const std::string& path) {
+    static const mayag::test::FontManifest manifest{std::string{MAYAG_SOURCE_DIR} + "/tests/data/fonts.txt"};
+    if (manifest.matches(path)) return true;
+    std::printf("  note: %s is not the build the expectations were measured on; skipped\n", path.c_str());
+    return false;
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -1483,15 +1497,15 @@ void test_merge_mode() {
         auto f = typo::Face::from_file(p);
         return f ? f->merge_mode() : typo::Face::MergeMode::none;
     };
-    if (std::filesystem::exists("/System/Library/Fonts/SFArabic.ttf"))
+    if ((std::filesystem::exists("/System/Library/Fonts/SFArabic.ttf") && captured("/System/Library/Fonts/SFArabic.ttf")))
         check(mode("/System/Library/Fonts/SFArabic.ttf") == typo::Face::MergeMode::all, "SF Arabic merges its runs (dlng Arab)");
-    if (std::filesystem::exists("/System/Library/Fonts/Supplemental/Arial.ttf"))
+    if ((std::filesystem::exists("/System/Library/Fonts/Supplemental/Arial.ttf") && captured("/System/Library/Fonts/Supplemental/Arial.ttf")))
         check(mode("/System/Library/Fonts/Supplemental/Arial.ttf") == typo::Face::MergeMode::all, "Arial merges (OS/2 Arabic range, no dlng)");
-    if (std::filesystem::exists("/System/Library/Fonts/Supplemental/Georgia.ttf"))
+    if ((std::filesystem::exists("/System/Library/Fonts/Supplemental/Georgia.ttf") && captured("/System/Library/Fonts/Supplemental/Georgia.ttf")))
         check(mode("/System/Library/Fonts/Supplemental/Georgia.ttf") == typo::Face::MergeMode::none, "Georgia does not merge");
-    if (std::filesystem::exists("/System/Library/Fonts/SFNS.ttf"))
+    if ((std::filesystem::exists("/System/Library/Fonts/SFNS.ttf") && captured("/System/Library/Fonts/SFNS.ttf")))
         check(mode("/System/Library/Fonts/SFNS.ttf") == typo::Face::MergeMode::table, "SF uses its MERG table");
-    if (std::filesystem::exists("/System/Library/Fonts/SFIndia.ttc")) {
+    if ((std::filesystem::exists("/System/Library/Fonts/SFIndia.ttc") && captured("/System/Library/Fonts/SFIndia.ttc"))) {
         const auto at = [](unsigned i) {
             auto f = typo::Face::from_file("/System/Library/Fonts/SFIndia.ttc", i);
             return f ? f->merge_mode() : typo::Face::MergeMode::none;
@@ -1506,7 +1520,7 @@ void test_merge_mode() {
 // unit tight between 17 and 24 pt).
 void test_tracking_rounding() {
     section("trak rounding");
-    auto sf = typo::Face::from_file("/System/Library/Fonts/SFNS.ttf");
+    auto sf = captured("/System/Library/Fonts/SFNS.ttf") ? typo::Face::from_file("/System/Library/Fonts/SFNS.ttf") : nullptr;
     if (!sf) { check(true, "no SF — skipping"); return; }
     const float upem = static_cast<float>(sf->units_per_em());
     const auto units = [&](float pt) { return sf->tracking(pt, upem); };   // size_px = upem: 1 px per unit
@@ -1551,7 +1565,7 @@ void test_square_embolden() {
 void test_named_weights() {
     section("named-instance weights");
     const char* cjk = "/System/Library/Fonts/CJKSymbolsFallback.ttc";
-    if (!std::filesystem::exists(cjk)) { check(true, "no CJK Symbols Fallback — skipping"); return; }
+    if (!std::filesystem::exists(cjk) || !captured(cjk)) { check(true, "no captured CJK Symbols Fallback — skipping"); return; }
     auto f = typo::Face::from_file(cjk, 0);
     check(f != nullptr && f->is_variable(), "CJK Symbols Fallback loads as a variable face");
     if (!f) return;
@@ -1559,7 +1573,7 @@ void test_named_weights() {
     near(f->wght_for(700.0f), 725.0f, 0.01f, "Bold (700) -> wght 725");
     near(f->wght_for(100.0f), 250.0f, 0.01f, "Thin (100) -> wght 250");
     near(f->wght_for(450.0f), 569.0f, 0.01f, "between named weights interpolates");
-    if (auto sf = typo::Face::from_file("/System/Library/Fonts/SFNS.ttf")) {
+    if (auto sf = captured("/System/Library/Fonts/SFNS.ttf") ? typo::Face::from_file("/System/Library/Fonts/SFNS.ttf") : nullptr) {
         // CoreText resolves NSFontWeight* to each face's named instance:
         // SF Medium is wght 510, Semibold 590, Ultralight (CSS 100) 30.9.
         near(sf->wght_for(400.0f), 400.0f, 0.01f, "SF Regular stays at 400");
@@ -1568,10 +1582,10 @@ void test_named_weights() {
         near(sf->wght_for(100.0f), 30.925f, 0.01f, "CSS 100 is Apple's Ultralight, the lighter of the two");
         near(sf->wght_for(200.0f), 110.725f, 0.01f, "CSS 200 is Apple's Thin");
     }
-    if (auto ar = typo::Face::from_file("/System/Library/Fonts/SFArabic.ttf")) {
+    if (auto ar = captured("/System/Library/Fonts/SFArabic.ttf") ? typo::Face::from_file("/System/Library/Fonts/SFArabic.ttf") : nullptr) {
         near(ar->wght_for(700.0f), 711.111f, 0.01f, "SF Arabic Bold sits at wght 711.1, not SF's 700");
     }
-    if (auto it = typo::Face::from_file("/System/Library/Fonts/SFNSItalic.ttf")) {
+    if (auto it = captured("/System/Library/Fonts/SFNSItalic.ttf") ? typo::Face::from_file("/System/Library/Fonts/SFNSItalic.ttf") : nullptr) {
         // SF Italic's weights also move YAXS: Bold Italic is YAXS 430.
         float yaxs = 0.0f;
         it->weight_axes_for(700.0f, [&](std::uint32_t tag, float v) { if (tag == typo::ot::tag("YAXS")) yaxs = v; });
@@ -1610,7 +1624,7 @@ void test_named_weights() {
 void test_hvgl() {
     section("hvgl outlines");
     const char* pf = "/System/Library/PrivateFrameworks/FontServices.framework/Resources/Reserved/PingFangUI.ttc";
-    if (!std::filesystem::exists(pf)) { check(true, "no PingFang UI — skipping"); return; }
+    if (!std::filesystem::exists(pf) || !captured(pf)) { check(true, "no captured PingFang UI — skipping"); return; }
     auto f = typo::Face::from_file(pf, 5);
     check(f != nullptr, "PingFang UI Display loads (hvgl outlines)");
     if (!f) return;
@@ -1817,7 +1831,7 @@ void test_coretext_parity() {
     // SF names itself "System Font" (SFNS.ttf); newer builds may say "SF Pro".
     const bool is_sf = f != nullptr && f->is_variable() &&
                        (f->family() == "System Font" || f->family().starts_with("SF Pro"));
-    if (!is_sf) {
+    if (!is_sf || !captured("/System/Library/Fonts/SFNS.ttf")) {
         std::printf("  (skipped: SF is not the primary UI face here)\n");
         return;
     }
@@ -2208,6 +2222,10 @@ void test_language() {
 void test_apple_cascade() {
     section("macOS fallback cascade (vs CoreText)");
 #if defined(__APPLE__)
+    // apple_cascade.hpp was derived from one macOS release; another ships a
+    // different fallback set (macOS 15 picks Arial Unicode MS for symbols
+    // that 27 sends to SF Devanagari and SF Tamil).
+    if (!captured("/System/Library/Fonts/SFIndia.ttc") || !captured("/System/Library/Fonts/SFNS.ttf")) return;
     auto stack = typo::system::default_stack();
     struct Want { char32_t cp; const char* family; };
     for (const Want w : {Want{0x5D0, ".SF Hebrew"}, Want{0x627, ".SF Arabic"}, Want{0x915, ".SF Devanagari"},

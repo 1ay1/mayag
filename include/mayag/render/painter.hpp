@@ -32,6 +32,9 @@ struct PaintOptions {
     const GlyphRenderer* glyphs    = nullptr;
     const layout::TextMeasurer* measurer = nullptr;
     bool                 debug_bounds = false;   ///< overlay every node's rect
+    /// The opaque colour the frame is cleared to, which text drawn on no fill
+    /// of its own sits on (alpha 0 = unknown). See DrawList::set_text_backdrop.
+    Color<Srgb>          clear_color{0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 namespace detail {
@@ -140,16 +143,25 @@ inline void paint_node(const Node& node, DrawList& dl, const PaintOptions& opts,
                     st.backdrop.saturation, st.backdrop.brightness, radii);
     }
 
-    // ── fill ────────────────────────────────────────────────────────────────────────
+    // ── fill ────────────────────────────────────────────────────────────────────────────────
+    const auto outer_backdrop = dl.text_backdrop();
     if (st.fill.visible()) {
         if (st.fill.kind == FillKind::solid) {
-            dl.fill_rect(frame, apply_opacity(st.fill.color, alpha), radii);
+            const Color<Srgb> c = apply_opacity(st.fill.color, alpha);
+            dl.fill_rect(frame, c, radii);
+            // An opaque solid fill is what this node's text (and its
+            // descendants' text, until one paints its own) sits on. Rounded
+            // corners only matter at the corners, where text never is.
+            dl.set_text_backdrop(c);
         } else {
             Fill f = st.fill;
             for (std::uint8_t i = 0; i < f.stop_count; ++i)
                 f.stops[i].color = apply_opacity(f.stops[i].color, alpha);
             dl.fill_gradient(frame, f, radii);
+            dl.clear_text_backdrop();
         }
+    } else if (st.backdrop.active()) {
+        dl.clear_text_backdrop();
     }
 
     // ── children ─────────────────────────────────────────────────────────────────────
@@ -206,6 +218,8 @@ inline void paint_node(const Node& node, DrawList& dl, const PaintOptions& opts,
     if (opts.debug_bounds) {
         dl.stroke_rect(frame, 1.0f, rgba<0xFF00FF60>, {}, StrokeAlign::inside);
     }
+    // Siblings and the parent's later text sit on the parent's backdrop.
+    dl.restore_text_backdrop(outer_backdrop);
 }
 
 }  // namespace detail
@@ -214,7 +228,10 @@ inline void paint_node(const Node& node, DrawList& dl, const PaintOptions& opts,
 /// (an app plus an overlay layer) can share one frame.
 inline void paint(const Node& root, DrawList& dl, const PaintOptions& opts = {}) {
     dl.reserve(root.count() * 3);
+    const auto before = dl.text_backdrop();
+    if (opts.clear_color.a >= 0.999f && dl.size() == 0) dl.set_text_backdrop(opts.clear_color);
     detail::paint_node(root, dl, opts, 1.0f, detail::Frame2{});
+    dl.restore_text_backdrop(before);
 }
 
 }  // namespace mayag::render

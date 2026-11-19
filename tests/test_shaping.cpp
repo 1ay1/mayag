@@ -12,6 +12,7 @@
 // Lines whose font is not installed (Linux CI) are skipped. Regenerate with
 // tools/hb_capture.sh after adding cases to corpus.txt.
 #include "../tools/hb_compat.hpp"
+#include "font_fingerprint.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -29,6 +30,11 @@ int main() {
     const std::string dir = std::string{MAYAG_SOURCE_DIR} + "/tests/data/shaping/";
     std::ifstream in{dir + "expected.txt"};
     if (!in) { std::printf("FAIL  cannot read expected.txt\n"); return 1; }
+    // The cases were captured from this exact set of font files; another
+    // macOS release ships other builds at the same paths (different glyph
+    // ids, kerning), so a case runs only on the file it was captured from.
+    const mayag::test::FontManifest manifest{std::string{MAYAG_SOURCE_DIR} + "/tests/data/fonts.txt"};
+    int other_build = 0;
     // FONT|TEXT|ARGS -> CoreText-verified output that replaces HarfBuzz's.
     std::map<std::string, std::string> coretext;
     {
@@ -61,6 +67,7 @@ int main() {
             index = static_cast<std::uint32_t>(std::stoul(path.substr(k + 1)));
             path = path.substr(0, k);
         }
+        if (!manifest.matches(path)) { ++other_build; continue; }
         std::vector<std::string> argv;
         for (std::size_t p = 0; p < args.size();) {
             std::size_t e = args.find(' ', p);
@@ -86,8 +93,10 @@ int main() {
             std::printf("  FAIL  %s | %s | %s\n        hb: %s\n        mg: %s\n", font.c_str(), text.c_str(),
                         args.c_str(), want.c_str(), got.c_str());
     }
-    std::printf("HarfBuzz 15.1 conformance: %d / %d match (%d of them CoreText-verified, %d skipped: font not installed)\n",
-                pass, pass + fail, via_coretext, skipped);
+    std::printf("HarfBuzz 15.1 conformance: %d / %d match (%d of them CoreText-verified, %d skipped: font not installed, "
+                "%d skipped: a different build of the font than the one captured)\n",
+                pass, pass + fail, via_coretext, skipped, other_build);
+    if (other_build > 0) std::printf("  note: regenerate with tools/hb_capture.sh on this OS to cover them\n");
     std::printf("\n%s  %d checks, %d failures\n", fail == 0 ? "PASS" : "FAIL", pass + fail, fail);
     return fail == 0 ? 0 : 1;
 }

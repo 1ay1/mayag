@@ -429,6 +429,7 @@ if(MAYAG_BUILD_TESTS)
     add_executable(mayag_font_tests tests/test_font.cpp)
     target_link_libraries(mayag_font_tests PRIVATE mayag)
     target_compile_options(mayag_font_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_font_tests PRIVATE MAYAG_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME mayag_font_tests COMMAND mayag_font_tests)
 
     add_executable(mayag_unicode_tests tests/test_unicode.cpp)

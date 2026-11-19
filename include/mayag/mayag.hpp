@@ -166,6 +166,7 @@ template <typename Ui>
     po.measurer     = &measurer;
     po.debug_bounds = opts.debug_bounds;
     po.glyphs       = static_cast<const render::GlyphRenderer*>(&bound.glyphs);
+    po.clear_color  = opts.background;
     render::paint(root, dl, po);
 
     const int w = static_cast<int>(viewport.x * opts.dpi_scale);

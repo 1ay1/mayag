@@ -147,6 +147,7 @@ class DrawList {
         batches_.clear();
         clip_stack_.clear();
         current_clip_ = Rect{Vec2{}, Vec2{num::inf, num::inf}};
+        text_backdrop_ = Vec4{};
     }
 
     void reserve(std::size_t n) {
@@ -199,6 +200,26 @@ class DrawList {
     }
 
     [[nodiscard]] const Rect& clip() const noexcept { return current_clip_; }
+
+    // ── text backdrop ───────────────────────────────────────────────────
+    //
+    // The opaque colour text is drawn on, when the painter knows it. GPU
+    // backends without framebuffer fetch blend glyphs in linear light and
+    // reshape coverage to imitate the encoded-space blend
+    // (kernel::apply_text_gamma); against the real backdrop that is exact,
+    // against the black/white design backdrops only close. Glyphs carry it
+    // in their otherwise unused color2 (w = 1 known, 0 unknown).
+    void set_text_backdrop(Color<Srgb> c) noexcept {
+        const auto p = premultiplied(c);
+        text_backdrop_ = c.a >= 0.999f ? Vec4{p.x, p.y, p.z, 1.0f} : Vec4{};
+        // The fill that set it is the instance just pushed; anything drawn
+        // after it that overlaps a glyph invalidates it for that glyph.
+        backdrop_since_ = instances_.size();
+    }
+    void clear_text_backdrop() noexcept { text_backdrop_ = Vec4{}; }
+    struct BackdropState { Vec4 colour; std::size_t since; };
+    [[nodiscard]] BackdropState text_backdrop() const noexcept { return {text_backdrop_, backdrop_since_}; }
+    void restore_text_backdrop(BackdropState s) noexcept { text_backdrop_ = s.colour; backdrop_since_ = s.since; }
 
     // ── emission ────────────────────────────────────────────────────────
 
@@ -397,6 +418,7 @@ class DrawList {
         i.rect  = {dst.origin.x, dst.origin.y, dst.size.x, dst.size.y};
         i.uv    = {atlas_uv.left(), atlas_uv.top(), atlas_uv.right(), atlas_uv.bottom()};
         i.color = premultiplied(c);
+        i.color2 = backdrop_for(dst);
         i.texture_slot = atlas_slot;
         // params.x carries the SDF antialiasing half-band in normalised field
         // units. 0 => the renderer falls back to its constant default. The
@@ -483,6 +505,23 @@ class DrawList {
     std::vector<Batch>    batches_;
     std::vector<Rect>     clip_stack_;
     Rect                  current_clip_{Vec2{}, Vec2{num::inf, num::inf}};
+    Vec4                  text_backdrop_{};   // see set_text_backdrop
+    std::size_t           backdrop_since_ = 0;
+
+    /// The backdrop under a glyph at `dst`, or unknown if any non-glyph
+    /// instance drawn after the backdrop's fill overlaps it (a sibling card,
+    /// an overlay in a z-stack). Glyph-on-glyph overlap is ignored: text
+    /// never sits on other text's ink.
+    [[nodiscard]] Vec4 backdrop_for(const Rect& dst) const noexcept {
+        if (text_backdrop_.w < 0.5f) return Vec4{};
+        for (std::size_t k = backdrop_since_; k < instances_.size(); ++k) {
+            const Instance& o = instances_[k];
+            if (o.kind == static_cast<std::uint32_t>(ShapeKind::glyph)) continue;
+            const Rect r{o.rect.x, o.rect.y, o.rect.z, o.rect.w};
+            if (r.intersects(dst)) return Vec4{};
+        }
+        return text_backdrop_;
+    }
 };
 
 }  // namespace mayag

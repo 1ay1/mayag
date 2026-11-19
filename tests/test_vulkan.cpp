@@ -53,6 +53,7 @@ Diff compare(backend::VulkanDevice& dev, const Node& tree, int w, int h, Color<S
              typo::FontStack* stack = nullptr) {
     DrawList dl;
     render::PaintOptions po{};
+    po.clear_color = clear;   // the frame is cleared to it, so text on no fill sits on it
     std::optional<typo::StackMeasurer>      meas;
     std::optional<typo::StackGlyphRenderer> glyphs;
     std::optional<typo::StackSampler>       sampler_store;
