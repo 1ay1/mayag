@@ -1815,6 +1815,17 @@ void test_coretext_parity() {
     bold_style.weight = FontWeight::bold;
     near(stack->shaped(s, typo::detail::shape_params_of(bold_style))->width, 149.963f, 0.01f,
          "bold kerning deltas follow the weight axis (line width matches CoreText)");
+
+    // Tracking goes on every advancing glyph and BEFORE mark attachment
+    // (CTRunGetPositions for SF Devanagari at 16 px): the u-sign under da
+    // sits at 8.992, not 9.36, and the line is 35.904 px wide.
+    TextStyle deva;
+    deva.size = 16.0f;
+    const auto dr = stack->shaped("\u0926\u0941\u0928\u093F\u092F\u093E", typo::detail::shape_params_of(deva));
+    if (dr && dr->glyphs.size() == 7 && stack->face_at(dr->glyphs[0].face_index)->file().postscript_name() == ".SFDevanagari-Regular") {
+        near(dr->glyphs[0].advance + dr->glyphs[1].offset.x, 8.992f, 0.002f, "Devanagari mark stays on its anchor under trak tracking");
+        near(dr->width, 35.904f, 0.002f, "tracked Devanagari line width matches CoreText");
+    }
 }
 
 /// Font smoothing and subpixel positioning: what makes the rasteriser draw

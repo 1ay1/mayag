@@ -1254,6 +1254,16 @@ class FontStack : public Shaper {
             if (!face.extents(g, e.x_bearing, e.y_bearing, e.width, e.height)) e = {};
             return true;
         };
+        // `trak` tracking and letter spacing go INTO the positioning pass,
+        // on every advancing glyph as CoreText applies them, before mark
+        // attachment: GPOS mark offsets are relative to the pen after the
+        // base's advance, so adding the tracking to the base afterwards
+        // pushed every attached mark right by it (SF Devanagari's u-sign
+        // sat 38 units off its anchor).
+        const float scale = face.scale_for(params.size_px);
+        const float track = tracking_px(face, params);
+        if (scale > 0.0f) ff.tracking = (track + params.letter_spacing) / scale;
+        ff.track_every_glyph = true;
 
         const ot::Direction dir = (level & 1) ? ot::Direction::rtl : ot::Direction::ltr;
         std::vector<ot::Feature> feats;
@@ -1280,8 +1290,6 @@ class FontStack : public Shaper {
 
         // Shaped output is visual; store logically (reverse RTL runs back).
         if (dir == ot::Direction::rtl) b.reverse();
-        const float scale = face.scale_for(params.size_px);
-        const float track = tracking_px(face, params);
         // CoreText's emoji box widens the advance with the image: the pen
         // moves ceil(box * em + tracking) (measured, every size).
         float emoji_pt = params.size_px;
@@ -1300,13 +1308,13 @@ class FontStack : public Shaper {
             g.missing = gi.gid == 0 && !ot::is_default_ignorable(gi);
             g.advance = gp.x_advance * scale;
             g.offset = Vec2{gp.x_offset * scale, -gp.y_offset * scale};   // y-up font units -> y-down px
-            if (g.advance != 0.0f) g.advance += params.letter_spacing + track;
             if (emoji_box && gp.x_advance != 0.0f) {
                 // CoreText's emoji advance: the image width plus tracking,
                 // rounded to whole pixels with a bias that fades out between
                 // 21 and 25 pt (fitted to CTRunGetAdvances, 8..160 pt).
                 const float bias = 0.37f * std::clamp((25.0f - emoji_pt) / 4.0f, 0.0f, 1.0f);
-                g.advance = std::round(gp.x_advance * scale * ebox.scale + track + bias) + params.letter_spacing;
+                const float untracked = gp.x_advance - ff.tracking;
+                g.advance = std::round(untracked * scale * ebox.scale + track + bias) + params.letter_spacing;
             }
             g.level = level;
             g.run = run_id;
@@ -2405,7 +2413,20 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             for (const std::size_t i : order) {
                 const auto& g = shaped.glyphs[i];
                 if (g.glyph_id == 0 && g.advance == 0.0f) continue;   // newline marker
-                placed.push_back({i, Vec2{pen_x, baseline_y} + g.offset});
+                // The baseline lands on a device row first and the glyph's own
+                // y offset is added (and rounded) on top, as CoreGraphics does:
+                // rounding baseline + offset in one step moved a Persian glyph
+                // with a -0.09 px cursive offset a whole row when the line's
+                // baseline fraction sat near .5.
+                Vec2 at{pen_x + g.offset.x, num::round(baseline_y) + g.offset.y};
+                // A MARK's vertical offset is not rounded but floored in y-up
+                // (ceil downward): SF Devanagari's u-sign at -1.05..-1.40 px
+                // draws 2 rows down in CoreText, at -2.1/-2.24 px 3 rows
+                // (measured 10..36 px); a base glyph's small cursive offset
+                // (-0.09 px, Persian) still rounds to the baseline.
+                if (g.advance == 0.0f && g.offset.y > 0.0f)
+                    at.y = num::round(baseline_y) + std::ceil(g.offset.y - 1e-3f);
+                placed.push_back({i, at});
                 pen_x += g.advance;
                 if (word_gap > 0.0f && g.cluster < s.size() &&
                     (s[g.cluster] == ' ' || s[g.cluster] == '\t')) {
