@@ -79,9 +79,20 @@ struct Transform {
     return t;
 }
 
+/// CoreGraphics font smoothing, the one definition: growth per side in
+/// device px for a glyph at `ppem` and smoothing level (0 black .. 4 white),
+/// min(kSmoothingMax, (kSmoothingBase + kSmoothingPerLevel * level) * ppem),
+/// as read from CGGlyphBuilder under lldb.
+inline constexpr double kSmoothingMax      = 0.3;
+inline constexpr double kSmoothingBase     = 0.0058;
+inline constexpr double kSmoothingPerLevel = 0.0025;
+[[nodiscard]] inline double smoothing_growth(double ppem, double level) noexcept {
+    return std::fmin(kSmoothingMax, (kSmoothingBase + kSmoothingPerLevel * level) * std::fmax(ppem, 0.0));
+}
+
 /// The light-text dilation CoreGraphics uses when choosing targets
 /// (FontSmoothing for light text: min(0.3, 0.015125 px per px)).
-[[nodiscard]] inline double light_dilation(double ppem) noexcept { return std::fmin(ppem * 0.015125, 0.3); }
+[[nodiscard]] inline double light_dilation(double ppem) noexcept { return std::fmin(ppem * 0.015125, kSmoothingMax); }
 
 /// CGFontAutohintTransformCreate: nothing unless ppem is an integer in
 /// 7..18; otherwise choose the targets and build the map for `dilation`.

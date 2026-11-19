@@ -23,6 +23,8 @@
 #endif
 
 #include <mayag/render/shader_source.hpp>
+#include <algorithm>
+#include <cmath>
 #include <string_view>
 #include <cstdio>
 #include <string>
@@ -169,8 +171,32 @@ static int check_metal_mirrors() {
     return bad;
 }
 
+// The kernel must stay in its transpilable subset, so it carries its own
+// sRGB transfer functions; they must equal core/color.hpp's (which the
+// framebuffer encode and the font engine use) everywhere, or text and
+// colours would decode differently on CPU and GPU.
+static int check_transfer_functions() {
+    int bad = 0;
+    float worst = 0.0f;
+    for (int i = 0; i <= 4096; ++i) {
+        const float x = static_cast<float>(i) / 4096.0f;
+        worst = std::max(worst, std::abs(mayag::kernel::srgb_to_linear(x) - mayag::detail::srgb_to_linear(x)));
+        worst = std::max(worst, std::abs(mayag::kernel::linear_to_srgb(x) - mayag::detail::linear_to_srgb(x)));
+    }
+    if (worst > 1e-6f) { std::printf("  FAIL  kernel sRGB curves differ from core/color.hpp by %g\n", worst); ++bad; }
+    // Metal's SDF band fallback is the kernel's sdf_edge_fallback.
+    char band[64];
+    std::snprintf(band, sizeof band, "params.x : %g;", static_cast<double>(mayag::kernel::sdf_edge_fallback));
+    if (std::string_view{mayag::render::shaders::msl_kernel}.find(band) == std::string_view::npos) {
+        std::printf("  FAIL  Metal SDF band fallback is not kernel::sdf_edge_fallback\n"); ++bad;
+    }
+    std::printf("transfer functions + SDF band single-sourced: %s\n", bad == 0 ? "ok" : "DRIFT");
+    return bad;
+}
+
 int main() {
     if (check_metal_mirrors() != 0) return 1;
+    if (check_transfer_functions() != 0) return 1;
     std::printf("mayag backend boundary\n======================\n");
 
     // ── what the core knows ─────────────────────────────────────────

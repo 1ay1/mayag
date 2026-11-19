@@ -805,7 +805,9 @@ struct TextLook {
     bool  cg_autohint;        ///< vertical autohint at small ppem
     bool  oblique_fallback;   ///< shear fallback faces inside italic runs
     bool  merge_glyphs;       ///< dlng-driven glyph merging (CoreText)
-    [[nodiscard]] static constexpr TextLook coregraphics() noexcept { return {0.30f, true, true, false, true}; }
+    [[nodiscard]] static constexpr TextLook coregraphics() noexcept {
+        return {static_cast<float>(cg_autohint::kSmoothingMax), true, true, false, true};
+    }
     [[nodiscard]] static constexpr TextLook portable() noexcept { return {0.0f, false, true, true, false}; }
     [[nodiscard]] static constexpr TextLook platform() noexcept {
         return coregraphics_text_default ? coregraphics() : portable();
@@ -1786,8 +1788,9 @@ class FontStack : public Shaper {
     /// FontConfig::smoothing / 0.3 so 0 turns it off.
     [[nodiscard]] float smoothing_px(float size_px, int level = 4) const noexcept {
         if (config_.smoothing <= 0.0f) return 0.0f;
-        const float per_px = 0.0058f + 0.0025f * static_cast<float>(std::clamp(level, 0, 4));
-        return num::min(0.3f, per_px * num::max(size_px, 0.0f)) * (config_.smoothing / 0.3f);
+        constexpr float cg_max = static_cast<float>(cg_autohint::kSmoothingMax);
+        const float g = static_cast<float>(cg_autohint::smoothing_growth(size_px, std::clamp(level, 0, 4)));
+        return g * (config_.smoothing / cg_max);
     }
 
     /// CoreGraphics' font-smoothing level for text drawn in `c`: the colour's
@@ -1796,9 +1799,7 @@ class FontStack : public Shaper {
     /// CGFontGetDefaultDilationParameters: no mismatch). The background
     /// plays no part.
     [[nodiscard]] static int smoothing_level(Color<Srgb> c) noexcept {
-        const auto lin = [](float v) {
-            return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
-        };
+        const auto lin = [](float v) { return ::mayag::detail::srgb_to_linear(v); };   // core/color.hpp
         const float l = 0.2126f * lin(c.c0) + 0.7152f * lin(c.c1) + 0.0722f * lin(c.c2);
         return std::clamp(static_cast<int>(std::lround(4.0f * l)), 0, 4);
     }

@@ -51,9 +51,7 @@ struct SrgbEncodeTable {
     constexpr SrgbEncodeTable() {
         for (std::size_t i = 0; i < size; ++i) {
             const float linear = static_cast<float>(i) / static_cast<float>(size - 1);
-            const float encoded = linear <= 0.0031308f
-                ? linear * 12.92f
-                : 1.055f * num::pow(linear, 1.0f / 2.4f) - 0.055f;
+            const float encoded = ::mayag::detail::linear_to_srgb(linear);   // core/color.hpp: the C++ OETF
             lut[i] = static_cast<std::uint8_t>(num::saturate(encoded) * 255.0f + 0.5f);
         }
     }
@@ -348,11 +346,6 @@ class Software {
     // both live in render/kernel.hpp, the single source of truth every backend
     // shares. They used to live HERE, which is exactly why GPU text could never
     // match this rasteriser: no shader had them.
-    static constexpr float sdf_edge = kernel::sdf_edge_fallback;
-
-    [[nodiscard]] static float apply_text_gamma(float cov, Vec4 premul_color) noexcept {
-        return kernel::apply_text_gamma(cov, premul_color);
-    }
 
     [[nodiscard]] static Rect clamp_scissor(const Rect& clip, const Framebuffer& fb) {
         const Rect screen{0.0f, 0.0f, static_cast<float>(fb.width()),
@@ -588,18 +581,23 @@ class Software {
                 // The atlas slot rides in the INSTANCE, not the batch, so
                 // glyphs and shapes share one batch. See DrawList::glyph.
                 (void)texture;
-                const float raw = sampler->sample(inst.texture_slot, u, v);
 
-                // A bitmap entry IS coverage; a distance-field entry is turned
-                // into exact box coverage by the shared kernel function, from
-                // the field and two taps one display pixel away (params.zw).
-                (void)sdf_edge;
-                float cov = raw;
-                if ((inst.flags & instance_flags::glyph_sdf) != 0) {
-                    const float rx = sampler->sample(inst.texture_slot, u + inst.params.z, v);
-                    const float ry = sampler->sample(inst.texture_slot, u, v + inst.params.w);
-                    cov = kernel::sdf_glyph_coverage(raw, rx, ry, inst.params);
-                }
+                // THE glyph coverage is kernel::glyph_coverage, the same
+                // function the GPU shader is transpiled from: bitmap entries
+                // are coverage, distance-field entries become box coverage
+                // from the field and its taps. Only the texture fetch is ours.
+                struct Ctx { const CoverageSampler* s; std::uint32_t slot; } ctx{sampler, inst.texture_slot};
+                kernel::Env env{};
+                env.ctx = &ctx;
+                env.atlas_r = [](const void* c, kernel::vec2 uv) {
+                    const auto* k = static_cast<const Ctx*>(c);
+                    return k->s->sample(k->slot, uv.x, uv.y);
+                };
+                kernel::Fragment f{};
+                f.uv = kernel::vec2{u, v};
+                f.flags = inst.flags;
+                f.params = inst.params;
+                const float cov = kernel::glyph_coverage(f, env);
 
                 // ── text coverage ─────────────────────────────────────
                 //
