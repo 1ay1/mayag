@@ -438,6 +438,10 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_theme_tests PRIVATE ${MAYAG_WARNINGS})
     target_compile_definitions(mayag_theme_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
     add_test(NAME mayag_theme_tests COMMAND mayag_theme_tests)
+    # It asserts a wall-clock cascade budget (ns/node): run alone, as
+    # reactive_headless does, or a parallel ctest load fails it (~100 ns/node
+    # alone, 400+ beside -j8 builds).
+    set_tests_properties(mayag_theme_tests PROPERTIES RUN_SERIAL TRUE)
 
     # The window host on jaal, driven through the headless platform. It is the
     # same host run<P>() uses on a real window.

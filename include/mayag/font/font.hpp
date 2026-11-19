@@ -1404,6 +1404,18 @@ class FontStack : public Shaper {
     /// at every size (Skia's choice) put every SF glyph ~0.15 px right of
     /// where macOS draws it.
     static constexpr int max_subpixel_phases = 5;
+
+    /// Glyph sizes are cached and rasterised in 1/64 px steps (see
+    /// glyph(): quarter-pixel buckets moved edges visibly against macOS).
+    /// One encode/decode pair, used by the cache key, the rasteriser and the
+    /// merged-run hash, so they cannot round differently.
+    static constexpr float size_steps_per_px = 64.0f;
+    [[nodiscard]] static std::uint32_t size_bucket_of(float size_px) noexcept {
+        return static_cast<std::uint32_t>(num::clamp(num::round(size_px * size_steps_per_px), 1.0f, 16777216.0f));
+    }
+    [[nodiscard]] static float size_of_bucket(std::uint32_t bucket) noexcept {
+        return static_cast<float>(bucket) / size_steps_per_px;
+    }
     [[nodiscard]] static int subpixel_phases_for(float size_px) noexcept {
         if (!(size_px > 0.0f)) return 1;
         const int n = 1 + static_cast<int>(std::floor(100.0f / (3.0f * size_px) + 1e-4f));
@@ -1445,7 +1457,7 @@ class FontStack : public Shaper {
         pieces.reserve(run.size());
         const auto base = split_pen(first_pen_x, phases);
         mix(static_cast<std::uint64_t>(base.phase));
-        mix(static_cast<std::uint64_t>(std::lround(size_px * 64.0f)));
+        mix(static_cast<std::uint64_t>(size_bucket_of(size_px)));
         mix(static_cast<std::uint64_t>(smoothing));
         for (const auto& m : run) {
             const auto sp = split_pen(first_pen_x + m.pos.x, phases);
@@ -1530,8 +1542,7 @@ class FontStack : public Shaper {
         const float sdf_px = use_sdf ? sdf_raster_px(size_px) : 0.0f;
         key.size_bucket = use_sdf
             ? static_cast<std::uint32_t>(sdf_px)
-            : static_cast<std::uint32_t>(num::clamp(num::round(size_px * 64.0f),
-                                                    1.0f, 16777216.0f));
+            : size_bucket_of(size_px);
         // Synthesise italic by shearing when the font can't slant itself
         // (static faces, or variable faces with no slnt/ital axis). Variable
         // faces WITH a slant axis already did it for real in pin_variations,
@@ -1688,7 +1699,7 @@ class FontStack : public Shaper {
 
         // Rasterise at the size the KEY represents, not the raw request, so
         // two calls that share a cache slot also share identical pixels.
-        const float quantised = static_cast<float>(key.size_bucket) / 64.0f;
+        const float quantised = size_of_bucket(key.size_bucket);
         const float scale = face.scale_for(quantised);
         const float grow = smoothing_px(quantised, smoothing);
         // macOS's glyph pipeline, in device px (y up): the font-smoothing
