@@ -979,6 +979,10 @@ class WaylandWindow {
         return gpu_->import_dmabuf_as(id, d, w, h, std::move(on_free));
     }
     [[nodiscard]] bool can_import_images() const noexcept { return gpu_active_ && gpu_->can_import(); }
+    /// Free GPU resources whose last frame has finished, without waiting for
+    /// the next frame (see VulkanDevice::poll_retired). True while some are
+    /// still in flight, so the caller polls again soon.
+    bool poll_gpu_retired() { return gpu_active_ && gpu_->poll_retired(); }
     [[nodiscard]] std::span<const FormatModifier> importable_formats() const {
         return gpu_active_ ? gpu_->importable_formats() : std::span<const FormatModifier>{};
     }
@@ -2425,6 +2429,17 @@ class WaylandWindow {
         p_->upload_image(id, std::move(img));
     }
     void release_image(std::uint32_t id) { p_->release_image(id); }
+
+#ifdef MAYAG_WITH_VULKAN
+    /// A foreign GPU buffer (dmabuf) as image(id), zero copies. See Impl.
+    [[nodiscard]] ImportResult import_image(std::uint32_t id, const Dmabuf& d, int w, int h,
+                                            std::function<void()> on_free) {
+        return p_->import_image(id, d, w, h, std::move(on_free));
+    }
+    [[nodiscard]] bool can_import_images() const noexcept { return p_->can_import_images(); }
+    [[nodiscard]] std::span<const FormatModifier> importable_formats() const { return p_->importable_formats(); }
+    bool poll_gpu_retired() { return p_->poll_gpu_retired(); }
+#endif
 
     void set_coverage_sampler(const backend::CoverageSampler* s) {
         p_->set_coverage_sampler(s);

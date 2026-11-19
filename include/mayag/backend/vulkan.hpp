@@ -703,6 +703,7 @@ struct Api {
     void (*DestroyFence)(VkDevice, VkFence, const void*) = nullptr;
     VkResult (*WaitForFences)(VkDevice, std::uint32_t, const VkFence*, Bool32, std::uint64_t) = nullptr;
     VkResult (*ResetFences)(VkDevice, std::uint32_t, const VkFence*) = nullptr;
+    VkResult (*GetFenceStatus)(VkDevice, VkFence) = nullptr;
     VkResult (*CreateSemaphore)(VkDevice, const VkSemaphoreCreateInfo*, const void*, VkSemaphore*) = nullptr;
     void (*DestroySemaphore)(VkDevice, VkSemaphore, const void*) = nullptr;
 

@@ -304,6 +304,24 @@ class VulkanDevice {
         return rebuild_swapchain_ || content_changed_ || acquire_failed_;
     }
 
+    /// Free what is retired, if the last frame has finished, WITHOUT waiting.
+    ///
+    /// Retirement is normally collected when the next frame starts. A
+    /// compositor cannot wait for that: a client whose old buffer was
+    /// replaced is blocked until that buffer is released, and if nothing else
+    /// changes on screen there is no next frame. So the host polls this
+    /// whenever it is idle; it costs one vkGetFenceStatus.
+    /// Returns whether anything is still waiting to be freed.
+    bool poll_retired() {
+        if (!valid_ || reclaim_.pending() == 0) return false;
+        if (api_->GetFenceStatus != nullptr && api_->GetFenceStatus(device_, in_flight_) == vk::VK_SUCCESS) {
+            // The fence is signalled: the last submit is done, so everything
+            // retired up to and including it is free.
+            reclaim_.collect(frames_completed_ + 1);
+        }
+        return reclaim_.pending() != 0;
+    }
+
     /// Render to an offscreen framebuffer and read it back as RGBA8. Used by
     /// the GPU-vs-software equivalence test, so the thing CI checks is the
     /// thing the window runs.
@@ -645,16 +663,29 @@ class VulkanDevice {
             return std::unexpected(ImportError::invalid_buffer);
         }
 
-        // The client wrote these pixels with the GPU, outside any layout mayag
-        // knows about, so the image arrives in UNDEFINED and must be moved to
-        // a layout a shader can sample.
+        // The client wrote these pixels on ITS queue, outside this device.
+        // Ownership must be ACQUIRED from the foreign queue family, from
+        // GENERAL: transitioning from UNDEFINED tells the driver the contents
+        // are garbage, and with a compressed modifier (NVIDIA's tiled ones)
+        // it throws them away -- the window draws, but blank.
+        // VK_QUEUE_FAMILY_FOREIGN_EXT where the device has it, else
+        // VK_QUEUE_FAMILY_EXTERNAL (core 1.1 external memory).
         one_shot([&](vk::VkCommandBuffer cb) {
             constexpr vk::Flags kShaderRead = 0x00000020;   // ACCESS_SHADER_READ_BIT
             constexpr vk::Flags kTopOfPipe  = 0x00000001;   // STAGE_TOP_OF_PIPE_BIT
             constexpr vk::Flags kFragment   = 0x00000080;   // STAGE_FRAGMENT_SHADER_BIT
-            barrier_image(cb, image, 0 /*UNDEFINED*/,
-                          vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                          0, kShaderRead, kTopOfPipe, kFragment);
+            constexpr int kGeneral = 1;                      // VK_IMAGE_LAYOUT_GENERAL
+            vk::VkImageMemoryBarrier b{};
+            b.sType = vk::VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.srcAccessMask = 0;
+            b.dstAccessMask = kShaderRead;
+            b.oldLayout = kGeneral;
+            b.newLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            b.srcQueueFamilyIndex = foreign_queue_ ? 0xFFFF'FFFDu : 0xFFFF'FFFEu;
+            b.dstQueueFamilyIndex = queue_family_;
+            b.image = image;
+            b.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            api_->CmdPipelineBarrier(cb, kTopOfPipe, kFragment, 0, 0, nullptr, 0, nullptr, 1, &b);
         });
 
         const std::uint32_t slot = next_import_slot_++;
@@ -1223,6 +1254,7 @@ class VulkanDevice {
         MG_LOAD(DestroyFence, "vkDestroyFence");
         MG_LOAD(WaitForFences, "vkWaitForFences");
         MG_LOAD(ResetFences, "vkResetFences");
+        MG_LOAD(GetFenceStatus, "vkGetFenceStatus");
         MG_LOAD(CreateSemaphore, "vkCreateSemaphore");
         MG_LOAD(DestroySemaphore, "vkDestroySemaphore");
         MG_LOAD(CmdBeginRenderPass, "vkCmdBeginRenderPass");
@@ -1311,6 +1343,11 @@ class VulkanDevice {
             dev_exts.push_back("VK_KHR_bind_memory2");
             dev_exts.push_back("VK_KHR_get_memory_requirements2");
             dmabuf_import_ = true;
+            // The right queue family to acquire a client's buffer from.
+            if (has_device_extension("VK_EXT_queue_family_foreign")) {
+                dev_exts.push_back("VK_EXT_queue_family_foreign");
+                foreign_queue_ = true;
+            }
         }
 
         // Explicit synchronisation, likewise opportunistic.
@@ -2420,6 +2457,7 @@ class VulkanDevice {
     /// 0xFFFF'FFFE.
     std::uint32_t next_import_slot_ = 0x8000'0000u;
     bool          dmabuf_import_ = false;
+    bool          foreign_queue_ = false;   ///< VK_EXT_queue_family_foreign enabled
     /// Whether timeline semaphores and syncobj import are available.
     bool          timeline_sync_ = false;
 
