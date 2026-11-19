@@ -1704,6 +1704,16 @@ struct RoleMod {
 };
 [[nodiscard]] constexpr RoleMod role(a11y::Role r) { return {r}; }
 
+/// `| caret_at(rect)`: where a text-entry node's caret sits, relative to the
+/// node (logical px). Lets the input method put its candidate window at the
+/// caret. `text_field` sets it itself.
+struct CaretAt {
+    MAYAG_MODIFIER(CaretAt, caps::none, caps::none, caps::none, "caret_at");
+    Rect v;
+    constexpr void apply(Style& s) const { s.caret_rect = v; }
+};
+[[nodiscard]] constexpr CaretAt caret_at(Rect r) { return {r}; }
+
 /// What a screen reader announces. Essential for anything whose meaning is
 /// carried by an icon or a colour rather than by text.
 struct LabelMod {

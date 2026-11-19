@@ -130,6 +130,12 @@ class Headless {
 
     void type(std::string_view s) { push(TextEvent{std::string{s}}); }
 
+    /// What the host told the platform about text entry: a text field has
+    /// focus (the input method would be enabled), and where its caret is.
+    void set_text_input(bool on, Rect caret) { text_input_ = on; if (on) text_caret_ = caret; }
+    [[nodiscard]] bool text_input_active() const noexcept { return text_input_; }
+    [[nodiscard]] Rect text_input_caret() const noexcept { return text_caret_; }
+
     /// Script an input-method composition, as a real IME produces it.
     ///
     /// Being able to drive this headlessly is what makes CJK input testable
@@ -257,6 +263,8 @@ class Headless {
     int         cursor_ = 0;
     Vec2        last_pos_{};
     std::uint64_t frames_presented_ = 0;
+    bool        text_input_ = false;
+    Rect        text_caret_{};
 };
 
 }  // namespace mayag::platform

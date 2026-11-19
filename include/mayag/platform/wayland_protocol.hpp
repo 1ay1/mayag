@@ -180,6 +180,19 @@ enum : std::uint32_t {
     cursor_dev_destroy          = 0,
     cursor_dev_set_shape        = 1,
 
+    // text-input-unstable-v3: how an input method (fcitx5, ibus) reaches a
+    // Wayland client. Requests are double-buffered until `commit`.
+    text_input_mgr_destroy          = 0,
+    text_input_mgr_get_text_input   = 1,
+    text_input_destroy              = 0,
+    text_input_enable               = 1,
+    text_input_disable              = 2,
+    text_input_set_surrounding_text = 3,
+    text_input_set_change_cause     = 4,
+    text_input_set_content_type     = 5,
+    text_input_set_cursor_rectangle = 6,
+    text_input_commit               = 7,
+
     // xdg-shell
     wm_base_destroy         = 0,
     wm_base_get_xdg_surface = 2,
@@ -418,6 +431,11 @@ struct XdgTables {
     wl_message pres_methods[2]{};
     wl_message pres_events[1]{};
     wl_message pres_fb_events[3]{};
+    const wl_interface* text_input_get_t[2]{};
+    const wl_interface* text_input_surface_t[1]{};
+    wl_message text_input_mgr_methods[2]{};
+    wl_message text_input_methods[8]{};
+    wl_message text_input_events[6]{};
 
     wl_interface wm_base{};
     wl_interface surface{};
@@ -432,6 +450,8 @@ struct XdgTables {
     wl_interface cursor_dev{};
     wl_interface presentation{};
     wl_interface pres_feedback{};
+    wl_interface text_input_mgr{};
+    wl_interface text_input{};
 
     XdgTables() {
         const Lib& L = lib();
@@ -583,6 +603,37 @@ struct XdgTables {
         pres_fb_events[1] = {"presented",   "uuuuuuu", null_types};
         pres_fb_events[2] = {"discarded",   "",        null_types};
         pres_feedback = wl_interface{"wp_presentation_feedback", 1, 0, nullptr, 3, pres_fb_events};
+
+        // ── zwp_text_input_manager_v3 / zwp_text_input_v3 ───────────────────
+        //
+        // Input methods. The compositor routes the keyboard through the IME
+        // and the client hears only preedit and commit strings, applied
+        // atomically at `done`.
+        text_input_get_t[0] = &text_input;
+        text_input_get_t[1] = L.i_seat;
+        text_input_surface_t[0] = L.i_surface;
+
+        text_input_mgr_methods[0] = {"destroy",        "",   null_types};
+        text_input_mgr_methods[1] = {"get_text_input", "no", text_input_get_t};
+        text_input_mgr = wl_interface{"zwp_text_input_manager_v3", 1, 2,
+                                      text_input_mgr_methods, 0, nullptr};
+
+        text_input_methods[0] = {"destroy",               "",     null_types};
+        text_input_methods[1] = {"enable",                "",     null_types};
+        text_input_methods[2] = {"disable",               "",     null_types};
+        text_input_methods[3] = {"set_surrounding_text",  "sii",  null_types};
+        text_input_methods[4] = {"set_text_change_cause", "u",    null_types};
+        text_input_methods[5] = {"set_content_type",      "uu",   null_types};
+        text_input_methods[6] = {"set_cursor_rectangle",  "iiii", null_types};
+        text_input_methods[7] = {"commit",                "",     null_types};
+        text_input_events[0]  = {"enter",                   "o",    text_input_surface_t};
+        text_input_events[1]  = {"leave",                   "o",    text_input_surface_t};
+        text_input_events[2]  = {"preedit_string",          "?sii", null_types};
+        text_input_events[3]  = {"commit_string",           "?s",   null_types};
+        text_input_events[4]  = {"delete_surrounding_text", "uu",   null_types};
+        text_input_events[5]  = {"done",                    "u",    null_types};
+        text_input = wl_interface{"zwp_text_input_v3", 1, 8, text_input_methods,
+                                  6, text_input_events};
     }
 };
 

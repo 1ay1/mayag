@@ -168,6 +168,126 @@ struct ShmBuffer {
     return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
 }
 
+/// Client-side key repeat.
+///
+/// Wayland does not repeat keys for a client: the compositor announces a
+/// rate and delay (wl_keyboard.repeat_info) and the CLIENT generates the
+/// repeats. Without this, holding Backspace deletes one character and
+/// holding an arrow moves once — every GTK/Qt app repeats, so a mayag app
+/// that does not reads as broken.
+///
+/// Pure: times are seconds on any monotonic clock, so it is tested headless.
+struct KeyRepeat {
+    std::int32_t rate  = 25;    ///< repeats per second; 0 disables (per protocol)
+    std::int32_t delay = 600;   ///< ms before the first repeat
+    std::uint32_t key = 0;      ///< evdev code held, 0 = none
+    double next = 0.0;          ///< when the next repeat fires
+
+    /// A key went down. Modifier keys and keys the keymap says do not
+    /// repeat (`repeats` false) never start a repeat.
+    void press(std::uint32_t code, bool repeats, double now) noexcept {
+        if (!repeats || rate <= 0) { key = 0; return; }
+        key  = code;
+        next = now + static_cast<double>(delay) / 1000.0;
+    }
+    void release(std::uint32_t code) noexcept { if (code == key) key = 0; }
+    void cancel() noexcept { key = 0; }
+    [[nodiscard]] bool active() const noexcept { return key != 0; }
+
+    /// How many repeats are due by `now` (advancing the clock). Capped so a
+    /// stalled loop does not dump a burst of hundreds of deletions.
+    [[nodiscard]] int due(double now) noexcept {
+        if (key == 0 || rate <= 0 || now < next) return 0;
+        const double period = 1.0 / static_cast<double>(rate);
+        int n = 0;
+        while (next <= now && n < 4) { next += period; ++n; }
+        if (next <= now) next = now + period;
+        return n;
+    }
+};
+
+/// zwp_text_input_v3's double-buffered state, applied at `done`.
+///
+/// The input method sends preedit_string / commit_string /
+/// delete_surrounding_text in any order and nothing takes effect until
+/// `done`, which applies them in the protocol's fixed order: delete the
+/// surrounding text, insert the commit string, then show the new preedit.
+/// This turns one `done` into mayag's events (TextEvent for commits,
+/// ComposeEvent / ComposeEndEvent for the preedit), so the IME speaks the
+/// same event model the headless backend scripts and macOS will.
+struct TextInputState {
+    // pending (since the last done)
+    std::string preedit, commit;
+    std::int32_t cursor_begin = -1, cursor_end = -1;
+    bool has_preedit = false, has_commit = false;
+    std::uint32_t delete_before = 0, delete_after = 0;
+    // applied
+    bool composing = false;
+    std::uint32_t serial = 0;   ///< number of commit requests we sent
+
+    void on_preedit(const char* text, std::int32_t begin, std::int32_t end) {
+        preedit = text != nullptr ? text : "";
+        cursor_begin = begin; cursor_end = end;
+        has_preedit = true;
+    }
+    void on_commit(const char* text) {
+        commit = text != nullptr ? text : "";
+        has_commit = true;
+    }
+    void on_delete(std::uint32_t before, std::uint32_t after) {
+        delete_before = before; delete_after = after;
+    }
+
+    /// Apply at `done`. `out` receives the events in protocol order.
+    template <class Out>
+    void on_done(Out&& out) {
+        // Deleting surrounding text needs the app's buffer; mayag does not
+        // report surrounding text, so a compliant IME sends none. Ignored.
+        delete_before = delete_after = 0;
+        // A commit (or an explicit empty preedit) ends the composition.
+        const bool new_preedit = has_preedit && !preedit.empty();
+        if (composing && (has_commit || !new_preedit)) {
+            out(Event{ComposeEndEvent{}});
+            composing = false;
+        }
+        if (has_commit && !commit.empty()) out(Event{TextEvent{commit}});
+        if (new_preedit) {
+            const auto len = static_cast<std::uint32_t>(preedit.size());
+            // -1/-1 means "hide the cursor": put it at the end.
+            const std::uint32_t b = cursor_begin < 0 ? len : std::min<std::uint32_t>(static_cast<std::uint32_t>(cursor_begin), len);
+            const std::uint32_t e = cursor_end < 0 ? b : std::min<std::uint32_t>(static_cast<std::uint32_t>(cursor_end), len);
+            out(Event{ComposeEvent{preedit, std::min(b, e), std::max(b, e), e}});
+            composing = true;
+        }
+        preedit.clear(); commit.clear();
+        has_preedit = has_commit = false;
+        cursor_begin = cursor_end = -1;
+    }
+
+    /// Focus left the text input: drop anything half-composed.
+    template <class Out>
+    void reset(Out&& out) {
+        if (composing) out(Event{ComposeEndEvent{}});
+        composing = false;
+        preedit.clear(); commit.clear();
+        has_preedit = has_commit = false;
+    }
+};
+
+/// Shift/Ctrl/Alt/Super/Caps/Num/AltGr: keys that never auto-repeat (the
+/// fallback when no keymap can say).
+[[nodiscard]] constexpr bool is_modifier_evdev(std::uint32_t code) noexcept {
+    switch (code) {
+        case 29: case 97:            // ctrl
+        case 42: case 54:            // shift
+        case 56: case 100:           // alt, altgr
+        case 125: case 126:          // super
+        case 58: case 69: case 70:   // caps, num, scroll lock
+            return true;
+        default: return false;
+    }
+}
+
 /// Linux evdev keycode -> mayag Key.
 ///
 /// Wayland sends raw evdev codes, which are POSITIONAL: they name the physical
@@ -263,6 +383,40 @@ struct ShmBuffer {
         case 126: return Key::super;        // right super
         default:  return Key::unknown;
     }
+}
+
+/// The NAMED key a keysym means (Key::unknown for printable keysyms).
+///
+/// Named keys follow the keymap, not the position: with `caps:escape` the
+/// Caps Lock key IS Escape, and a virtual keyboard (on-screen, remote
+/// desktop, wtype) sends whatever keycode its own keymap gives BackSpace.
+/// GTK and Qt read these from the keysym; so does mayag. Letters and digits
+/// stay positional (key_from_evdev) so shortcuts keep their place.
+[[nodiscard]] constexpr Key key_from_keysym(std::uint32_t sym) noexcept {
+    switch (sym) {
+        case 0xff08: return Key::backspace;
+        case 0xff09: case 0xfe20: return Key::tab;          // Tab, ISO_Left_Tab
+        case 0xff0d: case 0xff8d: return Key::enter;        // Return, KP_Enter
+        case 0xff1b: return Key::escape;
+        case 0xffff: case 0xff9f: return Key::del;          // Delete, KP_Delete
+        case 0xff63: case 0xff9e: return Key::insert;
+        case 0xff50: case 0xff95: return Key::home;
+        case 0xff57: case 0xff9c: return Key::end;
+        case 0xff51: case 0xff96: return Key::left;
+        case 0xff52: case 0xff97: return Key::up;
+        case 0xff53: case 0xff98: return Key::right;
+        case 0xff54: case 0xff99: return Key::down;
+        case 0xff55: case 0xff9a: return Key::page_up;
+        case 0xff56: case 0xff9b: return Key::page_down;
+        case 0xffe1: case 0xffe2: return Key::shift;
+        case 0xffe3: case 0xffe4: return Key::ctrl;
+        case 0xffe9: case 0xffea: return Key::alt;
+        case 0xffeb: case 0xffec: return Key::super;
+        case 0xffe5: return Key::caps_lock;
+        default: break;
+    }
+    if (sym >= 0xffbe && sym <= 0xffc9) return static_cast<Key>(static_cast<int>(Key::f1) + static_cast<int>(sym - 0xffbe));
+    return Key::unknown;
 }
 
 /// mayag cursor -> wp_cursor_shape_device_v1 shape.
@@ -521,6 +675,8 @@ class WaylandWindow {
         }
 
         L.display_dispatch_pending(display_);
+        // Client-side key repeat: the held key's repeats due by now.
+        pump_repeat();
         // Requests the listeners made (acks, cursor) go out now, not at the
         // next frame.
         L.display_flush(display_);
@@ -1163,6 +1319,9 @@ class WaylandWindow {
                 wl::add_listener(w->presentation_, &presentation_listener, w);
         } else if (id == "wp_cursor_shape_manager_v1") {
             w->cursor_manager_ = bind(&wl::xdg().cursor_mgr, 1);
+        } else if (id == "zwp_text_input_manager_v3") {
+            w->text_input_mgr_ = bind(&wl::xdg().text_input_mgr, 1);
+            w->make_text_input();
         }
     }
 
@@ -1461,6 +1620,7 @@ class WaylandWindow {
             if (w->keyboard_ != nullptr) {
                 wl::add_listener(w->keyboard_, &keyboard_listener, w);
             }
+            w->make_text_input();
         }
     }
 
@@ -1600,17 +1760,23 @@ class WaylandWindow {
     static void on_kb_keymap(void* data, wl::proxy*, std::uint32_t format,
                              std::int32_t fd, std::uint32_t size) {
         Impl* w = self(data);
+        // A new keymap changes what the held key means (layout switch,
+        // virtual keyboards): never repeat an old key under a new map.
+        w->repeat_.cancel();
         w->load_keymap(format, fd, size);
     }
 
     static void on_kb_enter(void* data, wl::proxy*, std::uint32_t, wl::proxy*,
                             wl::wl_array*) {
+        self(data)->repeat_.cancel();
         self(data)->pending_.push_back(FocusEvent{true});
     }
 
     static void on_kb_leave(void* data, wl::proxy*, std::uint32_t, wl::proxy*) {
         Impl* w = self(data);
         w->mods_ = Mods{};
+        w->repeat_.cancel();
+        if (w->compose_state_ != nullptr && w->xkb_.compose_reset != nullptr) w->xkb_.compose_reset(w->compose_state_);
         w->pending_.push_back(FocusEvent{false});
     }
 
@@ -1619,29 +1785,66 @@ class WaylandWindow {
         Impl* w = self(data);
         w->key_serial_ = serial;
 
-        // evdev codes are offset by 8 from the X11 keycodes xkbcommon wants.
-        const std::uint32_t xkb_code = key + 8u;
-
         // mayag's Event variant models key PRESSES only — a release carries no
         // information the app model uses, and inventing a KeyUp alternative
         // here would be a platform backend widening the public event type.
-        if (state != wl::keyboard_key_pressed) return;
+        // A release does stop that key's repeat.
+        if (state != wl::keyboard_key_pressed) { w->repeat_.release(key); return; }
 
-        w->pending_.push_back(KeyEvent{wldetail::key_from_evdev(key), w->mods_, false});
+        w->emit_key(key, false);
+        const bool repeats = w->xkb_keymap_ != nullptr && w->xkb_.key_repeats != nullptr
+            ? w->xkb_.key_repeats(w->xkb_keymap_, key + 8u) != 0
+            : !wldetail::is_modifier_evdev(key);
+        w->repeat_.press(key, repeats, wldetail::monotonic_now());
+    }
 
-        // Text. With a keymap this is the layout-correct character (including
-        // dead keys and AltGr); without one it is nothing, which is correct —
-        // guessing ASCII from a keycode is wrong on every non-US layout.
-        if (w->xkb_state_ != nullptr && w->xkb_.key_get_utf8 != nullptr) {
-            char buf[32];
-            const int n = w->xkb_.key_get_utf8(w->xkb_state_, xkb_code, buf,
-                                               sizeof(buf));
-            if (n > 0 && !w->mods_.ctrl && !w->mods_.super) {
-                const std::string_view s{buf, static_cast<std::size_t>(n)};
-                // Filter control characters; Enter/Tab/Backspace are KeyDown.
-                if (s.size() > 1 || static_cast<unsigned char>(s[0]) >= 0x20) {
-                    w->pending_.push_back(TextEvent{std::string{s}});
+    /// One key press (or a client-side repeat of one): the KeyEvent, then
+    /// its text through Compose.
+    void emit_key(std::uint32_t key, bool repeat) {
+        // evdev codes are offset by 8 from the X11 keycodes xkbcommon wants.
+        const std::uint32_t xkb_code = key + 8u;
+        Key k = wldetail::key_from_evdev(key);
+        if (xkb_state_ != nullptr && xkb_.key_get_one_sym != nullptr) {
+            if (const Key named = wldetail::key_from_keysym(xkb_.key_get_one_sym(xkb_state_, xkb_code));
+                named != Key::unknown)
+                k = named;
+        }
+        pending_.push_back(KeyEvent{k, mods_, repeat});
+
+        // Text. With a keymap this is the layout-correct character (AltGr
+        // included); without one it is nothing, which is correct — guessing
+        // ASCII from a keycode is wrong on every non-US layout.
+        if (xkb_state_ == nullptr || xkb_.key_get_utf8 == nullptr) return;
+        if (mods_.ctrl || mods_.super) return;
+        char buf[64];
+        int n = 0;
+
+        // Compose (dead keys, the Compose key): feed the keysym; while a
+        // sequence is in progress nothing is typed, a completed one types
+        // its result, a cancelled one types nothing (as GTK/Qt do).
+        // XKB_COMPOSE_FEED_ACCEPTED = 1; statuses: NOTHING 0, COMPOSING 1,
+        // COMPOSED 2, CANCELLED 3.
+        if (compose_state_ != nullptr && xkb_.key_get_one_sym != nullptr && xkb_.compose_feed != nullptr &&
+            xkb_.compose_status != nullptr) {
+            const std::uint32_t sym = xkb_.key_get_one_sym(xkb_state_, xkb_code);
+            if (xkb_.compose_feed(compose_state_, sym) == 1) {
+                const int st = xkb_.compose_status(compose_state_);
+                if (st == 1) return;
+                if (st == 3) { xkb_.compose_reset(compose_state_); return; }
+                if (st == 2) {
+                    n = xkb_.compose_utf8 != nullptr ? xkb_.compose_utf8(compose_state_, buf, sizeof(buf)) : 0;
+                    xkb_.compose_reset(compose_state_);
+                    if (n > 0) pending_.push_back(TextEvent{std::string{buf, static_cast<std::size_t>(n)}});
+                    return;
                 }
+            }
+        }
+        n = xkb_.key_get_utf8(xkb_state_, xkb_code, buf, sizeof(buf));
+        if (n > 0) {
+            const std::string_view s{buf, static_cast<std::size_t>(n)};
+            // Filter control characters; Enter/Tab/Backspace are KeyDown.
+            if (s.size() > 1 || static_cast<unsigned char>(s[0]) >= 0x20) {
+                pending_.push_back(TextEvent{std::string{s}});
             }
         }
     }
@@ -1679,6 +1882,9 @@ class WaylandWindow {
         Impl* w = self(data);
         w->repeat_rate_  = rate;
         w->repeat_delay_ = delay;
+        w->repeat_.rate  = rate;
+        w->repeat_.delay = delay;
+        if (rate <= 0) w->repeat_.cancel();
     }
 
     static inline const struct {
@@ -1711,6 +1917,18 @@ class WaylandWindow {
         void  (*update_mask)(void*, std::uint32_t, std::uint32_t, std::uint32_t,
                              std::uint32_t, std::uint32_t, std::uint32_t) = nullptr;
         int   (*mod_active)(void*, const char*, std::uint32_t)           = nullptr;
+        // Repeat and Compose (dead keys, the Compose key). All optional.
+        int   (*key_repeats)(void*, std::uint32_t)                       = nullptr;
+        std::uint32_t (*key_get_one_sym)(void*, std::uint32_t)           = nullptr;
+        void* (*compose_table_new)(void*, const char*, int)              = nullptr;
+        void  (*compose_table_unref)(void*)                              = nullptr;
+        void* (*compose_state_new)(void*, int)                           = nullptr;
+        void  (*compose_state_unref)(void*)                              = nullptr;
+        int   (*compose_feed)(void*, std::uint32_t)                      = nullptr;
+        void  (*compose_reset)(void*)                                    = nullptr;
+        int   (*compose_status)(void*)                                   = nullptr;
+        int   (*compose_utf8)(void*, char*, std::size_t)                 = nullptr;
+        int   (*keysym_utf8)(std::uint32_t, char*, std::size_t)          = nullptr;
     };
 
     void load_keymap(std::uint32_t format, std::int32_t fd, std::uint32_t size) {
@@ -1741,6 +1959,17 @@ class WaylandWindow {
                     sym("xkb_state_update_mask"));
                 xkb_.mod_active = reinterpret_cast<decltype(xkb_.mod_active)>(
                     sym("xkb_state_mod_name_is_active"));
+                xkb_.key_repeats = reinterpret_cast<decltype(xkb_.key_repeats)>(sym("xkb_keymap_key_repeats"));
+                xkb_.key_get_one_sym = reinterpret_cast<decltype(xkb_.key_get_one_sym)>(sym("xkb_state_key_get_one_sym"));
+                xkb_.compose_table_new = reinterpret_cast<decltype(xkb_.compose_table_new)>(sym("xkb_compose_table_new_from_locale"));
+                xkb_.compose_table_unref = reinterpret_cast<decltype(xkb_.compose_table_unref)>(sym("xkb_compose_table_unref"));
+                xkb_.compose_state_new = reinterpret_cast<decltype(xkb_.compose_state_new)>(sym("xkb_compose_state_new"));
+                xkb_.compose_state_unref = reinterpret_cast<decltype(xkb_.compose_state_unref)>(sym("xkb_compose_state_unref"));
+                xkb_.compose_feed = reinterpret_cast<decltype(xkb_.compose_feed)>(sym("xkb_compose_state_feed"));
+                xkb_.compose_reset = reinterpret_cast<decltype(xkb_.compose_reset)>(sym("xkb_compose_state_reset"));
+                xkb_.compose_status = reinterpret_cast<decltype(xkb_.compose_status)>(sym("xkb_compose_state_get_status"));
+                xkb_.compose_utf8 = reinterpret_cast<decltype(xkb_.compose_utf8)>(sym("xkb_compose_state_get_utf8"));
+                xkb_.keysym_utf8 = reinterpret_cast<decltype(xkb_.keysym_utf8)>(sym("xkb_keysym_to_utf8"));
             }
         }
 
@@ -1765,10 +1994,126 @@ class WaylandWindow {
             xkb_keymap_ = xkb_.keymap_new_from_string(
                 xkb_context_, static_cast<const char*>(map), 1, 0);
             if (xkb_keymap_ != nullptr) xkb_state_ = xkb_.state_new(xkb_keymap_);
+
+            // Compose: dead keys (´ then e -> é) and the Compose key, from
+            // the locale's table plus ~/.XCompose, exactly as GTK and Qt read
+            // them. Built once; a keymap change keeps it.
+            if (compose_state_ == nullptr && xkb_.compose_table_new != nullptr &&
+                xkb_.compose_state_new != nullptr) {
+                const char* locale = nullptr;
+                for (const char* var : {"LC_ALL", "LC_CTYPE", "LANG"}) {
+                    const char* v = ::getenv(var);
+                    if (v != nullptr && *v != '\0') { locale = v; break; }
+                }
+                compose_table_ = xkb_.compose_table_new(xkb_context_, locale != nullptr ? locale : "C", 0);
+                if (compose_table_ != nullptr) compose_state_ = xkb_.compose_state_new(compose_table_, 0);
+            }
         }
 
         ::munmap(map, size);
         ::close(fd);
+    }
+
+    // ── input methods: zwp_text_input_v3 ──────────────────────────────────
+    //
+    // fcitx5 and ibus reach Wayland clients through this protocol (GTK4, Qt6,
+    // Chromium and Firefox all speak it). While enabled, the compositor
+    // routes keys through the IME, which answers with preedit and commit
+    // strings; mayag turns those into ComposeEvent / TextEvent, the event
+    // model the headless backend already scripts. The caret rectangle tells
+    // the IME where to put its candidate window.
+
+    void make_text_input() {
+        if (text_input_ != nullptr || text_input_mgr_ == nullptr || seat_ == nullptr) return;
+        text_input_ = wl::request_new(text_input_mgr_, wl::text_input_mgr_get_text_input,
+                                      &wl::xdg().text_input, wl::version_of(text_input_mgr_), seat_);
+        if (text_input_ != nullptr) wl::add_listener(text_input_, &text_input_listener, this);
+    }
+
+    /// Send enable/disable and the caret rectangle when they changed. The
+    /// protocol double-buffers everything until `commit`, and the IME
+    /// counts commits to match its `done` serials.
+    void sync_text_input() {
+        if (text_input_ == nullptr || !ti_entered_) return;
+        const bool want = ti_want_;
+        bool dirty = false;
+        if (want && !ti_enabled_) {
+            wl::request(text_input_, wl::text_input_enable);
+            // content type: normal hint, normal purpose
+            wl::request(text_input_, wl::text_input_set_content_type, 0u, 0u);
+            ti_enabled_ = true; dirty = true;
+            ti_sent_rect_ = Rect{Vec2{-1, -1}, Vec2{}};
+        } else if (!want && ti_enabled_) {
+            wl::request(text_input_, wl::text_input_disable);
+            ti_enabled_ = false; dirty = true;
+            ti_.reset([&](Event e) { pending_.push_back(std::move(e)); });
+        }
+        if (ti_enabled_ && !(ti_rect_ == ti_sent_rect_)) {
+            wl::request(text_input_, wl::text_input_set_cursor_rectangle,
+                        static_cast<std::int32_t>(ti_rect_.origin.x), static_cast<std::int32_t>(ti_rect_.origin.y),
+                        static_cast<std::int32_t>(std::max(ti_rect_.size.x, 1.0f)),
+                        static_cast<std::int32_t>(std::max(ti_rect_.size.y, 1.0f)));
+            ti_sent_rect_ = ti_rect_;
+            dirty = true;
+        }
+        if (dirty) {
+            wl::request(text_input_, wl::text_input_commit);
+            ++ti_.serial;
+            wl::lib().display_flush(display_);
+        }
+    }
+
+    static void on_ti_enter(void* data, wl::proxy*, wl::proxy* surface) {
+        Impl* w = self(data);
+        if (surface != w->surface_) return;
+        w->ti_entered_ = true;
+        w->ti_enabled_ = false;
+        w->sync_text_input();
+    }
+    static void on_ti_leave(void* data, wl::proxy*, wl::proxy*) {
+        Impl* w = self(data);
+        if (w->ti_enabled_ && w->text_input_ != nullptr) {
+            wl::request(w->text_input_, wl::text_input_disable);
+            wl::request(w->text_input_, wl::text_input_commit);
+            ++w->ti_.serial;
+        }
+        w->ti_entered_ = false;
+        w->ti_enabled_ = false;
+        w->ti_.reset([&](Event e) { w->pending_.push_back(std::move(e)); });
+    }
+    static void on_ti_preedit(void* data, wl::proxy*, const char* text, std::int32_t b, std::int32_t e) {
+        self(data)->ti_.on_preedit(text, b, e);
+    }
+    static void on_ti_commit(void* data, wl::proxy*, const char* text) {
+        self(data)->ti_.on_commit(text);
+    }
+    static void on_ti_delete(void* data, wl::proxy*, std::uint32_t before, std::uint32_t after) {
+        self(data)->ti_.on_delete(before, after);
+    }
+    static void on_ti_done(void* data, wl::proxy*, std::uint32_t) {
+        Impl* w = self(data);
+        // A stale serial still applies text (the spec allows it; dropping a
+        // commit would lose what the user typed).
+        w->ti_.on_done([&](Event e) { w->pending_.push_back(std::move(e)); });
+    }
+
+    static inline const struct {
+        void (*enter)(void*, wl::proxy*, wl::proxy*);
+        void (*leave)(void*, wl::proxy*, wl::proxy*);
+        void (*preedit_string)(void*, wl::proxy*, const char*, std::int32_t, std::int32_t);
+        void (*commit_string)(void*, wl::proxy*, const char*);
+        void (*delete_surrounding_text)(void*, wl::proxy*, std::uint32_t, std::uint32_t);
+        void (*done)(void*, wl::proxy*, std::uint32_t);
+    } text_input_listener{&on_ti_enter, &on_ti_leave, &on_ti_preedit, &on_ti_commit,
+                          &on_ti_delete, &on_ti_done};
+
+    /// Repeats due now for the held key, as KeyEvent{repeat=true} + text.
+    void pump_repeat() {
+        if (!repeat_.active()) return;
+        // While the IME owns the keyboard, the compositor repeats for it.
+        if (ti_enabled_) { repeat_.cancel(); return; }
+        const int n = repeat_.due(wldetail::monotonic_now());
+        for (int i = 0; i < n; ++i) emit_key(repeat_.key, true);
     }
 
     // ── teardown ────────────────────────────────────────────────────────
@@ -1794,6 +2139,10 @@ class WaylandWindow {
         if (pool_base_ != nullptr)    ::munmap(pool_base_, pool_bytes_);
         if (pool_fd_ >= 0)            ::close(pool_fd_);
 
+        if (compose_state_ != nullptr && xkb_.compose_state_unref != nullptr)
+            xkb_.compose_state_unref(compose_state_);
+        if (compose_table_ != nullptr && xkb_.compose_table_unref != nullptr)
+            xkb_.compose_table_unref(compose_table_);
         if (xkb_state_ != nullptr && xkb_.state_unref != nullptr)
             xkb_.state_unref(xkb_state_);
         if (xkb_keymap_ != nullptr && xkb_.keymap_unref != nullptr)
@@ -1817,6 +2166,9 @@ class WaylandWindow {
         // are not destroyed. wl_display_disconnect frees the connection but
         // not the objects created on it — ASan sees each one as a direct leak.
         wl::destroy(cursor_manager_);
+        if (text_input_ != nullptr)     wl::request_destroy(text_input_, wl::text_input_destroy);
+        if (text_input_mgr_ != nullptr) wl::request_destroy(text_input_mgr_, wl::text_input_mgr_destroy);
+        text_input_ = text_input_mgr_ = nullptr;
         wl::destroy(viewporter_);
         wl::destroy(frac_manager_);
         wl::destroy(deco_manager_);
@@ -1909,6 +2261,18 @@ class WaylandWindow {
     std::uint64_t frames_dropped_   = 0;
     std::int32_t  repeat_rate_      = 25;
     std::int32_t  repeat_delay_     = 600;
+    wldetail::KeyRepeat repeat_{};
+
+    // Input methods (zwp_text_input_v3). The manager is global; the text
+    // input is per seat. Enabled while the app has a text field focused.
+    wl::proxy* text_input_mgr_ = nullptr;
+    wl::proxy* text_input_     = nullptr;
+    bool       ti_entered_     = false;   ///< compositor sent `enter` for our surface
+    bool       ti_enabled_     = false;   ///< we sent enable (+commit)
+    bool       ti_want_        = false;   ///< the app has a text field focused
+    Rect       ti_rect_{};                ///< caret rect, logical px
+    Rect       ti_sent_rect_{Vec2{-1, -1}, Vec2{}};
+    wldetail::TextInputState ti_{};
 
     const backend::CoverageSampler* sampler_ = nullptr;
     backend::ImageStore images_;
@@ -1935,6 +2299,8 @@ class WaylandWindow {
     void* xkb_context_ = nullptr;
     void* xkb_keymap_  = nullptr;
     void* xkb_state_   = nullptr;
+    void* compose_table_ = nullptr;
+    void* compose_state_ = nullptr;
     };
 
   public:
@@ -1990,6 +2356,22 @@ class WaylandWindow {
     void set_cursor(CursorShape shape)   { p_->set_cursor(shape); }
     void set_clipboard(std::string_view text) { p_->set_clipboard(text); }
     [[nodiscard]] std::string get_clipboard() { return p_->get_clipboard(); }
+
+    /// A text field has keyboard focus (`on`), its caret at `caret` (logical
+    /// px): enables the input method (fcitx5, ibus) and places its
+    /// candidate window. Cheap to call every frame; only changes go out.
+    void set_text_input(bool on, Rect caret) {
+        if (!p_) return;
+        p_->ti_want_ = on;
+        if (on) p_->ti_rect_ = caret;
+        p_->sync_text_input();
+    }
+    /// Seconds until the held key's next client-side repeat, or a negative
+    /// value when no key is held. The host wakes then and pumps dispatch().
+    [[nodiscard]] double seconds_until_repeat() const noexcept {
+        if (!p_ || !p_->repeat_.active() || p_->ti_enabled_) return -1.0;
+        return std::max(0.0, p_->repeat_.next - wldetail::monotonic_now());
+    }
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() { return p_->read_pixels(); }
 

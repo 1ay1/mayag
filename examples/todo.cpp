@@ -49,6 +49,8 @@ struct Todo {
     // ── messages ────────────────────────────────────────────────────────
 
     struct Typed   { std::string s; };
+    struct Composing { std::string s; std::uint32_t caret, sel0, sel1; };
+    struct ComposeEnd {};
     struct KeyDown { KeyEvent k; };
     struct Add     {};
     struct Toggle  { int index; };
@@ -61,7 +63,7 @@ struct Todo {
     struct CloseMenu {};
     struct Quit    {};
 
-    using Msg = std::variant<Typed, KeyDown, Add, Toggle, Remove, SetFilter,
+    using Msg = std::variant<Typed, Composing, ComposeEnd, KeyDown, Add, Toggle, Remove, SetFilter,
                              Scrolled, FocusInput, Tick, OpenMenu, CloseMenu, Quit>;
     using Cmd = mayag::Cmd<Msg, set_title, focus>;
     using Sub = mayag::Sub<Msg>;
@@ -99,9 +101,17 @@ struct Todo {
     // ── update: pure ────────────────────────────────────────────────────
 
     static Cmd update(Model& m, const Typed& e) {
+        m.input.cancel_preedit();   // a commit replaces the composition
         m.input.insert(e.s);
         return {};
     }
+    // Input-method composition (fcitx5/ibus on Linux): shown in the field,
+    // underlined, until the IME commits it as a Typed.
+    static Cmd update(Model& m, const Composing& e) {
+        m.input.set_preedit(e.s, e.caret, e.sel0, e.sel1);
+        return {};
+    }
+    static Cmd update(Model& m, ComposeEnd) { m.input.cancel_preedit(); return {}; }
     static Cmd update(Model& m, const KeyDown& e) {
                 // The text field's own key map handles motion, selection and
                 // editing. Only what it declines reaches the app.
@@ -319,6 +329,10 @@ struct Todo {
     // ── input: pure ─────────────────────────────────────────────────────
 
     static std::optional<Msg> on(const Model&, const TextEvent& e) { return Typed{e.text}; }
+    static std::optional<Msg> on(const Model&, const ComposeEvent& e) {
+        return Composing{e.text, e.caret, e.selection_start, e.selection_end};
+    }
+    static std::optional<Msg> on(const Model&, const ComposeEndEvent&) { return ComposeEnd{}; }
     static std::optional<Msg> on(const Model& m, const KeyEvent& k) {
         if (k.key == Key::escape && k.mods == Mods{})
             return m.menu_for != 0 ? Msg{CloseMenu{}} : Msg{Quit{}};
@@ -389,6 +403,34 @@ int main(int argc, char** argv) {
         };
 
         const auto initial = rt.model().items.size();
+
+        // ── input methods ──────────────────────────────────────────────────────────
+        //
+        // Focusing the field tells the platform a text field is active and
+        // where its caret is (the IME's candidate window opens there); a
+        // composition shows in the field and only the commit lands in it.
+        rt.click("input");
+        rt.tick();
+        ok(rt.window().text_input_active(), "focusing the field enables the input method");
+        if (const auto r = rt.node_rect("input")) {
+            const Rect c = rt.window().text_input_caret();
+            ok(r->contains(c.origin) && c.size.y > 4.0f, "and the caret rect is inside the field");
+        }
+        rt.window().compose("こん");
+        rt.tick();
+        ok(rt.model().input.preedit == "こん" && rt.model().input.text.empty(),
+           "a composition is preedit, not text");
+        rt.window().commit("今日");
+        rt.tick();
+        ok(rt.model().input.text == "今日" && rt.model().input.preedit.empty(),
+           "the commit lands in the field");
+        rt.window().press_key(Key::a, Mods::cmd());
+        rt.tick();
+        rt.window().press_key(Key::backspace);
+        rt.tick();
+        rt.click("filter-all");
+        rt.tick();
+        ok(!rt.window().text_input_active(), "focus elsewhere disables it");
 
         // Typing goes into the text field's state.
         rt.window().type("Write more tests");

@@ -125,6 +125,104 @@ void test_xdg_tables() {
           "get_toplevel constructs an xdg_toplevel");
     check(x.deco_manager.methods[wl::deco_manager_get_toplevel].types[1] == &x.toplevel,
           "decoration is requested for a toplevel");
+
+    // text-input-unstable-v3, pinned against text-input-unstable-v3.xml.
+    check(std::string_view{x.text_input_mgr.name} == "zwp_text_input_manager_v3" &&
+          x.text_input_mgr.method_count == 2, "text input manager: 2 requests");
+    check(x.text_input_mgr.methods[wl::text_input_mgr_get_text_input].types[0] == &x.text_input,
+          "get_text_input constructs a zwp_text_input_v3");
+    check(x.text_input.method_count == 8 && x.text_input.event_count == 6,
+          "text input: 8 requests, 6 events");
+    check(std::string_view{x.text_input.methods[wl::text_input_commit].name} == "commit",
+          "commit is at opcode 7");
+    check(std::string_view{x.text_input.methods[wl::text_input_set_cursor_rectangle].name} ==
+              "set_cursor_rectangle" &&
+          arity(x.text_input.methods[wl::text_input_set_cursor_rectangle].signature) == 4,
+          "set_cursor_rectangle is opcode 6, (x, y, w, h)");
+    check(std::string_view{x.text_input.events[2].name} == "preedit_string" &&
+          std::string_view{x.text_input.events[2].signature} == "?sii",
+          "preedit_string carries (text?, begin, end)");
+    check(std::string_view{x.text_input.events[5].name} == "done", "done is event 5");
+}
+
+// ── client-side key repeat ─────────────────────────────────────────────────────
+
+void test_key_repeat() {
+    section("key repeat");
+    wldetail::KeyRepeat r;
+    r.rate = 25; r.delay = 600;
+    r.press(14, true, 10.0);                              // backspace held at t=10
+    check(r.due(10.5) == 0, "nothing before the delay");
+    check(r.due(10.6) == 1, "first repeat at the delay");
+    check(r.due(10.62) == 0 && r.due(10.64) == 1, "then one every 1/rate s");
+    check(r.due(20.0) <= 4, "a stalled loop gets a bounded burst, not hundreds");
+    r.release(30);
+    check(r.active(), "releasing another key keeps the repeat");
+    r.release(14);
+    check(!r.active() && r.due(30.0) == 0, "releasing the key stops it");
+    r.press(42, false, 0.0);
+    check(!r.active(), "a non-repeating key (shift) never repeats");
+    r.rate = 0;
+    r.press(14, true, 0.0);
+    check(!r.active(), "rate 0 disables repeat, per wl_keyboard.repeat_info");
+    check(wldetail::is_modifier_evdev(42) && wldetail::is_modifier_evdev(29) &&
+          !wldetail::is_modifier_evdev(30), "modifier evdev codes");
+    // Named keys come from the keysym: caps:escape, virtual keyboards.
+    check(wldetail::key_from_keysym(0xff1b) == Key::escape && wldetail::key_from_keysym(0xff08) == Key::backspace &&
+          wldetail::key_from_keysym(0xfe20) == Key::tab && wldetail::key_from_keysym(0xffc9) == Key::f12,
+          "keysym -> named key");
+    check(wldetail::key_from_keysym('a') == Key::unknown, "letters stay positional");
+}
+
+// ── input methods: text-input-v3 state machine ──────────────────────────────
+//
+// What fcitx5/ibus send while typing こんにちは, and what mayag emits.
+
+void test_text_input_state() {
+    section("text-input-v3");
+    wldetail::TextInputState ti;
+    std::vector<Event> out;
+    const auto sink = [&](Event e) { out.push_back(std::move(e)); };
+
+    ti.on_preedit("こ", 3, 3);
+    ti.on_done(sink);
+    check(out.size() == 1 && std::holds_alternative<ComposeEvent>(out[0]) &&
+          std::get<ComposeEvent>(out[0]).text == "こ" && std::get<ComposeEvent>(out[0]).caret == 3,
+          "preedit -> ComposeEvent with the caret");
+    out.clear();
+
+    ti.on_preedit("こんにちは", 0, 15);
+    ti.on_done(sink);
+    check(out.size() == 1 && std::get<ComposeEvent>(out[0]).selection_end == 15,
+          "a converted clause is a highlighted range");
+    out.clear();
+
+    // Commit: preedit cleared and commit string in ONE done.
+    ti.on_commit("今日は");
+    ti.on_preedit(nullptr, 0, 0);
+    ti.on_done(sink);
+    check(out.size() == 2 && std::holds_alternative<ComposeEndEvent>(out[0]) &&
+          std::holds_alternative<TextEvent>(out[1]) && std::get<TextEvent>(out[1]).text == "今日は",
+          "commit: composition ends, then the text");
+    out.clear();
+
+    // Nothing pending: done is a no-op.
+    ti.on_done(sink);
+    check(out.empty(), "an empty done emits nothing");
+
+    // A bare commit with no composition (e.g. an emoji picker).
+    ti.on_commit("😀");
+    ti.on_done(sink);
+    check(out.size() == 1 && std::get<TextEvent>(out[0]).text == "😀", "a bare commit types");
+    out.clear();
+
+    // Focus leaves mid-composition: it is abandoned.
+    ti.on_preedit("ni", -1, -1);
+    ti.on_done(sink);
+    check(std::get<ComposeEvent>(out.back()).caret == 2, "cursor -1 means the end");
+    out.clear();
+    ti.reset(sink);
+    check(out.size() == 1 && std::holds_alternative<ComposeEndEvent>(out[0]), "leaving abandons the preedit");
 }
 
 // ── keymap ──────────────────────────────────────────────────────────────
@@ -295,6 +393,8 @@ int main() {
     std::printf("=====================\n");
 
     test_xdg_tables();
+    test_key_repeat();
+    test_text_input_state();
     test_evdev_keymap();
     test_damage_union();
     test_no_compositor_is_not_a_crash();

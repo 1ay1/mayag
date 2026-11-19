@@ -430,6 +430,11 @@ class window_host {
             const auto before = emitted_;
             pump_erased();
             if (poll_only && !dirty_ && emitted_ == before && handled_.empty()) return;
+        } else if (poll_only && cx_) {
+            // A key-repeat wake: read the repeats the window generates.
+            const auto before = emitted_;
+            pump_erased();
+            if (!dirty_ && emitted_ == before && handled_.empty()) return;
         }
         // Handler messages from this pump: into the kernel now. jaal folds
         // them on the very next turn (a message is pending), which draws.
@@ -535,10 +540,27 @@ class window_host {
         // draw when the look finds nothing. (jaal skips this call when the
         // model changed, so a stale flag can't suppress a real frame.)
         poll_only_ = poll_window_ && now >= next_poll_;
+        // A held key's repeat is due (Wayland repeats client-side): pump.
+        if (window_repeat_in() == 0.0) poll_only_ = true;
         return poll_only_;
     }
 
+    /// Seconds until the window's next key repeat; negative when none.
+    [[nodiscard]] double window_repeat_in() const noexcept {
+        if constexpr (requires { window_.seconds_until_repeat(); }) return window_.seconds_until_repeat();
+        return -1.0;
+    }
+
     [[nodiscard]] std::optional<std::chrono::nanoseconds> wait_hint() const noexcept {
+        using ns = std::chrono::nanoseconds;
+        const auto hint = wait_hint_inner();
+        const double rep = window_repeat_in();
+        if (rep < 0.0) return hint;
+        const ns r{static_cast<std::int64_t>(rep * 1e9)};
+        return hint ? std::min(*hint, r) : r;
+    }
+
+    [[nodiscard]] std::optional<std::chrono::nanoseconds> wait_hint_inner() const noexcept {
         using ns = std::chrono::nanoseconds;
         const auto now = now_();
         if (dirty_ || draw_owed_) {
@@ -740,6 +762,32 @@ class window_host {
     void pump_erased() {
         erased_cx cx{*this};
         pump(cx);
+    }
+
+    /// Tell the platform whether a text field has keyboard focus, and where
+    /// its caret is: that enables the input method (fcitx5/ibus on Wayland)
+    /// and puts its candidate window at the caret. A node counts as text
+    /// entry by role (`text_field`, set by text_field / code_view /
+    /// terminal_view, or by `| role(...)` on a custom one).
+    void sync_text_input() {
+        if constexpr (requires { window_.set_text_input(true, Rect{}); }) {
+            const std::uint64_t f = input_.focused();
+            const Node* n = f != 0 ? tree_.find(f) : nullptr;
+            if (n == nullptr && f != 0) {
+                for (const auto& o : overlays_.items())
+                    if (const Node* m = o.content.find(f)) { n = m; break; }
+            }
+            const bool entry = n != nullptr && n->style().a11y_role == a11y::Role::text_field;
+            Rect caret{};
+            if (entry) {
+                const Rect fr = n->frame();   // logical px, like the protocol
+                const Rect& c = n->style().caret_rect;
+                caret = c.size.y > 0.0f
+                    ? Rect{Vec2{fr.origin.x + c.origin.x, fr.origin.y + c.origin.y}, c.size}
+                    : Rect{fr.origin, Vec2{1.0f, fr.size.y}};
+            }
+            window_.set_text_input(entry, caret);
+        }
     }
 
     [[nodiscard]] bool animating() const noexcept {
@@ -1147,6 +1195,7 @@ class window_host {
         frame.instances  = static_cast<std::uint32_t>(draws_.size());
         frame.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
         { ScopedTimer t{frame.render_ms}; window_.present(draws_, theme_.background); }
+        sync_text_input();
         if (frame_counter_ == 1 && startup::enabled()) {
             std::fprintf(stderr, "mayag: startup first frame: view %.1f cascade %.1f layout %.1f paint %.1f render %.1f ms\n",
                          frame.view_ms, frame.cascade_ms, frame.layout_ms, frame.paint_ms, frame.render_ms);

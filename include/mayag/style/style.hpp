@@ -509,6 +509,12 @@ struct Style {
     /// a resize handle a double arrow.
     CursorShape cursor = CursorShape::arrow;
 
+    /// Where this text-entry node's caret is, relative to its frame (logical
+    /// px; zero size = not set). When the node has keyboard focus the host
+    /// hands it to the platform so the input method's candidate window opens
+    /// AT the caret instead of in a screen corner.
+    Rect caret_rect{};
+
     /// Stable identity for hit-testing and animation matching. Zero means
     /// "anonymous"; the DSL assigns one when you name a node.
     std::uint64_t id = 0;

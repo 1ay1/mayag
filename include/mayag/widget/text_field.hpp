@@ -79,20 +79,24 @@ namespace mayag::dsl {
     const layout::TextMeasurer& mm = ctx().measurer();
     TextStyle ts{};
     ts.size = font_size;
-    const std::string_view text = state.text;
+    // While an input method composes, the field shows committed text with
+    // the preedit spliced in at the caret (TextEditState::display_text),
+    // underlined, and the caret sits inside the preedit where the IME says.
+    const std::string shown = state.display_text();
+    const std::string_view text = shown;
     const auto x_at = [&](std::size_t byte) -> float {
         if (byte == 0 && text.empty()) return 0.0f;
         if (measure) return byte == 0 ? 0.0f : measure(text.substr(0, num::min(byte, text.size())));
         return mm.caret_x(text, ts, num::min(byte, text.size()));
     };
-    const float caret_x = x_at(state.caret);
+    const float caret_x = x_at(state.display_caret());
     std::vector<std::pair<float, float>> spans;
-    if (state.has_selection()) {
+    if (state.has_selection() && !state.composing()) {
         if (measure) spans.push_back({x_at(state.selection_start()), x_at(state.selection_end())});
         else spans = mm.selection_spans(text, ts, state.selection_start(), state.selection_end());
     }
     std::vector<Node> layers;
-    layers.push_back((text_owned(showing_placeholder ? std::string{placeholder} : state.text)
+    layers.push_back((text_owned(showing_placeholder ? std::string{placeholder} : shown)
                         | font(font_size)
                         | fg(showing_placeholder ? t.text_disabled : t.text_primary)
                         | ellipsis
@@ -105,6 +109,22 @@ namespace mayag::dsl {
     layers.push_back((box() | size(1.5f, font_size * 1.2f)
                             | bg(t.accent.fade(focused ? 1.0f : 0.0f))
                             | absolute(caret_x, 0)).build());
+    if (state.composing()) {
+        // The preedit's underline (and the IME's highlighted clause, thicker).
+        const std::size_t p0 = num::min(state.caret, state.text.size());
+        const float u0 = x_at(p0), u1 = x_at(p0 + state.preedit.size());
+        layers.push_back((box() | size(num::max(u1 - u0, 1.0f), 1.0f)
+                                | bg(t.text_primary) | absolute(num::min(u0, u1), font_size * 1.18f)).build());
+        if (state.preedit_sel_end > state.preedit_sel_start) {
+            const float s0 = x_at(p0 + state.preedit_sel_start), s1 = x_at(p0 + state.preedit_sel_end);
+            layers.push_back((box() | size(num::max(s1 - s0, 1.0f), 2.0f)
+                                    | bg(t.accent) | absolute(num::min(s0, s1), font_size * 1.18f)).build());
+        }
+    }
+
+    // Where the caret is, for the input method's candidate window: the
+    // field's padding plus the caret's position on the line.
+    const Rect caret_box{Vec2{t.spaced(11) + caret_x, t.spaced(9)}, Vec2{1.5f, font_size * 1.2f}};
 
     // FIRST child is in flow and therefore sizes the field; the selection
     // highlight(s) and caret float over it.
@@ -115,6 +135,8 @@ namespace mayag::dsl {
          | radius(t.radius_small)
          | clip
          | cursor(CursorShape::text)
+         | role(a11y::Role::text_field)
+         | caret_at(caret_box)
          | id_of_raw(nid);
 }
 
