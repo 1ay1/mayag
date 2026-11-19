@@ -171,6 +171,47 @@ void test_default_stack_completeness() {
     check(stack->resolve('A').second != 0, "Latin always resolves");
 }
 
+// ── Linux: the faces a Linux desktop would pick ───────────────────────────────
+//
+// "Most specialised covering face" used to give Arabic to Noto Kufi (a
+// display design) and Hebrew to Noto Rashi (a historical script). Where the
+// standard text face is installed, it must be the one the stack resolves.
+// Each check skips itself on a machine without that family.
+
+void test_linux_conventions() {
+#if !defined(__APPLE__) && !defined(_WIN32)
+    section("linux fallback conventions");
+    const auto& db = system::Database::instance();
+    const auto family_for = [](const typo::FontStack& s, char32_t cp) -> std::string {
+        const auto [face, gid] = s.resolve(cp);
+        const typo::Face* f = gid != 0 ? s.face_at(face) : nullptr;
+        return f != nullptr ? f->family() : std::string{};
+    };
+    auto stack = system::default_stack();
+    struct Want { char32_t cp; const char* family; };
+    for (const Want w : {Want{0x0627, "Noto Sans Arabic"}, Want{0x05D0, "Noto Sans Hebrew"},
+                         Want{0x1D538, "Noto Sans Math"}}) {
+        if (db.find(w.family) == nullptr) continue;
+        const std::string got = family_for(*stack, w.cp);
+        check(got == w.family, std::string{"U+"} + std::to_string(w.cp) + " resolves to " +
+                               w.family + " (got " + got + ")");
+    }
+    // The math face must not take Arabic text (it maps the Arabic math
+    // alphabet's letters too).
+    check(family_for(*stack, 0x0644) != "Noto Sans Math", "Arabic text never comes from the math face");
+
+    // Han follows the locale: one codepoint, five regional designs.
+    if (db.find("Noto Sans CJK TC") != nullptr && db.find("Noto Sans CJK JP") != nullptr) {
+        check(system::detail::han_region("zh-tw") == "TC" && system::detail::han_region("zh-cn") == "SC" &&
+              system::detail::han_region("ja-jp") == "JP" && system::detail::han_region("ko-kr") == "KR" &&
+              system::detail::han_region("zh-hk") == "HK" && system::detail::han_region("en-us") == "JP",
+              "locale -> Han region");
+        const auto fams = system::linux_script_families(system::Script::han, "zh-tw");
+        check(!fams.empty() && fams.front() == "Noto Sans CJK TC", "zh-TW prefers Noto Sans CJK TC");
+    }
+#endif
+}
+
 // ── colour emoji actually renders ────────────────────────────────
 //
 // The end-to-end payoff: a colour font's glyph is decoded from its CBDT/sbix
@@ -224,6 +265,7 @@ int main() {
     test_color_emoji_renders();
     test_coverage_routing();
     test_default_stack_completeness();
+    test_linux_conventions();
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -26,8 +26,10 @@
 
 #include <algorithm>
 #include <bit>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -749,6 +751,95 @@ class Database {
 #endif
 }
 
+namespace detail {
+
+/// The user's language for font selection, lowercase BCP-47-ish ("zh-tw",
+/// "ja", "en-us"): LANGUAGE's first entry, then LC_ALL, LC_CTYPE, LANG, as
+/// glibc and fontconfig read them. "C"/"POSIX" mean no preference.
+[[nodiscard]] inline std::string user_language() {
+    for (const char* var : {"LANGUAGE", "LC_ALL", "LC_CTYPE", "LANG"}) {
+        const char* v = std::getenv(var);
+        if (v == nullptr || *v == '\0') continue;
+        std::string s{v};
+        if (const auto colon = s.find(':'); colon != std::string::npos) s.resize(colon);
+        if (const auto dot = s.find_first_of(".@"); dot != std::string::npos) s.resize(dot);
+        if (s.empty() || s == "C" || s == "POSIX") continue;
+        for (char& c : s) c = c == '_' ? '-' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    }
+    return {};
+}
+
+/// Noto CJK region for Han text, from the user's language: the same
+/// codepoint is drawn differently in China, Taiwan, Hong Kong, Japan and
+/// Korea, so this is a correctness choice, not a style one. Other locales
+/// keep Japanese, mayag's long-standing default. Hangul and kana are the
+/// same design in every region, so ONE face serves all of CJK (a second
+/// would only shadow the first's ideographs).
+[[nodiscard]] inline std::string_view han_region(std::string_view lang) noexcept {
+    if (lang.starts_with("ko")) return "KR";
+    if (lang == "zh-tw" || lang.starts_with("zh-hant")) return "TC";
+    if (lang == "zh-hk" || lang == "zh-mo") return "HK";
+    if (lang.starts_with("zh")) return "SC";
+    return "JP";
+}
+
+}  // namespace detail
+
+#if !defined(__APPLE__) && !defined(_WIN32)
+/// The face a Linux desktop draws `s` with, best first: the standard text
+/// designs fontconfig's defaults, GNOME and KDE, Chrome and Firefox resolve
+/// to (Noto Sans <Script>, then the long-standing distro faces). Without
+/// this the most SPECIALISED covering face wins, which for Arabic is Noto
+/// Kufi (a display design) and for Hebrew Noto Rashi (a historical script).
+/// Empty: no convention, the database's own ranking decides.
+[[nodiscard]] inline std::vector<std::string> linux_script_families(Script s, std::string_view lang) {
+    using V = std::vector<std::string>;
+    switch (s) {
+        case Script::arabic:     return V{"Noto Sans Arabic", "Noto Naskh Arabic", "Noto Sans Arabic UI",
+                                          "Noto Naskh Arabic UI", "DejaVu Sans", "Amiri"};
+        case Script::hebrew:     return V{"Noto Sans Hebrew", "Noto Serif Hebrew", "DejaVu Sans", "Culmus"};
+        case Script::armenian:   return V{"Noto Sans Armenian", "DejaVu Sans"};
+        case Script::georgian:   return V{"Noto Sans Georgian", "DejaVu Sans"};
+        case Script::syriac:     return V{"Noto Sans Syriac", "Noto Sans Syriac Eastern", "Noto Sans Syriac Western"};
+        case Script::thaana:     return V{"Noto Sans Thaana"};
+        case Script::devanagari: return V{"Noto Sans Devanagari", "Lohit Devanagari"};
+        case Script::bengali:    return V{"Noto Sans Bengali", "Lohit Bengali"};
+        case Script::gurmukhi:   return V{"Noto Sans Gurmukhi", "Lohit Gurmukhi"};
+        case Script::gujarati:   return V{"Noto Sans Gujarati", "Lohit Gujarati"};
+        case Script::tamil:      return V{"Noto Sans Tamil", "Lohit Tamil"};
+        case Script::telugu:     return V{"Noto Sans Telugu", "Lohit Telugu"};
+        case Script::kannada:    return V{"Noto Sans Kannada", "Lohit Kannada"};
+        case Script::malayalam:  return V{"Noto Sans Malayalam", "Lohit Malayalam"};
+        case Script::sinhala:    return V{"Noto Sans Sinhala", "Noto Sans Sinhala UI"};
+        case Script::thai:       return V{"Noto Sans Thai", "Noto Sans Thai UI", "Noto Sans Thai Looped"};
+        case Script::lao:        return V{"Noto Sans Lao", "Noto Sans Lao UI"};
+        case Script::khmer:      return V{"Noto Sans Khmer", "Noto Sans Khmer UI"};
+        case Script::myanmar:    return V{"Noto Sans Myanmar", "Noto Sans Myanmar UI", "Padauk"};
+        case Script::tibetan:    return V{"Noto Serif Tibetan", "Noto Sans Tibetan", "Jomolhari"};
+        case Script::ethiopic:   return V{"Noto Sans Ethiopic", "Abyssinica SIL"};
+        case Script::mongolian:  return V{"Noto Sans Mongolian"};
+        case Script::cherokee:   return V{"Noto Sans Cherokee"};
+        case Script::canadian:   return V{"Noto Sans Canadian Aboriginal"};
+        case Script::math:       return V{"Noto Sans Math", "STIX Two Math", "DejaVu Math TeX Gyre", "DejaVu Sans"};
+        case Script::symbols:    return V{"Noto Sans Symbols", "Noto Sans Symbols 2", "DejaVu Sans"};
+        case Script::hangul:
+        case Script::han:
+        case Script::hiragana:
+        case Script::katakana: {
+            const std::string r{detail::han_region(lang)};
+            V v{"Noto Sans CJK " + r, "Source Han Sans " + r};
+            for (std::string_view other : {"JP", "SC", "TC", "KR", "HK"})
+                if (other != r) v.push_back("Noto Sans CJK " + std::string{other});
+            v.insert(v.end(), {"WenQuanYi Micro Hei", "WenQuanYi Zen Hei", "Droid Sans Fallback",
+                               "NanumGothic", "UnDotum"});
+            return v;
+        }
+        default: return {};
+    }
+}
+#endif
+
 /// The always-available floor: a real TrueType face synthesized in memory,
 /// so `default_stack()` is never empty even on a machine with no fonts. This
 /// is what let the separate `strokefont` engine be deleted — the last-resort
@@ -924,8 +1015,65 @@ class Database {
     //    can draw a script, it is in the chain. Scripts already covered by
     //    the primary are skipped by add_entry's dedup, and the most
     //    specialised face per script is chosen by covering().
-    for (const auto& probe : script_probes) {
+#if !defined(__APPLE__) && !defined(_WIN32)
+    //    On Linux "most specialised" picks badly (Noto Kufi, a display face,
+    //    for all Arabic; Noto Rashi, a historical script, for Hebrew; an icon
+    //    font for symbols the UI font already has), so a script the stack
+    //    already draws is skipped, and the standard text design a Linux
+    //    desktop uses (linux_script_families, locale-aware for CJK) is tried
+    //    before the generic ranking.
+    const std::string lang = detail::user_language();
+    const auto served = [&](char32_t cp) {
+        for (std::size_t i = 0; i < stack->face_count(); ++i)
+            if (stack->serves(i, cp)) return true;
+        return false;
+    };
+#endif
+    // Linux: symbols and math first, so ∀ or → the UI font lacks comes from
+    // a symbol design, not from the full-width ideograph-sized one in a CJK
+    // face that happens to sit earlier in the chain.
+    std::vector<ScriptProbe> probes{std::begin(script_probes), std::end(script_probes)};
+#if !defined(__APPLE__) && !defined(_WIN32)
+    std::stable_partition(probes.begin(), probes.end(), [](const ScriptProbe& p) {
+        return p.script == Script::math || p.script == Script::symbols;
+    });
+#endif
+    for (const auto& probe : probes) {
         if (probe.script == Script::emoji) continue;   // handled last, in colour
+#if !defined(__APPLE__) && !defined(_WIN32)
+        // Symbols and math are huge blocks one probe cannot stand for (a UI
+        // font has ∀ but not 𝔸): always add their face.
+        const bool broad = probe.script == Script::math || probe.script == Script::symbols;
+        if (!broad && served(probe.codepoint)) continue;
+        bool placed = false;
+        for (const std::string& fam : linux_script_families(probe.script, lang)) {
+            const FontEntry* e = db.find(fam, 400, false);
+            if (e == nullptr || !e->covers(probe.script) || !e->outlines) continue;
+            if (broad) {
+                // Limited to the symbol/math blocks: Noto Sans Math also maps
+                // Arabic letters (the Arabic math alphabet) and must not
+                // shadow the Arabic text face.
+                static constexpr std::array<std::array<char32_t, 2>, 6> math_blocks{{
+                    {0x2100, 0x214F}, {0x2200, 0x22FF}, {0x27C0, 0x27EF}, {0x2980, 0x2AFF},
+                    {0x1D400, 0x1D7FF}, {0x1EE00, 0x1EEFF}}};
+                static constexpr std::array<std::array<char32_t, 2>, 9> symbol_blocks{{
+                    {0x2190, 0x21FF}, {0x2300, 0x23FF}, {0x2400, 0x24FF}, {0x25A0, 0x27BF},
+                    {0x2900, 0x297F}, {0x2B00, 0x2BFF}, {0x1F000, 0x1F0FF}, {0x1F700, 0x1F8FF},
+                    {0x1FB00, 0x1FBFF}}};
+                if (already(e)) { placed = true; break; }
+                if (auto face = Face::from_file(e->path, e->face_index)) {
+                    added.emplace_back(e->path, e->face_index);
+                    if (probe.script == Script::math) stack->add_limited(std::move(face), math_blocks);
+                    else stack->add_limited(std::move(face), symbol_blocks);
+                    placed = true;
+                    break;
+                }
+                continue;
+            }
+            if (add_entry(e)) { placed = true; break; }
+        }
+        if (placed) continue;
+#endif
         // The best candidate first; if it will not load, the next one. One
         // unloadable face must not leave a whole script as tofu.
         if (add_entry(db.covering(probe.codepoint))) continue;
