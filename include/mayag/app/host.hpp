@@ -646,11 +646,16 @@ class window_host {
     void handle(const PatchImage& e) {
         const auto& p = e.patch.get();
         bool done = false;
+        // Nothing to patch in place (a keyframe, a frame that changed most of
+        // the image): it is the whole picture. update_image_regions() of no
+        // rects "succeeds", which skipped the upload and left every refresh
+        // and video frame after the first one off screen.
+        const bool partial = !p.rects.empty() || p.move;
         bool moved = !p.move;
         if constexpr (requires { window_.move_image_rows(e.id, 0, 0, 1, 1, 0); })
             if (p.move) moved = window_.move_image_rows(e.id, (*p.move)[0], (*p.move)[1], (*p.move)[2], (*p.move)[3], (*p.move)[4]);
         if constexpr (requires { window_.update_image_regions(e.id, 1, 1, p.rects, p.pixels); })
-            if (moved) done = window_.update_image_regions(e.id, p.width, p.height, p.rects, p.pixels);
+            if (partial && moved) done = window_.update_image_regions(e.id, p.width, p.height, p.rects, p.pixels);
         if (!done && p.whole) {
             if constexpr (requires { window_.upload_image(e.id, std::shared_ptr<const ImageData>{}); })
                 window_.upload_image(e.id, std::shared_ptr<const ImageData>(

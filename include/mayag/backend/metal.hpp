@@ -571,6 +571,24 @@ class MetalDevice {
         return true;
     }
 
+    /// An image's pixels as the GPU holds them (RGBA bytes), for checking.
+    [[nodiscard]] std::vector<std::uint8_t> read_image(std::uint32_t key) {
+        using namespace mtl;
+        std::vector<std::uint8_t> out;
+        const auto it = images_.find(key);
+        if (it == images_.end() || it->second.texture == nullptr) return out;
+        const int w = it->second.w, h = it->second.h;
+        out.resize(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4);
+        // Anything queued against it (a move) finishes first.
+        id cmd = msg<id>(queue_, sel("commandBuffer"));
+        msg<void>(cmd, sel("commit"));
+        msg<void>(cmd, sel("waitUntilCompleted"));
+        struct { std::uint64_t x, y, z, w, h, d; } region{0, 0, 0, static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h), 1};
+        msg<void>(it->second.texture, sel("getBytes:bytesPerRow:fromRegion:mipmapLevel:"), out.data(),
+                  static_cast<std::uint64_t>(w) * 4, region, static_cast<std::uint64_t>(0));
+        return out;
+    }
+
     void release_image(std::uint32_t key) {
         using namespace mtl;
         const auto it = images_.find(key);

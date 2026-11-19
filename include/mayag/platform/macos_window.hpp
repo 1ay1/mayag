@@ -545,6 +545,14 @@ class MacWindow {
         (void)id, (void)x, (void)y, (void)w, (void)h, (void)dy;
         return false;
     }
+    /// An uploaded image as the GPU holds it (RGBA), for checking. Empty: none.
+    [[nodiscard]] std::vector<std::uint8_t> read_image(std::uint32_t id) {
+#if defined(MAYAG_WITH_METAL)
+        if (gpu_enabled_) return gpu_.read_image(id);
+#endif
+        (void)id;
+        return {};
+    }
     /// Rewrite rectangles of an uploaded image in place (Metal). false:
     /// upload it whole instead.
     bool update_image_regions(std::uint32_t id, int w, int h, const std::vector<std::array<int, 4>>& rects,
