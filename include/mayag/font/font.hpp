@@ -727,6 +727,21 @@ class Face {
                 static constexpr std::string_view connected[] = {"Arab", "Beng", "Deva", "Guru", "Mong", "Syrc", "Nkoo",
                                                                 "Phag", "Mand", "Mani", "Rohg", "Adlm", "Sogd", "Hmnp"};
                 for (const auto c : connected) if (s.find(c) != std::string_view::npos) return MergeMode::all;
+                // Apple's Indic faces list LANGUAGES, not scripts (SF Bangla
+                // "bn", SF Gurmukhi "pa"); a language written in a connected
+                // script counts as that script.
+                static constexpr std::string_view connected_langs[] = {"bn", "as", "pa", "hi", "mr", "ne", "sa", "ar",
+                                                                      "fa", "ur", "ps", "sd", "ug", "ku", "syr", "mn", "nqo"};
+                std::size_t at = 0;
+                while (at < s.size()) {
+                    std::size_t comma = s.find(',', at);
+                    if (comma == std::string_view::npos) comma = s.size();
+                    std::string_view item = s.substr(at, comma - at);
+                    while (!item.empty() && item.front() == ' ') item.remove_prefix(1);
+                    item = item.substr(0, item.find('-'));
+                    for (const auto l : connected_langs) if (item == l) return MergeMode::all;
+                    at = comma + 1;
+                }
                 return MergeMode::none;
             }
         }

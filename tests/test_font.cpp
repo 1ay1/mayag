@@ -1466,6 +1466,14 @@ void test_merge_mode() {
         check(mode("/System/Library/Fonts/Supplemental/Georgia.ttf") == typo::Face::MergeMode::none, "Georgia does not merge");
     if (std::filesystem::exists("/System/Library/Fonts/SFNS.ttf"))
         check(mode("/System/Library/Fonts/SFNS.ttf") == typo::Face::MergeMode::table, "SF uses its MERG table");
+    if (std::filesystem::exists("/System/Library/Fonts/SFIndia.ttc")) {
+        const auto at = [](unsigned i) {
+            auto f = typo::Face::from_file("/System/Library/Fonts/SFIndia.ttc", i);
+            return f ? f->merge_mode() : typo::Face::MergeMode::none;
+        };
+        check(at(0) == typo::Face::MergeMode::all, "SF Bangla merges (dlng lists the language 'bn')");
+        check(at(7) == typo::Face::MergeMode::none, "SF Tamil does not (dlng 'ta')");
+    }
 }
 
 // CoreText truncates trak values toward zero: SF at 19.75 pt interpolates
