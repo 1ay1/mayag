@@ -101,6 +101,10 @@ struct CodeViewOptions {
     const std::vector<editor::GitMark>*    git = nullptr;
     const editor::Range*                   inline_hint_range = nullptr;   ///< e.g. a pending completion's ghost text
     std::string                            ghost_text{};                  ///< drawn after the caret (inline completion)
+    /// The face role code is set in: monospace by default, so the grid the
+    /// caret math assumes is the grid the glyphs actually sit on.
+    FontFamily                             family = FontFamily::mono;
+    bool                                   ligatures = false;             ///< -> != ===, when the face has them
 };
 
 inline constexpr std::size_t part_fold_base = part_dec + 1000;
@@ -110,13 +114,13 @@ namespace detail {
 /// One monospace cell, measured from the real font (so the caret lands on
 /// the glyph edge whatever the face). Falls back to 0.6 em.
 template <class C>
-[[nodiscard]] float cell_width(const C& c, float size) {
+[[nodiscard]] float cell_width(const C& c, float size, FontFamily fam = FontFamily::mono) {
     if constexpr (requires { c.c.measurer(); }) {
-        TextStyle st; st.size = size;
+        TextStyle st; st.size = size; st.family = fam;
         const float w = c.c.measurer().advance("0000000000", st) / 10.0f;
         if (w > 0.0f) return w;
     } else if constexpr (requires { c.measurer(); }) {
-        TextStyle st; st.size = size;
+        TextStyle st; st.size = size; st.family = fam;
         const float w = c.measurer().advance("0000000000", st) / 10.0f;
         if (w > 0.0f) return w;
     }
@@ -162,7 +166,7 @@ template <ControlContext C>
     using namespace editor;
     const float fs = o.font_size;
     const float lh = std::round(fs * o.line_height);
-    const float cw = detail::cell_width(c, fs);
+    const float cw = detail::cell_width(c, fs, o.family);
     const int digits = std::max(3, static_cast<int>(std::to_string(ed.line_count()).size()));
     const float gutter = o.line_numbers ? static_cast<float>(digits) * cw + 44.0f : 28.0f;
     const auto& vis = ed.visual_lines();
@@ -301,7 +305,7 @@ template <ControlContext C>
             if (b <= a) return;
             const std::string seg = detail::expand_tabs(std::string_view{s}.substr(a, b - a), col, ed.tab_width, o.show_whitespace);
             col = ed.display_col(l, static_cast<int>(b));
-            Node n = (text_owned(seg) | font(fs) | fg(col_) | no_ligatures | clip_text).build();
+            Node n = (text_owned(seg) | font(fs) | family(o.family) | fg(col_) | ligatures(o.ligatures) | clip_text).build();
             if (italic_) n.style().text.italic = true;
             runs.push_back(std::move(n));
         };
@@ -313,7 +317,7 @@ template <ControlContext C>
         if (at < s.size()) push_run(at, static_cast<std::uint32_t>(s.size()), th.of(Tok::text));
         if (ed.folds.contains(l)) {
             const int hidden_n = ed.fold_end(l).value_or(l) - l;
-            runs.push_back((h(text_owned(" \u22EF " + std::to_string(hidden_n) + " lines ") | font(fs * 0.85f) | fg(th.fold_marker))
+            runs.push_back((h(text_owned(" \u22EF " + std::to_string(hidden_n) + " lines ") | font(fs * 0.85f) | family(o.family) | fg(th.fold_marker))
                             | bg(th.folded_bg) | radius(t.rounded(3)) | pad(0, t.spaced(2)) | margin(0, 0, 0, 6)
                             | id_of(id, part_fold_base + static_cast<std::size_t>(l))).build());
         }
@@ -326,7 +330,7 @@ template <ControlContext C>
     if (!o.ghost_text.empty() && ed.sels.size() == 1 && ed.sels[0].empty()) {
         const int vr = vrow(cur.line);
         if (vr >= first && vr < last)
-            layers.push_back((h(text_owned(o.ghost_text) | font(fs) | italic | fg(th.of(Tok::comment)) | no_ligatures)
+            layers.push_back((h(text_owned(o.ghost_text) | font(fs) | family(o.family) | italic | fg(th.of(Tok::comment)) | no_ligatures)
                               | height(lh) | align(Align::center)
                               | absolute(col_x(cur.line, cur.col), row_y(vr))).build());
     }
@@ -385,7 +389,7 @@ template <ControlContext C>
         const bool active = l == cur.line;
         if (o.line_numbers) {
             const int shown_no = o.relative_numbers && !active ? std::abs(l - cur.line) : l + 1;
-            gut.push_back((h(text_owned(std::to_string(shown_no)) | font(fs * 0.9f)
+            gut.push_back((h(text_owned(std::to_string(shown_no)) | font(fs * 0.9f) | family(o.family)
                                  | fg(active ? th.line_no_active : th.line_no) | text_align(TextAlign::right) | width(static_cast<float>(digits) * cw))
                            | height(lh) | align(Align::center) | absolute(12, y)).build());
         }

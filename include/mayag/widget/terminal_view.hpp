@@ -489,10 +489,12 @@ inline constexpr TermPalette default_term_palette{
 
 /// A TermRowView from a tiny markup, for previews, empty states, tests and
 /// docs (not a VT parser): {r}{g}{y}{b}{m}{c}{w} ANSI colours, {d} dim grey,
-/// {R}{G}{Y}{N}{M}{C}{W} their bright twins, {B} bold {I} italic {D} dim
-/// {S} strike {V} inverse {U} underline {~} curly red underline {L}
-/// hyperlink 1 {K} green background {0} reset. Colours come from `pal`, so
-/// the same markup recolours with the user's scheme.
+/// {R}{G}{Y}{N}{M}{C}{W} their bright twins, {k} black (slot 0) {n} default
+/// foreground; {1}..{8} background = palette slot 1..8, {9} default
+/// background (powerline segments: "{4}{k} ~/src {9}{b}\uE0B0"); {B} bold
+/// {I} italic {D} dim {S} strike {V} inverse {U} underline {~} curly red
+/// underline {L} hyperlink 1 {K} green background {0} reset. Colours come
+/// from `pal`, so the same markup recolours with the user's scheme.
 [[nodiscard]] inline TermRowView term_row(std::string_view markup, int cols, TermMark mark = TermMark::none,
                                           const TermPalette& pal = default_term_palette) {
     TermRowView r;
@@ -505,6 +507,11 @@ inline constexpr TermPalette default_term_palette{
             const auto fgc = [&](std::uint32_t v) { pen.fg = v; pen.default_fg = false; };
             switch (k) {
                 case '0': pen = TermCell{}; break;
+                case 'k': fgc(pal[0]); break;
+                case 'n': pen.default_fg = true; pen.fg = 0; break;
+                case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8':
+                    pen.bg = pal[static_cast<std::size_t>(k - '0')]; pen.default_bg = false; break;
+                case '9': pen.default_bg = true; pen.bg = 0; break;
                 case 'r': fgc(pal[1]); break;  case 'g': fgc(pal[2]); break;  case 'y': fgc(pal[3]); break;
                 case 'b': fgc(pal[4]); break;  case 'm': fgc(pal[5]); break;  case 'c': fgc(pal[6]); break;
                 case 'w': fgc(pal[7]); break;  case 'd': fgc(pal[8]); break;

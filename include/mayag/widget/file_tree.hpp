@@ -26,6 +26,9 @@
 #include "control.hpp"
 #include "file_icon.hpp"
 #include "virtual_list.hpp"
+#include "../app/handlers.hpp"
+
+#include <unordered_map>
 
 #include <string>
 #include <vector>
@@ -152,12 +155,36 @@ template <ControlContext C>
 [[nodiscard]] inline Node file_tree(const C& c, std::string_view id, const std::vector<TreeRow>& rows,
                                     int chosen, const ScrollState& list_scroll, bool focused = true) {
     MemoKey k;
-    k.add(std::string_view{"file_tree"}).add(id).add(chosen).add(focused)
+    k.add(std::string_view{"file_tree"}).add(id).add(chosen).add(focused).add(static_cast<int>(c.theme.icons))
      .add(list_scroll.offset).add(list_scroll.viewport).add(rows.size());
     for (const auto& r : rows)
         k.add(r.name).add(r.depth).add(r.dir).add(r.open).add(r.active).add(r.git).add(r.errors)
          .add(r.tabs).add(r.here).add(r.here_hue).add(r.action);
     return memo_widget(c, k, [&] { return detail::file_tree_build(c, id, rows, chosen, list_scroll, focused); });
+}
+
+/// The tree with its click behaviour attached: row i carries
+/// `on_click(pick(i, click_count))`. The rows are the tree's nodes that
+/// clicks land on (gestures name the innermost control, they do not bubble),
+/// so this is where a row's meaning has to live. `pick` must be a
+/// stateless-or-cheaply-copyable callable: it is copied into every row.
+template <ControlContext C, class Pick>
+    requires std::invocable<const Pick&, int, int>
+[[nodiscard]] inline Node file_tree(const C& c, std::string_view id, const std::vector<TreeRow>& rows,
+                                    int chosen, const ScrollState& list_scroll, bool focused, Pick pick) {
+    Node n = file_tree(c, id, rows, chosen, list_scroll, focused);
+    std::unordered_map<std::uint64_t, int> row_of;
+    row_of.reserve(rows.size());
+    for (std::size_t i = 0; i < rows.size(); ++i) row_of.emplace(part_id(id, i), static_cast<int>(i));
+    const auto wire = [&](const auto& self, Node& x) -> void {
+        if (const auto it = row_of.find(x.style().id); it != row_of.end()) {
+            x = (std::move(x) | on_click([pick, row = it->second](const Clicked& k) { return pick(row, k.count); })).build();
+            return;
+        }
+        for (auto& k : x.children()) self(self, k);
+    };
+    wire(wire, n);
+    return n;
 }
 
 template <ControlContext C>
@@ -201,6 +228,7 @@ template <ControlContext C>
                          : r.here ? mix(t.surface, r.here_hue, 0.10f)
                          : r.active ? t.surface_raised.fade(0.6f) : row_hov ? t.surface_raised.fade(0.45f) : t.surface.fade(0.0f))
                 | border(t.stroke(1), sel && focused ? t.accent.fade(0.6f) : t.border.fade(0.0f))
+                | transition() | pointer_cursor
                 | role(a11y::Role::list_item) | selected(sel) | label(r.name)
                 | id_of(id, static_cast<std::size_t>(i))).build();
     });

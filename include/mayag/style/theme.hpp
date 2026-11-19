@@ -35,6 +35,11 @@ struct Sheet;
 
 enum class Mode : std::uint8_t { dark, light };
 
+/// Which glyph set icons are drawn from. `letters` needs no font at all
+/// (a coloured letter mark); `nerd` uses Nerd Font devicons, for an app
+/// whose font stack carries one (JetBrainsMono Nerd Font, ...).
+enum class IconSet : std::uint8_t { letters, nerd };
+
 struct Theme {
     Mode mode = Mode::dark;
 
@@ -96,6 +101,9 @@ struct Theme {
     /// Every widget's look. Null: the standard sheet. Point it at your own
     /// (usually a static) to restyle every widget at once.
     const Sheet* sheet = nullptr;
+
+    /// Icon glyphs for files, folders and chrome (see IconSet).
+    IconSet icons = IconSet::letters;
 
     friend constexpr bool operator==(const Theme&, const Theme&) = default;
 
