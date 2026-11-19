@@ -1,5 +1,5 @@
 #pragma once
-// mayag::widget resize_hud — the "120 × 40" badge shown while resizing
+// mayag::widget resize_hud — the "SIZE 120×40" chip shown while resizing
 //
 //   if (m.resizing) resize_hud(c, "hud", cols, rows);
 //
@@ -8,25 +8,28 @@
 // the app hides it ~600 ms after the last resize.
 
 #include "control.hpp"
+#include "hud.hpp"
 #include "../scene/overlay.hpp"
 
 #include <string>
+#include <vector>
 
 namespace mayag::dsl {
 
+/// `px`: the pixel size, shown dimmed after the grid size ("" = none).
 template <ControlContext C>
 inline void resize_hud(const C& c, std::string_view id, int cols, int rows, std::string_view extra = {}) {
     const Theme& t = c.theme;
+    const auto dim = mix(t.text_primary, t.background, 0.5f);
+    std::vector<HudSeg> segs{{std::to_string(cols) + "\u00D7" + std::to_string(rows), t.text_primary, true}};
+    if (!extra.empty()) segs.push_back({std::string{extra}, dim});
     c.overlay(Overlay{
-        .content = (v(text_owned(std::to_string(cols) + " \u00D7 " + std::to_string(rows)) | font(t.font_size * 1.6f) | bold
-                          | fg(var::text_primary) | text_align(TextAlign::center),
-                      text_owned(std::string{extra}) | font(t.font_size * 0.85f) | fg(var::text_secondary) | text_align(TextAlign::center))
-                    | gap(t.spaced(2)) | pad(t.spaced(10), t.spaced(18)) | align(Align::center)
-                    | bg(t.overlay.fade(0.92f)) | border(t.stroke(1), t.border_strong) | radius(t.radius_medium) | elevation(t.lift(16))).build(),
+        .content = (hud_chip(c, segs, {.tone = t.accent, .size = t.font_size * 0.8f})).build(),
         .id = part_id(id, part_menu),
         .placement = Placement::centered,
         .dismiss = Dismiss::never,
         .layer = 25,
+        .passthrough = true,   // never eats the click it is floating over
     });
 }
 

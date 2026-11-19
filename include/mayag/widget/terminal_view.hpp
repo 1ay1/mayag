@@ -104,6 +104,17 @@ struct TermViewOptions {
     /// stack with a monospace face (FontStack::add_family) gets a true grid;
     /// one without falls back to its UI chain, as before.
     FontFamily family = FontFamily::mono;
+    /// Smooth cursor: where the cursor is DRAWN, as an offset in cells from
+    /// its cell (the app eases it toward 0). With `cursor_trail`, ghosts are
+    /// drawn from there to the cell -- a short comet as it travels.
+    float cursor_dx = 0.0f, cursor_dy = 0.0f;
+    bool  cursor_trail = false;
+    /// Smooth scrolling: every row is drawn this many px lower (the app passes
+    /// one extra row above the viewport and a negative offset of up to a row,
+    /// so the grid slides by sub-row amounts; the view clips the rest).
+    float y_offset = 0.0f;
+    /// Glow under the cursor (0..1), for a cursor that reads as a light source.
+    float cursor_glow = 0.0f;
 };
 
 /// Geometry of the last draw, for hit testing and for sizing the pty
@@ -271,7 +282,7 @@ template <ControlContext C>
         out_metrics->origin_x = ox; out_metrics->origin_y = oy;
     }
     const auto col_x = [&](int col) { return ox + static_cast<float>(col) * cw; };
-    const auto row_y = [&](int row) { return oy + static_cast<float>(row) * ch; };
+    const auto row_y = [&](int row) { return oy + o.y_offset + static_cast<float>(row) * ch; };
     const auto bright = [&](Color<Srgb> col, bool is_bold) {
         return is_bold && th.bold_brighten > 0.0f ? mix(col, colors::white, th.bold_brighten) : col;
     };
@@ -417,8 +428,24 @@ template <ControlContext C>
     }
 
     // ── cursor ──
-    if (g.cursor_visible && g.cursor_row >= 0 && g.cursor_row < nrows && (o.cursor_on || !o.focused)) {
-        const float x = col_x(g.cursor_col), y = row_y(g.cursor_row);
+    const bool moving = std::fabs(o.cursor_dx) > 0.02f || std::fabs(o.cursor_dy) > 0.02f;
+    if (g.cursor_visible && g.cursor_row >= 0 && g.cursor_row < nrows && (o.cursor_on || !o.focused || moving)) {
+        const float tx = col_x(g.cursor_col), ty = row_y(g.cursor_row);
+        const float x = tx + o.cursor_dx * cw, y = ty + o.cursor_dy * ch;
+        if (o.focused && o.cursor_trail && moving) {   // the comet: fading ghosts from here to the cell
+            constexpr int n = 7;
+            for (int k = n; k >= 1; --k) {
+                const float f = static_cast<float>(k) / static_cast<float>(n + 1);
+                const float gx = x + (tx - x) * f, gy = y + (ty - y) * f;
+                const float sh = 0.55f + 0.45f * (1.0f - f);
+                layers.push_back((box() | size(cw * sh, ch * sh) | radius(2.0f)
+                                  | absolute(gx + cw * (1.0f - sh) * 0.5f, gy + ch * (1.0f - sh) * 0.5f)
+                                  | bg(rgb_of(th.cursor, 0.06f + 0.16f * (1.0f - f)))).build());
+            }
+        }
+        if (o.focused && o.cursor_glow > 0.0f)
+            layers.push_back((box() | size(cw, ch) | absolute(x, y)
+                              | shadow(cw * 1.2f, rgb_of(th.cursor, 0.25f * std::clamp(o.cursor_glow, 0.0f, 1.0f)), {0.0f, 0.0f})).build());
         const TermCell* under = g.cursor_col < static_cast<int>(g.lines[static_cast<std::size_t>(g.cursor_row)].cells.size())
                                     ? &g.lines[static_cast<std::size_t>(g.cursor_row)].cells[static_cast<std::size_t>(g.cursor_col)] : nullptr;
         const float w = (under && under->width == 2 ? 2.0f : 1.0f) * cw;
@@ -431,7 +458,7 @@ template <ControlContext C>
             rect(x, y + ch - 3, w, 2.5f, cc);
         } else {
             rect(x, y, w, ch, cc);
-            if (under != nullptr && !under->text.empty() && under->text != " ")
+            if (!moving && under != nullptr && !under->text.empty() && under->text != " ")
                 layers.push_back((h(text_owned(under->text) | font(o.font_size) | family(o.family) | fg(rgb_of(th.cursor_text)) | no_ligatures
                                     | (((under->flags & term_attr::bold) != 0) ? bold : weight(FontWeight::regular)))
                                   | size(w + cw, ch) | align(Align::center) | absolute(x, y)).build());

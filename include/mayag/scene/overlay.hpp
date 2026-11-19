@@ -194,7 +194,7 @@ namespace overlay {
     // content clips; scrolling lists stay usable).
     const bool vertical = placement == Placement::below_start || placement == Placement::below_end ||
                           placement == Placement::above_start || placement == Placement::above_end;
-    if (vertical && anchor.size.y > 0.0f) {
+    if (vertical && anchor.size.y > 0.0f && gap >= 0.0f) {   // a negative gap places INSIDE the anchor on purpose
         const float below_room = num::max(viewport.y - (anchor.bottom() + gap), 0.0f);
         const float above_room = num::max(anchor.top() - gap, 0.0f);
         const bool overlaps = pos.y < anchor.bottom() && pos.y + size.y > anchor.top();
