@@ -734,8 +734,9 @@ class WaylandWindow {
         L.display_flush(display_);
 
         // Start the input-to-photon clock at the first user event not yet on
-        // screen.
+        // screen (unless the program marks inputs itself).
         for (const auto& e : pending_) {
+            if (photon_manual_) break;
             if (!std::holds_alternative<ResizeEvent>(e) && !std::holds_alternative<FocusEvent>(e) &&
                 !std::holds_alternative<CloseRequest>(e)) { note_input(); break; }
         }
@@ -1746,10 +1747,37 @@ class WaylandWindow {
     void note_event_time(std::uint32_t ms) noexcept { if (ms != 0) last_event_ms_ = ms; }
 
     void record_photon(double ms) {
+        if (ms < 0.0 || ms > 5000.0) return;   // a clock glitch, not a frame
         photon_[photon_next_++ % photon_.size()] = ms;
         photon_count_ = std::min(photon_count_ + 1, photon_.size());
         photon_last_ = ms;
+        if (photon_sink_) photon_sink_(ms);
     }
+
+    // ── input to photon, for a program that forwards input ───────────────
+    //
+    // A nested compositor or remote desktop does not draw the answer to its
+    // window's input; a client somewhere else does, later. Its latency runs
+    // from the input to the frame that first shows that client's answer.
+    // In manual mode the window's own events no longer start the clock;
+    // the program marks the input whose answer the next frame will show.
+
+    void set_photon_manual(bool on) noexcept { photon_manual_ = on; }
+    /// The next frame drawn shows the answer to input from `at` (monotonic
+    /// seconds). The oldest unshown mark is kept: the honest latency.
+    void mark_input(double at) noexcept {
+        if (unshown_input_ < 0.0 || at < unshown_input_) unshown_input_ = at;
+    }
+    /// An input event's wl timestamp (ms, CLOCK_MONOTONIC, wrapping) as
+    /// monotonic seconds; `now` if it is implausible (synthetic events).
+    [[nodiscard]] double event_seconds(std::uint32_t ms) const noexcept {
+        const double now = wldetail::monotonic_now();
+        const auto now_ms = static_cast<std::uint32_t>(static_cast<std::uint64_t>(now * 1000.0));
+        const std::uint32_t age = now_ms - ms;
+        return age < 1000 ? now - static_cast<double>(age) / 1000.0 : now;
+    }
+    /// Every measured sample, as it is measured (ms).
+    void set_photon_sink(std::function<void(double)> f) { photon_sink_ = std::move(f); }
 
     [[nodiscard]] std::optional<DisplayTiming> display_timing() const noexcept {
         if (vblank_s_ <= 0.0 || period_ns_ == 0) return std::nullopt;
@@ -2448,6 +2476,8 @@ class WaylandWindow {
     std::array<double, 120> photon_{};
     std::size_t photon_next_ = 0, photon_count_ = 0;
     double     photon_last_ = 0.0;
+    bool       photon_manual_ = false;
+    std::function<void(double)> photon_sink_;
     wl::proxy* frame_callback_ = nullptr;
     wl::proxy* pool_           = nullptr;
 
@@ -2596,6 +2626,10 @@ class WaylandWindow {
         p_->set_cursor_image(argb, w, h, stride, hot_x, hot_y);
     }
     void set_raw_input(std::function<void(const RawInput&)> f) { p_->set_raw_input(std::move(f)); }
+    void set_photon_manual(bool on) noexcept { p_->set_photon_manual(on); }
+    void mark_input(double at) noexcept { p_->mark_input(at); }
+    [[nodiscard]] double event_seconds(std::uint32_t ms) const noexcept { return p_->event_seconds(ms); }
+    void set_photon_sink(std::function<void(double)> f) { p_->set_photon_sink(std::move(f)); }
     void set_clipboard(std::string_view text) { p_->set_clipboard(text); }
     [[nodiscard]] std::string get_clipboard() { return p_->get_clipboard(); }
 
