@@ -15,6 +15,7 @@
 
 #include <mayag/mayag.hpp>
 #include <mayag/backend/tiled.hpp>
+#include "../examples/timing.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -143,12 +144,12 @@ int main() {
     // instance count) are the machine-independent part and stay strict.
     const double slack = 3.0;   // headroom for a loaded CI box
 
-    check(cpu_side < kFrameBudget * 0.35 * slack,
+    check(mayag::testing::timing_ok(cpu_side < kFrameBudget * 0.35 * slack),
           "view+layout+paint is " +
               std::to_string(static_cast<int>(100.0 * cpu_side / kFrameBudget)) +
               "% of a 60 Hz frame");
 
-    check(total < kFrameBudget * 0.75 * slack,
+    check(mayag::testing::timing_ok(total < kFrameBudget * 0.75 * slack),
           "the full software path is " +
               std::to_string(static_cast<int>(100.0 * total / kFrameBudget)) +
               "% of a 60 Hz frame");

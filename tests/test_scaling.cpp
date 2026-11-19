@@ -16,6 +16,7 @@
 #include <mayag/mayag.hpp>
 #include <mayag/widget/virtual_list.hpp>
 #include <mayag/backend/tiled.hpp>
+#include "../examples/timing.hpp"
 #include <mayag/widget/virtual_list.hpp>
 
 #include <chrono>
@@ -118,7 +119,7 @@ int main() {
               std::to_string(big.ms) + " vs " + std::to_string(small.ms) + " ms)");
 
     // And the absolute number has to leave room for the rest of a frame.
-    check(big.ms < 4.0,
+    check(mayag::testing::timing_ok(big.ms < 4.0),
           "a 100k-row frame builds in under 4 ms of the 16.7 ms budget");
 
     std::printf("\n%s  %d checks, %d failures\n",

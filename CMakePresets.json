@@ -3,11 +3,44 @@
   "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
   "configurePresets": [
     {
+      "name": "base-linux",
+      "hidden": true,
+      "generator": "Ninja",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "MAYAG_PCH": "ON",
+        "MAYAG_COMPILER_CACHE": "ON",
+        "MAYAG_FAST_LINKER": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "inherits": "base-linux",
+      "displayName": "Linux dev loop: clang -O0 -g + shared PCH + ccache + mold",
+      "description": "The edit-compile loop. ~60 s cold on 12 cores, ~14 s from a clean tree with a warm ccache, ~4 s to rebuild one example.",
+      "binaryDir": "${sourceDir}/build-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS_DEBUG": "-O0 -g -gsplit-dwarf"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "base-linux",
+      "displayName": "Linux release: clang -O3 + shared PCH + ccache + mold",
+      "description": "Optimised builds for benchmarks and shipping. ~3 min cold on 12 cores (GCC: ~7 min); warm-cache rebuilds are seconds.",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
       "name": "fast",
-      "displayName": "Fast build: upstream clang + shared PCH with codegen",
+      "displayName": "macOS fast build: upstream clang + shared PCH with codegen",
       "description": "Homebrew LLVM (brew install llvm). mayag.hpp is precompiled once with its code compiled once; ~115 s cold on an 8-core M-series, 9 s to rebuild one example.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-fast",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm/bin/clang",
@@ -21,6 +54,7 @@
       "description": "The CI macOS-gcc configuration. No shared PCH; ~4x slower to build than 'fast'.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "g++-16"
@@ -28,10 +62,14 @@
     }
   ],
   "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "release", "configurePreset": "release" },
     { "name": "fast", "configurePreset": "fast" },
     { "name": "gcc", "configurePreset": "gcc" }
   ],
   "testPresets": [
+    { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true }, "execution": { "jobs": 8 } },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true }, "execution": { "jobs": 8 } },
     { "name": "fast", "configurePreset": "fast", "output": { "outputOnFailure": true }, "execution": { "jobs": 6 } },
     { "name": "gcc", "configurePreset": "gcc", "output": { "outputOnFailure": true }, "execution": { "jobs": 6 } }
   ]

@@ -20,12 +20,50 @@ option(MAYAG_COMPILER_CACHE "Use ccache/sccache as the compiler launcher when av
 if(MAYAG_COMPILER_CACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
     find_program(MAYAG_CCACHE NAMES ccache sccache)
     if(MAYAG_CCACHE)
-        set(CMAKE_C_COMPILER_LAUNCHER   "${MAYAG_CCACHE}" CACHE STRING "" FORCE)
-        set(CMAKE_CXX_COMPILER_LAUNCHER "${MAYAG_CCACHE}" CACHE STRING "" FORCE)
+        get_filename_component(mayag_cache_name "${MAYAG_CCACHE}" NAME_WE)
+        if(mayag_cache_name STREQUAL "ccache")
+            # The shared PCH makes ccache refuse EVERY consumer ("could not
+            # use precompiled header") unless time_macros/pch_defines
+            # sloppiness is on, and then 85% of the build was uncacheable.
+            # Set here, through the launcher, so the user's ccache.conf is
+            # untouched. Safe: the PCH is built with -fno-pch-timestamp and
+            # no mayag header expands __DATE__/__TIME__.
+            set(mayag_launcher ${CMAKE_COMMAND} -E env
+                "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime"
+                ${MAYAG_CCACHE})
+        else()
+            set(mayag_launcher ${MAYAG_CCACHE})
+        endif()
+        set(CMAKE_C_COMPILER_LAUNCHER   "${mayag_launcher}" CACHE STRING "" FORCE)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${mayag_launcher}" CACHE STRING "" FORCE)
         message(STATUS "mayag: compiler cache enabled (${MAYAG_CCACHE})")
     else()
         message(STATUS "mayag: no ccache/sccache found — install ccache to make "
                        "header edits rebuild in seconds (pacman/apt/brew install ccache)")
+    endif()
+endif()
+
+# ───────────────────────────────────────────────────────────────────────
+# Fast linker (mold, else lld) for mayag's own examples and tests
+#
+# ~65 executables, each linking the same large objects. mold links them in a
+# fraction of GNU ld's time. Only set when the user picked no linker (CMake's
+# CMAKE_LINKER_TYPE or -fuse-ld in their flags), and only for ELF.
+# ───────────────────────────────────────────────────────────────────────
+option(MAYAG_FAST_LINKER "Link mayag's examples/tests with mold or lld when available" ON)
+set(MAYAG_LINK_FLAG "")
+if(MAYAG_FAST_LINKER AND UNIX AND NOT APPLE AND NOT CMAKE_LINKER_TYPE
+   AND NOT CMAKE_EXE_LINKER_FLAGS MATCHES "fuse-ld")
+    find_program(MAYAG_MOLD mold)
+    find_program(MAYAG_LLD ld.lld)
+    if(MAYAG_MOLD)
+        set(MAYAG_LINK_FLAG "-fuse-ld=mold")
+    elseif(MAYAG_LLD AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        set(MAYAG_LINK_FLAG "-fuse-ld=lld")
+    endif()
+    if(MAYAG_LINK_FLAG)
+        add_link_options(${MAYAG_LINK_FLAG})
+        message(STATUS "mayag: linking with ${MAYAG_LINK_FLAG}")
     endif()
 endif()
 
@@ -751,7 +789,7 @@ function(mayag_pch_variant name)
     add_custom_command(
         OUTPUT ${code}
         COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_OBJECTS:mayag_pch_${name}> ${pch_copy}
-        COMMAND ${CMAKE_CXX_COMPILER} ${opt} -c ${pch_copy} -o ${code}
+        COMMAND ${CMAKE_CXX_COMPILER_LAUNCHER} ${CMAKE_CXX_COMPILER} ${opt} -c ${pch_copy} -o ${code}
         DEPENDS mayag_pch_${name} $<TARGET_OBJECTS:mayag_pch_${name}>
         COMMENT "mayag: compiling the shared PCH's code (${name})"
         VERBATIM)
@@ -799,6 +837,17 @@ if(MAYAG_PCH_ACTIVE)
 elseif(MAYAG_PCH AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     message(STATUS "mayag: AppleClang cannot read mayag's PCH; for ~2x faster builds use "
                    "upstream clang: -DCMAKE_CXX_COMPILER=$(brew --prefix llvm)/bin/clang++")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE AND (MAYAG_BUILD_EXAMPLES OR MAYAG_BUILD_TESTS))
+    # GCC has no PCH codegen and spends ~3x clang's time per -O3 TU on
+    # mayag's template stack (hello.cpp: 44 s vs 14 s); a .gch only saves the
+    # ~2 s parse. Point at the presets rather than switching compilers
+    # behind the user's back (CI pins GCC on purpose).
+    find_program(MAYAG_CLANGXX clang++)
+    if(MAYAG_CLANGXX)
+        message(STATUS "mayag: building with GCC (~7 min cold). clang is installed: "
+                       "`cmake --preset dev` (~1 min cold, ~4 s per edit) or "
+                       "`cmake --preset release` (~3 min) build much faster.")
+    endif()
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────

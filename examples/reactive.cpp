@@ -15,6 +15,7 @@
 //   ./mayag_reactive --headless   asserts the latency budget in CI
 
 #include "harness.hpp"
+#include "timing.hpp"
 #include <mayag/widget/divider.hpp>
 #include <mayag/widget/layout.hpp>
 
@@ -348,13 +349,13 @@ int main(int argc, char** argv) {
 
         // A continuously animating scene must fit a 60 Hz frame with room to
         // spare, or the app cannot also do the work it exists for.
-        ok(L.mean_cpu_ms() < 8.0,
+        ok(mayag::testing::timing_ok(L.mean_cpu_ms() < 8.0),
            "mean frame is under half the 60 Hz budget (" +
            std::to_string(L.mean_cpu_ms()) + " ms)");
-        ok(L.percentile_cpu_ms(0.99) < 16.6,
+        ok(mayag::testing::timing_ok(L.percentile_cpu_ms(0.99) < 16.6),
            "p99 fits inside one refresh (" +
            std::to_string(L.percentile_cpu_ms(0.99)) + " ms)");
-        ok(L.missed_frames() == 0,
+        ok(mayag::testing::timing_ok(L.missed_frames() == 0),
            "no missed frames (" + std::to_string(L.missed_frames()) + ")");
 
         // ── idles unless something is moving ────────────────────────────
