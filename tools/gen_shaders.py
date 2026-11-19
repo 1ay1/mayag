@@ -411,7 +411,19 @@ def emit_array(name, words):
 
 
 def cxx_raw(name, text):
-    return 'inline constexpr std::string_view %s = R"SHADER(\n%s\n)SHADER";' % (name, text)
+    # MSVC rejects a single string literal over 16380 bytes (C2026), so the
+    # source is emitted as adjacent raw literals, split at line breaks; the
+    # compiler concatenates them into one string.
+    body = "\n" + text + "\n"
+    chunks, cur = [], ""
+    for line in body.splitlines(keepends=True):
+        if cur and len(cur) + len(line) > 12000:
+            chunks.append(cur)
+            cur = ""
+        cur += line
+    chunks.append(cur)
+    lits = "\n".join('R"SHADER(%s)SHADER"' % c for c in chunks)
+    return "inline constexpr std::string_view %s =\n%s;" % (name, lits)
 
 
 def main():

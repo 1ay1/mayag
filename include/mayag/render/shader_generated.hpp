@@ -14,7 +14,8 @@
 
 namespace mayag::render::generated {
 
-inline constexpr std::string_view glsl_vertex = R"SHADER(
+inline constexpr std::string_view glsl_vertex =
+R"SHADER(
 #version 450
 layout(location = 0) in vec4 i_rect;
 layout(location = 1) in vec4 i_radii;
@@ -77,7 +78,8 @@ void main() {
 
 )SHADER";
 
-inline constexpr std::string_view glsl_fragment = R"SHADER(
+inline constexpr std::string_view glsl_fragment =
+R"SHADER(
 #version 450
 layout(location = 0) in vec2  v_local;
 layout(location = 1) in vec2  v_norm;
@@ -352,7 +354,8 @@ float box_halfplane_coverage(float d, float nx, float ny)  {
 
 /// Coverage of a distance-field glyph texel. `raw` is the field at the pixel
 /// centre, `rx`/`ry` the field one display pixel right/down (the gradient
-/// gives the edge normal). params.x = half a display pixel in field units
+)SHADER"
+R"SHADER(/// gives the edge normal). params.x = half a display pixel in field units
 /// (the field is Euclidean, so distance in px = (raw - 0.5) / (2 params.x)),
 /// params.y = font-smoothing growth in field units: CoreGraphics dilates
 /// with a SQUARE kernel, so an edge with normal n moves g (|nx| + |ny|).
