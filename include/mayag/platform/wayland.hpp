@@ -1446,8 +1446,15 @@ class WaylandWindow {
         if (display_ != nullptr) L.display_flush(display_);
     }
 
-    /// The raw input tap (see raw::). Unset by default.
-    void set_raw_input(std::function<void(const RawInput&)> f) { raw_ = std::move(f); }
+    /// The raw input tap (see raw::). Unset by default. The keyboard's
+    /// keymap and repeat rate usually arrive before anyone installs a tap,
+    /// so they are replayed to it at once.
+    void set_raw_input(std::function<void(const RawInput&)> f) {
+        raw_ = std::move(f);
+        if (!raw_) return;
+        if (!keymap_text_.empty()) raw_(raw::Keymap{keymap_text_});
+        if (keyboard_ != nullptr) raw_(raw::Repeat{repeat_.rate, repeat_.delay});
+    }
 
 
     // ════════════════════════════════════════════════════════════════════
@@ -1485,7 +1492,10 @@ class WaylandWindow {
                 wl::add_listener(w->wm_base_, &wm_base_listener, w);
             }
         } else if (id == "wl_seat") {
-            w->seat_ = bind(L.i_seat, 5);
+            // v8: high-resolution wheel (axis_value120), never more than the
+            // libwayland we loaded knows how to decode.
+            const auto seat_max = static_cast<std::uint32_t>(L.i_seat->version);
+            w->seat_ = bind(L.i_seat, seat_max < 8 ? seat_max : 8);
             if (w->seat_ != nullptr) wl::add_listener(w->seat_, &seat_listener, w);
         } else if (id == "wl_output") {
             if (w->output_ == nullptr) {
@@ -2197,8 +2207,10 @@ class WaylandWindow {
         // guaranteed writable and we only ever read it.
         void* map = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
         if (map == MAP_FAILED) { ::close(fd); return; }
-        if (raw_ && size > 0)
-            raw_(raw::Keymap{std::string(static_cast<const char*>(map), ::strnlen(static_cast<const char*>(map), size))});
+        if (size > 0) {
+            keymap_text_.assign(static_cast<const char*>(map), ::strnlen(static_cast<const char*>(map), size));
+            if (raw_) raw_(raw::Keymap{keymap_text_});
+        }
 
         if (xkb_context_ == nullptr) xkb_context_ = xkb_.context_new(0);
         if (xkb_context_ != nullptr) {
@@ -2471,6 +2483,7 @@ class WaylandWindow {
 
     std::uint32_t pointer_serial_ = 0;
     std::function<void(const RawInput&)> raw_;
+    std::string keymap_text_;  // the compositor's keymap, for a late raw tap
     enum class CursorMode : std::uint8_t { shape, raw_shape, image, hidden };
     CursorMode cursor_mode_ = CursorMode::shape;
     std::uint32_t cursor_raw_shape_ = 1;
