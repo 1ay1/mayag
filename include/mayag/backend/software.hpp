@@ -202,6 +202,10 @@ class CoverageSampler {
     /// sRGB-encoded. Only `texture` instances call this. The default returns
     /// opaque white, which multiplies through as "no image" rather than
     /// drawing a black rectangle when nothing is bound.
+    /// Sample user texture `id` (an image() node's id; 0 = none bound).
+    [[nodiscard]] virtual Vec4 sample_texture(std::uint32_t /*id*/, float u, float v) const {
+        return sample_texture(u, v);
+    }
     [[nodiscard]] virtual Vec4 sample_texture(float /*u*/, float /*v*/) const {
         return Vec4{1.0f, 1.0f, 1.0f, 1.0f};
     }
@@ -285,6 +289,8 @@ class ImageStore final : public CoverageSampler {
     void bind(std::uint32_t id) noexcept { bound_ = id; }
 
     [[nodiscard]] bool empty() const noexcept { return images_.empty(); }
+    /// Every image, by id: what a GPU that comes up late re-uploads.
+    [[nodiscard]] const auto& all() const noexcept { return images_; }
     /// The image texture slot samples now, or null.
     [[nodiscard]] std::shared_ptr<const ImageData> bound_image() const {
         const auto it = images_.find(bound_);
@@ -298,6 +304,15 @@ class ImageStore final : public CoverageSampler {
     [[nodiscard]] Vec4 sample_rgba(std::uint32_t slot, float u, float v) const override {
         return glyphs_ != nullptr ? glyphs_->sample_rgba(slot, u, v)
                                   : Vec4{1.0f, 1.0f, 1.0f, 0.0f};
+    }
+    /// Each image() samples its own id; the bound one is only the fallback
+    /// for callers that do not say which.
+    [[nodiscard]] Vec4 sample_texture(std::uint32_t id, float u, float v) const override {
+        auto it = images_.find(id);
+        if (it == images_.end()) it = images_.find(bound_);
+        if (it == images_.end() || !it->second) return Vec4{1.0f, 1.0f, 1.0f, 1.0f};
+        TextureSource src{it->second->rgba.data(), it->second->width, it->second->height};
+        return src.sample(u, v);
     }
     [[nodiscard]] Vec4 sample_texture(float u, float v) const override {
         const auto it = images_.find(bound_);
@@ -484,7 +499,7 @@ class Software {
                     if (cov <= 0.001f) continue;
                     const float u = (p.x - shape.left()) / shape.width();
                     const float v = (p.y - shape.top())  / shape.height();
-                    const Vec4 t = sampler->sample_texture(num::saturate(u),
+                    const Vec4 t = sampler->sample_texture(texture, num::saturate(u),
                                                            num::saturate(v));
                     const Vec4 lin{kernel::srgb_to_linear(t.x),
                                    kernel::srgb_to_linear(t.y),

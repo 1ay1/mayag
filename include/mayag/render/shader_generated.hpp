@@ -137,7 +137,7 @@ layout(location = 9) in vec2  v_half;
 layout(set = 0, binding = 0) uniform sampler2D u_atlas;
 layout(set = 0, binding = 1) uniform sampler2D u_color_atlas;
 layout(set = 0, binding = 2) uniform sampler2D u_capture;
-layout(set = 0, binding = 3) uniform sampler2D u_texture;
+layout(set = 1, binding = 0) uniform sampler2D u_texture;   // one set per texture, bound per batch
 
 layout(location = 0) out vec4 o_color;
 
@@ -395,9 +395,9 @@ float apply_text_gamma(float cov, vec4 premul_color)  {
 /// ENCODED values, enc(dst) + (enc(src) - enc(dst)) * cov * alpha. With
 /// t = cov * alpha that is enc(src) * t + enc(dst) * (1 - t): premultiplied
 /// "over", in encoded space. So a backend that lets the blender see the
-/// target's encoded bytes (a UNORM view of the sRGB image, Vulkan) gets the
 )SHADER"
-R"SHADER(/// exact result from this source and the ordinary blend state; no coverage
+R"SHADER(/// target's encoded bytes (a UNORM view of the sRGB image, Vulkan) gets the
+/// exact result from this source and the ordinary blend state; no coverage
 /// reshaping, no knowledge of the backdrop. The software rasteriser applies
 /// the identical formula itself (Framebuffer::blend_text), so both paths
 /// draw the same text pixels by construction.
@@ -637,9 +637,9 @@ Shaded shade(Fragment f)  {
     }
 
     // LINEAR PREMULTIPLIED. No transfer function here, ever: the software path
-    // composites into a linear framebuffer and encodes once at the end, and the
 )SHADER"
-R"SHADER(    // GPU path renders into an _SRGB attachment so the hardware decodes, blends
+R"SHADER(    // composites into a linear framebuffer and encodes once at the end, and the
+    // GPU path renders into an _SRGB attachment so the hardware decodes, blends
     // in linear, and encodes on store. Both blend coverage in linear light.
     result.color = vec4(color.x * cov, color.y * cov, color.z * cov, color.w * cov);
     return result;
@@ -788,7 +788,7 @@ inline constexpr std::uint32_t fragment[] = {
     0x00000021, 0x00000000, 0x00040047, 0x000000bc, 0x00000022, 0x00000000, 0x00040047, 0x000000c3,
     0x00000021, 0x00000001, 0x00040047, 0x000000c3, 0x00000022, 0x00000000, 0x00040047, 0x000000c9,
     0x00000021, 0x00000002, 0x00040047, 0x000000c9, 0x00000022, 0x00000000, 0x00040047, 0x000000d0,
-    0x00000021, 0x00000003, 0x00040047, 0x000000d0, 0x00000022, 0x00000000, 0x00040047, 0x0000085e,
+    0x00000021, 0x00000000, 0x00040047, 0x000000d0, 0x00000022, 0x00000001, 0x00040047, 0x0000085e,
     0x0000001e, 0x00000000, 0x00040047, 0x00000861, 0x0000001e, 0x00000001, 0x00040047, 0x00000865,
     0x0000000b, 0x0000000f, 0x00040047, 0x00000869, 0x0000001e, 0x00000009, 0x00040047, 0x0000086c,
     0x0000001e, 0x00000007, 0x00040047, 0x0000086f, 0x0000001e, 0x00000002, 0x00040047, 0x00000872,

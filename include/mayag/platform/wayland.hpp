@@ -951,7 +951,7 @@ class WaylandWindow {
         if (!img) return;
 #ifdef MAYAG_WITH_VULKAN
         if (gpu_active_) {
-            (void)gpu_->upload_texture(img->rgba.data(), img->width, img->height);
+            (void)gpu_->upload_texture(id, img->rgba.data(), img->width, img->height);
         }
 #endif
         images_.upload(id, std::move(img));
@@ -960,9 +960,29 @@ class WaylandWindow {
     void release_image(std::uint32_t id) {
         images_.release(id);
 #ifdef MAYAG_WITH_VULKAN
-        if (gpu_active_ && images_.empty()) gpu_->release_texture();
+        if (gpu_active_) gpu_->release_texture(id);
 #endif
     }
+
+#ifdef MAYAG_WITH_VULKAN
+    /// Optional window capability: show a FOREIGN GPU buffer as image(id),
+    /// zero copies. The compositor path: a client's dmabuf, imported by the
+    /// device, sampled where image(id) is drawn. `on_free` runs when the GPU
+    /// has finished with the buffer this replaces (or this one, on failure).
+    [[nodiscard]] ImportResult import_image(std::uint32_t id, const Dmabuf& d, int w, int h,
+                                            std::function<void()> on_free) {
+        if (!gpu_active_) {
+            if (on_free) on_free();
+            return std::unexpected(ImportError::not_supported);
+        }
+        images_.release(id);  // the CPU path cannot show it; don't show a stale one
+        return gpu_->import_dmabuf_as(id, d, w, h, std::move(on_free));
+    }
+    [[nodiscard]] bool can_import_images() const noexcept { return gpu_active_ && gpu_->can_import(); }
+    [[nodiscard]] std::span<const FormatModifier> importable_formats() const {
+        return gpu_active_ ? gpu_->importable_formats() : std::span<const FormatModifier>{};
+    }
+#endif
 
 #ifdef MAYAG_WITH_VULKAN
     /// Upload dirty glyph rects to the GPU atlas image before a frame that
@@ -985,8 +1005,8 @@ class WaylandWindow {
         gpu_ = std::move(d);
         gpu_active_ = true;
         apply_surface_geometry();   // the size may have changed since the CPU frames
-        if (auto img = images_.bound_image())
-            (void)gpu_->upload_texture(img->rgba.data(), img->width, img->height);
+        for (const auto& [id, img] : images_.all())
+            (void)gpu_->upload_texture(id, img->rgba.data(), img->width, img->height);
         // The shm buffers are done with; give them back.
         if (shm_made_) {
             for (auto& b : buffers_) b.unmap();

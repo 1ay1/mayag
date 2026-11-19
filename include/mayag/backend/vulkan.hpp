@@ -847,14 +847,14 @@ class VulkanBackend final : public Device {
 
     void sync_atlas(const AtlasView& v) override { dev_.sync_atlas_view(v); }
 
-    void upload_image(std::uint32_t,
+    void upload_image(std::uint32_t id,
                       std::shared_ptr<const ImageData> img) override {
         if (!img) return;
         // The GPU must copy -- pixels have to reach device memory -- but it
         // copies ONCE, here, instead of once per layer of the call chain.
-        (void)dev_.upload_texture(img->rgba.data(), img->width, img->height);
+        (void)dev_.upload_texture(id, img->rgba.data(), img->width, img->height);
     }
-    void release_image(std::uint32_t) override { dev_.release_texture(); }
+    void release_image(std::uint32_t id) override { dev_.release_texture(id); }
 
     /// Zero-copy import. Falls through to the copying path only when the
     /// caller hands over memory mayag already owns.

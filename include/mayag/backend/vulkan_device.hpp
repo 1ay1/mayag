@@ -52,6 +52,7 @@ inline int fd_close(int fd) noexcept { return ::close(fd); }
 #include <cstring>
 #include <optional>
 #include <string_view>
+#include <map>
 #include <vector>
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(_WIN32)
@@ -427,58 +428,52 @@ class VulkanDevice {
         return true;
     }
 
-    /// Upload an RGBA8 image and make it the texture that KIND_TEXTURE
-    /// instances sample. Returns a slot id (1-based; 0 means "no texture").
-    ///
-    /// This is deliberately a SINGLE bound texture rather than a slot array:
-    /// mayag draws a whole frame in a handful of instanced batches, and a
-    /// per-instance texture array would need either bindless descriptors or a
-    /// batch break per image. One binding covers the cases that exist today
-    /// (an image, a video frame) honestly, and the signature leaves room to
-    /// grow without changing callers.
-    std::uint32_t upload_texture(const std::uint8_t* rgba, int w, int h) {
-        if (!valid_ || rgba == nullptr || w <= 0 || h <= 0) return 0;
-
-        if (w != tex_w_ || h != tex_h_) {
-            // The size changed, so the old image must go -- but a frame in
-            // flight may still be SAMPLING it, and freeing a resource the GPU
-            // is reading is undefined behaviour. In practice it hangs inside
-            // the driver with no stack that points back here, which is how
-            // this first showed up: "it hung in fullscreen on pause".
-            //
-            // The obvious fix is DeviceWaitIdle, and it works, and it stalls
-            // the entire GPU to answer a question about ONE image. Retire it
-            // instead: hand the handles to the reclaimer tagged with the
-            // current frame, and they are freed once that frame completes.
-            // Same correctness, no stall, and a compositor destroying a
-            // buffer per closing window does not stop the world each time.
-            const std::uint64_t frame = frames_completed_;
-            auto* api = api_;
-            auto dev = device_;
-            auto old_view = tex_view_;
-            auto old_image = tex_image_;
-            auto old_mem = tex_mem_;
-            reclaim_.retire(frame + 1, [api, dev, old_view, old_image, old_mem] {
-                if (old_view) api->DestroyImageView(dev, old_view, nullptr);
-                if (old_image) api->DestroyImage(dev, old_image, nullptr);
-                if (old_mem) api->FreeMemory(dev, old_mem, nullptr);
-            });
-
-            tex_view_ = nullptr; tex_image_ = nullptr; tex_mem_ = nullptr;
-            make_sampled_image(w, h, vk::VK_FORMAT_R8G8B8A8_UNORM,
-                               tex_image_, tex_mem_, tex_view_);
-            tex_w_ = w; tex_h_ = h;
+    /// Upload an RGBA8 image as texture `id` (an image() node's id). Each id
+    /// is its own image and its own set-1 descriptor, so any number of
+    /// textures are live and each batch samples its own. Re-uploading an id
+    /// at the same size reuses its image; at a new size the old one is
+    /// retired, not destroyed, because a frame in flight may sample it.
+    std::uint32_t upload_texture(std::uint32_t id, const std::uint8_t* rgba, int w, int h) {
+        if (!valid_ || rgba == nullptr || w <= 0 || h <= 0 || id == 0) return 0;
+        auto it = textures_.find(id);
+        if (it != textures_.end() && (it->second.imported || it->second.w != w || it->second.h != h)) {
+            retire_texture(it->second, {});
+            textures_.erase(it);
+            it = textures_.end();
         }
-        if (tex_image_ == nullptr) return 0;
+        if (it == textures_.end()) {
+            Texture t;
+            t.w = w;
+            t.h = h;
+            make_sampled_image(w, h, vk::VK_FORMAT_R8G8B8A8_UNORM, t.image, t.memory, t.view);
+            if (t.image == nullptr) return 0;
+            t.set = allocate_tex_set();
+            if (t.set == nullptr) {
+                retire_texture(t, {});
+                return 0;
+            }
+            write_tex_set(t.set, t.view);
+            it = textures_.emplace(id, t).first;
+        }
 
         const std::size_t bytes = static_cast<std::size_t>(w) * h * 4;
         ensure_staging(bytes);
         std::memcpy(staging_ptr_, rgba, bytes);
-        upload_plane(tex_image_, w, h, /*channels=*/4);
-
-        atlas_dirty_binding_ = true;   // rebind so the shader sees it
+        upload_plane(it->second.image, w, h, /*channels=*/4);
         content_changed_ = true;
-        return 1;
+        return id;
+    }
+
+    /// The old single-texture call: id 1.
+    std::uint32_t upload_texture(const std::uint8_t* rgba, int w, int h) { return upload_texture(1, rgba, w, h); }
+
+    /// Drop texture `id`. Retired with the frame that last used it.
+    void release_texture(std::uint32_t id) {
+        auto it = textures_.find(id);
+        if (it == textures_.end()) return;
+        retire_texture(it->second, {});
+        textures_.erase(it);
+        content_changed_ = true;
     }
 
     /// Import a dmabuf as a sampleable image WITHOUT copying its pixels.
@@ -639,6 +634,10 @@ class VulkanDevice {
         vci.image = image;
         vci.viewType = 1;                     // VK_IMAGE_VIEW_TYPE_2D
         vci.format = vk_format;
+        // xrgb/xbgr: the fourth byte is padding, often 0. Read it as opaque,
+        // or an X-format window composites as fully transparent.
+        // (VkComponentSwizzle: IDENTITY = 0, ONE = 2.)
+        if (d.format == formats::xrgb8888 || d.format == formats::xbgr8888) vci.components = {0, 0, 0, 2};
         vci.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         if (api_->CreateImageView(device_, &vci, nullptr, &view) != vk::VK_SUCCESS) {
             api_->FreeMemory(device_, mem, nullptr);
@@ -659,8 +658,42 @@ class VulkanDevice {
         });
 
         const std::uint32_t slot = next_import_slot_++;
-        imports_.push_back(Imported{slot, image, view, mem});
+        Texture t;
+        t.image = image;
+        t.view = view;
+        t.memory = mem;
+        t.w = w;
+        t.h = h;
+        t.imported = true;
+        t.set = allocate_tex_set();
+        if (t.set == nullptr) {
+            retire_texture(t, {});
+            return std::unexpected(ImportError::invalid_buffer);
+        }
+        write_tex_set(t.set, t.view);
+        textures_.emplace(slot, t);
+        content_changed_ = true;
         return TextureHandle{slot};
+    }
+
+    /// import_dmabuf, as texture `id` (an image() node's id), replacing what
+    /// that id showed. The compositor path: a client's new buffer becomes
+    /// what its window draws, zero copies, and the old buffer is released
+    /// (on_free) only when the GPU has finished sampling it.
+    [[nodiscard]] ImportResult import_dmabuf_as(std::uint32_t id, const Dmabuf& d, int w, int h,
+                                                std::function<void()> on_old_free = {}) {
+        auto r = import_dmabuf(d, w, h);
+        if (!r) return r;
+        auto node = textures_.extract(r->slot);
+        if (auto old = textures_.find(id); old != textures_.end()) {
+            retire_texture(old->second, std::move(on_old_free));
+            textures_.erase(old);
+        } else if (on_old_free) {
+            on_old_free();
+        }
+        node.key() = id;
+        textures_.insert(std::move(node));
+        return TextureHandle{id};
     }
 
     /// Drop an imported texture, reporting when it is genuinely free.
@@ -675,29 +708,82 @@ class VulkanDevice {
     /// That is exactly what wl_buffer.release needs, and the Reclaimer
     /// already knew it -- it simply had nobody to tell.
     void release_import(std::uint32_t slot, std::function<void()> on_free = {}) {
-        const auto it = std::find_if(imports_.begin(), imports_.end(),
-                                     [&](const Imported& i) { return i.slot == slot; });
-        if (it == imports_.end()) {
+        const auto it = textures_.find(slot);
+        if (it == textures_.end()) {
             // Unknown slot: nothing is holding the buffer, so it is free now.
             // Reporting rather than staying silent means a caller never has
             // to guess whether its callback was dropped.
             if (on_free) on_free();
             return;
         }
+        retire_texture(it->second, std::move(on_free));
+        textures_.erase(it);
+        content_changed_ = true;
+    }
 
+    // ── the texture table ───────────────────────────────────────────────────────────────
+
+    /// One user texture: uploaded (we own the memory) or imported (a
+    /// client's dmabuf), and the set-1 descriptor that samples it.
+    struct Texture {
+        vk::VkImage image = nullptr;
+        vk::VkImageView view = nullptr;
+        vk::VkDeviceMemory memory = nullptr;
+        vk::VkDescriptorSet set = nullptr;
+        int w = 0, h = 0;
+        bool imported = false;
+    };
+
+    /// Destroy `t` once the frame that may be sampling it has completed, and
+    /// recycle its descriptor set. `on_free` runs at that moment: the moment
+    /// the GPU provably finished with the memory (wl_buffer.release).
+    void retire_texture(const Texture& t, std::function<void()> on_free) {
         auto* api = api_;
         auto dev = device_;
-        auto view = it->view;
-        auto image = it->image;
-        auto mem = it->memory;
-        reclaim_.retire(frames_completed_ + 1,
-                        [api, dev, view, image, mem, on_free = std::move(on_free)] {
-            if (view) api->DestroyImageView(dev, view, nullptr);
-            if (image) api->DestroyImage(dev, image, nullptr);
-            if (mem) api->FreeMemory(dev, mem, nullptr);
+        reclaim_.retire(frames_completed_ + 1, [this, api, dev, t, on_free = std::move(on_free)] {
+            if (t.view) api->DestroyImageView(dev, t.view, nullptr);
+            if (t.image) api->DestroyImage(dev, t.image, nullptr);
+            if (t.memory) api->FreeMemory(dev, t.memory, nullptr);
+            if (t.set) free_tex_sets_.push_back(t.set);
             if (on_free) on_free();
         });
-        imports_.erase(it);
+    }
+
+    [[nodiscard]] vk::VkDescriptorSet allocate_tex_set() {
+        if (!free_tex_sets_.empty()) {
+            const auto s = free_tex_sets_.back();
+            free_tex_sets_.pop_back();
+            return s;
+        }
+        vk::VkDescriptorSetAllocateInfo a{};
+        a.sType = vk::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        a.descriptorPool = desc_pool_;
+        a.descriptorSetCount = 1;
+        a.pSetLayouts = &tex_set_layout_;
+        vk::VkDescriptorSet s = nullptr;
+        if (api_->AllocateDescriptorSets(device_, &a, &s) != vk::VK_SUCCESS) return nullptr;
+        return s;
+    }
+
+    void write_tex_set(vk::VkDescriptorSet set, vk::VkImageView view) {
+        if (set == nullptr || view == nullptr) return;
+        vk::VkDescriptorImageInfo info{sampler_, view, vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        vk::VkWriteDescriptorSet w{};
+        w.sType = vk::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = set;
+        w.dstBinding = 0;
+        w.descriptorCount = 1;
+        w.descriptorType = vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &info;
+        api_->UpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    }
+
+    /// The set a batch with this texture id binds. 0 and the atlas
+    /// sentinels (the shader does not sample u_texture for them) and unknown
+    /// ids all get the complete fallback set.
+    [[nodiscard]] vk::VkDescriptorSet tex_set_for(std::uint32_t id) const {
+        if (auto it = textures_.find(id); it != textures_.end() && it->second.set) return it->second.set;
+        return fallback_tex_set_;
     }
 
     /// Whether this device can import at all. False on a driver without the
@@ -824,24 +910,11 @@ class VulkanDevice {
         return importable_;
     }
 
+    /// Drop every texture: an app dropping its last image, and teardown
+    /// (which then calls collect_all() once the device is idle).
     void release_texture() {
-        // Retired rather than waited on, like the resize path above. This one
-        // runs when an app drops its last image and at teardown; teardown
-        // calls collect_all() after the device really is idle, which is the
-        // one place a blocking wait is the right answer.
-        auto* api = api_;
-        auto dev = device_;
-        auto view = tex_view_;
-        auto image = tex_image_;
-        auto mem = tex_mem_;
-        reclaim_.retire(frames_completed_ + 1, [api, dev, view, image, mem] {
-            if (view) api->DestroyImageView(dev, view, nullptr);
-            if (image) api->DestroyImage(dev, image, nullptr);
-            if (mem) api->FreeMemory(dev, mem, nullptr);
-        });
-        tex_view_ = nullptr; tex_image_ = nullptr; tex_mem_ = nullptr;
-        tex_w_ = tex_h_ = 0;
-        atlas_dirty_binding_ = true;
+        for (auto& [id, t] : textures_) retire_texture(t, {});
+        textures_.clear();
         content_changed_ = true;
     }
 
@@ -860,6 +933,10 @@ class VulkanDevice {
     void destroy() {
         if (device_ == nullptr || api_ == nullptr) return;
         if (api_->DeviceWaitIdle) api_->DeviceWaitIdle(device_);
+
+        // Live textures join the retired ones, so the collect below frees
+        // them too (their descriptor sets die with the pool).
+        release_texture();
 
         // The device really is idle now, so everything retired is safe to
         // free regardless of which frame it belonged to. This is the ONE
@@ -892,6 +969,10 @@ class VulkanDevice {
         if (layout_) api_->DestroyPipelineLayout(device_, layout_, nullptr);
         if (desc_pool_) api_->DestroyDescriptorPool(device_, desc_pool_, nullptr);
         if (set_layout_) api_->DestroyDescriptorSetLayout(device_, set_layout_, nullptr);
+        if (tex_set_layout_) api_->DestroyDescriptorSetLayout(device_, tex_set_layout_, nullptr);
+        tex_set_layout_ = nullptr;
+        free_tex_sets_.clear();
+        fallback_tex_set_ = nullptr;
         if (render_pass_) api_->DestroyRenderPass(device_, render_pass_, nullptr);
         if (render_pass_load_) api_->DestroyRenderPass(device_, render_pass_load_, nullptr);
         if (render_pass_clear_mid_) api_->DestroyRenderPass(device_, render_pass_clear_mid_, nullptr);
@@ -1502,12 +1583,19 @@ class VulkanDevice {
     }
 
     [[nodiscard]] bool create_pipeline(int color_format, bool for_present) {
-        // descriptor set layout: four combined image samplers — binding 0 is
-        // the coverage atlas (R8), binding 1 the colour atlas (RGBA, emoji),
-        // binding 2 the backdrop capture (RGBA snapshot of the frame), and
-        // binding 3 the current user texture (RGBA, an image()/video frame).
-        vk::VkDescriptorSetLayoutBinding bindings[4]{};
-        for (int i = 0; i < 4; ++i) {
+        // Two descriptor sets.
+        //
+        //   set 0  what every draw shares: binding 0 the coverage atlas (R8),
+        //          1 the colour atlas (RGBA, emoji), 2 the backdrop capture
+        //   set 1  ONE user texture (an image(), a video frame, a compositor
+        //          client's buffer), bound per batch
+        //
+        // Set 1 used to be binding 3 of set 0, holding "the current user
+        // texture": one image for the whole frame, so two image() nodes both
+        // sampled whichever was uploaded last. A compositor shows many
+        // windows at once; each needs its own.
+        vk::VkDescriptorSetLayoutBinding bindings[3]{};
+        for (int i = 0; i < 3; ++i) {
             bindings[i].binding = static_cast<std::uint32_t>(i);
             bindings[i].descriptorType = vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             bindings[i].descriptorCount = 1;
@@ -1515,13 +1603,22 @@ class VulkanDevice {
         }
         vk::VkDescriptorSetLayoutCreateInfo dslci{};
         dslci.sType = vk::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dslci.bindingCount = 4; dslci.pBindings = bindings;
+        dslci.bindingCount = 3; dslci.pBindings = bindings;
         if (api_->CreateDescriptorSetLayout(device_, &dslci, nullptr, &set_layout_) != vk::VK_SUCCESS) return false;
 
-        vk::VkDescriptorPoolSize pool_size{vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4};
+        vk::VkDescriptorSetLayoutBinding tex_binding = bindings[0];
+        vk::VkDescriptorSetLayoutCreateInfo tslci = dslci;
+        tslci.bindingCount = 1; tslci.pBindings = &tex_binding;
+        if (api_->CreateDescriptorSetLayout(device_, &tslci, nullptr, &tex_set_layout_) != vk::VK_SUCCESS) return false;
+
+        // Set 0, plus a pool of set-1 descriptors that are RECYCLED (a
+        // released texture's set goes back on a free list once its frame
+        // retires) rather than freed: no FREE_DESCRIPTOR_SET pool, no
+        // fragmentation, and the count bounds how many textures can be live.
+        vk::VkDescriptorPoolSize pool_size{vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 + kMaxTextures};
         vk::VkDescriptorPoolCreateInfo dpci{};
         dpci.sType = vk::VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &pool_size;
+        dpci.maxSets = 1 + kMaxTextures; dpci.poolSizeCount = 1; dpci.pPoolSizes = &pool_size;
         if (api_->CreateDescriptorPool(device_, &dpci, nullptr, &desc_pool_) != vk::VK_SUCCESS) return false;
 
         vk::VkDescriptorSetAllocateInfo dsai{};
@@ -1529,13 +1626,18 @@ class VulkanDevice {
         dsai.descriptorPool = desc_pool_; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &set_layout_;
         api_->AllocateDescriptorSets(device_, &dsai, &desc_set_);
 
+        // Set 1 for texture 0: the colour atlas, so a batch with no user
+        // texture still binds a COMPLETE set (an unwritten one is UB).
+        fallback_tex_set_ = allocate_tex_set();
+
         // push constant: viewport vec2
         vk::VkPushConstantRange push{};
         push.stageFlags = vk::VK_SHADER_STAGE_VERTEX_BIT;
         push.offset = 0; push.size = sizeof(float) * 2;
+        const vk::VkDescriptorSetLayout set_layouts[2] = {set_layout_, tex_set_layout_};
         vk::VkPipelineLayoutCreateInfo plci{};
         plci.sType = vk::VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        plci.setLayoutCount = 1; plci.pSetLayouts = &set_layout_;
+        plci.setLayoutCount = 2; plci.pSetLayouts = set_layouts;
         plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &push;
         if (api_->CreatePipelineLayout(device_, &plci, nullptr, &layout_) != vk::VK_SUCCESS) return false;
 
@@ -1726,22 +1828,16 @@ class VulkanDevice {
     }
 
     void update_atlas_descriptor() {
-        vk::VkDescriptorImageInfo info[4]{};
+        vk::VkDescriptorImageInfo info[3]{};
         info[0].sampler = sampler_; info[0].imageView = atlas_view_;
         info[0].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         info[1].sampler = sampler_; info[1].imageView = color_view_;
         info[1].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         info[2].sampler = sampler_; info[2].imageView = capture_view_;
         info[2].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        // Binding 3 falls back to the colour atlas when no user texture is
-        // bound: a descriptor set must be COMPLETE before it is used, and an
-        // unwritten binding is undefined behaviour rather than a blank sample.
-        info[3].sampler = sampler_;
-        info[3].imageView = tex_view_ != nullptr ? tex_view_ : color_view_;
-        info[3].imageLayout = vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        vk::VkWriteDescriptorSet w[4]{};
-        for (int i = 0; i < 4; ++i) {
+        vk::VkWriteDescriptorSet w[3]{};
+        for (int i = 0; i < 3; ++i) {
             w[i].sType = vk::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = desc_set_;
             w[i].dstBinding = static_cast<std::uint32_t>(i);
@@ -1749,7 +1845,10 @@ class VulkanDevice {
             w[i].descriptorType = vk::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             w[i].pImageInfo = &info[i];
         }
-        api_->UpdateDescriptorSets(device_, 4, w, 0, nullptr);
+        api_->UpdateDescriptorSets(device_, 3, w, 0, nullptr);
+        // The fallback texture set points at the colour atlas, which a resize
+        // of the atlas replaces: rewrite it with the rest.
+        write_tex_set(fallback_tex_set_, color_view_);
         atlas_dirty_binding_ = false;
     }
 
@@ -2102,8 +2201,17 @@ class VulkanDevice {
                 begin(last ? render_pass_load_ : render_pass_load_mid_, fb, pipeline_);
             }
             started = true;
+            // Set 1 follows the batch's texture; rebinding only when it
+            // changes keeps the common case (no images) at one bind.
+            vk::VkDescriptorSet bound_tex = nullptr;
             for (std::uint32_t r = step.runs_begin; r < step.runs_end; ++r) {
                 const render::DrawRun& run = plan.runs[r];
+                const vk::VkDescriptorSet want = tex_set_for(batches[run.batch].texture);
+                if (want != bound_tex) {
+                    api_->CmdBindDescriptorSets(cb, vk::VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &want, 0,
+                                                nullptr);
+                    bound_tex = want;
+                }
                 vk::VkRect2D scissor = clamp_scissor(batches[run.batch].clip, vw, vh);
                 api_->CmdSetScissor(cb, 0, 1, &scissor);
                 api_->CmdDraw(cb, 4, run.count, 0, run.first);
@@ -2304,17 +2412,13 @@ class VulkanDevice {
 
     // ── state ────────────────────────────────────────────────────────────
 
-    /// A buffer imported from a dmabuf. Kept in a list rather than a single
-    /// slot because a compositor holds one per client surface, not one total.
-    struct Imported {
-        std::uint32_t     slot = 0;
-        vk::VkImage       image = nullptr;
-        vk::VkImageView   view = nullptr;
-        vk::VkDeviceMemory memory = nullptr;
-    };
-    std::vector<Imported> imports_;
-    /// Slot 0 means "invalid handle", so numbering starts at 1.
-    std::uint32_t next_import_slot_ = 1;
+    /// Every user texture, uploaded or imported, by id. Ordered so iteration
+    /// (teardown) is deterministic.
+    std::map<std::uint32_t, Texture> textures_;
+    /// Ids for import() (no caller id): a high range, so they can never
+    /// collide with an app's image() ids or the atlas sentinels just below
+    /// 0xFFFF'FFFE.
+    std::uint32_t next_import_slot_ = 0x8000'0000u;
     bool          dmabuf_import_ = false;
     /// Whether timeline semaphores and syncobj import are available.
     bool          timeline_sync_ = false;
@@ -2394,8 +2498,12 @@ class VulkanDevice {
     vk::VkFramebuffer off_text_fb_ = nullptr;
     render::FramePlanner planner_;
     vk::VkDescriptorSetLayout set_layout_ = nullptr;
+    vk::VkDescriptorSetLayout tex_set_layout_ = nullptr;   ///< set 1: one user texture
     vk::VkDescriptorPool desc_pool_ = nullptr;
     vk::VkDescriptorSet desc_set_ = nullptr;
+    vk::VkDescriptorSet fallback_tex_set_ = nullptr;       ///< set 1 for "no texture"
+    std::vector<vk::VkDescriptorSet> free_tex_sets_;       ///< recycled, ready to rewrite
+    static constexpr std::uint32_t kMaxTextures = 1024;
     vk::VkSampler sampler_ = nullptr;
 
     // atlas
@@ -2428,10 +2536,6 @@ class VulkanDevice {
     /// Index of the image handed to the last QueuePresentKHR, so read_swapchain
     /// copies the frame the compositor actually got.
     std::uint32_t last_presented_ = 0;
-    // The single user texture (image(), video frames). See upload_texture.
-    vk::VkImage tex_image_ = nullptr; vk::VkDeviceMemory tex_mem_ = nullptr;
-    vk::VkImageView tex_view_ = nullptr;
-    int tex_w_ = 0, tex_h_ = 0;
     std::vector<vk::VkImage> swap_images_;
     std::vector<vk::VkImageView> swap_views_;
     std::vector<vk::VkFramebuffer> framebuffers_;
