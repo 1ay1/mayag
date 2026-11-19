@@ -780,18 +780,15 @@ enum class RenderMode : std::uint8_t {
     hybrid,
 };
 
-/// Whether glyphs default to the macOS look (CoreGraphics font smoothing and
-/// curve flattening). On by default on Apple platforms only: there mayag's
-/// text sits beside every native app's and must match it; elsewhere the
-/// native rasterisers (FreeType, DirectWrite) neither thicken glyphs nor
-/// under-flatten curves, so mayag draws exact outlines instead. Define
-/// MAYAG_COREGRAPHICS_TEXT to 0 or 1 to override the platform choice.
+/// Whether glyphs default to the macOS look: CoreGraphics font smoothing
+/// (the stem weight macOS text has), its curve flattening, glyph merging for
+/// connected scripts and upright italic fallback, pixel-matched to CoreText.
+/// On by default on EVERY platform, so text renders the same on Linux and
+/// Windows as on a Mac. Define MAYAG_COREGRAPHICS_TEXT=0 for the
+/// FreeType/DirectWrite look (exact outlines, no thickening), or pick per
+/// stack with FontConfig::coregraphics() / portable().
 #if !defined(MAYAG_COREGRAPHICS_TEXT)
-#  if defined(__APPLE__)
-#    define MAYAG_COREGRAPHICS_TEXT 1
-#  else
-#    define MAYAG_COREGRAPHICS_TEXT 0
-#  endif
+#  define MAYAG_COREGRAPHICS_TEXT 1   // the macOS look everywhere; 0 opts out
 #endif
 inline constexpr bool coregraphics_text_default = MAYAG_COREGRAPHICS_TEXT != 0;
 

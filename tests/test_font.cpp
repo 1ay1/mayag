@@ -1892,7 +1892,7 @@ void test_smoothing() {
               "coregraphics() and portable() presets select the two looks");
         check((dflt.smoothing > 0.0f) == typo::coregraphics_text_default &&
                   dflt.cg_flattening == typo::coregraphics_text_default,
-              "FontConfig{} follows the platform's native look");
+              "FontConfig{} follows MAYAG_COREGRAPHICS_TEXT (the macOS look by default)");
     }
     const std::uint16_t gid = stack->face_at(0)->glyph_for('l');
     if (gid == 0) return;
