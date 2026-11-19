@@ -238,7 +238,7 @@ class VulkanDevice {
     void submit(const DrawList& list, Color<Srgb> clear) {
         if (!valid_ || offscreen_) return;
         if (rebuild_swapchain_) { rebuild_swapchain(); rebuild_swapchain_ = false; }
-        if (swapchain_ == nullptr) { acquire_failed_ = true; return; }
+        if (swapchain_ == nullptr) { acquire_failed_ = true; flush_frame_sync(); return; }
 
         api_->WaitForFences(device_, 1, &in_flight_, 1, ~0ull);
 
@@ -256,8 +256,8 @@ class VulkanDevice {
         std::uint32_t image_index = 0;
         VkResultCheck acq = api_->AcquireNextImageKHR(device_, swapchain_, ~0ull,
                                                       image_available_, nullptr, &image_index);
-        if (acq == vk::VK_ERROR_OUT_OF_DATE_KHR) { rebuild_swapchain(); acquire_failed_ = true; return; }
-        if (acq != vk::VK_SUCCESS && acq != vk::VK_SUBOPTIMAL_KHR) { acquire_failed_ = true; return; }
+        if (acq == vk::VK_ERROR_OUT_OF_DATE_KHR) { rebuild_swapchain(); acquire_failed_ = true; flush_frame_sync(); return; }
+        if (acq != vk::VK_SUCCESS && acq != vk::VK_SUBOPTIMAL_KHR) { acquire_failed_ = true; flush_frame_sync(); return; }
         acquire_failed_ = false;
 
         api_->ResetFences(device_, 1, &in_flight_);
@@ -276,12 +276,41 @@ class VulkanDevice {
         api_->EndCommandBuffer(cb);
 
         const vk::Flags wait_stage = vk::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        // Binary semaphores (swapchain) plus every client timeline this frame
+        // waits on or signals, in one submit: the values array is parallel
+        // to the semaphores array, with 0 for the binary ones.
+        constexpr vk::Flags kFragmentStage = 0x00000080;
+        std::vector<vk::VkSemaphore> waits{image_available_};
+        std::vector<vk::Flags> stages{wait_stage};
+        std::vector<std::uint64_t> wait_values{0};
+        for (const auto& w : frame_waits_) {
+            waits.push_back(w.sem);
+            stages.push_back(kFragmentStage);
+            wait_values.push_back(w.value);
+        }
+        std::vector<vk::VkSemaphore> signals{render_done_};
+        std::vector<std::uint64_t> signal_values{0};
+        for (const auto& s : frame_signals_) {
+            signals.push_back(s.sem);
+            signal_values.push_back(s.value);
+        }
+        frame_waits_.clear();
+        frame_signals_.clear();
+        vk::VkTimelineSemaphoreSubmitInfo ts{};
+        ts.sType = vk::VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        ts.waitSemaphoreValueCount = static_cast<std::uint32_t>(wait_values.size());
+        ts.pWaitSemaphoreValues = wait_values.data();
+        ts.signalSemaphoreValueCount = static_cast<std::uint32_t>(signal_values.size());
+        ts.pSignalSemaphoreValues = signal_values.data();
         vk::VkSubmitInfo si{};
         si.sType = vk::VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.waitSemaphoreCount = 1; si.pWaitSemaphores = &image_available_;
-        si.pWaitDstStageMask = &wait_stage;
+        si.pNext = timeline_sync_ ? &ts : nullptr;
+        si.waitSemaphoreCount = static_cast<std::uint32_t>(waits.size());
+        si.pWaitSemaphores = waits.data();
+        si.pWaitDstStageMask = stages.data();
         si.commandBufferCount = 1; si.pCommandBuffers = &cb;
-        si.signalSemaphoreCount = 1; si.pSignalSemaphores = &render_done_;
+        si.signalSemaphoreCount = static_cast<std::uint32_t>(signals.size());
+        si.pSignalSemaphores = signals.data();
         api_->QueueSubmit(queue_, 1, &si, in_flight_);
 
         vk::VkPresentInfoKHR pi{};
@@ -923,6 +952,96 @@ class VulkanDevice {
     /// else -- remove the shared mutable state rather than lock it.
     [[nodiscard]] std::span<const FormatModifier> importable_formats() const {
         return importable_;
+    }
+
+    // ── explicit sync, on the GPU ────────────────────────────────────────────────────
+    //
+    // wait_timeline() blocks the CPU and is for the rare question that needs
+    // a CPU answer. The frame path never does: a client's timeline (a DRM
+    // syncobj) is imported ONCE as a semaphore, and each frame's submit
+    //   WAITS on the client's acquire point (its drawing is done) at the
+    //     fragment stage -- the GPU orders our sampling after its writes,
+    //     the CPU never waits, and a slow client delays only the GPU work
+    //     behind it
+    //   SIGNALS the client's release point when that submit completes --
+    //     the client reuses its buffer exactly when we have finished reading
+
+    /// A client timeline imported as a semaphore. 0 = invalid.
+    [[nodiscard]] std::uint32_t import_timeline(int fd) {
+        if (!timeline_sync_ || fd < 0 || api_->ImportSemaphoreFdKHR == nullptr) return 0;
+        vk::VkSemaphore sem = create_timeline_semaphore(0);
+        if (sem == nullptr) return 0;
+        const int dup_fd = detail::fd_dup(fd);  // Vulkan takes ownership of what it is given
+        if (dup_fd < 0) {
+            api_->DestroySemaphore(device_, sem, nullptr);
+            return 0;
+        }
+        vk::VkImportSemaphoreFdInfoKHR info{};
+        info.sType = vk::VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR;
+        info.semaphore = sem;
+        info.handleType = vk::VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+        info.fd = dup_fd;
+        if (api_->ImportSemaphoreFdKHR(device_, &info) != vk::VK_SUCCESS) {
+            detail::fd_close(dup_fd);
+            api_->DestroySemaphore(device_, sem, nullptr);
+            return 0;
+        }
+        const auto id = next_timeline_++;
+        timelines_.emplace(id, sem);
+        return id;
+    }
+
+    /// Done with a timeline (its surface is gone): destroyed once no frame
+    /// in flight waits on or signals it.
+    void release_timeline(std::uint32_t id) {
+        auto it = timelines_.find(id);
+        if (it == timelines_.end()) return;
+        auto* api = api_;
+        auto dev = device_;
+        auto sem = it->second;
+        reclaim_.retire(frames_completed_ + 1, [api, dev, sem] { api->DestroySemaphore(dev, sem, nullptr); });
+        timelines_.erase(it);
+    }
+
+    /// The next frame's submit waits for `timeline` to reach `value` before
+    /// its fragment shaders run.
+    void frame_wait(std::uint32_t timeline, std::uint64_t value) {
+        if (auto it = timelines_.find(timeline); it != timelines_.end()) frame_waits_.push_back({it->second, value});
+    }
+
+    /// The next frame's submit sets `timeline` to `value` when it completes.
+    void frame_signal(std::uint32_t timeline, std::uint64_t value) {
+        if (auto it = timelines_.find(timeline); it != timelines_.end()) frame_signals_.push_back({it->second, value});
+    }
+
+    /// Signal now, from the queue, after everything submitted so far: for a
+    /// release whose buffer the next frame will not touch (it was replaced
+    /// on screen, and no new frame is coming yet).
+    void signal_after_submitted(std::uint32_t timeline, std::uint64_t value) {
+        auto it = timelines_.find(timeline);
+        if (it == timelines_.end() || !valid_) return;
+        signal_now(it->second, value);
+    }
+
+    /// A frame that will not be drawn still owes its signals: a client waits
+    /// on them to reuse its buffer. Its waits are moot (nothing samples).
+    void flush_frame_sync() {
+        for (const auto& s : frame_signals_) signal_now(s.sem, s.value);
+        frame_signals_.clear();
+        frame_waits_.clear();
+    }
+
+    void signal_now(vk::VkSemaphore sem, std::uint64_t value) {
+        vk::VkTimelineSemaphoreSubmitInfo ts{};
+        ts.sType = vk::VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        ts.signalSemaphoreValueCount = 1;
+        ts.pSignalSemaphoreValues = &value;
+        vk::VkSubmitInfo si{};
+        si.sType = vk::VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.pNext = &ts;
+        si.signalSemaphoreCount = 1;
+        si.pSignalSemaphores = &sem;
+        api_->QueueSubmit(queue_, 1, &si, nullptr);   // queue order: after every prior submit
     }
 
     /// Drop every texture: an app dropping its last image, and teardown
@@ -2488,6 +2607,15 @@ class VulkanDevice {
     /// collide with an app's image() ids or the atlas sentinels just below
     /// 0xFFFF'FFFE.
     std::uint32_t next_import_slot_ = 0x8000'0000u;
+    /// Client timelines imported for explicit sync, and what the next frame
+    /// waits on and signals.
+    struct TimelineOp {
+        vk::VkSemaphore sem;
+        std::uint64_t value;
+    };
+    std::map<std::uint32_t, vk::VkSemaphore> timelines_;
+    std::uint32_t next_timeline_ = 1;
+    std::vector<TimelineOp> frame_waits_, frame_signals_;
     bool          dmabuf_import_ = false;
     bool          foreign_queue_ = false;   ///< VK_EXT_queue_family_foreign enabled
     /// Whether timeline semaphores and syncobj import are available.

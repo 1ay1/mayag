@@ -983,6 +983,14 @@ class WaylandWindow {
     /// the next frame (see VulkanDevice::poll_retired). True while some are
     /// still in flight, so the caller polls again soon.
     bool poll_gpu_retired() { return gpu_active_ && gpu_->poll_retired(); }
+    // Explicit sync (see VulkanDevice): a client timeline, waited on and
+    // signalled by the GPU in the frame that shows its buffer.
+    [[nodiscard]] std::uint32_t import_timeline(int fd) { return gpu_active_ ? gpu_->import_timeline(fd) : 0; }
+    void release_timeline(std::uint32_t t) { if (gpu_active_) gpu_->release_timeline(t); }
+    void frame_wait(std::uint32_t t, std::uint64_t v) { if (gpu_active_) gpu_->frame_wait(t, v); }
+    void frame_signal(std::uint32_t t, std::uint64_t v) { if (gpu_active_) gpu_->frame_signal(t, v); }
+    void signal_after_submitted(std::uint32_t t, std::uint64_t v) { if (gpu_active_) gpu_->signal_after_submitted(t, v); }
+    [[nodiscard]] bool explicit_sync() const noexcept { return gpu_active_ && gpu_->sync_caps().import_syncobj; }
     /// `f` once the frames already submitted have finished (see VulkanDevice).
     void after_gpu(std::function<void()> f) {
         if (gpu_active_) gpu_->after_gpu(std::move(f));
@@ -2445,6 +2453,12 @@ class WaylandWindow {
     [[nodiscard]] std::span<const FormatModifier> importable_formats() const { return p_->importable_formats(); }
     bool poll_gpu_retired() { return p_->poll_gpu_retired(); }
     void after_gpu(std::function<void()> f) { p_->after_gpu(std::move(f)); }
+    [[nodiscard]] std::uint32_t import_timeline(int fd) { return p_->import_timeline(fd); }
+    void release_timeline(std::uint32_t t) { p_->release_timeline(t); }
+    void frame_wait(std::uint32_t t, std::uint64_t v) { p_->frame_wait(t, v); }
+    void frame_signal(std::uint32_t t, std::uint64_t v) { p_->frame_signal(t, v); }
+    void signal_after_submitted(std::uint32_t t, std::uint64_t v) { p_->signal_after_submitted(t, v); }
+    [[nodiscard]] bool explicit_sync() const noexcept { return p_->explicit_sync(); }
     void release_texture(std::uint32_t id) { p_->release_image(id); }
 #endif
 
