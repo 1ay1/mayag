@@ -331,6 +331,9 @@ class MacWindow {
     /// pulling on (the default), this drains NSApp itself without waiting.
     [[nodiscard]] std::vector<Event> dispatch() {
         using namespace objc;
+        // Presented frames' feedback, collected here so a photon sink hears
+        // every sample even when nothing asks for display_timing().
+        if (photon_sink_) drain_feedback();
         std::vector<Event> out = std::move(fed_);
         fed_.clear();
 
@@ -627,6 +630,28 @@ class MacWindow {
     /// as evdev codes. Unset by default.
     void set_raw_input(std::function<void(const RawInput&)> f) { raw_ = std::move(f); }
 
+    // -- input to photon, for a program that forwards input -----------------
+    //
+    // A remote desktop does not draw the answer to its window's input; a
+    // client elsewhere does, later. In manual mode the window's own events
+    // no longer start the clock; the program marks the input whose answer
+    // the next frame will show (the Wayland window has the same three).
+
+    void set_photon_manual(bool on) noexcept { photon_manual_ = on; }
+    /// The next frame drawn shows the answer to input from `at`, in
+    /// std::chrono::steady_clock seconds (mapped here onto the presented
+    /// handler's clock). The oldest unshown mark is kept.
+    void mark_input(double at) noexcept {
+        const double steady =
+            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const double age = steady - at;
+        if (age < 0.0 || age > 1.0) return;  // not a plausible input time
+        const double host = host_now() - age;
+        if (unshown_input_ < 0.0 || host < unshown_input_) unshown_input_ = host;
+    }
+    /// Every measured sample, as it is measured (ms).
+    void set_photon_sink(std::function<void(double)> f) { photon_sink_ = std::move(f); }
+
     void set_clipboard(std::string_view s) {
         using namespace objc;
         id pb = msg_cls<id>(objc_getClass("NSPasteboard"), sel("generalPasteboard"));
@@ -769,7 +794,7 @@ class MacWindow {
         // Every event translate_one emits is user input (resize and close are
         // reported by dispatch()). Stamp it with the time the HID stack saw
         // it, which is where input-to-photon honestly starts.
-        if (out.size() > before) note_input(msg<double>(ev, sel("timestamp")));
+        if (out.size() > before && !photon_manual_) note_input(msg<double>(ev, sel("timestamp")));
     }
 
     static double host_now() noexcept {
@@ -871,6 +896,7 @@ class MacWindow {
         photon_[photon_next_++ % photon_.size()] = ms;
         photon_count_ = std::min(photon_count_ + 1, photon_.size());
         photon_last_ = ms;
+        if (photon_sink_) photon_sink_(ms);
     }
 
     void translate_one(id ev, std::vector<Event>& out) {
@@ -1138,6 +1164,8 @@ class MacWindow {
     std::array<double, 120> photon_{};
     std::size_t   photon_next_ = 0, photon_count_ = 0;
     double        photon_last_ = 0.0;
+    bool          photon_manual_ = false;
+    std::function<void(double)> photon_sink_;
     bool          trace_ = [] {
         const char* v = std::getenv("MAYAG_PHOTON");
         return v != nullptr && std::string_view{v} == "2";
