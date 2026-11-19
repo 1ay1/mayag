@@ -22,6 +22,7 @@
 #include "../backend/software.hpp"
 #include "../backend/tiled.hpp"
 #include "../render/draw_list.hpp"
+#include "raw_input.hpp"
 #include "types.hpp"
 
 #if defined(MAYAG_WITH_METAL)
@@ -496,6 +497,111 @@ class MacWindow {
         if (cursor != nullptr) msg<void>(cursor, sel("set"));
     }
 
+    // ── images (image(id) nodes) ────────────────────────────────────────────────
+
+    /// Hand pixels to the renderer for image(id): the CPU store (software
+    /// path) and, when Metal is up, a texture.
+    void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
+        if (!img) return;
+#if defined(MAYAG_WITH_METAL)
+        if (gpu_enabled_) gpu_.upload_image(id, img->rgba.data(), img->width, img->height);
+#endif
+        images_.upload(id, std::move(img));
+    }
+    /// Rewrite rectangles of an uploaded image in place (Metal). false:
+    /// upload it whole instead.
+    bool update_image_regions(std::uint32_t id, int w, int h, const std::vector<std::array<int, 4>>& rects,
+                              const std::vector<std::uint8_t>& packed) {
+#if defined(MAYAG_WITH_METAL)
+        if (gpu_enabled_) return gpu_.update_image_regions(id, w, h, rects, packed);
+#endif
+        (void)id, (void)w, (void)h, (void)rects, (void)packed;
+        return false;
+    }
+    void release_image(std::uint32_t id) {
+        images_.release(id);
+#if defined(MAYAG_WITH_METAL)
+        if (gpu_enabled_) gpu_.release_image(id);
+#endif
+    }
+
+    // ── fullscreen ───────────────────────────────────────────────────────────
+
+    void set_fullscreen(bool on) {
+        using namespace objc;
+        if (window_ == nullptr) return;
+        constexpr unsigned long full = 1ul << 14;  // NSWindowStyleMaskFullScreen
+        const bool is = (msg<unsigned long>(window_, sel("styleMask")) & full) != 0;
+        if (is != on) msg<void>(window_, sel("toggleFullScreen:"), static_cast<id>(nullptr));
+    }
+
+    // ── cursor, as another program asked ──────────────────────────────────────────
+
+    /// A wp_cursor_shape_v1 shape by number, as the nearest NSCursor.
+    void set_cursor_shape_raw(std::uint32_t shape) {
+        using namespace objc;
+        show_cursor();
+        const char* name = "arrowCursor";
+        switch (shape) {
+            case 2: name = "contextualMenuCursor"; break;   // context-menu
+            case 4: case 13: name = "pointingHandCursor"; break;  // pointer, alias-ish
+            case 7: name = "crosshairCursor"; break;
+            case 8: case 9: name = "IBeamCursor"; break;     // text, vertical-text
+            case 10: name = "dragLinkCursor"; break;         // alias
+            case 11: name = "dragCopyCursor"; break;         // copy
+            case 14: case 15: name = "operationNotAllowedCursor"; break;  // no-drop, not-allowed
+            case 16: name = "openHandCursor"; break;         // grab
+            case 17: name = "closedHandCursor"; break;       // grabbing
+            case 18: case 22: case 23: case 26: name = "resizeLeftRightCursor"; break;  // e/w/ew/col
+            case 19: case 21: case 24: case 27: name = "resizeUpDownCursor"; break;     // n/s/ns/row
+            default: break;
+        }
+        id cursor = msg_cls<id>(objc_getClass("NSCursor"), sel(name));
+        if (cursor != nullptr) msg<void>(cursor, sel("set"));
+    }
+
+    void hide_cursor() {
+        if (cursor_hidden_) return;
+        objc::msg_cls<void>(objc_getClass("NSCursor"), objc::sel("hide"));
+        cursor_hidden_ = true;
+    }
+
+    /// A cursor drawn by another program: little-endian ARGB words
+    /// (premultiplied), hotspot in its pixels.
+    void set_cursor_image(const std::uint8_t* argb, int w, int h, int stride, int hot_x, int hot_y) {
+        using namespace objc;
+        if (argb == nullptr || w <= 0 || h <= 0) return;
+        show_cursor();
+        id rep = msg<id>(msg_cls<id>(objc_getClass("NSBitmapImageRep"), sel("alloc")),
+            sel("initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:"
+                "colorSpaceName:bytesPerRow:bitsPerPixel:"),
+            static_cast<unsigned char**>(nullptr), static_cast<long>(w), static_cast<long>(h), static_cast<long>(8),
+            static_cast<long>(4), static_cast<BOOL>(YES), static_cast<BOOL>(NO), nsstring("NSDeviceRGBColorSpace"),
+            static_cast<long>(w * 4), static_cast<long>(32));
+        if (rep == nullptr) return;
+        auto* dst = msg<unsigned char*>(rep, sel("bitmapData"));
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const auto* s = argb + static_cast<std::ptrdiff_t>(y) * stride + x * 4;  // B, G, R, A
+                auto* d = dst + (static_cast<std::ptrdiff_t>(y) * w + x) * 4;          // R, G, B, A
+                d[0] = s[2], d[1] = s[1], d[2] = s[0], d[3] = s[3];
+            }
+        id image = msg<id>(msg_cls<id>(objc_getClass("NSImage"), sel("alloc")), sel("initWithSize:"),
+                           CGSize{static_cast<double>(w) / dpi_, static_cast<double>(h) / dpi_});
+        msg<void>(image, sel("addRepresentation:"), rep);
+        id cursor = msg<id>(msg_cls<id>(objc_getClass("NSCursor"), sel("alloc")), sel("initWithImage:hotSpot:"), image,
+                            CGPoint{static_cast<double>(hot_x) / dpi_, static_cast<double>(hot_y) / dpi_});
+        if (cursor != nullptr) msg<void>(cursor, sel("set"));
+        if (custom_cursor_ != nullptr) msg<void>(custom_cursor_, sel("release"));
+        custom_cursor_ = cursor;
+        msg<void>(image, sel("release"));
+        msg<void>(rep, sel("release"));
+    }
+
+    /// The raw input tap (see raw_input.hpp): every key press AND release,
+    /// as evdev codes. Unset by default.
+    void set_raw_input(std::function<void(const RawInput&)> f) { raw_ = std::move(f); }
+
     void set_clipboard(std::string_view s) {
         using namespace objc;
         id pb = msg_cls<id>(objc_getClass("NSPasteboard"), sel("generalPasteboard"));
@@ -510,7 +616,10 @@ class MacWindow {
         return from_nsstring(s);
     }
 
-    void set_coverage_sampler(const backend::CoverageSampler* s) { sampler_ = s; }
+    void set_coverage_sampler(const backend::CoverageSampler* s) {
+        images_.set_glyphs(s);
+        sampler_ = &images_;
+    }
 
     /// Give the window the glyph atlas the GPU path must keep in sync.
     ///
@@ -801,6 +910,7 @@ class MacWindow {
             case ev_key_down: {
                 const auto code = msg<unsigned short>(ev, sel("keyCode"));
                 const bool repeat = msg<BOOL>(ev, sel("isARepeat")) != 0;
+                if (!repeat) raw_key(ev, true, mods);
                 out.push_back(KeyEvent{key_from_code(code), mods, repeat});
 
                 // Printable input arrives separately, so a shortcut and the
@@ -834,6 +944,22 @@ class MacWindow {
                         out.push_back(TextEvent{s});
                     }
                 }
+                break;
+            }
+            case ev_key_up:
+                raw_key(ev, false, mods);
+                break;
+            case ev_flags_changed: {
+                // A modifier went down or up: which, from its own flag bit.
+                // Caps Lock toggles, so each change is a press and release.
+                const auto code = msg<unsigned short>(ev, sel("keyCode"));
+                if (code == 0x39) {
+                    raw_key(ev, true, mods);
+                    raw_key(ev, false, mods);
+                } else if (const auto bit = modifier_bit(code); bit != 0) {
+                    raw_key(ev, (flags & bit) != 0, mods);
+                }
+                raw_flags_ = flags;
                 break;
             }
             default:
@@ -902,6 +1028,58 @@ class MacWindow {
     backend::Framebuffer      fb_{1, 1};
     std::vector<std::uint8_t> pixels_;
     const backend::CoverageSampler* sampler_ = nullptr;
+    backend::ImageStore images_;          // image(id) for the software path
+    std::function<void(const RawInput&)> raw_;
+    unsigned long long raw_flags_ = 0;    // modifier flags last seen, for raw key-up of modifiers
+    bool cursor_hidden_ = false;
+    id custom_cursor_ = nullptr;
+
+    void show_cursor() {
+        if (!cursor_hidden_) return;
+        objc::msg_cls<void>(objc_getClass("NSCursor"), objc::sel("unhide"));
+        cursor_hidden_ = false;
+    }
+
+    /// macOS virtual keycode (kVK_*) -> evdev keycode (linux/input-event-codes.h),
+    /// the one keyboard vocabulary i4-style programs forward. 0: no evdev key.
+    [[nodiscard]] static std::uint32_t evdev_from_code(unsigned short c) {
+        static constexpr std::uint16_t map[128] = {
+            30, 31, 32, 33, 35, 34, 44, 45, 46, 47, 86, 48, 16, 17, 18, 19,      // 0x00
+            21, 20, 2, 3, 4, 5, 7, 6, 13, 10, 8, 12, 9, 11, 27, 24,               // 0x10
+            22, 26, 23, 25, 28, 38, 36, 40, 37, 39, 43, 51, 53, 49, 50, 52,       // 0x20
+            15, 57, 41, 14, 0, 1, 126, 125, 42, 58, 56, 29, 54, 100, 97, 0,       // 0x30
+            187, 83, 0, 55, 0, 78, 0, 69, 115, 114, 113, 98, 96, 0, 74, 188,      // 0x40
+            189, 117, 82, 79, 80, 81, 75, 76, 77, 71, 190, 72, 73, 124, 89, 121,  // 0x50
+            63, 64, 65, 61, 66, 67, 0, 87, 0, 183, 186, 184, 0, 68, 0, 88,        // 0x60
+            0, 185, 110, 102, 104, 111, 62, 107, 60, 109, 59, 105, 106, 108, 103, 0,  // 0x70
+        };
+        return c < 128 ? map[c] : 0;
+    }
+
+    /// The device-dependent flag bit for a modifier key (left/right apart).
+    [[nodiscard]] static unsigned long long modifier_bit(unsigned short code) {
+        switch (code) {
+            case 0x38: return 0x2;      // left shift
+            case 0x3C: return 0x4;      // right shift
+            case 0x3B: return 0x1;      // left control
+            case 0x3E: return 0x2000;   // right control
+            case 0x3A: return 0x20;     // left option
+            case 0x3D: return 0x40;     // right option
+            case 0x37: return 0x8;      // left command
+            case 0x36: return 0x10;     // right command
+            default: return 0;
+        }
+    }
+
+    void raw_key(id ev, bool pressed, const Mods& mods) {
+        using namespace objc;
+        if (!raw_) return;
+        const auto code = msg<unsigned short>(ev, sel("keyCode"));
+        const auto e = evdev_from_code(code);
+        if (e == 0) return;
+        const auto t = static_cast<std::uint32_t>(msg<double>(ev, sel("timestamp")) * 1000.0);
+        raw_(raw::Key{t, e, pressed, key_from_code(code), mods});
+    }
 
     bool gpu_enabled_ = false;
     Vec2 gpu_size_{};

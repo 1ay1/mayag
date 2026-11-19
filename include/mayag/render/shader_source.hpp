@@ -253,6 +253,7 @@ vertex Varyings mayag_vertex(uint vid [[vertex_id]],
 fragment float4 mayag_fragment(Varyings v [[stage_in]],
                                texture2d<float> atlas [[texture(0)]],
                                texture2d<float> color_atlas [[texture(1)]],
+                               texture2d<float> image [[texture(2)]],
                                sampler smp [[sampler(0)]]
 #if MG_FB_FETCH
                                , float4 dst [[color(0)]]
@@ -353,7 +354,9 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
               : mg_mix_oklch(v.color, v.color2, t);
     }
 
-    if (v.kind == KIND_TEXTURE) color *= atlas.sample(smp, v.uv);
+    // A user image (the batch's own texture, an _SRGB format: the hardware
+    // decodes to linear), modulated by the node's colour as kernel.hpp does.
+    if (v.kind == KIND_TEXTURE) color *= image.sample(smp, v.uv);
 
     return color * cov;
 }

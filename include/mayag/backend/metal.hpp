@@ -46,6 +46,7 @@ extern "C" void  objc_autoreleasePoolPop(void*);
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -419,6 +420,12 @@ class MetalDevice {
             msg<void>(enc, sel("setFragmentSamplerState:atIndex:"),
                       sampler_, static_cast<std::uint64_t>(0));
         }
+        // Slot 2: the batch's image (image(id)). Bound per batch, only when
+        // it changes; something is always bound (an empty slot faults).
+        id fallback_image = color_texture_ != nullptr ? color_texture_ : atlas_texture_;
+        id bound_image = fallback_image;
+        if (bound_image != nullptr)
+            msg<void>(enc, sel("setFragmentTexture:atIndex:"), bound_image, static_cast<std::uint64_t>(2));
 
         std::uint32_t draws = 0;
         for (const Batch& batch : list.batches()) {
@@ -431,6 +438,14 @@ class MetalDevice {
             const auto sc = clamp_scissor(batch.clip, vw, vh);
             if (!sc) continue;    // fully offscreen — nothing to draw
             msg<void>(enc, sel("setScissorRect:"), *sc);
+            if (batch.texture != 0) {
+                const auto img = images_.find(batch.texture);
+                id want = img != images_.end() ? img->second.texture : fallback_image;
+                if (want != nullptr && want != bound_image) {
+                    msg<void>(enc, sel("setFragmentTexture:atIndex:"), want, static_cast<std::uint64_t>(2));
+                    bound_image = want;
+                }
+            }
 
             msg<void>(enc, sel("drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:"),
                       primitive_triangle_strip,
@@ -459,6 +474,66 @@ class MetalDevice {
     /// on it made every offscreen render silently skip the upload, so text
     /// came out blank while boxes and circles were perfect. Resource
     /// ownership follows the device; only presentation follows the layer.
+    /// Image `key` (image(key) in a view): straight RGBA8, sRGB-encoded, as
+    /// mayag's ImageData is. Re-uploading at the same size rewrites it in
+    /// place; a new size makes a new texture (frames in flight keep the old
+    /// one alive: command buffers retain what they sample).
+    void upload_image(std::uint32_t key, const std::uint8_t* rgba, int w, int h) {
+        using namespace mtl;
+        if (device_ == nullptr || rgba == nullptr || w <= 0 || h <= 0 || key == 0) return;
+        auto& img = images_[key];
+        if (img.texture == nullptr || img.w != w || img.h != h) {
+            if (img.texture != nullptr) msg<void>(img.texture, sel("release"));
+            id desc = msg_cls<id>(objc_getClass("MTLTextureDescriptor"),
+                sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
+                static_cast<std::uint64_t>(71),   // MTLPixelFormatRGBA8Unorm_sRGB
+                static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h), static_cast<BOOL>(NO));
+            img.texture = msg<id>(device_, sel("newTextureWithDescriptor:"), desc);
+            img.w = w;
+            img.h = h;
+        }
+        if (img.texture == nullptr) return;
+        struct { std::uint64_t x, y, z, w, h, d; } region{
+            0, 0, 0, static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h), 1};
+        msg<void>(img.texture, sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
+                  region, static_cast<std::uint64_t>(0), rgba, static_cast<std::uint64_t>(w) * 4);
+    }
+
+    /// Rewrite rectangles (x, y, w, h) of image `key` (already w x h) from
+    /// `packed`: each rect's rows tight, rect after rect. false: no such
+    /// image at that size, or sizes that do not add up.
+    bool update_image_regions(std::uint32_t key, int w, int h, const std::vector<std::array<int, 4>>& rects,
+                              const std::vector<std::uint8_t>& packed) {
+        using namespace mtl;
+        const auto it = images_.find(key);
+        if (it == images_.end() || it->second.texture == nullptr || it->second.w != w || it->second.h != h)
+            return false;
+        std::size_t need = 0;
+        for (const auto& r : rects) {
+            if (r[0] < 0 || r[1] < 0 || r[2] <= 0 || r[3] <= 0 || r[0] + r[2] > w || r[1] + r[3] > h) return false;
+            need += static_cast<std::size_t>(r[2]) * static_cast<std::size_t>(r[3]) * 4;
+        }
+        if (need != packed.size()) return false;
+        std::size_t at = 0;
+        for (const auto& r : rects) {
+            struct { std::uint64_t x, y, z, w, h, d; } region{
+                static_cast<std::uint64_t>(r[0]), static_cast<std::uint64_t>(r[1]), 0,
+                static_cast<std::uint64_t>(r[2]), static_cast<std::uint64_t>(r[3]), 1};
+            msg<void>(it->second.texture, sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"), region,
+                      static_cast<std::uint64_t>(0), packed.data() + at, static_cast<std::uint64_t>(r[2]) * 4);
+            at += static_cast<std::size_t>(r[2]) * static_cast<std::size_t>(r[3]) * 4;
+        }
+        return true;
+    }
+
+    void release_image(std::uint32_t key) {
+        using namespace mtl;
+        const auto it = images_.find(key);
+        if (it == images_.end()) return;
+        if (it->second.texture != nullptr) msg<void>(it->second.texture, sel("release"));
+        images_.erase(it);
+    }
+
     void upload_atlas(const std::uint8_t* pixels, int width, int height) {
         using namespace mtl;
         if (device_ == nullptr || pixels == nullptr || width <= 0 || height <= 0) return;
@@ -871,6 +946,11 @@ class MetalDevice {
 
     std::size_t   instance_capacity_ = 0;
     int           atlas_w_ = 0, atlas_h_ = 0;
+    struct Image {
+        id  texture = nullptr;
+        int w = 0, h = 0;
+    };
+    std::map<std::uint32_t, Image> images_;  // image(id) textures
     std::uint32_t atlas_generation_ = 0;
     bool          atlas_uploaded_ = false;
     Vec2          viewport_{};
