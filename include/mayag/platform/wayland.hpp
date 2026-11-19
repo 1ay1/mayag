@@ -442,6 +442,47 @@ struct TextInputState {
 }  // namespace wldetail
 
 // ════════════════════════════════════════════════════════════════════════
+// Raw input: the seat as the host compositor delivered it
+// ════════════════════════════════════════════════════════════════════════
+//
+// mayag's events are an APP's view of input: key presses with text, one
+// coalesced scroll per frame, three mouse buttons. A program that forwards
+// input to someone else (a nested compositor, a remote desktop) needs the
+// seat itself: every key press AND release by evdev code, the exact xkb
+// modifier masks and the keymap they index, every pointer motion at its
+// sub-pixel position, every button, and scroll as the axis stream it is
+// (smooth, discrete, value120, stop). That is this tap. It is opt-in
+// (WaylandWindow::set_raw_input) and costs nothing when unset; mayag's own
+// events are delivered exactly as before alongside it.
+//
+// Fixed-point values are wl_fixed (24.8) raw, as the protocol has them, so
+// nothing is lost or re-rounded on the way through.
+namespace raw {
+struct Key {
+    std::uint32_t time;
+    std::uint32_t code;     ///< evdev
+    bool pressed;
+    mayag::Key key;         ///< what mayag would report (keysym-resolved)
+    Mods mods;              ///< effective modifiers at this key
+};
+struct Modifiers { std::uint32_t depressed, latched, locked, group; };
+struct Keymap { std::string text; };                   ///< XKB_V1 text
+struct Repeat { std::int32_t rate, delay; };
+struct KeyboardFocus { bool in; };
+struct Motion { std::uint32_t time; std::int32_t x, y; };   ///< surface-local, logical, wl_fixed
+struct Button { std::uint32_t time, button; bool pressed; };  ///< evdev BTN_*
+struct Axis { std::uint32_t time, axis; std::int32_t value; };  ///< wl_fixed
+struct AxisValue120 { std::uint32_t axis; std::int32_t value120; };
+struct AxisSource { std::uint32_t source; };
+struct AxisStop { std::uint32_t time, axis; };
+struct Frame {};
+struct PointerFocus { bool in; };
+}  // namespace raw
+using RawInput = std::variant<raw::Key, raw::Modifiers, raw::Keymap, raw::Repeat, raw::KeyboardFocus, raw::Motion,
+                              raw::Button, raw::Axis, raw::AxisValue120, raw::AxisSource, raw::AxisStop, raw::Frame,
+                              raw::PointerFocus>;
+
+// ════════════════════════════════════════════════════════════════════════
 // WaylandWindow
 // ════════════════════════════════════════════════════════════════════════
 
@@ -880,8 +921,9 @@ class WaylandWindow {
     }
 
     void set_cursor(CursorShape shape) {
-        if (shape == cursor_) return;
+        if (shape == cursor_ && cursor_mode_ == CursorMode::shape) return;
         cursor_ = shape;
+        cursor_mode_ = CursorMode::shape;
         apply_cursor();
     }
 
@@ -1323,10 +1365,90 @@ class WaylandWindow {
     }
 
     void apply_cursor() {
-        if (cursor_device_ == nullptr || pointer_serial_ == 0) return;
+        if (pointer_ == nullptr || pointer_serial_ == 0) return;
+        switch (cursor_mode_) {
+            case CursorMode::image:
+                if (cursor_surface_ != nullptr) {
+                    wl::request(pointer_, wl::pointer_set_cursor, pointer_serial_, cursor_surface_, cursor_hot_x_,
+                                cursor_hot_y_);
+                    return;
+                }
+                break;
+            case CursorMode::hidden:
+                wl::request(pointer_, wl::pointer_set_cursor, pointer_serial_, static_cast<wl::proxy*>(nullptr), 0, 0);
+                return;
+            case CursorMode::raw_shape:
+                if (cursor_device_ != nullptr) {
+                    wl::request(cursor_device_, wl::cursor_dev_set_shape, pointer_serial_, cursor_raw_shape_);
+                    return;
+                }
+                break;
+            case CursorMode::shape: break;
+        }
+        if (cursor_device_ == nullptr) return;
         wl::request(cursor_device_, wl::cursor_dev_set_shape, pointer_serial_,
                     wldetail::cursor_to_shape(cursor_));
     }
+
+    /// A wp_cursor_shape_v1 shape by number: the full set (34 shapes), for a
+    /// program passing on what another client asked for.
+    void set_cursor_shape_raw(std::uint32_t shape) {
+        cursor_mode_ = CursorMode::raw_shape;
+        cursor_raw_shape_ = shape;
+        apply_cursor();
+        if (display_ != nullptr) wl::lib().display_flush(display_);
+    }
+
+    void hide_cursor() {
+        cursor_mode_ = CursorMode::hidden;
+        apply_cursor();
+        if (display_ != nullptr) wl::lib().display_flush(display_);
+    }
+
+    /// A cursor IMAGE: premultiplied ARGB8888 rows (wl_shm's format), drawn
+    /// by the host compositor on its cursor plane, so it moves with zero
+    /// added latency. Copied once into a buffer of mayag's own.
+    void set_cursor_image(const std::uint8_t* argb, int w, int h, int stride, int hot_x, int hot_y) {
+        const wl::Lib& L = wl::lib();
+        if (argb == nullptr || w <= 0 || h <= 0 || w > 256 || h > 256 || compositor_ == nullptr || shm_ == nullptr)
+            return;
+        if (cursor_surface_ == nullptr)
+            cursor_surface_ = wl::request_new(compositor_, wl::compositor_create_surface, L.i_surface,
+                                              wl::version_of(compositor_));
+        if (cursor_surface_ == nullptr) return;
+        const std::size_t row = static_cast<std::size_t>(w) * 4, bytes = row * static_cast<std::size_t>(h);
+        const int fd = wldetail::make_shm_fd(bytes);
+        if (fd < 0) return;
+        void* map = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED) { ::close(fd); return; }
+        for (int y = 0; y < h; ++y)
+            std::memcpy(static_cast<std::uint8_t*>(map) + row * static_cast<std::size_t>(y),
+                        argb + static_cast<std::size_t>(stride) * static_cast<std::size_t>(y), row);
+        ::munmap(map, bytes);
+        wl::proxy* pool = wl::request_new(shm_, wl::shm_create_pool, L.i_shm_pool, wl::version_of(shm_), fd,
+                                          static_cast<std::int32_t>(bytes));
+        ::close(fd);
+        if (pool == nullptr) return;
+        wl::proxy* buf = wl::request_new(pool, wl::shm_pool_create_buffer, L.i_buffer, wl::version_of(pool), 0, w, h,
+                                         static_cast<std::int32_t>(row), wl::shm_format_argb8888);
+        wl::request_destroy(pool, wl::shm_pool_destroy);
+        if (buf == nullptr) return;
+        wl::request(cursor_surface_, wl::surface_attach, buf, 0, 0);
+        wl::request(cursor_surface_, wl::surface_damage_buffer, 0, 0, w, h);
+        wl::request(cursor_surface_, wl::surface_commit);
+        // The previous image's buffer: replaced by this commit, so done with.
+        if (cursor_buffer_ != nullptr) wl::request_destroy(cursor_buffer_, wl::buffer_destroy);
+        cursor_buffer_ = buf;
+        cursor_hot_x_ = hot_x;
+        cursor_hot_y_ = hot_y;
+        cursor_mode_ = CursorMode::image;
+        apply_cursor();
+        if (display_ != nullptr) L.display_flush(display_);
+    }
+
+    /// The raw input tap (see raw::). Unset by default.
+    void set_raw_input(std::function<void(const RawInput&)> f) { raw_ = std::move(f); }
+
 
     // ════════════════════════════════════════════════════════════════════
     // Listeners
@@ -1704,6 +1826,10 @@ class WaylandWindow {
                              wl::proxy*, wl::fixed_t sx, wl::fixed_t sy) {
         Impl* w = self(data);
         w->pointer_serial_ = serial;
+        if (w->raw_) {
+            w->raw_(raw::PointerFocus{true});
+            w->raw_(raw::Motion{0, sx, sy});
+        }
         w->pointer_pos_ = Vec2{static_cast<float>(wl::fixed_to_double(sx)),
                                static_cast<float>(wl::fixed_to_double(sy))};
         // The cursor is undefined on enter and MUST be set, or it vanishes.
@@ -1715,6 +1841,7 @@ class WaylandWindow {
                              wl::proxy*) {
         Impl* w = self(data);
         w->pointer_serial_ = serial;
+        if (w->raw_) w->raw_(raw::PointerFocus{false});
         // Park the pointer off-surface so hover state clears.
         w->pending_.push_back(MouseMove{Vec2{-1.0f, -1.0f}, Vec2{}, w->mods_});
     }
@@ -1723,6 +1850,7 @@ class WaylandWindow {
                               wl::fixed_t sx, wl::fixed_t sy) {
         Impl* w = self(data);
         w->note_event_time(time_ms);
+        if (w->raw_) w->raw_(raw::Motion{time_ms, sx, sy});
         const Vec2 p{static_cast<float>(wl::fixed_to_double(sx)),
                      static_cast<float>(wl::fixed_to_double(sy))};
         const Vec2 delta{p.x - w->pointer_pos_.x, p.y - w->pointer_pos_.y};
@@ -1731,10 +1859,11 @@ class WaylandWindow {
     }
 
     static void on_ptr_button(void* data, wl::proxy*, std::uint32_t serial,
-                              std::uint32_t, std::uint32_t button,
+                              std::uint32_t time_ms, std::uint32_t button,
                               std::uint32_t state) {
         Impl* w = self(data);
         w->pointer_serial_ = serial;
+        if (w->raw_) w->raw_(raw::Button{time_ms, button, state == 1});
 
         // evdev button codes.
         MouseButton b = MouseButton::left;
@@ -1762,9 +1891,10 @@ class WaylandWindow {
         }
     }
 
-    static void on_ptr_axis(void* data, wl::proxy*, std::uint32_t,
+    static void on_ptr_axis(void* data, wl::proxy*, std::uint32_t time_ms,
                             std::uint32_t axis, wl::fixed_t value) {
         Impl* w = self(data);
+        if (w->raw_) w->raw_(raw::Axis{time_ms, axis, value});
         // Wayland's axis is "down/right is positive", and its magnitude is in
         // surface units. mayag scrolls content, so the sign is inverted here
         // once rather than in every scroll view.
@@ -1777,6 +1907,7 @@ class WaylandWindow {
 
     static void on_ptr_frame(void* data, wl::proxy*) {
         Impl* w = self(data);
+        if (w->raw_) w->raw_(raw::Frame{});
         // Scroll is delivered as one-or-more axis events terminated by a
         // frame. Coalescing here means a high-resolution trackpad produces one
         // mayag event per physical gesture step, not three.
@@ -1787,12 +1918,17 @@ class WaylandWindow {
         }
     }
 
-    static void on_ptr_axis_source(void*, wl::proxy*, std::uint32_t) {}
-    static void on_ptr_axis_stop(void*, wl::proxy*, std::uint32_t, std::uint32_t) {}
+    static void on_ptr_axis_source(void* data, wl::proxy*, std::uint32_t source) {
+        if (self(data)->raw_) self(data)->raw_(raw::AxisSource{source});
+    }
+    static void on_ptr_axis_stop(void* data, wl::proxy*, std::uint32_t time_ms, std::uint32_t axis) {
+        if (self(data)->raw_) self(data)->raw_(raw::AxisStop{time_ms, axis});
+    }
     static void on_ptr_axis_discrete(void*, wl::proxy*, std::uint32_t, std::int32_t) {}
     static void on_ptr_axis_value120(void* data, wl::proxy*, std::uint32_t axis,
                                      std::int32_t v120) {
         Impl* w = self(data);
+        if (w->raw_) w->raw_(raw::AxisValue120{axis, v120});
         // High-resolution wheel: 120 units per detent. Prefer this over the
         // legacy axis event when both arrive, by replacing rather than adding.
         const float lines = -static_cast<float>(v120) / 120.0f;
@@ -1836,11 +1972,13 @@ class WaylandWindow {
     static void on_kb_enter(void* data, wl::proxy*, std::uint32_t, wl::proxy*,
                             wl::wl_array*) {
         self(data)->repeat_.cancel();
+        if (self(data)->raw_) self(data)->raw_(raw::KeyboardFocus{true});
         self(data)->pending_.push_back(FocusEvent{true});
     }
 
     static void on_kb_leave(void* data, wl::proxy*, std::uint32_t, wl::proxy*) {
         Impl* w = self(data);
+        if (w->raw_) w->raw_(raw::KeyboardFocus{false});
         w->mods_ = Mods{};
         w->repeat_.cancel();
         if (w->compose_state_ != nullptr && w->xkb_.compose_reset != nullptr) w->xkb_.compose_reset(w->compose_state_);
@@ -1848,9 +1986,10 @@ class WaylandWindow {
     }
 
     static void on_kb_key(void* data, wl::proxy*, std::uint32_t serial,
-                          std::uint32_t, std::uint32_t key, std::uint32_t state) {
+                          std::uint32_t time_ms, std::uint32_t key, std::uint32_t state) {
         Impl* w = self(data);
         w->key_serial_ = serial;
+        if (w->raw_) w->raw_(raw::Key{time_ms, key, state == wl::keyboard_key_pressed, w->resolve_key(key), w->mods_});
 
         // mayag's Event variant models key PRESSES only — a release carries no
         // information the app model uses, and inventing a KeyUp alternative
@@ -1867,15 +2006,22 @@ class WaylandWindow {
 
     /// One key press (or a client-side repeat of one): the KeyEvent, then
     /// its text through Compose.
-    void emit_key(std::uint32_t key, bool repeat) {
-        // evdev codes are offset by 8 from the X11 keycodes xkbcommon wants.
-        const std::uint32_t xkb_code = key + 8u;
+    /// The mayag Key for an evdev code: positional, unless the keymap names
+    /// a key mayag knows (so a remapped layout's Backspace is Backspace).
+    [[nodiscard]] Key resolve_key(std::uint32_t key) const {
         Key k = wldetail::key_from_evdev(key);
         if (xkb_state_ != nullptr && xkb_.key_get_one_sym != nullptr) {
-            if (const Key named = wldetail::key_from_keysym(xkb_.key_get_one_sym(xkb_state_, xkb_code));
+            if (const Key named = wldetail::key_from_keysym(xkb_.key_get_one_sym(xkb_state_, key + 8u));
                 named != Key::unknown)
                 k = named;
         }
+        return k;
+    }
+
+    void emit_key(std::uint32_t key, bool repeat) {
+        // evdev codes are offset by 8 from the X11 keycodes xkbcommon wants.
+        const std::uint32_t xkb_code = key + 8u;
+        const Key k = resolve_key(key);
         pending_.push_back(KeyEvent{k, mods_, repeat});
 
         // Text. With a keymap this is the layout-correct character (AltGr
@@ -1920,6 +2066,7 @@ class WaylandWindow {
                            std::uint32_t depressed, std::uint32_t latched,
                            std::uint32_t locked, std::uint32_t group) {
         Impl* w = self(data);
+        if (w->raw_) w->raw_(raw::Modifiers{depressed, latched, locked, group});
         if (w->xkb_state_ != nullptr && w->xkb_.update_mask != nullptr) {
             w->xkb_.update_mask(w->xkb_state_, depressed, latched, locked,
                                 0, 0, group);
@@ -1947,6 +2094,7 @@ class WaylandWindow {
     static void on_kb_repeat(void* data, wl::proxy*, std::int32_t rate,
                              std::int32_t delay) {
         Impl* w = self(data);
+        if (w->raw_) w->raw_(raw::Repeat{rate, delay});
         w->repeat_.rate  = rate;
         w->repeat_.delay = delay;
         if (rate <= 0) w->repeat_.cancel();
@@ -2049,6 +2197,8 @@ class WaylandWindow {
         // guaranteed writable and we only ever read it.
         void* map = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
         if (map == MAP_FAILED) { ::close(fd); return; }
+        if (raw_ && size > 0)
+            raw_(raw::Keymap{std::string(static_cast<const char*>(map), ::strnlen(static_cast<const char*>(map), size))});
 
         if (xkb_context_ == nullptr) xkb_context_ = xkb_.context_new(0);
         if (xkb_context_ != nullptr) {
@@ -2183,6 +2333,9 @@ class WaylandWindow {
     void teardown() noexcept {
         if (display_ == nullptr) return;
         const wl::Lib& L = wl::lib();
+        raw_ = nullptr;
+        if (cursor_buffer_ != nullptr) { wl::request_destroy(cursor_buffer_, wl::buffer_destroy); cursor_buffer_ = nullptr; }
+        if (cursor_surface_ != nullptr) { wl::request_destroy(cursor_surface_, wl::surface_destroy); cursor_surface_ = nullptr; }
 
 #ifdef MAYAG_WITH_VULKAN
         // The GPU device wraps the wl_surface (its VkSurfaceKHR) and marshals
@@ -2317,6 +2470,13 @@ class WaylandWindow {
     CursorShape cursor_ = CursorShape::arrow;
 
     std::uint32_t pointer_serial_ = 0;
+    std::function<void(const RawInput&)> raw_;
+    enum class CursorMode : std::uint8_t { shape, raw_shape, image, hidden };
+    CursorMode cursor_mode_ = CursorMode::shape;
+    std::uint32_t cursor_raw_shape_ = 1;
+    wl::proxy* cursor_surface_ = nullptr;
+    wl::proxy* cursor_buffer_ = nullptr;
+    std::int32_t cursor_hot_x_ = 0, cursor_hot_y_ = 0;
     std::uint32_t key_serial_     = 0;
 
     double        start_time_       = 0.0;
@@ -2417,6 +2577,12 @@ class WaylandWindow {
     void set_title(std::string_view t)   { p_->set_title(t); }
     void set_fullscreen(bool on)         { p_->set_fullscreen(on); }
     void set_cursor(CursorShape shape)   { p_->set_cursor(shape); }
+    void set_cursor_shape_raw(std::uint32_t shape) { p_->set_cursor_shape_raw(shape); }
+    void hide_cursor() { p_->hide_cursor(); }
+    void set_cursor_image(const std::uint8_t* argb, int w, int h, int stride, int hot_x, int hot_y) {
+        p_->set_cursor_image(argb, w, h, stride, hot_x, hot_y);
+    }
+    void set_raw_input(std::function<void(const RawInput&)> f) { p_->set_raw_input(std::move(f)); }
     void set_clipboard(std::string_view text) { p_->set_clipboard(text); }
     [[nodiscard]] std::string get_clipboard() { return p_->get_clipboard(); }
 
