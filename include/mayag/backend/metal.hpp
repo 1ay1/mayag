@@ -460,6 +460,7 @@ class MetalDevice {
             msg<void>(cmd, sel("presentDrawable:"), present_drawable);
         }
         msg<void>(cmd, sel("commit"));
+        if (present_drawable != nullptr) flush_core_animation();
         retire_slot(cmd);
         if (wait) msg<void>(cmd, sel("waitUntilCompleted"));
 
@@ -932,6 +933,17 @@ class MetalDevice {
         msg<void>(enc, sel("endEncoding"));
         msg<void>(cmd, sel("presentDrawable:"), drawable);
         msg<void>(cmd, sel("commit"));
+        flush_core_animation();
+    }
+
+    /// Hand the presented drawable to the window server now. Core Animation
+    /// commits layer changes from an AppKit run-loop observer; a program on
+    /// its own loop (jaal's kqueue) only spins AppKit when it polls for
+    /// input, so without this a frame drawn while idle (a remote window
+    /// updating by itself) stayed off screen until the next key or mouse
+    /// move.
+    static void flush_core_animation() {
+        mtl::msg_cls<void>(objc_getClass("CATransaction"), mtl::sel("flush"));
     }
 
     id    device_ = nullptr;
