@@ -117,7 +117,11 @@ struct Rect {
     [[nodiscard]] constexpr Vec2  center() const noexcept { return origin + size * 0.5f; }
     [[nodiscard]] constexpr Vec2  half()   const noexcept { return size * 0.5f; }
     [[nodiscard]] constexpr float area()   const noexcept { return size.x * size.y; }
-    [[nodiscard]] constexpr bool  empty()  const noexcept { return size.x <= 0.0f || size.y <= 0.0f; }
+    /// Written as !(w > 0 && h > 0) so a NaN size (a degenerate layout or
+    /// animation) counts as empty: `w <= 0` is false for NaN, and a NaN rect
+    /// that slipped through reached static_cast<int>(NaN) (INT_MIN on x86) in
+    /// the rasteriser's pixel bounds.
+    [[nodiscard]] constexpr bool  empty()  const noexcept { return !(size.x > 0.0f && size.y > 0.0f); }
 
     [[nodiscard]] constexpr bool contains(Vec2 p) const noexcept {
         return p.x >= left() && p.x < right() && p.y >= top() && p.y < bottom();
@@ -132,7 +136,7 @@ struct Rect {
     [[nodiscard]] constexpr Rect intersect(const Rect& o) const noexcept {
         const Vec2 lo = mayag::max(min(), o.min());
         const Vec2 hi = mayag::min(max(), o.max());
-        return (hi.x <= lo.x || hi.y <= lo.y) ? Rect{lo, Vec2{}} : Rect{lo, hi - lo};
+        return !(hi.x > lo.x && hi.y > lo.y) ? Rect{lo, Vec2{}} : Rect{lo, hi - lo};   // NaN -> empty
     }
 
     /// Bounding union. An empty rect is the identity, so folding a list works.
@@ -157,7 +161,13 @@ struct Rect {
 
     /// Round outward to integer pixel bounds — the correct rounding for a
     /// scissor/clip rect, where cutting a partially covered pixel is a bug.
+    /// An EMPTY rect stays empty: rounding a zero-size rect at (684.7,
+    /// 691.0) outward used to produce the real 1x1 pixel (684,690)-(685,691),
+    /// so a shape clipped away entirely (a glass panel scrolled below the
+    /// viewport) was drawn anyway, outside the framebuffer, and the
+    /// rasteriser's blur read and wrote past its end (segfault at -O3).
     [[nodiscard]] constexpr Rect pixel_snap_out() const noexcept {
+        if (empty()) return Rect{origin, Vec2{}};
         const Vec2 lo{num::floor(left()), num::floor(top())};
         const Vec2 hi{num::ceil(right()), num::ceil(bottom())};
         return Rect{lo, hi - lo};

@@ -374,7 +374,10 @@ class Software {
         float pad = 1.0f;
         if (kind == ShapeKind::shadow && (inst.flags & instance_flags::inset) == 0u) pad = inst.params.x * 3.0f + 2.0f;
 
-        const Rect bounds = shape.expand(pad).intersect(scissor).pixel_snap_out();
+        // Snap THEN clip: the scissor is integer and inside the framebuffer,
+        // so the pixel bounds can never leave it (clipping first and snapping
+        // the result is what once turned an empty intersection into a pixel).
+        const Rect bounds = shape.expand(pad).pixel_snap_out().intersect(scissor);
         if (bounds.empty()) return;
 
         const int x0 = static_cast<int>(bounds.left());

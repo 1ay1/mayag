@@ -1225,8 +1225,37 @@ void test_kinetic_scroll() {
     }
 }
 
+// ── a shape clipped away entirely draws nothing ─────────────────────────────
+//
+// mayag_studio segfaulted at -O3: a frosted-glass panel scrolled below its
+// scroll view's clip intersected to an EMPTY rect at a fractional position,
+// pixel_snap_out() rounded that outward into a real 1x1 pixel outside the
+// framebuffer, and the blur read and wrote past the end of the buffer.
+void test_clipped_away_shapes() {
+    section("shapes clipped away draw nothing");
+    check(Rect{Vec2{684.7f, 691.0f}, Vec2{}}.pixel_snap_out().empty(), "an empty rect snaps to empty");
+    check(Rect{Vec2{0, 0}, Vec2{std::nanf(""), 4}}.empty(), "a NaN-sized rect is empty");
+
+    const int W = 64, H = 40;
+    for (const bool tiled : {false, true}) {
+        DrawList dl;
+        dl.push_clip(Rect{Vec2{4, 4}, Vec2{40, 30}});
+        // Entirely below the clip, at fractional coordinates, partly off-screen.
+        dl.backdrop(Rect{Vec2{20.66f, 41.96f}, Vec2{30.6f, 19.6f}}, 28.0f, 1.8f, 1.0f);
+        dl.fill_rect(Rect{Vec2{20.66f, 41.96f}, Vec2{30.6f, 19.6f}}, rgb<0xFF0000>);
+        dl.pop_clip();
+        backend::Framebuffer fb{W, H};
+        fb.clear(rgb<0x101010>);
+        const auto before = fb.to_rgba8();
+        if (tiled) backend::Tiled::render(dl, fb, nullptr, &backend::shared_pool(), rgb<0x101010>);
+        else       backend::Software::render(dl, fb, nullptr);
+        check(fb.to_rgba8() == before, tiled ? "tiled: nothing is drawn" : "reference: nothing is drawn");
+    }
+}
+
 int main() {
     std::printf("mayag test suite\n================");
+    test_clipped_away_shapes();
 
     test_color();
     test_sdf();
