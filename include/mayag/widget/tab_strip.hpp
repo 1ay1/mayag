@@ -243,15 +243,30 @@ template <ControlContext C>
     const Color<Srgb> active_hue = active >= 0 && active < static_cast<int>(tabs.size()) ? hue_of(tabs[static_cast<std::size_t>(active)]) : t.accent;
     const Color<Srgb> pill_base = mix(t.surface_raised, active_hue, 0.07f);
     const Color<Srgb> pill_top = mix(pill_base, colors::white, 0.045f);
-    const Color<Srgb> pill_edge = mix(t.border_strong, active_hue, 0.30f);
+    const Color<Srgb> pill_edge = mix(t.border_strong, active_hue, 0.18f);
+    // Two lines only when they actually fit (title + subtitle at their line
+    // heights, plus breathing room); otherwise a single, centred title line
+    // rather than text crammed against the tab's edges.
+    const bool two_lines = o.subtitle && tab_h >= fs * (0.98f + 0.78f) * 1.3f + t.spaced(1) + 8.0f;
+    const float icon_d = std::clamp(tab_h - 10.0f, 16.0f, two_lines ? 26.0f : 20.0f);
 
     std::vector<Node> items;
     items.push_back((box() | size(o.inset_left, 1)).build());
+    const auto tab_hov = [&](std::size_t k) {
+        return c.hovered(part_id(id, k)) || c.hovered(part_id(id, tab_part_close + k));
+    };
     for (std::size_t i = 0; i < tabs.size(); ++i) {
         const TermTabInfo& tb = tabs[i];
         const bool on = static_cast<int>(i) == active;
         const auto pid = part_id(id, i), cid = part_id(id, tab_part_close + i);
         const bool hov = c.hovered(pid) || c.hovered(cid);
+        // a hairline between two resting tabs gives each its own edge; it
+        // steps aside next to the active or hovered one, which has a surface
+        if (i > 0) {
+            const bool quiet = on || hov || static_cast<int>(i - 1) == active || tab_hov(i - 1);
+            items.push_back((box() | size(1, std::round(tab_h * 0.42f))
+                             | bg(quiet ? t.border.fade(0.0f) : t.border)).build());
+        }
         const Color<Srgb> hue = hue_of(tb);
         // what the active tab looks like before the sliding marker has a rect (first frame)
         const Color<Srgb> on_bg = lifted || o.style == S::flat ? pill_base : t.surface.fade(0.0f);
@@ -276,12 +291,13 @@ template <ControlContext C>
         } else if (!tb.running && tb.last_exit > 0) {
             trailing = (h(text_owned("\u2716 " + std::to_string(tb.last_exit)) | font(t.font_size * 0.74f) | semibold | fg(var::danger))
                         | pad(0, t.spaced(5)) | radius(t.rounded(5)) | bg(t.tint(t.danger, 0.14f))).build();
-        } else if (o.activity && recently_active(tb.activity)) {
-            trailing = activity_sparkline(tb.activity, on ? hue : mix(hue, t.text_secondary, 0.35f));
+        } else if (o.activity && !on && recently_active(tb.activity)) {
+            // background tabs only: the one you are looking at needs no meter
+            trailing = activity_sparkline(tb.activity, mix(hue, t.text_secondary, 0.35f), 10.0f, 8);
         }
 
         if (tb.pinned) {
-            items.push_back((h(node(tab_icon(t, tb, time, on, std::min(24.0f, tab_h - 6.0f))),
+            items.push_back((h(node(tab_icon(t, tb, time, on, icon_d)),
                                node(tb.unread && !on ? (box() | size(5, 5) | bg(hue) | radius(t.rounded(2.5f)) | absolute(27, 6)).build() : Node{}))
                              | size(40, tab_h) | center | radius(rad)
                              | bg(on && !slide ? on_bg : hov ? mix(t.surface, colors::white, 0.04f) : flash > 0 ? t.tint(flash_col, 0.25f * flash) : t.surface.fade(0.0f))
@@ -291,23 +307,31 @@ template <ControlContext C>
         }
 
         std::string line2 = !tb.host.empty() ? tb.host : tb.cwd;
-        if (tb.running) line2 = short_duration(tb.elapsed) + (line2.empty() ? "" : "  \u00B7  " + line2);
+        if (tb.running) line2 = short_duration(tb.elapsed) + (line2.empty() ? "" : " \u00B7 " + line2);
         const Color<Srgb> title_col = on ? t.text_primary : tb.unread || hov ? mix(t.text_secondary, t.text_primary, 0.6f) : t.text_secondary;
         // no icon: a running command still shows, as a pulsing dot
         const bool dot = (tb.unread && !on) || (!o.icon && tb.running);
         const float pulse = tb.running ? 0.55f + 0.45f * static_cast<float>(std::sin(time * 5.0)) : 1.0f;
-        auto title_row = h(node(dot ? (box() | size(6, 6) | bg(hue.fade(pulse)) | radius(3.0f)).build() : Node{}),
-                           text_owned(tb.title.empty() ? tb.process : tb.title) | font(fs * 0.98f)
-                               | (on ? semibold : weight(FontWeight::medium)) | fg(title_col) | ellipsis | grow() | min_size(0, 0))
-                       | gap(t.spaced(5)) | align(Align::center) | width(pct(100));
-        Node sub = !o.subtitle ? Node{} : (text_owned(line2) | font(fs * 0.78f)
-                    | fg(!tb.host.empty() && tb.host_danger ? t.danger : tb.running ? mix(hue, t.text_secondary, 0.3f) : t.text_disabled)
-                    | ellipsis).build();
+        // children only when present: an empty slot still takes a gap, which
+        // indents one tab's title against its neighbours'
+        std::vector<Node> title_parts;
+        if (dot) title_parts.push_back((box() | size(6, 6) | bg(hue.fade(pulse)) | radius(3.0f)).build());
+        title_parts.push_back((text_owned(tb.title.empty() ? tb.process : tb.title) | font(fs * 0.98f)
+                               | (on ? semibold : weight(FontWeight::medium)) | fg(title_col) | ellipsis | grow() | min_size(0, 0)).build());
+        Node title_row = (h_list(std::move(title_parts), t.spaced(5)) | align(Align::center) | width(pct(100))).build();
+        std::vector<Node> lines;
+        lines.push_back(std::move(title_row));
+        if (two_lines)
+            lines.push_back((text_owned(line2) | font(fs * 0.78f)
+                             | fg(!tb.host.empty() && tb.host_danger ? t.danger : tb.running ? mix(hue, t.text_secondary, 0.3f) : t.text_disabled)
+                             | ellipsis | width(pct(100))).build());
 
-        items.push_back((h(node(o.icon ? tab_icon(t, tb, time, on, std::min(24.0f, tab_h - 6.0f)) : Node{}),
-                           v(std::move(title_row), node(std::move(sub))) | gap(t.spaced(1)) | grow() | min_size(0, 0),
-                           h(node(std::move(trailing))) | min_size(20, 0) | align(Align::center) | justify(Justify::end))
-                         | gap(t.spaced(9)) | align(Align::center) | pad(0, t.spaced(7), 0, t.spaced(9))
+        std::vector<Node> row;
+        if (o.icon) row.push_back(tab_icon(t, tb, time, on, icon_d));
+        row.push_back((v_list(std::move(lines), t.spaced(1)) | justify(Justify::center) | grow() | min_size(0, 0)).build());
+        row.push_back((h(node(std::move(trailing))) | min_size(16, 0) | align(Align::center) | justify(Justify::end)).build());
+        items.push_back((h_list(std::move(row), t.spaced(two_lines ? 9 : 7))
+                         | align(Align::center) | pad(0, t.spaced(7), 0, t.spaced(o.icon ? 6 : 10))
                          | width(0) | grow() | shrink() | min_size(o.min_tab, tab_h) | max_size(o.max_tab, tab_h) | height(tab_h)
                          | radius(rad)
                          | bg(on && !slide ? on_bg
@@ -350,10 +374,10 @@ template <ControlContext C>
         const float x = r.left() - o2.x, y = r.top() - o2.y;
         switch (o.style) {
             case S::pill:
+                // the card alone: its tinted edge and lift say "active"; a
+                // tick under it collided with the subtitle and read as noise
                 layers.push_back((box() | size(r.width(), r.height()) | linear_gradient(pill_top, pill_base) | border(t.stroke(1), pill_edge)
-                                  | radius(rad) | elevation(t.lift(4)) | absolute(x, y) | id_of(marker_id)).build());
-                layers.push_back((box() | size(18, 2.5f) | bg(active_hue) | radius(1.25f)
-                                  | absolute(x + r.width() * 0.5f - 9.0f, y + r.height() - 2.5f)).build());
+                                  | radius(rad) | elevation(t.lift(3)) | absolute(x, y) | id_of(marker_id)).build());
                 break;
             case S::underline: {   // the tab's width, on the strip's edge (where the hairline is)
                 const float inset = std::min(rad, 6.0f) + 4.0f;

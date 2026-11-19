@@ -255,7 +255,7 @@ class MacWindow {
         w.dpi_ = w.native_dpi_;
         if (const char* forced = std::getenv("MAYAG_DPI")) {
             const float v = std::strtof(forced, nullptr);
-            if (v > 0.0f) w.dpi_ = v;
+            if (v > 0.0f) { w.dpi_ = v; w.dpi_forced_ = true; }
         }
 
         w.start_ = std::chrono::steady_clock::now();
@@ -334,12 +334,37 @@ class MacWindow {
         std::vector<Event> out = std::move(fed_);
         fed_.clear();
 
-        // Track live size, so a resize by the user is reported once.
+        // Track live geometry: the content view's size in points and the
+        // window's backing scale. Both are reported as one ResizeEvent, and
+        // the FIRST call always reports — the same contract as Wayland's
+        // initial configure. Without it a program whose model starts at some
+        // other size than the window (the window may also have been clamped
+        // to the screen) lays out for a size it never gets told about, and
+        // the frame fills only part of the window.
         const CGRect content = msg<CGRect>(view_, sel("frame"));
         const Vec2 now_size{static_cast<float>(content.size.width),
                             static_cast<float>(content.size.height)};
-        if (now_size != size_) {
+        float now_dpi = dpi_;
+        if (!dpi_forced_) {
+            // dragged to a display with another scale (Retina <-> 1x), or the
+            // display's own scale changed: render at the new native scale
+            const auto native = static_cast<float>(msg<double>(window_, sel("backingScaleFactor")));
+            if (native > 0.0f) now_dpi = native;
+        }
+        if (!announced_ || now_size != size_ || now_dpi != dpi_) {
+            if (now_dpi != dpi_) {
+                native_dpi_ = now_dpi;
+                // the software path's CALayer must know the new scale, or Core
+                // Animation resamples the image (the GPU path re-sets its
+                // CAMetalLayer's scale in present(), keyed on pixel size)
+                if (!gpu_enabled_) {
+                    if (id layer = msg<id>(view_, sel("layer")))
+                        msg<void>(layer, sel("setContentsScale:"), static_cast<double>(now_dpi));
+                }
+            }
+            announced_ = true;
             size_ = now_size;
+            dpi_ = now_dpi;
             out.push_back(ResizeEvent{size_, dpi_});
         }
 
@@ -1016,6 +1041,8 @@ class MacWindow {
     Vec2  size_{1024, 640};
     float dpi_ = 1.0f;
     float native_dpi_ = 1.0f;   ///< what the display actually offers
+    bool  dpi_forced_ = false;  ///< MAYAG_DPI pins the scale; display changes are ignored
+    bool  announced_ = false;   ///< the first dispatch() reports the real geometry
     Vec2  last_mouse_{};
     bool  pull_ = true;
     std::vector<Event> fed_;
