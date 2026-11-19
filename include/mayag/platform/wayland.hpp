@@ -1040,6 +1040,22 @@ class WaylandWindow {
         images_.upload(id, std::move(img));
     }
 
+    /// Rewrite rectangles of an uploaded image in place (see
+    /// VulkanDevice::update_texture_regions). false: upload it whole.
+    bool update_image_regions(std::uint32_t id, int w, int h, const std::vector<std::array<int, 4>>& rects,
+                              const std::vector<std::uint8_t>& packed) {
+#ifdef MAYAG_WITH_VULKAN
+        if (!gpu_active_ || rects.empty()) return false;
+        std::vector<backend::VulkanDevice::Region> r;
+        r.reserve(rects.size());
+        for (const auto& q : rects) r.push_back({q[0], q[1], q[2], q[3]});
+        return gpu_->update_texture_regions(id, w, h, r.data(), r.size(), packed.data(), packed.size());
+#else
+        (void)id, (void)w, (void)h, (void)rects, (void)packed;
+        return false;
+#endif
+    }
+
     void release_image(std::uint32_t id) {
         images_.release(id);
 #ifdef MAYAG_WITH_VULKAN
@@ -2700,6 +2716,10 @@ class WaylandWindow {
 
     void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
         p_->upload_image(id, std::move(img));
+    }
+    bool update_image_regions(std::uint32_t id, int w, int h, const std::vector<std::array<int, 4>>& rects,
+                              const std::vector<std::uint8_t>& packed) {
+        return p_->update_image_regions(id, w, h, rects, packed);
     }
     void release_image(std::uint32_t id) { p_->release_image(id); }
 

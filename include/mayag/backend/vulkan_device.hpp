@@ -526,6 +526,55 @@ class VulkanDevice {
     /// The old single-texture call: id 1.
     std::uint32_t upload_texture(const std::uint8_t* rgba, int w, int h) { return upload_texture(1, rgba, w, h); }
 
+    /// Rewrite only these rectangles of texture `id` (already uploaded at
+    /// w x h). `packed` holds each rectangle's pixels in turn, rows tight
+    /// (RGBA8): one copy command for all of them. A typed character costs a
+    /// few KB, not the whole picture. false: no such texture at that size.
+    struct Region { int x, y, w, h; };
+    bool update_texture_regions(std::uint32_t id, int w, int h, const Region* regions, std::size_t count,
+                                const std::uint8_t* packed, std::size_t packed_size) {
+        if (!valid_ || packed == nullptr || count == 0) return false;
+        auto it = textures_.find(id);
+        if (it == textures_.end() || it->second.imported || it->second.w != w || it->second.h != h) return false;
+        std::size_t bytes = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& r = regions[i];
+            if (r.x < 0 || r.y < 0 || r.w <= 0 || r.h <= 0 || r.x + r.w > w || r.y + r.h > h) return false;
+            bytes += static_cast<std::size_t>(r.w) * static_cast<std::size_t>(r.h) * 4;
+        }
+        if (bytes != packed_size) return false;
+        ensure_staging(bytes);
+        std::memcpy(staging_ptr_, packed, bytes);
+        std::vector<vk::VkBufferImageCopy> copies(count);
+        std::size_t at = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& r = regions[i];
+            auto& c = copies[i];
+            c = {};
+            c.bufferOffset = at;
+            c.imageSubresource = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            c.imageOffset = {r.x, r.y};
+            c.z = 0;
+            c.imageExtent = {static_cast<std::uint32_t>(r.w), static_cast<std::uint32_t>(r.h), 1};
+            at += static_cast<std::size_t>(r.w) * static_cast<std::size_t>(r.h) * 4;
+        }
+        const auto image = it->second.image;
+        one_shot([&](vk::VkCommandBuffer cb) {
+            barrier_image(cb, image, vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk::VK_ACCESS_SHADER_READ_BIT,
+                          vk::VK_ACCESS_TRANSFER_WRITE_BIT, vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                          vk::VK_PIPELINE_STAGE_TRANSFER_BIT);
+            api_->CmdCopyBufferToImage(cb, staging_buf_.buf, image, vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                       static_cast<std::uint32_t>(copies.size()), copies.data());
+            barrier_image(cb, image, vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, vk::VK_ACCESS_TRANSFER_WRITE_BIT,
+                          vk::VK_ACCESS_SHADER_READ_BIT, vk::VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          vk::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        });
+        content_changed_ = true;
+        return true;
+    }
+
     /// Drop texture `id`. Retired with the frame that last used it.
     void release_texture(std::uint32_t id) {
         auto it = textures_.find(id);

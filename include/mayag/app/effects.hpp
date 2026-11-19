@@ -14,13 +14,16 @@
 
 #include <jaal/jaal.hpp>
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace mayag {
 
@@ -60,6 +63,22 @@ using upload_image = jaal::pure_fx<UploadImage, "upload_image">;
 struct ReleaseImage { std::uint32_t id = 0; };
 using release_image = jaal::pure_fx<ReleaseImage, "release_image">;
 
+/// Rewrite rectangles of image `id` in place: only what changed crosses to
+/// the GPU. `pixels` packs each rect's RGBA8 rows tightly, rect after rect.
+/// `whole` is the full picture, uploaded instead where an in-place update
+/// cannot happen (first frame, a resize, a backend without it).
+struct PatchData {
+    int width = 0, height = 0;
+    std::vector<std::array<int, 4>> rects;  // x, y, w, h
+    std::vector<std::uint8_t> pixels;
+    std::optional<jaal::shared<ImageData>> whole;
+};
+struct PatchImage {
+    std::uint32_t id = 0;
+    jaal::shared<PatchData> patch;
+};
+using patch_image = jaal::pure_fx<PatchImage, "patch_image">;
+
 [[nodiscard]] inline UploadImage upload(std::uint32_t id, ImageData img) {
     return {id, jaal::shared<ImageData>::make(std::move(img))};
 }
@@ -89,6 +108,6 @@ struct read_clipboard {
 /// Every window effect, for a program that wants the whole set.
 template <class Msg>
 using window_cmd = jaal::Cmd<Msg, set_title, write_clipboard, set_fullscreen, set_cursor,
-                             focus, upload_image, release_image, read_clipboard, window_action>;
+                             focus, upload_image, release_image, patch_image, read_clipboard, window_action>;
 
 }  // namespace mayag

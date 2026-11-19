@@ -643,6 +643,18 @@ class window_host {
         }
     }
     void handle(const FocusNode& e) { input_.set_focus_visible(e.node_id); dirty_ = true; }
+    void handle(const PatchImage& e) {
+        const auto& p = e.patch.get();
+        bool done = false;
+        if constexpr (requires { window_.update_image_regions(e.id, 1, 1, p.rects, p.pixels); })
+            done = window_.update_image_regions(e.id, p.width, p.height, p.rects, p.pixels);
+        if (!done && p.whole) {
+            if constexpr (requires { window_.upload_image(e.id, std::shared_ptr<const ImageData>{}); })
+                window_.upload_image(e.id, std::shared_ptr<const ImageData>(
+                                               std::make_shared<jaal::shared<ImageData>>(*p.whole), &p.whole->get()));
+        }
+        dirty_ = true;
+    }
     void handle(const UploadImage& e) {
         if constexpr (requires { window_.upload_image(e.id, std::shared_ptr<const ImageData>{}); }) {
             // shared<T> holds a shared_ptr<const T>; alias it without a copy.
