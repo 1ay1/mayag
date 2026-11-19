@@ -193,6 +193,13 @@ enum : std::uint32_t {
     text_input_set_cursor_rectangle = 6,
     text_input_commit               = 7,
 
+    // wp_tearing_control_v1: let the compositor flip this surface's
+    // buffers immediately (presentation hint 1 = async) instead of at vblank.
+    tearing_mgr_destroy             = 0,
+    tearing_mgr_get_control         = 1,
+    tearing_control_set_hint        = 0,
+    tearing_control_destroy         = 1,
+
     // xdg-shell
     wm_base_destroy         = 0,
     wm_base_get_xdg_surface = 2,
@@ -436,6 +443,9 @@ struct XdgTables {
     wl_message text_input_mgr_methods[2]{};
     wl_message text_input_methods[8]{};
     wl_message text_input_events[6]{};
+    const wl_interface* tearing_get_t[2]{};
+    wl_message tearing_mgr_methods[2]{};
+    wl_message tearing_methods[2]{};
 
     wl_interface wm_base{};
     wl_interface surface{};
@@ -452,6 +462,8 @@ struct XdgTables {
     wl_interface pres_feedback{};
     wl_interface text_input_mgr{};
     wl_interface text_input{};
+    wl_interface tearing_mgr{};
+    wl_interface tearing{};
 
     XdgTables() {
         const Lib& L = lib();
@@ -634,6 +646,16 @@ struct XdgTables {
         text_input_events[5]  = {"done",                    "u",    null_types};
         text_input = wl_interface{"zwp_text_input_v3", 1, 8, text_input_methods,
                                   6, text_input_events};
+
+        // ── wp_tearing_control_manager_v1 / wp_tearing_control_v1 ────────────
+        tearing_get_t[0] = &tearing;
+        tearing_get_t[1] = L.i_surface;
+        tearing_mgr_methods[0] = {"destroy",             "",   null_types};
+        tearing_mgr_methods[1] = {"get_tearing_control", "no", tearing_get_t};
+        tearing_mgr = wl_interface{"wp_tearing_control_manager_v1", 1, 2, tearing_mgr_methods, 0, nullptr};
+        tearing_methods[0] = {"set_presentation_hint", "u", null_types};
+        tearing_methods[1] = {"destroy",               "",  null_types};
+        tearing = wl_interface{"wp_tearing_control_v1", 1, 2, tearing_methods, 0, nullptr};
     }
 };
 

@@ -70,6 +70,11 @@ namespace detail {
     };
 }
 
+/// MAYAG_VSYNC=0/1 overrides AppConfig::vsync for any app (latency A/B).
+inline void apply_env_overrides(AppConfig& cfg) {
+    if (const char* v = std::getenv("MAYAG_VSYNC"); v != nullptr && *v != '\0') cfg.vsync = *v != '0';
+}
+
 [[nodiscard]] inline jaal::kernel::options kernel_options(const AppConfig& cfg) {
     jaal::kernel::options o;
     o.on_fault = cfg.catch_exceptions ? jaal::fault_policy::skip : jaal::fault_policy::stop;
@@ -448,6 +453,7 @@ void log_photon(W& window) {
 
 template <Program P>
 int run(AppConfig cfg) {
+    detail::apply_env_overrides(cfg);
     // Fonts and the window/GPU don't depend on each other: start the font
     // scan on a worker, open the window here, then collect it.
     std::optional<typo::system::FontLoad> fonts;
@@ -469,6 +475,7 @@ int run(AppConfig cfg) {
 /// say). Returns when the program quits.
 template <Program P, class W>
 int run_on(W& window, AppConfig cfg) {
+    detail::apply_env_overrides(cfg);
 #if MAYAG_COCOA_LOOP
     if constexpr (std::same_as<W, platform::MacWindow>) {
     // macOS: AppKit owns the main thread; the run loop drives the program.

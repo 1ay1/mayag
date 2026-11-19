@@ -351,6 +351,11 @@ class VulkanDevice {
 
     [[nodiscard]] std::uint64_t frames_presented() const noexcept { return frames_; }
     [[nodiscard]] const char* device_name() const noexcept { return device_name_; }
+    /// Prefer tearing IMMEDIATE presentation over MAILBOX (call before the
+    /// swapchain is built; takes effect on the next rebuild otherwise).
+    void set_low_latency(bool on) noexcept {
+        if (on != low_latency_) { low_latency_ = on; if (swapchain_) rebuild_swapchain_ = true; }
+    }
     /// True when glyphs blend in encoded space, exactly as CoreGraphics (and
     /// the software reference) draws text: the device can view its target
     /// as UNORM. False: the linear-light coverage approximation.
@@ -1802,17 +1807,23 @@ class VulkanDevice {
         // animation on its own frame clock and sleeps in jaal's reactor in
         // between, and draws input-driven frames only when input arrives.
         //
-        // MAYAG_PRESENT=fifo forces FIFO, for comparing the two.
+        // MAYAG_PRESENT=fifo forces FIFO, for comparing the two; =immediate
+        // (or set_low_latency(true), the window's vsync=false) prefers
+        // IMMEDIATE: no wait for vblank at all, tearing allowed.
         int present_mode = vk::VK_PRESENT_MODE_FIFO_KHR;
         {
             const char* force = std::getenv("MAYAG_PRESENT");
             const bool want_fifo = force != nullptr && std::string_view{force} == "fifo";
+            const bool want_immediate = low_latency_ || (force != nullptr && std::string_view{force} == "immediate");
             std::uint32_t n = 0;
             api_->GetPhysicalDeviceSurfacePresentModesKHR(phys_, surface_, &n, nullptr);
             std::vector<int> modes(n);
             if (n > 0) api_->GetPhysicalDeviceSurfacePresentModesKHR(phys_, surface_, &n, modes.data());
             for (int m : modes)
                 if (m == vk::VK_PRESENT_MODE_MAILBOX_KHR && !want_fifo) present_mode = m;
+            if (want_immediate && !want_fifo)
+                for (int m : modes)
+                    if (m == vk::VK_PRESENT_MODE_IMMEDIATE_KHR) present_mode = m;
         }
         present_mode_ = present_mode;
 
@@ -2349,6 +2360,7 @@ class VulkanDevice {
     vk::VkPhysicalDeviceMemoryProperties mem_props_{};
     char device_name_[256] = "vulkan";
     int  present_mode_ = 2;   // VK_PRESENT_MODE_FIFO_KHR until a swapchain exists
+    bool low_latency_ = false;   ///< prefer IMMEDIATE (the window's vsync = false)
 
     vk::VkCommandPool cmd_pool_ = nullptr;
     vk::VkCommandBuffer frame_cb_ = nullptr, oneshot_cb_ = nullptr;

@@ -306,7 +306,7 @@ struct AppConfig {
     std::string title = "mayag";
     Vec2        size{1024, 640};
     bool        resizable = true;
-    bool        vsync     = true;
+    bool        vsync     = true;   ///< false: async presents (tearing), input drawn at once: lowest latency
     Theme       theme     = themes::midnight;
     /// Animate theme changes: when `P::theme(model)` changes, the WHOLE UI
     /// morphs from the old theme to the new one -- colours in Oklab, radii,
@@ -481,6 +481,9 @@ class window_host {
     /// freshest input just before the vblank.
     [[nodiscard]] time_point next_draw_at() const noexcept { return next_draw_at(now_()); }
     [[nodiscard]] time_point next_draw_at(time_point now) const noexcept {
+        // vsync off (async/tearing presents): a frame is shown the moment it
+        // is submitted, so holding it for a vblank only adds latency.
+        if (!cfg_.vsync) return now;
         if (slot_of(now) != drawn_slot_) return now;
         if (latched_) return slot_start(drawn_slot_ + 1);
         return std::max(now, latch_point(drawn_slot_));

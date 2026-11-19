@@ -573,6 +573,16 @@ class WaylandWindow {
                                           wl::version_of(viewporter_),
                                           surface_);
         }
+        // vsync off: the lowest input-to-photon the display allows. Ask the
+        // compositor to flip our buffers the moment they arrive (tearing,
+        // presentation hint 1 = async) instead of at the next vblank, and the
+        // swapchain for IMMEDIATE. Compositors honour it per policy
+        // (Hyprland: general:allow_tearing + an `immediate` window rule).
+        if (!cfg.vsync && tearing_mgr_ != nullptr) {
+            tearing_ = wl::request_new(tearing_mgr_, wl::tearing_mgr_get_control, &wl::xdg().tearing,
+                                       wl::version_of(tearing_mgr_), surface_);
+            if (tearing_ != nullptr) wl::request(tearing_, wl::tearing_control_set_hint, 1u);
+        }
 
         // Commit with no buffer, then wait: the xdg protocol requires the
         // first configure to arrive before the first buffer is attached.
@@ -966,6 +976,7 @@ class WaylandWindow {
     /// atlas uploads in full on its first sync (a fresh device holds a 1x1
     /// placeholder); the bound image is re-uploaded here.
     void adopt_gpu(std::unique_ptr<backend::VulkanDevice> d) {
+        if (d) d->set_low_latency(!cfg_.vsync);
         if (!d || !d->attach_wayland(display_, surface_, logical_, scale_)) {
             if (d) d->destroy();
             if (!gpu_) gpu_ = std::make_unique<backend::VulkanDevice>();
@@ -1336,6 +1347,8 @@ class WaylandWindow {
                 wl::add_listener(w->presentation_, &presentation_listener, w);
         } else if (id == "wp_cursor_shape_manager_v1") {
             w->cursor_manager_ = bind(&wl::xdg().cursor_mgr, 1);
+        } else if (id == "wp_tearing_control_manager_v1") {
+            w->tearing_mgr_ = bind(&wl::xdg().tearing_mgr, 1);
         } else if (id == "zwp_text_input_manager_v3") {
             w->text_input_mgr_ = bind(&wl::xdg().text_input_mgr, 1);
             w->make_text_input();
@@ -2179,6 +2192,9 @@ class WaylandWindow {
         if (text_input_ != nullptr)     wl::request_destroy(text_input_, wl::text_input_destroy);
         if (text_input_mgr_ != nullptr) wl::request_destroy(text_input_mgr_, wl::text_input_mgr_destroy);
         text_input_ = text_input_mgr_ = nullptr;
+        if (tearing_ != nullptr) wl::request_destroy(tearing_, wl::tearing_control_destroy);
+        if (tearing_mgr_ != nullptr) wl::request_destroy(tearing_mgr_, wl::tearing_mgr_destroy);
+        tearing_ = tearing_mgr_ = nullptr;
         wl::destroy(viewporter_);
         wl::destroy(frac_manager_);
         wl::destroy(deco_manager_);
@@ -2218,6 +2234,8 @@ class WaylandWindow {
     wl::proxy* viewport_       = nullptr;
     wl::proxy* cursor_manager_ = nullptr;
     wl::proxy* cursor_device_  = nullptr;
+    wl::proxy* tearing_mgr_    = nullptr;
+    wl::proxy* tearing_        = nullptr;
     wl::proxy* presentation_   = nullptr;
     bool       pres_clock_monotonic_ = true;
     double     vblank_s_  = 0.0;          // last presented frame, monotonic s
