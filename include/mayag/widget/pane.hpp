@@ -48,15 +48,16 @@ template <ControlContext C>
     };
     Node strip = p.show_title
         ? (h(node(dot(p.focused ? t.accent : t.text_disabled, 5).build()),
-             text_owned(p.title) | font(t.font_size * 0.86f) | (p.focused ? semibold : weight(FontWeight::regular))
+             text_owned(p.title) | font(t.font_size * t.chrome_type * 0.94f) | (p.focused ? semibold : weight(FontWeight::regular))
                  | fg(p.focused ? t.text_primary : t.text_secondary) | ellipsis | grow() | min_size(0, 0),
              node(p.broadcast ? tag("BROADCAST", t.danger) : Node{}),
              node(p.zoomed ? tag("ZOOM", t.warning) : Node{}),
              h(text<"\u00D7"> | font(t.font_size) | fg(c.hovered(cid) ? t.text_primary : t.text_disabled))
                  | size(18, 18) | center | radius(t.rounded(3)) | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
                  | transition() | pointer_cursor | label("close pane") | id_of(id, pane_part_close))
-           | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(8)) | height(24) | width(pct(100))
-           | bg(p.focused ? t.surface : t.surface.fade(0.5f)) | border(t.stroke(1), t.border.fade(0.6f))).build()
+           | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(8)) | height(std::round(t.bar_height * 0.72f)) | width(pct(100))
+           | bg(p.focused ? t.background : t.surface) | inner_shadow(0.0f, t.border.fade(0.7f), {0.0f, -1.0f})
+           | when(p.focused, inner_shadow(0.0f, t.accent, {0.0f, 2.0f}))).build()
         : Node{};
     Node footer = p.exited
         ? (h(text_owned(p.exit_code == 0 ? "[process completed]" : "[process exited with code " + std::to_string(p.exit_code) + "]")

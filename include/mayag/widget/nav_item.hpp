@@ -6,6 +6,7 @@
 // in the accent colour (e.g. "2/6" when two settings there are modified).
 
 #include "control.hpp"
+#include "sheet.hpp"
 
 #include <string>
 #include <string_view>
@@ -17,19 +18,18 @@ template <ControlContext C>
                                    std::string_view icon, std::string_view name, bool active,
                                    std::string_view trailing = {}, bool trailing_hot = false) {
     const Theme& t = c.theme;
-    const auto pid = part_id(base, index);
-    const bool hov = c.hovered(pid);
-    return (h(text_owned(std::string{icon}) | font(t.font_size) | fg(active ? t.accent : t.text_secondary)
+
+    // Look from the theme's Sheet: `item` (rows of a list), with its `mark`
+    // bar lit on the active destination.
+    return (h(box() | size(2, 14) | with_look(sheet_of(t).mark, t),
+              text_owned(std::string{icon}) | font(t.font_size) | fg(active ? t.accent : t.text_secondary)
                   | text_align(TextAlign::center) | width(18),
               text_owned(std::string{name}) | font(t.font_size)
-                  | (active ? semibold : weight(FontWeight::regular))
-                  | fg(active || hov ? t.text_primary : t.text_secondary) | grow(),
+                  | (active ? semibold : weight(FontWeight::regular)) | grow(),
               text_owned(std::string{trailing}) | font(t.font_size * 0.9f)
                   | fg(trailing_hot ? t.accent : t.text_disabled))
-            | gap(t.spaced(10)) | align(Align::center) | pad(t.spaced(7), t.spaced(10)) | width(pct(100))
-            | bg(active ? t.surface_raised : (hov ? t.surface_raised.fade(0.5f) : t.surface.fade(0.0f)))
-            | border(t.stroke(1), c.focused(pid) ? t.focus_ring : t.border.fade(0.0f))
-            | radius(t.radius_small)
+            | gap(t.spaced(8)) | align(Align::center) | pad(t.spaced(7), t.spaced(10), t.spaced(7), t.spaced(4))
+            | width(pct(100)) | with_look(sheet_of(t).item, t) | group()
             | pointer_cursor
             | role(a11y::Role::tab) | selected(active) | label(name)
             | id_of(base, index)).build();

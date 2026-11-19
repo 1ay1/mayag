@@ -337,10 +337,15 @@ inline const Sheet& Sheet::standard() {
             transition());
 
         // ── chrome ──────────────────────────────────────────────────────
-        x.strip = look(bg(var::surface), border(var::line, var::border));
+        // A strip is a band with a hairline FOOT (an inset shadow, so it
+        // costs no layout); tabs are cells divided by a hairline on their
+        // right; the active cell is the content's colour and has no foot,
+        // so it opens into the pane under it.
+        x.strip = look(bg(var::surface));
         x.tab = look(
-            bg(var::surface), border(var::line, var::border), fg(var::text_secondary),
-            hovered(bg(var::tint(var::surface_raised, 0.5f)), fg(var::text_primary)),
+            bg(var::surface.fade(0.0f)), fg(var::text_secondary),
+            inner_shadow(0.0f, var::border, {-1.0f, 0.0f}),
+            hovered(bg(var::surface_raised.fade(0.5f)), fg(var::text_primary)),
             when(state::selected, bg(var::background), fg(var::text_primary)),
             transition());
         x.mark = look(bg(var::accent.fade(0.0f)),
@@ -358,8 +363,10 @@ inline const Sheet& Sheet::standard() {
             hovered(bg(var::surface_raised), fg(var::text_primary)),
             when(state::selected, bg(var::tint(var::accent, 0.20f)), fg(var::text_primary)),
             transition());
-        x.pane = look(border(var::line, var::border.fade(0.0f)),
-                      when(state::selected, border_color(var::accent.fade(0.6f))), transition());
+        // Panes are cells of the split; the gutters (pane_split's divider)
+        // draw the lines between them. Focus is the accent rail on the
+        // focused pane's title strip (pane_frame), so the frame itself is bare.
+        x.pane = look(transition());
         return x;
     }();
     return s;
@@ -499,14 +506,15 @@ namespace sheets {
                               when(state::group(state::pressed), scale(1.25f)), transition());
 
         // Chrome: hairlines, square, and light only where the eye should go.
-        x.strip = look(bg(var::surface), border(var::line, var::border));
+        x.strip = look(bg(var::surface));
         x.tab = look(
-            bg(var::surface.fade(0.0f)), border(var::line, var::border.fade(0.0f)), fg(var::text_disabled),
+            bg(var::surface.fade(0.0f)), fg(var::text_disabled),
+            inner_shadow(0.0f, var::border.fade(0.7f), {-1.0f, 0.0f}),
             hovered(bg(var::accent.fade(0.05f)), fg(var::text_secondary)),
-            when(state::selected, bg(var::background), fg(var::text_primary), border_color(var::border)),
+            when(state::selected, bg(var::background), fg(var::text_primary)),
             transition());
         x.mark = look(bg(var::accent.fade(0.0f)),
-                      when(state::group(state::selected), bg(var::accent), shadow(6.0f, var::accent.fade(0.55f))),
+                      when(state::group(state::selected), bg(var::accent)),
                       transition());
         x.segment = look(
             radius(0.0f), bg(var::accent.fade(0.0f)), fg(var::text_disabled),
@@ -522,9 +530,10 @@ namespace sheets {
             hovered(bg(var::accent.fade(0.05f)), fg(var::text_primary)),
             when(state::selected, bg(var::accent.fade(0.11f)), fg(var::text_primary), border_color(var::accent.fade(0.45f))),
             transition());
-        x.pane = look(border(var::line, var::border),
-                      when(state::selected, border_color(var::accent.fade(0.7f)), shadow(10.0f, var::accent.fade(0.08f))),
-                      transition());
+        // Panes are cells of the split; the gutters (pane_split's divider)
+        // draw the lines between them. Focus is the accent rail on the
+        // focused pane's title strip (pane_frame), so the frame itself is bare.
+        x.pane = look(transition());
         return x;
     }();
     return s;

@@ -40,6 +40,15 @@ enum class Mode : std::uint8_t { dark, light };
 /// whose font stack carries one (JetBrainsMono Nerd Font, ...).
 enum class IconSet : std::uint8_t { letters, nerd };
 
+/// How the active tab in a tab strip is marked.
+///   underline  a bar under the title, the strip stays flat
+///   overline   a bar on top (the active tab lit from above)
+///   block      the active tab is a block in the content's colour, so it
+///              flows into the pane below it (browser / Zed tabs)
+///   pill       the active tab is a rounded pill floating in the strip
+///   slant      powerline: each tab ends in a wedge (``)
+enum class TabShape : std::uint8_t { underline, overline, block, pill, slant };
+
 struct Theme {
     Mode mode = Mode::dark;
 
@@ -104,6 +113,17 @@ struct Theme {
 
     /// Icon glyphs for files, folders and chrome (see IconSet).
     IconSet icons = IconSet::letters;
+
+    // Chrome geometry -- the part of a terminal/editor window that is not
+    // content. One place, so the tab strip, the status bar, the window
+    // buttons and a pane's title strip agree on height and type.
+    TabShape tab_shape   = TabShape::underline;
+    float    bar_height  = 34.0f;   ///< tab strip / title bar
+    float    status_height = 26.0f; ///< status bar
+    float    chrome_type = 0.92f;   ///< chrome text, a multiple of font_size
+    float    tab_width   = 200.0f;  ///< a tab's preferred width
+    bool     tab_numbers = true;    ///< 1..9 on idle tabs
+    bool     tab_close_on_hover = true;  ///< the × shows only on the active / hovered tab
 
     friend constexpr bool operator==(const Theme&, const Theme&) = default;
 
@@ -340,7 +360,8 @@ namespace detail {
     float Theme::*floats_[] = {
         &Theme::radius_small, &Theme::radius_medium, &Theme::radius_large, &Theme::space_unit,
         &Theme::font_size, &Theme::line_hairline, &Theme::line_strong, &Theme::line_focus,
-        &Theme::depth_scale, &Theme::motion_scale};
+        &Theme::depth_scale, &Theme::motion_scale,
+        &Theme::bar_height, &Theme::status_height, &Theme::chrome_type, &Theme::tab_width};
     for (auto m : floats_) r.*m = num::lerp(a.*m, b.*m, t);
     r.motion_ui       = detail::lerp_spring(a.motion_ui, b.motion_ui, t);
     r.motion_emphasis = detail::lerp_spring(a.motion_emphasis, b.motion_emphasis, t);

@@ -42,8 +42,8 @@ template <ControlContext C>
                               : it.tone == T::success ? t.success : it.tone == T::accent ? t.accent
                               : it.tone == T::dim ? t.text_disabled : t.text_secondary;
         const bool live = it.interactive;
-        auto body = h(text_owned(it.icon) | font(t.font_size * 0.9f) | fg(it.active ? t.accent : col),
-                      text_owned(it.text) | font(t.font_size * 0.88f) | fg(live && hov ? t.text_primary : col))
+        auto body = h(text_owned(it.icon) | font(t.font_size * t.chrome_type) | fg(it.active ? t.accent : col),
+                      text_owned(it.text) | font(t.font_size * t.chrome_type * 0.95f) | fg(live && hov ? t.text_primary : col))
                   | gap(t.spaced(5)) | align(Align::center) | pad(0, t.spaced(7)) | height(pct(100))
                   | bg(live && hov ? t.surface_raised : it.active ? t.surface_raised.fade(0.6f) : t.surface.fade(0.0f))
                   | transition();
@@ -55,8 +55,9 @@ template <ControlContext C>
     for (std::size_t i = 0; i < left.size(); ++i) l.push_back(seg(left[i], i));
     for (std::size_t i = 0; i < right.size(); ++i) r.push_back(seg(right[i], 100 + i));
     return (h(h(h_list(std::move(l))) | height(pct(100)), spacer(), h(h_list(std::move(r))) | height(pct(100)))
-            | align(Align::center) | pad(0, t.spaced(4)) | height(26) | width(pct(100))
-            | with_look(sheet_of(t).strip, t)).build();
+            | align(Align::center) | pad(0, t.spaced(4)) | height(t.status_height) | width(pct(100))
+            | with_look(sheet_of(t).strip, t)
+            | inner_shadow(0.0f, t.border, {0.0f, 1.0f})).build();
 }
 
 }  // namespace mayag::dsl
