@@ -1,4 +1,6 @@
 #pragma once
+// Internal fragment: included by vulkan.hpp after the Vulkan ABI it uses;
+// include <mayag/backend/vulkan.hpp>, not this file.
 // mayag::backend::VulkanDevice — the render device
 //
 // Split from vulkan.hpp (the ABI) so the mechanical part and the interesting
@@ -20,6 +22,7 @@
 #include "../render/draw_list.hpp"
 #include "../render/frame_plan.hpp"
 #include "../core/startup.hpp"
+#include <jaal/core/sendable.hpp>   // sendable_opt_in, specialised below
 #include "../render/shader_generated.hpp"
 #include "backend.hpp"   // AtlasView / view_of
 #include "reclaim.hpp"

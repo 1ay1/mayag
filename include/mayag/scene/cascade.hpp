@@ -275,7 +275,7 @@ inline void inherit_text(TextStyle& to, const TextStyle& from) noexcept {
         if (id == in.hovered) m |= hover;
         if (id == in.pressed && in.press_inside) m |= pressed;
         if (id == in.focused) {
-            m |= focus;
+            m |= state::bit::focus;   // qualified: mayag::focus is the focus effect
             if (in.focus_visible) m |= focus_visible;
         }
         if (in.previous_ids != nullptr && !in.previous_ids->contains(id)) m |= starting;

@@ -1,4 +1,6 @@
 #pragma once
+// Internal fragment: included by outline.hpp after Outline is defined; include
+// <mayag/font/outline.hpp>, not this file.
 // mayag::typo — Apple 'hvgl' / 'hvpm' outlines (HVF, Hierarchical Variation
 // Fonts), as specified in Apple's TrueType Reference Manual (RM06,
 // Chap6hvgl / Chap6hvpm). PingFang UI, the face CoreText draws Chinese and

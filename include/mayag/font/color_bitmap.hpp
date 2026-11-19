@@ -17,6 +17,7 @@
 #include "opentype.hpp"
 #include "../image/png_decode.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <vector>

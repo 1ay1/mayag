@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 
 namespace mayag::typo::ot::indic_table {
 
