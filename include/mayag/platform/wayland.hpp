@@ -697,9 +697,12 @@ class WaylandWindow {
         }
 
         if (resize_needed_) {
-            if (!gpu_on() || shm_made_) resize_surfaces();
+            if (!gpu_on() || shm_made_) resize_surfaces();   // shm buffers + geometry
 #ifdef MAYAG_WITH_VULKAN
-            if (gpu_active_) gpu_->resize(logical_, scale_);
+            if (gpu_active_) {
+                gpu_->resize(logical_, scale_);
+                apply_surface_geometry();   // the swapchain's frames map to the NEW size
+            }
 #endif
             resize_needed_ = false;
             pending_.push_back(ResizeEvent{logical_, scale_});
@@ -970,6 +973,7 @@ class WaylandWindow {
         }
         gpu_ = std::move(d);
         gpu_active_ = true;
+        apply_surface_geometry();   // the size may have changed since the CPU frames
         if (auto img = images_.bound_image())
             (void)gpu_->upload_texture(img->rgba.data(), img->width, img->height);
         // The shm buffers are done with; give them back.
@@ -1129,6 +1133,21 @@ class WaylandWindow {
         // kept for resize().
 
         // Tell the compositor how the buffer maps to the surface.
+        apply_surface_geometry();
+
+        first_frame_ = true;
+        damage_supported_ = wl::version_of(surface_) >= 4;
+    }
+
+    /// How the buffer maps onto the surface (viewport destination or buffer
+    /// scale) and the opaque region: the ONE place either is set, called on
+    /// every size change by whichever path draws. It used to live only in the
+    /// shm path, so once Vulkan owned the surface a resize kept the old
+    /// viewport destination and the compositor scaled every new frame into
+    /// the old, smaller box (the app shrunk into a corner, wallpaper around).
+    void apply_surface_geometry() {
+        const wl::Lib& L = wl::lib();
+        if (surface_ == nullptr) return;
         if (viewport_ != nullptr) {
             wl::request(viewport_, wl::viewport_set_destination,
                         static_cast<std::int32_t>(logical_.x),
@@ -1152,9 +1171,6 @@ class WaylandWindow {
                 wl::request_destroy(region, wl::region_destroy);
             }
         }
-
-        first_frame_ = true;
-        damage_supported_ = wl::version_of(surface_) >= 4;
     }
 
     /// Encode the linear framebuffer into the compositor's pages as BGRA8.
