@@ -133,7 +133,8 @@ enum { VK_STRUCTURE_TYPE_APPLICATION_INFO = 0,
        VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR = 1000001000,
        VK_STRUCTURE_TYPE_PRESENT_INFO_KHR = 1000001001,
        VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR = 1000006000,
-       VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR = 1000009000 };
+       VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR = 1000009000,
+       VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO = 1000147000 };
 
 enum { VK_FORMAT_R8G8B8A8_UNORM = 37,
        VK_FORMAT_B8G8R8A8_UNORM = 44,
@@ -192,7 +193,11 @@ enum { VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT = 1,
        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT = 0x2000 };
 enum { VK_ACCESS_TRANSFER_WRITE_BIT = 0x1000, VK_ACCESS_TRANSFER_READ_BIT = 0x800,
        VK_ACCESS_SHADER_READ_BIT = 0x20, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT = 0x100,
-       VK_ACCESS_MEMORY_READ_BIT = 0x8000 };
+       VK_ACCESS_COLOR_ATTACHMENT_READ_BIT = 0x80, VK_ACCESS_MEMORY_READ_BIT = 0x8000 };
+// An image (or swapchain) whose views may use another format of its class:
+// the sRGB colour target gets a UNORM view so text can blend in encoded space.
+enum { VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT = 0x8 };
+enum { VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR = 0x4 };
 enum { VK_PRESENT_MODE_FIFO_KHR = 2, VK_PRESENT_MODE_MAILBOX_KHR = 1,
        VK_PRESENT_MODE_IMMEDIATE_KHR = 0 };
 enum { VK_COLOR_SPACE_SRGB_NONLINEAR_KHR = 0 };
@@ -404,7 +409,16 @@ struct VkSamplerCreateInfo {
 struct VkShaderModuleCreateInfo {
     int sType; const void* pNext; Flags flags; std::size_t codeSize; const std::uint32_t* pCode;
 };
-struct VkSpecializationInfo;
+struct VkSpecializationMapEntry { std::uint32_t constantID, offset; std::size_t size; };
+struct VkSpecializationInfo {
+    std::uint32_t mapEntryCount; const VkSpecializationMapEntry* pMapEntries;
+    std::size_t dataSize; const void* pData;
+};
+/// VK_KHR_image_format_list (core 1.2): the formats a mutable image's views
+/// will use, so the driver can keep compression on.
+struct VkImageFormatListCreateInfo {
+    int sType; const void* pNext; std::uint32_t viewFormatCount; const int* pViewFormats;
+};
 struct VkPipelineShaderStageCreateInfo {
     int sType; const void* pNext; Flags flags; Flags stage; VkShaderModule module;
     const char* pName; const VkSpecializationInfo* pSpecializationInfo;

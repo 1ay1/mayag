@@ -315,6 +315,28 @@ inline constexpr u32 FLAG_GLYPH_SDF = 128u;
     return mg::clamp(mg::mix(on_white, on_black, t), 0.0f, 1.0f);
 }
 
+/// CoreGraphics' text blend, exactly, as the SOURCE of a fixed-function
+/// `src + dst * (1 - srcA)` blend into an sRGB-ENCODED target.
+///
+/// CoreGraphics draws a glyph into an sRGB context as a per-channel lerp of
+/// ENCODED values, enc(dst) + (enc(src) - enc(dst)) * cov * alpha. With
+/// t = cov * alpha that is enc(src) * t + enc(dst) * (1 - t): premultiplied
+/// "over", in encoded space. So a backend that lets the blender see the
+/// target's encoded bytes (a UNORM view of the sRGB image, Vulkan) gets the
+/// exact result from this source and the ordinary blend state; no coverage
+/// reshaping, no knowledge of the backdrop. The software rasteriser applies
+/// the identical formula itself (Framebuffer::blend_text), so both paths
+/// draw the same text pixels by construction.
+[[nodiscard]] inline vec4 encoded_text_source(f32 cov, vec4 premul_color) noexcept {
+    const f32 a = premul_color.w;
+    if (a <= 1e-6f) return vec4{0.0f, 0.0f, 0.0f, 0.0f};
+    const f32 t = mg::clamp(cov * a, 0.0f, 1.0f);
+    return vec4{linear_to_srgb(mg::clamp(premul_color.x / a, 0.0f, 1.0f)) * t,
+                linear_to_srgb(mg::clamp(premul_color.y / a, 0.0f, 1.0f)) * t,
+                linear_to_srgb(mg::clamp(premul_color.z / a, 0.0f, 1.0f)) * t,
+                t};
+}
+
 /// Fallback half-width of the SDF threshold band, in normalised field units,
 /// used when the glyph emitter supplied none. It must be at least half the
 /// field's change across ONE texel or the smoothstep lands entirely between
@@ -476,6 +498,21 @@ struct Env {
     return mix_oklch(f.color, f.color2, t);
 }
 
+/// Coverage of one glyph fragment, before any blending decision.
+[[nodiscard]] inline f32 glyph_coverage(const Fragment& f, const Env& env) noexcept {
+    // A bitmap entry IS coverage. A distance-field entry becomes exact box
+    // coverage from the field value and its gradient (sdf_glyph_coverage);
+    // params.zw = the uv step of one display pixel, so the two extra taps
+    // sit one pixel away whatever the scale.
+    const f32 raw = env.atlas_r(env.ctx, f.uv);
+    if ((f.flags & FLAG_GLYPH_SDF) != 0u) {
+        const f32 rx = env.atlas_r(env.ctx, vec2{f.uv.x + f.params.z, f.uv.y});
+        const f32 ry = env.atlas_r(env.ctx, vec2{f.uv.x, f.uv.y + f.params.w});
+        return sdf_glyph_coverage(raw, rx, ry, f.params);
+    }
+    return raw;
+}
+
 /// Shade one fragment. THE function — every backend's inner loop ends here.
 [[nodiscard]] inline Shaded shade(const Fragment& f, const Env& env) noexcept {
     Shaded result;
@@ -527,19 +564,11 @@ struct Env {
     // ── coverage ────────────────────────────────────────────────────
     f32 cov;
     if (f.kind == KIND_GLYPH) {
-        const f32 raw = env.atlas_r(env.ctx, f.uv);
-        if ((f.flags & FLAG_GLYPH_SDF) != 0u) {
-            // Distance-field entry: exact box coverage from the field value
-            // and its gradient (sdf_glyph_coverage). params.zw = the uv step
-            // of one display pixel, so the two extra taps sit one pixel away
-            // whatever the scale.
-            const f32 rx = env.atlas_r(env.ctx, vec2{f.uv.x + f.params.z, f.uv.y});
-            const f32 ry = env.atlas_r(env.ctx, vec2{f.uv.x, f.uv.y + f.params.w});
-            cov = sdf_glyph_coverage(raw, rx, ry, f.params);
-        } else {
-            cov = raw;   // bitmap entry: already coverage
-        }
-        cov = apply_text_gamma(cov, f.color);
+        // Linear-light blending against an unseen backdrop: the coverage is
+        // reshaped to approximate CoreGraphics' encoded-space blend. Only a
+        // backend that cannot blend glyphs in encoded space lands here;
+        // Vulkan uses encoded_text_source through a UNORM view instead.
+        cov = apply_text_gamma(glyph_coverage(f, env), f.color);
     } else {
         cov = shape_coverage(f);
     }

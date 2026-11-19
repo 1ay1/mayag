@@ -18,6 +18,7 @@
 //   render_offscreen(...)     render to a Framebuffer (for tests)
 
 #include "../render/draw_list.hpp"
+#include "../render/frame_plan.hpp"
 #include "../core/startup.hpp"
 #include "../render/shader_generated.hpp"
 #include "backend.hpp"   // AtlasView / view_of
@@ -254,7 +255,8 @@ class VulkanDevice {
         api_->ResetCommandBuffer(cb, 0);
         begin_cb(cb);
         record_pass(cb, framebuffers_[image_index], swap_images_[image_index],
-                    list, clear, swap_extent_.width, swap_extent_.height);
+                    list, clear, swap_extent_.width, swap_extent_.height,
+                    image_index < text_framebuffers_.size() ? text_framebuffers_[image_index] : nullptr);
         api_->EndCommandBuffer(cb);
 
         const vk::Flags wait_stage = vk::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -317,7 +319,7 @@ class VulkanDevice {
 
         one_shot([&](vk::VkCommandBuffer cb) {
             record_pass(cb, off_fb_, off_image_, list, clear,
-                        static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+                        static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), off_text_fb_);
             // colour attachment -> transfer src, then copy to readback buffer
             barrier_image(cb, off_image_, vk::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                           vk::VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -337,6 +339,10 @@ class VulkanDevice {
 
     [[nodiscard]] std::uint64_t frames_presented() const noexcept { return frames_; }
     [[nodiscard]] const char* device_name() const noexcept { return device_name_; }
+    /// True when glyphs blend in encoded space, exactly as CoreGraphics (and
+    /// the software reference) draws text: the device can view its target
+    /// as UNORM. False: the linear-light coverage approximation.
+    [[nodiscard]] bool encoded_text() const noexcept { return text_pipeline_ != nullptr; }
 
     /// Read back the image that was ACTUALLY PRESENTED, as RGBA8.
     ///
@@ -843,6 +849,8 @@ class VulkanDevice {
 
         destroy_swapchain_objects();
         if (swapchain_) api_->DestroySwapchainKHR(device_, swapchain_, nullptr);
+        if (off_text_fb_) api_->DestroyFramebuffer(device_, off_text_fb_, nullptr);
+        if (off_text_view_) api_->DestroyImageView(device_, off_text_view_, nullptr);
         if (off_fb_) api_->DestroyFramebuffer(device_, off_fb_, nullptr);
         if (off_view_) api_->DestroyImageView(device_, off_view_, nullptr);
         if (off_image_) api_->DestroyImage(device_, off_image_, nullptr);
@@ -858,6 +866,9 @@ class VulkanDevice {
         if (color_mem_) api_->FreeMemory(device_, color_mem_, nullptr);
         if (sampler_) api_->DestroySampler(device_, sampler_, nullptr);
         if (pipeline_) api_->DestroyPipeline(device_, pipeline_, nullptr);
+        if (text_pipeline_) api_->DestroyPipeline(device_, text_pipeline_, nullptr);
+        if (text_render_pass_) api_->DestroyRenderPass(device_, text_render_pass_, nullptr);
+        if (text_render_pass_last_) api_->DestroyRenderPass(device_, text_render_pass_last_, nullptr);
         if (layout_) api_->DestroyPipelineLayout(device_, layout_, nullptr);
         if (desc_pool_) api_->DestroyDescriptorPool(device_, desc_pool_, nullptr);
         if (set_layout_) api_->DestroyDescriptorSetLayout(device_, set_layout_, nullptr);
@@ -1217,6 +1228,23 @@ class VulkanDevice {
             timeline_sync_ = true;
         }
 
+        // Mutable-format swapchain images, so the sRGB colour target can also
+        // be rendered through a UNORM view: that is how glyphs blend in
+        // ENCODED space, exactly as CoreGraphics draws text (see
+        // kernel::encoded_text_source). Opportunistic like the rest: without
+        // it, text falls back to the coverage-reshaping approximation.
+        // image_format_list is core in 1.2 but this device runs at 1.1.
+        bool has_swapchain_ext = false;
+        for (const char* e : dev_exts) has_swapchain_ext = has_swapchain_ext || std::string_view{e} == "VK_KHR_swapchain";
+        if (has_swapchain_ext && has_device_extension("VK_KHR_swapchain_mutable_format") &&
+            has_device_extension("VK_KHR_image_format_list")) {
+            bool listed = false;
+            for (const char* e : dev_exts) listed = listed || std::string_view{e} == "VK_KHR_image_format_list";
+            if (!listed) dev_exts.push_back("VK_KHR_image_format_list");
+            dev_exts.push_back("VK_KHR_swapchain_mutable_format");
+            swapchain_mutable_ = true;
+        }
+
         vk::VkDeviceCreateInfo dci{};
         dci.sType = vk::VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         // Timeline semaphores are a FEATURE, not just an extension: the
@@ -1509,7 +1537,12 @@ class VulkanDevice {
         dep.srcSubpass = vk::VK_SUBPASS_EXTERNAL; dep.dstSubpass = 0;
         dep.srcStageMask = vk::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         dep.dstStageMask = vk::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstAccessMask = vk::VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        // A frame can span several passes over one target (backdrop
+        // segments, the encoded-space text pass), each LOADING and blending
+        // onto what the previous one wrote: make those writes visible.
+        dep.srcAccessMask = vk::VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dep.dstAccessMask = vk::VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                            vk::VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         vk::VkRenderPassCreateInfo rpci{};
         rpci.sType = vk::VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         rpci.attachmentCount = 1; rpci.pAttachments = &att;
@@ -1620,6 +1653,53 @@ class VulkanDevice {
         gp.pMultisampleState = &ms; gp.pColorBlendState = &cb; gp.pDynamicState = &ds;
         gp.layout = layout_; gp.renderPass = render_pass_; gp.subpass = 0;
         VkResultCheck r = api_->CreateGraphicsPipelines(device_, nullptr, 1, &gp, nullptr, &pipeline_);
+
+        // The text pipeline: same program with MG_TEXT_PASS = true, drawing
+        // into a UNORM view of this very target so the blend runs on the
+        // ENCODED bytes. Built only when that view can exist: an sRGB target,
+        // and (for a swapchain) mutable-format images. Without it text keeps
+        // the coverage-reshaping approximation in the main pipeline.
+        const int text_format = unorm_of(color_format);
+        // MAYAG_TEXT_BLEND=linear keeps glyphs in the main pipeline (the
+        // coverage-reshaping approximation), for A/B comparison.
+        const char* tb = std::getenv("MAYAG_TEXT_BLEND");
+        const bool want_encoded = tb == nullptr || std::string_view{tb} != "linear";
+        if (r == vk::VK_SUCCESS && want_encoded && text_format != 0 && (!for_present || swapchain_mutable_)) {
+            vk::VkAttachmentDescription ta = att4;          // LOAD, attachment -> attachment
+            ta.format = text_format;
+            vk::VkRenderPassCreateInfo trp = rpci;
+            trp.pAttachments = &ta;
+            // The frame's LAST pass must leave the image as the main passes
+            // would (present-src for a swapchain): a second, compatible pass.
+            vk::VkAttachmentDescription tl = ta;
+            tl.finalLayout = att.finalLayout;
+            vk::VkRenderPassCreateInfo trl = trp;
+            trl.pAttachments = &tl;
+            if (api_->CreateRenderPass(device_, &trl, nullptr, &text_render_pass_last_) != vk::VK_SUCCESS)
+                text_render_pass_last_ = nullptr;
+            if (text_render_pass_last_ != nullptr &&
+                api_->CreateRenderPass(device_, &trp, nullptr, &text_render_pass_) == vk::VK_SUCCESS) {
+                const vk::Bool32 on = 1;
+                const vk::VkSpecializationMapEntry entry{0, 0, sizeof(vk::Bool32)};
+                const vk::VkSpecializationInfo spec{1, &entry, sizeof(on), &on};
+                std::array<vk::VkPipelineShaderStageCreateInfo, 2> tstages = stages;
+                tstages[1].pSpecializationInfo = &spec;
+                vk::VkGraphicsPipelineCreateInfo tgp = gp;
+                tgp.pStages = tstages.data();
+                tgp.renderPass = text_render_pass_;
+                if (api_->CreateGraphicsPipelines(device_, nullptr, 1, &tgp, nullptr, &text_pipeline_) != vk::VK_SUCCESS) {
+                    text_pipeline_ = nullptr;
+                    api_->DestroyRenderPass(device_, text_render_pass_, nullptr);
+                    text_render_pass_ = nullptr;
+                }
+            } else {
+                text_render_pass_ = nullptr;
+            }
+            if (text_render_pass_ == nullptr && text_render_pass_last_ != nullptr) {
+                api_->DestroyRenderPass(device_, text_render_pass_last_, nullptr);
+                text_render_pass_last_ = nullptr;
+            }
+        }
         api_->DestroyShaderModule(device_, vert, nullptr);
         api_->DestroyShaderModule(device_, frag, nullptr);
         return r == vk::VK_SUCCESS;
@@ -1743,6 +1823,16 @@ class VulkanDevice {
         ci.presentMode = present_mode;
         ci.clipped = 1;
         ci.oldSwapchain = swapchain_;
+        // Mutable format: the same images are also rendered through a UNORM
+        // view by the text pass (see create_pipeline).
+        const int view_formats[2] = {swap_format_, unorm_of(swap_format_)};
+        vk::VkImageFormatListCreateInfo fmt_list{};
+        if (swapchain_mutable_ && view_formats[1] != 0) {
+            fmt_list.sType = vk::VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
+            fmt_list.viewFormatCount = 2; fmt_list.pViewFormats = view_formats;
+            ci.pNext = &fmt_list;
+            ci.flags |= vk::VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
+        }
         vk::VkSwapchainKHR new_swap = nullptr;
         if (api_->CreateSwapchainKHR(device_, &ci, nullptr, &new_swap) != vk::VK_SUCCESS) return false;
         if (swapchain_) destroy_swapchain_objects();
@@ -1755,6 +1845,8 @@ class VulkanDevice {
 
         swap_views_.resize(count);
         framebuffers_.resize(count);
+        text_views_.assign(count, nullptr);
+        text_framebuffers_.assign(count, nullptr);
         for (std::uint32_t i = 0; i < count; ++i) {
             vk::VkImageViewCreateInfo vci{};
             vci.sType = vk::VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1762,6 +1854,10 @@ class VulkanDevice {
             vci.format = swap_format_;
             vci.subresourceRange = {vk::VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             api_->CreateImageView(device_, &vci, nullptr, &swap_views_[i]);
+            if (swapchain_mutable_ && unorm_of(swap_format_) != 0) {
+                vci.format = unorm_of(swap_format_);
+                api_->CreateImageView(device_, &vci, nullptr, &text_views_[i]);
+            }
         }
         return true;
     }
@@ -1784,6 +1880,11 @@ class VulkanDevice {
             fci.attachmentCount = 1; fci.pAttachments = &swap_views_[i];
             fci.width = swap_extent_.width; fci.height = swap_extent_.height; fci.layers = 1;
             api_->CreateFramebuffer(device_, &fci, nullptr, &framebuffers_[i]);
+            if (text_render_pass_ != nullptr && i < text_views_.size() && text_views_[i] != nullptr) {
+                fci.renderPass = text_render_pass_;
+                fci.pAttachments = &text_views_[i];
+                api_->CreateFramebuffer(device_, &fci, nullptr, &text_framebuffers_[i]);
+            }
         }
     }
 
@@ -1794,6 +1895,9 @@ class VulkanDevice {
     }
 
     void destroy_swapchain_objects() {
+        for (auto fb : text_framebuffers_) if (fb) api_->DestroyFramebuffer(device_, fb, nullptr);
+        for (auto v : text_views_) if (v) api_->DestroyImageView(device_, v, nullptr);
+        text_framebuffers_.clear(); text_views_.clear();
         for (auto fb : framebuffers_) if (fb) api_->DestroyFramebuffer(device_, fb, nullptr);
         for (auto v : swap_views_) if (v) api_->DestroyImageView(device_, v, nullptr);
         framebuffers_.clear(); swap_views_.clear();
@@ -1802,6 +1906,9 @@ class VulkanDevice {
     // ── offscreen target ─────────────────────────────────────────────────
 
     void recreate_offscreen_target(int w, int h) {
+        if (off_text_fb_) api_->DestroyFramebuffer(device_, off_text_fb_, nullptr);
+        if (off_text_view_) api_->DestroyImageView(device_, off_text_view_, nullptr);
+        off_text_fb_ = nullptr; off_text_view_ = nullptr;
         if (off_fb_) api_->DestroyFramebuffer(device_, off_fb_, nullptr);
         if (off_view_) api_->DestroyImageView(device_, off_view_, nullptr);
         if (off_image_) api_->DestroyImage(device_, off_image_, nullptr);
@@ -1817,6 +1924,9 @@ class VulkanDevice {
         ici.usage = vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk::VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         ici.sharingMode = vk::VK_SHARING_MODE_EXCLUSIVE;
         ici.initialLayout = vk::VK_IMAGE_LAYOUT_UNDEFINED;
+        // Mutable so the text pass can render through a UNORM view (core in
+        // Vulkan 1.0 for images; no extension needed offscreen).
+        if (text_pipeline_ != nullptr) ici.flags |= vk::VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
         api_->CreateImage(device_, &ici, nullptr, &off_image_);
         vk::VkMemoryRequirements req{};
         api_->GetImageMemoryRequirements(device_, off_image_, &req);
@@ -1839,6 +1949,13 @@ class VulkanDevice {
         fci.renderPass = render_pass_; fci.attachmentCount = 1; fci.pAttachments = &off_view_;
         fci.width = static_cast<std::uint32_t>(w); fci.height = static_cast<std::uint32_t>(h); fci.layers = 1;
         api_->CreateFramebuffer(device_, &fci, nullptr, &off_fb_);
+
+        if (text_pipeline_ != nullptr) {
+            vci.format = unorm_of(off_format_);
+            api_->CreateImageView(device_, &vci, nullptr, &off_text_view_);
+            fci.renderPass = text_render_pass_; fci.pAttachments = &off_text_view_;
+            api_->CreateFramebuffer(device_, &fci, nullptr, &off_text_fb_);
+        }
 
         readback_buf_ = make_buffer(static_cast<vk::DeviceSize>(w) * h * 4,
                                     vk::VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
@@ -1884,17 +2001,14 @@ class VulkanDevice {
 
     void record_pass(vk::VkCommandBuffer cb, vk::VkFramebuffer fb, vk::VkImage target,
                      const DrawList& list,
-                     Color<Srgb> clear, std::uint32_t vw, std::uint32_t vh) {
+                     Color<Srgb> clear, std::uint32_t vw, std::uint32_t vh,
+                     vk::VkFramebuffer text_fb = nullptr) {
         if (atlas_dirty_binding_) update_atlas_descriptor();
 
-        // Does the frame contain any frosted-glass panels? If so it renders in
-        // two segments: everything up to the backdrops, a mid-frame snapshot
-        // of the colour target, then the backdrops sampling it.
         const auto& insts = list.instances();
-        bool has_backdrop = false;
-        for (const auto& in : insts) {
-            if (static_cast<ShapeKind>(in.kind) == ShapeKind::backdrop) { has_backdrop = true; break; }
-        }
+        const auto& batches = list.batches();
+        const bool encoded = text_pipeline_ != nullptr && text_fb != nullptr;
+        const render::FramePlan& plan = planner_.plan(list, vw, vh, encoded);
 
         // The colour attachment is _SRGB, so the hardware sRGB-encodes on
         // store — including the clear. Give it a LINEAR value so the stored
@@ -1907,16 +2021,16 @@ class VulkanDevice {
         cv.color.float32[2] = lin.c2; cv.color.float32[3] = 1.0f;
         const float viewport_push[2] = {static_cast<float>(vw), static_cast<float>(vh)};
 
-        auto begin = [&](vk::VkRenderPass rp) {
+        auto begin = [&](vk::VkRenderPass rp, vk::VkFramebuffer target_fb, vk::VkPipeline pipe) {
             vk::VkRenderPassBeginInfo bi{};
             bi.sType = vk::VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            bi.renderPass = rp; bi.framebuffer = fb;
+            bi.renderPass = rp; bi.framebuffer = target_fb;
             bi.renderArea = {{0, 0}, {vw, vh}};
             bi.clearValueCount = 1; bi.pClearValues = &cv;
             api_->CmdBeginRenderPass(cb, &bi, vk::VK_SUBPASS_CONTENTS_INLINE);
             vk::VkViewport vp{0, 0, static_cast<float>(vw), static_cast<float>(vh), 0.0f, 1.0f};
             api_->CmdSetViewport(cb, 0, 1, &vp);
-            api_->CmdBindPipeline(cb, vk::VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+            api_->CmdBindPipeline(cb, vk::VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
             api_->CmdBindDescriptorSets(cb, vk::VK_PIPELINE_BIND_POINT_GRAPHICS, layout_,
                                         0, 1, &desc_set_, 0, nullptr);
             api_->CmdPushConstants(cb, layout_, vk::VK_SHADER_STAGE_VERTEX_BIT, 0,
@@ -1926,55 +2040,55 @@ class VulkanDevice {
                 api_->CmdBindVertexBuffers(cb, 0, 1, &instance_buf_.buf, &o0);
             }
         };
-        if (!has_backdrop) {
-            begin(render_pass_);
-            for (const auto& batch : list.batches()) {
-                vk::VkRect2D scissor = clamp_scissor(batch.clip, vw, vh);
-                api_->CmdSetScissor(cb, 0, 1, &scissor);
-                api_->CmdDraw(cb, 4, batch.count, 0, batch.first);
-            }
-            api_->CmdEndRenderPass(cb);
-            return;
-        }
 
-        // Glass reads what is drawn BEHIND it, and whatever comes after it in
-        // the list (its own fill, its text, later panels) must land on top of
-        // the blur. So the frame renders in painter order, split at each
-        // backdrop: draw up to it, snapshot the region it reads, blur.
-        const auto& batches = list.batches();
-        const auto is_bd = [&](const Batch& b) {
-            return b.count > 0 && static_cast<ShapeKind>(insts[b.first].kind) == ShapeKind::backdrop;
-        };
-        const auto draw_range = [&](std::size_t a, std::size_t b) {
-            for (std::size_t i = a; i < b; ++i) {
-                const auto& batch = batches[i];
-                vk::VkRect2D scissor = clamp_scissor(batch.clip, vw, vh);
-                api_->CmdSetScissor(cb, 0, 1, &scissor);
-                api_->CmdDraw(cb, 4, batch.count, 0, batch.first);
-            }
-        };
-        std::size_t last_bd = 0;
-        for (std::size_t i = 0; i < batches.size(); ++i) if (is_bd(batches[i])) last_bd = i;
+        // The plan (render/frame_plan.hpp) is the frame in painter order:
+        // shape passes into the sRGB view, text passes into the UNORM view
+        // (encoded-space blending), and backdrop captures between segments.
+        // The first pass clears, the last leaves the final layout; a frame
+        // whose plan is empty still clears.
+        std::size_t last_pass = plan.steps.size();
+        for (std::size_t s = plan.steps.size(); s-- > 0;)
+            if (plan.steps[s].kind != render::PassStep::Kind::capture) { last_pass = s; break; }
 
         bool started = false;
-        std::size_t from = 0;
-        for (std::size_t i = 0; i < batches.size(); ++i) {
-            if (!is_bd(batches[i])) continue;
-            // Everything up to this backdrop.
-            begin(started ? render_pass_load_mid_ : render_pass_clear_mid_);
+        for (std::size_t s = 0; s < plan.steps.size(); ++s) {
+            const render::PassStep& step = plan.steps[s];
+            if (step.kind == render::PassStep::Kind::capture) {
+                if (!started) {   // nothing drawn yet: the capture still needs the clear
+                    begin(render_pass_clear_mid_, fb, pipeline_);
+                    api_->CmdEndRenderPass(cb);
+                    started = true;
+                }
+                capture_region(cb, target, backdrop_region(insts[step.capture_instance], vw, vh));
+                continue;
+            }
+            const bool last = s == last_pass;
+            if (step.kind == render::PassStep::Kind::text) {
+                if (!started) {   // a frame that starts with text: clear first
+                    begin(render_pass_clear_mid_, fb, pipeline_);
+                    api_->CmdEndRenderPass(cb);
+                    started = true;
+                }
+                begin(last ? text_render_pass_last_ : text_render_pass_, text_fb, text_pipeline_);
+            } else if (!started) {
+                begin(last ? render_pass_ : render_pass_clear_mid_, fb, pipeline_);
+            } else {
+                begin(last ? render_pass_load_ : render_pass_load_mid_, fb, pipeline_);
+            }
             started = true;
-            draw_range(from, i);
+            for (std::uint32_t r = step.runs_begin; r < step.runs_end; ++r) {
+                const render::DrawRun& run = plan.runs[r];
+                vk::VkRect2D scissor = clamp_scissor(batches[run.batch].clip, vw, vh);
+                api_->CmdSetScissor(cb, 0, 1, &scissor);
+                api_->CmdDraw(cb, 4, run.count, 0, run.first);
+            }
             api_->CmdEndRenderPass(cb);
-
-            capture_region(cb, target, backdrop_region(insts[batches[i].first], vw, vh));
-
-            // The backdrop itself, then (after the last one) the rest.
-            const bool last = i == last_bd;
-            begin(last ? render_pass_load_ : render_pass_load_mid_);
-            draw_range(i, i + 1);
-            if (last) draw_range(i + 1, batches.size());
+        }
+        if (!started || last_pass == plan.steps.size()) {
+            // Empty frame, or one that ended on a capture: finish with a pass
+            // that leaves the image in its final layout.
+            begin(started ? render_pass_load_ : render_pass_, fb, pipeline_);
             api_->CmdEndRenderPass(cb);
-            from = i + 1;
         }
     }
 
@@ -2126,6 +2240,14 @@ class VulkanDevice {
         api_->UpdateDescriptorSets(device_, 1, &w, 0, nullptr);
     }
 
+    /// The UNORM format sharing an sRGB format's bytes (0 when there is none,
+    /// or the target is not sRGB): the view the text pass renders through.
+    [[nodiscard]] static constexpr int unorm_of(int format) noexcept {
+        if (format == vk::VK_FORMAT_B8G8R8A8_SRGB) return vk::VK_FORMAT_B8G8R8A8_UNORM;
+        if (format == vk::VK_FORMAT_R8G8B8A8_SRGB) return vk::VK_FORMAT_R8G8B8A8_UNORM;
+        return 0;
+    }
+
     static vk::VkRect2D clamp_scissor(const Rect& clip, std::uint32_t vw, std::uint32_t vh) {
         // An unbounded clip (the common no-scissor case) covers the frame.
         if (clip.size.x >= 1e8f || clip.size.y >= 1e8f || clip.size.x <= 0.0f || clip.size.y <= 0.0f) {
@@ -2233,6 +2355,19 @@ class VulkanDevice {
     vk::VkRenderPass render_pass_load_mid_ = nullptr;
     vk::VkPipelineLayout layout_ = nullptr;
     vk::VkPipeline pipeline_ = nullptr;
+    // Encoded-space text (kernel::encoded_text_source): a LOAD pass on a
+    // UNORM view of the colour target, and the glyph-only pipeline for it.
+    // Null when the target cannot be viewed as UNORM; text then blends in
+    // the main pipeline with the coverage-reshaping approximation.
+    vk::VkRenderPass text_render_pass_ = nullptr;
+    vk::VkRenderPass text_render_pass_last_ = nullptr;
+    vk::VkPipeline text_pipeline_ = nullptr;
+    bool swapchain_mutable_ = false;
+    std::vector<vk::VkImageView> text_views_;
+    std::vector<vk::VkFramebuffer> text_framebuffers_;
+    vk::VkImageView off_text_view_ = nullptr;
+    vk::VkFramebuffer off_text_fb_ = nullptr;
+    render::FramePlanner planner_;
     vk::VkDescriptorSetLayout set_layout_ = nullptr;
     vk::VkDescriptorPool desc_pool_ = nullptr;
     vk::VkDescriptorSet desc_set_ = nullptr;

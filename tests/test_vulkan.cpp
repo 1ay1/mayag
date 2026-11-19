@@ -107,6 +107,7 @@ int main() {
         return 0;
     }
     std::printf("device: %s\n", dev.device_name());
+    std::printf("text blend: %s\n", dev.encoded_text() ? "encoded (CoreGraphics)" : "linear approximation");
 
     // ── shapes match the reference ───────────────────────────────────────
     section("shapes");
@@ -295,6 +296,98 @@ int main() {
               "no pixel differs systematically (max < 85/255)");
         check(d.frac_over8 < 0.0115,
               "fewer than 1.15% of pixels differ by more than 8/255");
+    }
+
+    // ── coloured text blends as CoreGraphics does ─────────────────────────
+    // The reference draws glyphs with an ENCODED-space lerp
+    // (Framebuffer::blend_text). A GPU blending in linear light can only
+    // approximate that through coverage reshaping, which is exact for grey
+    // text on black or white and off by up to ~60/255 for saturated text on
+    // a light or coloured backdrop: blue links on white, accent text on a
+    // tinted card. With the encoded text pass (a UNORM view of the target)
+    // the GPU's edge pixels must match the reference's.
+    section("coloured text: encoded-space blend");
+    {
+        const int W = 420, H = 220;
+        auto stack = typo::system::default_stack();
+        auto ui = v(
+            h(text<"Links and accents"> | font(20) | fg(rgb<0x0060FF>)) | bg(rgb<0xFFFFFF>) | pad(6),
+            h(text<"Mauve on base"> | font(20) | fg(rgb<0xCBA6F7>)) | bg(rgb<0x1E1E2E>) | pad(6),
+            h(text<"Peach on surface"> | font(20) | fg(rgb<0xFAB387>)) | bg(rgb<0x313244>) | pad(6),
+            h(text<"Red on cream"> | font(20) | fg(rgb<0xD20F39>)) | bg(rgb<0xEFF1F5>) | pad(6),
+            h(text<"White on blue"> | font(20) | fg(rgb<0xFFFFFF>)) | bg(rgb<0x0060FF>) | pad(6)
+        ) | gap(4) | pad(8) | width(420) | height(220);
+        Node n = ui.build();
+        typo::StackMeasurer measurer{*stack};
+        layout::layout_tree(n, {static_cast<float>(W), static_cast<float>(H)}, measurer);
+        Diff d = compare(dev, n, W, H, rgb<0x808080>, stack.get());
+        std::printf("  coloured text: mean|d|=%.3f max=%d over8=%.2f%%\n",
+                    d.mean, d.max, d.frac_over8 * 100.0);
+        // The same boxes without their text: what the shapes alone disagree
+        // by (edge antialiasing), so the check isolates the TEXT blend.
+        auto bare = v(
+            h() | bg(rgb<0xFFFFFF>) | pad(6) | height(36), h() | bg(rgb<0x1E1E2E>) | pad(6) | height(36),
+            h() | bg(rgb<0x313244>) | pad(6) | height(36), h() | bg(rgb<0xEFF1F5>) | pad(6) | height(36),
+            h() | bg(rgb<0x0060FF>) | pad(6) | height(36)
+        ) | gap(4) | pad(8) | width(420) | height(220);
+        Node nb = bare.build();
+        layout::layout_tree(nb, {static_cast<float>(W), static_cast<float>(H)}, measurer);
+        const Diff base = compare(dev, nb, W, H, rgb<0x808080>, stack.get());
+        std::printf("  boxes only:    mean|d|=%.3f max=%d over8=%.2f%%\n",
+                    base.mean, base.max, base.frac_over8 * 100.0);
+        // Measured on NVIDIA and lavapipe: with the encoded blend the text
+        // adds NOTHING over the boxes' own edge disagreement (max 30 either
+        // way, mean slightly lower: glyphs cover some box edges). The
+        // linear-light approximation adds +0.27 mean and a 63/255 max.
+        check(d.max <= base.max + 4, "text adds no outlier pixels over its backdrops (max)");
+        check(d.mean <= base.mean + 0.05, "coloured text matches the reference (mean)");
+    }
+
+    // ── the pass planner keeps painter order ──────────────────────────────
+    section("frame planner");
+    {
+        render::FramePlanner planner;
+        const auto glyph_at = [](DrawList& dl, float x, float y) {
+            dl.glyph(Rect{Vec2{x, y}, Vec2{8, 12}}, Rect{Vec2{0, 0}, Vec2{0.01f, 0.01f}}, rgb<0xFFFFFF>);
+        };
+        // Ten cards, each with a label on top: 2 passes, not 20.
+        DrawList cards;
+        for (int i = 0; i < 10; ++i) {
+            const float y = static_cast<float>(i) * 40.0f;
+            cards.fill_rect(Rect{Vec2{0, y}, Vec2{200, 36}}, rgb<0x313244>);
+            glyph_at(cards, 10, y + 10);
+            glyph_at(cards, 20, y + 10);
+        }
+        const auto& p = planner.plan(cards, 400, 400, true);
+        check(p.passes() == 2, "cards with labels: one shape pass, one text pass");
+        check(!p.steps.empty() && p.steps.back().kind == render::PassStep::Kind::text,
+              "labels draw after their cards");
+
+        // A shape painted OVER text must stay over it.
+        DrawList cover;
+        glyph_at(cover, 10, 10);
+        cover.fill_rect(Rect{Vec2{0, 0}, Vec2{50, 50}}, rgb<0x000000>);
+        const auto& q = planner.plan(cover, 100, 100, true);
+        check(q.passes() == 2 && q.steps.front().kind == render::PassStep::Kind::text,
+              "a shape over text: text pass first, then the shape");
+
+        // Disjoint text and shapes commute: still 2 passes.
+        DrawList apart;
+        glyph_at(apart, 10, 10);
+        apart.fill_rect(Rect{Vec2{200, 200}, Vec2{50, 50}}, rgb<0x000000>);
+        glyph_at(apart, 300, 300);
+        check(planner.plan(apart, 400, 400, true).passes() == 2, "disjoint items commute");
+
+        // Without a UNORM view everything is one pass, in list order.
+        check(planner.plan(cards, 400, 400, false).passes() == 1, "no text view: one pass");
+
+        // Every instance drawn exactly once.
+        std::vector<int> seen(cards.size(), 0);
+        const auto& c = planner.plan(cards, 400, 400, true);
+        for (const auto& r : c.runs) for (std::uint32_t k = 0; k < r.count; ++k) ++seen[r.first + k];
+        bool once = true;
+        for (int s : seen) once = once && s == 1;
+        check(once, "every instance is drawn exactly once");
     }
 
     std::printf("\n%s  %d checks, %d failures\n",

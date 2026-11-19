@@ -309,6 +309,11 @@ layout(set = 0, binding = 3) uniform sampler2D u_texture;
 
 layout(location = 0) out vec4 o_color;
 
+// Specialisation constant 0: this pipeline draws ONLY glyphs, into a UNORM
+// view of the sRGB colour target, so the fixed-function blend runs on the
+// encoded bytes — CoreGraphics' text blend, exactly (encoded_text_source).
+layout(constant_id = 0) const bool MG_TEXT_PASS = false;
+
 // ── everything below is GENERATED from include/mayag/render/kernel.hpp ──
 // Do not edit: run tools/gen_shaders.py (CMake does this automatically).
 
@@ -349,6 +354,13 @@ void main() {
     f.kind   = v_meta.x;
     f.flags  = v_meta.y;
 
+    if (MG_TEXT_PASS) {
+        float cov = glyph_coverage(f);
+        if (cov <= 0.001) discard;
+        o_color = encoded_text_source(cov, f.color);
+        return;
+    }
+
     Shaded s = shade(f);
     if (s.discarded) discard;
     o_color = s.color;
@@ -373,6 +385,10 @@ def emit_glsl():
     prog = prog.replace("env.capture_size.y", "env_capture_size().y")
     prog = prog.replace("Shaded shade(Fragment f, )", "Shaded shade(Fragment f)")
     prog = re.sub(r"Shaded shade\(Fragment f,\s*\)", "Shaded shade(Fragment f)", prog)
+    # Every kernel function that took (Fragment, Env) loses the Env: the
+    # texture fetches are globals in GLSL. Signatures, then call sites.
+    prog = re.sub(r"(\w+ \w+\(Fragment f),\s*\)", r"\1)", prog)
+    prog = re.sub(r"\((\w+), env\)", r"(\1)", prog)
     prog = prog.replace("result.discard", "result.discarded")
     prog = prog.replace("Shaded result;", "Shaded result; result.discarded = false;")
     prog = prog.replace("{ result.discarded = true; return result; }",
