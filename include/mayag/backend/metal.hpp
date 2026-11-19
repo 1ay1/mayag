@@ -198,6 +198,16 @@ class PresentSink {
 
     void begin(unsigned long drawable_id, FrameTag tag, double submit_s) {
         std::lock_guard lock{m_};
+        // CAMetalLayer recycles a few drawables, and their ids. An entry whose
+        // handler never fired is stale by the time its id comes round again;
+        // left in place it would take this frame's presentation (and lose
+        // its tag: the input that frame answers would never be measured).
+        for (auto it = pending_.begin(); it != pending_.end(); ++it)
+            if (it->first == drawable_id) {
+                if (done_.size() < 1024) done_.push_back(it->second);  // reported as dropped
+                pending_.erase(it);
+                break;
+            }
         // A handler that never fires (a layer torn down mid-flight) must not
         // make this grow without bound.
         if (pending_.size() >= 64) pending_.erase(pending_.begin());
@@ -1005,6 +1015,8 @@ class MetalDevice {
     /// updating by itself) stayed off screen until the next key or mouse
     /// move.
     static void flush_core_animation() {
+        static const bool off = std::getenv("MAYAG_NO_CA_FLUSH") != nullptr;
+        if (off) return;
         mtl::msg_cls<void>(objc_getClass("CATransaction"), mtl::sel("flush"));
     }
 
