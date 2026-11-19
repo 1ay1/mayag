@@ -119,6 +119,7 @@ struct SettingsPanelProps {
     std::string title = "settings";
     std::string subtitle;           ///< under the title in the sidebar
     std::string brand = "\u276F_";  ///< the logo tile's glyphs
+    std::optional<Node> logo;       ///< a drawn logo instead of the glyph tile (any size)
     std::string footer;             ///< e.g. the config file path
     float       width = 900.0f, height = 620.0f;
 };
@@ -447,7 +448,7 @@ template <ControlContext C, class On>
                              | fg(on_ ? t.accent : muted),
                          text_owned(cap(sec)) | font(fs) | grow() | fg(on_ || hov ? t.text_primary : t.text_secondary),
                          text_owned(mods ? std::to_string(mods) : std::string{}) | font(fs * 0.78f) | fg(t.accent))
-                       | gap(10.0f) | align(Align::center) | height(30.0f) | pad(0, 10.0f) | radius(5.0f)
+                       | gap(10.0f) | align(Align::center) | height(30.0f) | pad(0, 10.0f) | radius(t.rounded(5.0f))
                        | bg(on_ ? mix(t.background, t.text_primary, 0.08f) : hov ? mix(t.background, t.text_primary, 0.04f)
                                 : t.background.fade(0.0f))
                        | pointer_cursor | role(a11y::Role::tab) | selected(on_) | label(sec) | id_of(base + ".nav", i)
@@ -459,10 +460,14 @@ template <ControlContext C, class On>
                              }});
                          })).build());
     }
-    auto brand = h(h(text_owned(p.brand) | font(fs * 0.85f) | semibold | fg(t.on_accent))
-                       | size(24.0f, 24.0f) | center | radius(6.0f) | bg(t.accent),
-                   text_owned(cap(p.title)) | font(fs * 1.05f) | semibold | fg(t.text_primary))
-               | gap(10.0f) | align(Align::center) | height(52.0f) | pad(0, 16.0f);
+    Node mark = p.logo ? *p.logo
+                       : (h(text_owned(p.brand) | font(fs * 0.95f) | semibold | fg(t.on_accent))
+                          | size(26.0f, 26.0f) | center | radius(t.rounded(6.0f)) | bg(t.accent)).build();
+    auto brand = h(node(std::move(mark)),
+                   v(text_owned(p.title) | font(fs * (p.logo ? 1.35f : 1.05f)) | semibold | fg(t.text_primary),
+                     text_owned(p.subtitle) | font(fs * 0.8f) | fg(muted))
+                       | gap(1.0f))
+               | gap(12.0f) | align(Align::center) | height(p.logo ? 76.0f : 52.0f) | pad(0, 14.0f);
     auto sidebar = v(std::move(brand), v(std::move(nav)) | gap(1.0f) | pad(0, 8.0f), spacer(),
                      text_owned(p.footer) | font(fs * 0.75f) | fg(muted) | ellipsis | width(pct(100)) | pad(12.0f, 16.0f))
                  | width(kSetSidebarW) | height(pct(100)) | bg(mix(t.background, t.text_primary, 0.02f))
@@ -479,10 +484,10 @@ template <ControlContext C, class On>
         field.push_back((box() | grow()).build());
         field.push_back((text_owned(std::to_string(vis.size()) + " found") | font(fs * 0.8f) | fg(muted)).build());
     }
-    field.push_back((h(text_owned("/") | font(fs * 0.75f) | fg(muted)) | size(18.0f, 18.0f) | center | radius(4.0f)
+    field.push_back((h(text_owned("/") | font(fs * 0.75f) | fg(muted)) | size(18.0f, 18.0f) | center | radius(t.rounded(4.0f))
                      | border(t.stroke(1), line)).build());
     auto search = h(std::move(field)) | gap(8.0f) | align(Align::center) | height(32.0f) | pad(0, 10.0f) | grow()
-                | radius(6.0f) | bg(mix(t.background, t.text_primary, 0.04f))
+                | radius(t.rounded(6.0f)) | bg(mix(t.background, t.text_primary, 0.04f))
                 | border(t.stroke(1), st.filtering ? t.accent : line)
                 | pointer_cursor | id_of(base + ".search")
                 | on_click([on] { return on(SettingsOp{[](SettingsPanelState& s) { s.filtering = true; }}); });
@@ -493,7 +498,7 @@ template <ControlContext C, class On>
                           | fg(modified ? t.accent : muted))
                         | height(32.0f) | center,
                     h(text_owned("Reset") | font(fs * 0.85f) | fg(!modified ? muted : rh ? t.text_primary : t.text_secondary))
-                        | height(28.0f) | pad(0, 12.0f) | center | radius(6.0f)
+                        | height(28.0f) | pad(0, 12.0f) | center | radius(t.rounded(6.0f))
                         | bg(rh ? mix(t.background, t.text_primary, 0.08f) : t.background.fade(0.0f))
                         | border(t.stroke(1), modified ? line : line.fade(0.0f))
                         | pointer_cursor | id_of(base + ".reset_all")
@@ -528,7 +533,7 @@ template <ControlContext C, class On>
                     ctl = (h(std::move(knob),
                              h(text_owned(setting_readout(s)) | font(fs * 0.9f) | monospace
                                    | fg(s.modified ? t.accent : t.text_primary))
-                                 | width(kSetValueW) | height(26.0f) | center | radius(5.0f)
+                                 | width(kSetValueW) | height(26.0f) | center | radius(t.rounded(5.0f))
                                  | bg(mix(t.background, t.text_primary, 0.05f)) | border(t.stroke(1), line))
                            | gap(10.0f) | align(Align::center) | width(kSetCtlW)).build();
                     break;
@@ -547,7 +552,7 @@ template <ControlContext C, class On>
                         segs.push_back((h(text_owned(s.options[q]) | font(fs * 0.88f)
                                               | fg(on_ ? t.text_primary : sh ? t.text_primary : t.text_secondary)
                                               | (on_ ? semibold : weight(FontWeight::regular)))
-                                        | grow() | height(24.0f) | center | radius(4.0f)
+                                        | grow() | height(24.0f) | center | radius(t.rounded(4.0f))
                                         | bg(on_ ? mix(t.background, t.text_primary, 0.13f) : sh ? mix(t.background, t.text_primary, 0.05f)
                                                  : t.background.fade(0.0f))
                                         | shadow(on_ ? 3.0f : 0.0f, colors::black.fade(on_ ? 0.35f : 0.0f), {0.0f, 1.0f})
@@ -555,7 +560,7 @@ template <ControlContext C, class On>
                                         | on_click([on, f = emit(i, E::Op::set, static_cast<float>(q))] { return on(SettingsOp{f}); }))
                                            .build());
                     }
-                    ctl = (h(std::move(segs)) | gap(2.0f) | pad(3.0f) | width(kSetCtlW) | radius(6.0f)
+                    ctl = (h(std::move(segs)) | gap(2.0f) | pad(3.0f) | width(kSetCtlW) | radius(t.rounded(6.0f))
                            | bg(mix(t.background, t.text_primary, 0.04f)) | border(t.stroke(1), line)
                            | role(a11y::Role::group) | label(rid)).build();
                     break;
@@ -599,13 +604,13 @@ template <ControlContext C, class On>
             const auto xid = part_id(rid, 9);
             auto reset = h(text_owned(s.modified ? std::string{ui_glyph(t, "\uF0E2", "\u21BA")} : std::string{})
                                | font(fs * 0.8f) | fg(c.hovered(xid) ? t.text_primary : muted))
-                       | size(22.0f, 22.0f) | center | radius(5.0f)
+                       | size(22.0f, 22.0f) | center | radius(t.rounded(5.0f))
                        | bg(s.modified && c.hovered(xid) ? mix(t.background, t.text_primary, 0.08f) : t.background.fade(0.0f))
                        | pointer_cursor | id_of(rid, 9)
                        | on_click([on, f = emit(i, E::Op::reset)] { return on(SettingsOp{f}); });
 
             auto title = h(text_owned(setting_title(s)) | font(fs) | fg(t.text_primary),
-                           box() | size(5.0f, 5.0f) | radius(2.5f) | bg(s.modified ? t.accent : t.accent.fade(0.0f)))
+                           box() | size(5.0f, 5.0f) | radius(t.rounded(2.5f)) | bg(s.modified ? t.accent : t.accent.fade(0.0f)))
                        | gap(6.0f) | align(Align::center);
             rows.push_back((h(v(std::move(title), text_owned(s.hint) | font(fs * 0.82f) | fg(muted) | ellipsis | width(pct(100)))
                                   | gap(2.0f) | grow() | min_size(0, 0),
@@ -621,7 +626,7 @@ template <ControlContext C, class On>
         auto head = h(text_owned(cap(first.section)) | font(fs * 0.9f) | semibold | fg(t.text_secondary))
                   | align(Align::center) | height(kSetHeadH) | pad(0, 4.0f);
         blocks.push_back((v(std::move(head),
-                            v(std::move(rows)) | width(pct(100)) | radius(8.0f) | clip | border(t.stroke(1), line))
+                            v(std::move(rows)) | width(pct(100)) | radius(t.rounded(8.0f)) | clip | border(t.stroke(1), line))
                           | width(pct(100))).build());
     }
     if (vis.empty())
@@ -635,7 +640,7 @@ template <ControlContext C, class On>
     // ── footer: key hints ────────────────────────────────────────────────
     const auto hint = [&](std::string_view k, std::string_view what) {
         return (h(h(text_owned(std::string{k}) | font(fs * 0.75f) | fg(t.text_secondary))
-                      | height(18.0f) | pad(0, 5.0f) | center | radius(4.0f) | border(t.stroke(1), line),
+                      | height(18.0f) | pad(0, 5.0f) | center | radius(t.rounded(4.0f)) | border(t.stroke(1), line),
                   text_owned(std::string{what}) | font(fs * 0.78f) | fg(muted))
                 | gap(6.0f) | align(Align::center)).build();
     };
@@ -657,7 +662,7 @@ template <ControlContext C, class On>
               v(std::move(header), node(std::move(body)) | grow() | min_size(0, 0) | width(pct(100)), std::move(footer))
                   | grow() | height(pct(100)) | min_size(0, 0))
             | size(p.width, p.height) | clip | bg(t.background) | border(t.stroke(1), mix(t.background, t.text_primary, 0.16f))
-            | radius(10.0f) | shadow(40.0f, rgba<0x00000090>, {0.0f, 16.0f})
+            | radius(t.rounded(10.0f)) | shadow(40.0f, rgba<0x00000090>, {0.0f, 16.0f})
             | role(a11y::Role::dialog) | label(p.title)).build();
 }
 

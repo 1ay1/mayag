@@ -69,12 +69,40 @@ struct TabStripMotion {
     [[nodiscard]] bool animating() const noexcept { return pill.animating(); }
 };
 
+/// How the active tab is marked.
+enum class TabStripStyle : std::uint8_t {
+    pill,        ///< a lifted card that slides between tabs (default)
+    underline,   ///< flat tabs; a bar slides under the active one
+    flat,        ///< a filled block with an accent edge on top, no lift
+};
+/// How the active-tab marker moves to a newly selected tab.
+enum class TabMotion : std::uint8_t {
+    stretch,   ///< the leading edge races ahead, the trailing edge catches up (elastic)
+    slide,     ///< the marker glides as one piece
+    instant,   ///< it jumps
+};
+/// When a tab shows its close button.
+enum class TabClose : std::uint8_t { hover, always, never };
+
 struct TabStripOptions {
     float inset_left = 0.0f;       ///< room for window controls (macOS traffic lights: 78)
     bool  show_numbers = false;    ///< ⌘ held: show ⌘1..9
     float max_tab = 236.0f;
     float min_tab = 96.0f;
     float height = 46.0f;
+    TabStripStyle style = TabStripStyle::pill;
+    float radius = -1.0f;          ///< corner radius, px; < 0: the theme's
+    bool  icon = true;             ///< the process icon with its status ring
+    bool  subtitle = true;         ///< the second line: directory / host / elapsed
+    bool  activity = true;         ///< the output sparkline
+    bool  hue = true;              ///< colour each tab by its directory (else: the accent)
+    bool  new_button = true;       ///< the + / menu group
+    TabClose close = TabClose::hover;
+    TabMotion motion = TabMotion::stretch;
+    float stretch = 0.6f;          ///< how far the leading edge runs ahead (0..1)
+    std::string number_prefix = "\u2318";   ///< before the 1..9 hints ("alt+" off macOS)
+    bool  bottom = false;          ///< the strip sits under the content: its hairline goes on top
+    float font_scale = 1.0f;
 };
 
 inline constexpr std::size_t tab_part_close = part_dec + 6144;
@@ -196,7 +224,12 @@ template <ControlContext C>
 [[nodiscard]] inline Node tab_strip(const C& c, std::string_view id, const std::vector<TermTabInfo>& tabs, int active,
                                     const TabStripMotion* motion, double time, const TabStripOptions& o = {}) {
     const Theme& t = c.theme;
-    const float tab_h = o.height - 10.0f;
+    using S = TabStripStyle;
+    const bool lifted = o.style == S::pill;
+    const float tab_h = lifted ? o.height - 10.0f : o.height - 1.0f;
+    const float rad = o.radius >= 0.0f ? o.radius : t.rounded(10);
+    const float fs = t.font_size * o.font_scale;
+    const auto hue_of = [&](const TermTabInfo& tb) { return o.hue ? tab_hue(tb) : t.accent; };
     if (motion != nullptr && active >= 0 && active < static_cast<int>(tabs.size())) {
         if constexpr (requires { c.track(motion->pill, std::uint64_t{}); }) {
             c.track(motion->pill, part_id(id, static_cast<std::size_t>(active)));
@@ -207,7 +240,7 @@ template <ControlContext C>
         }
     }
     const bool slide = motion != nullptr && motion->pill.ready() && motion->strip.ready();
-    const Color<Srgb> active_hue = active >= 0 && active < static_cast<int>(tabs.size()) ? tab_hue(tabs[static_cast<std::size_t>(active)]) : t.accent;
+    const Color<Srgb> active_hue = active >= 0 && active < static_cast<int>(tabs.size()) ? hue_of(tabs[static_cast<std::size_t>(active)]) : t.accent;
     const Color<Srgb> pill_base = mix(t.surface_raised, active_hue, 0.07f);
     const Color<Srgb> pill_top = mix(pill_base, colors::white, 0.045f);
     const Color<Srgb> pill_edge = mix(t.border_strong, active_hue, 0.30f);
@@ -219,7 +252,9 @@ template <ControlContext C>
         const bool on = static_cast<int>(i) == active;
         const auto pid = part_id(id, i), cid = part_id(id, tab_part_close + i);
         const bool hov = c.hovered(pid) || c.hovered(cid);
-        const Color<Srgb> hue = tab_hue(tb);
+        const Color<Srgb> hue = hue_of(tb);
+        // what the active tab looks like before the sliding marker has a rect (first frame)
+        const Color<Srgb> on_bg = lifted || o.style == S::flat ? pill_base : t.surface.fade(0.0f);
 
         // Result flash: fades over three seconds after a command ends.
         const float flash = !tb.running && tb.last_exit >= 0 && tb.finished_ago < 3.0
@@ -228,27 +263,28 @@ template <ControlContext C>
 
         // Trailing slot: close on hover, else the most useful signal.
         Node trailing;
-        if (hov && !tb.pinned) {
-            trailing = (h(text<"\u00D7"> | font(t.font_size * 1.05f) | fg(c.hovered(cid) ? t.text_primary : t.text_secondary))
-                        | size(20, 20) | center | radius(t.rounded(6)) | bg(c.hovered(cid) ? mix(t.surface_raised, colors::white, 0.06f) : t.surface.fade(0.0f))
+        const bool want_close = !tb.pinned && (o.close == TabClose::always || (o.close == TabClose::hover && hov));
+        if (want_close) {
+            trailing = (h(text<"\u00D7"> | font(fs * 1.05f) | fg(c.hovered(cid) ? t.text_primary : t.text_secondary))
+                        | size(20, 20) | center | radius(std::min(rad, 6.0f)) | bg(c.hovered(cid) ? mix(t.surface_raised, colors::white, 0.06f) : t.surface.fade(0.0f))
                         | pointer_cursor | label("close tab") | id_of(id, tab_part_close + i)).build();
         } else if (o.show_numbers && i < 9) {
-            trailing = (h(text_owned("\u2318" + std::to_string(i + 1)) | font(t.font_size * 0.78f) | semibold | fg(var::text_secondary))
+            trailing = (h(text_owned(o.number_prefix + std::to_string(i + 1)) | font(t.font_size * 0.78f) | semibold | fg(var::text_secondary))
                         | pad(t.spaced(1), t.spaced(5)) | radius(t.rounded(5)) | bg(var::surface_raised)).build();
         } else if (tb.bell) {
             trailing = (text<"\U0001F514"> | font(t.font_size * 0.8f)).build();
         } else if (!tb.running && tb.last_exit > 0) {
             trailing = (h(text_owned("\u2716 " + std::to_string(tb.last_exit)) | font(t.font_size * 0.74f) | semibold | fg(var::danger))
                         | pad(0, t.spaced(5)) | radius(t.rounded(5)) | bg(t.tint(t.danger, 0.14f))).build();
-        } else if (recently_active(tb.activity)) {
+        } else if (o.activity && recently_active(tb.activity)) {
             trailing = activity_sparkline(tb.activity, on ? hue : mix(hue, t.text_secondary, 0.35f));
         }
 
         if (tb.pinned) {
-            items.push_back((h(node(tab_icon(t, tb, time, on, 24.0f)),
+            items.push_back((h(node(tab_icon(t, tb, time, on, std::min(24.0f, tab_h - 6.0f))),
                                node(tb.unread && !on ? (box() | size(5, 5) | bg(hue) | radius(t.rounded(2.5f)) | absolute(27, 6)).build() : Node{}))
-                             | size(40, tab_h) | center | radius(t.rounded(10))
-                             | bg(on && !slide ? pill_base : hov ? mix(t.surface, colors::white, 0.04f) : flash > 0 ? t.tint(flash_col, 0.25f * flash) : t.surface.fade(0.0f))
+                             | size(40, tab_h) | center | radius(rad)
+                             | bg(on && !slide ? on_bg : hov ? mix(t.surface, colors::white, 0.04f) : flash > 0 ? t.tint(flash_col, 0.25f * flash) : t.surface.fade(0.0f))
                              | pointer_cursor | role(a11y::Role::tab) | selected(on) | label(tb.title)
                              | id_of(id, i)).build());
             continue;
@@ -257,35 +293,38 @@ template <ControlContext C>
         std::string line2 = !tb.host.empty() ? tb.host : tb.cwd;
         if (tb.running) line2 = short_duration(tb.elapsed) + (line2.empty() ? "" : "  \u00B7  " + line2);
         const Color<Srgb> title_col = on ? t.text_primary : tb.unread || hov ? mix(t.text_secondary, t.text_primary, 0.6f) : t.text_secondary;
-        auto title_row = h(node(tb.unread && !on ? (box() | size(5, 5) | bg(hue) | radius(t.rounded(2.5f))).build() : Node{}),
-                           text_owned(tb.title.empty() ? tb.process : tb.title) | font(t.font_size * 0.98f)
+        // no icon: a running command still shows, as a pulsing dot
+        const bool dot = (tb.unread && !on) || (!o.icon && tb.running);
+        const float pulse = tb.running ? 0.55f + 0.45f * static_cast<float>(std::sin(time * 5.0)) : 1.0f;
+        auto title_row = h(node(dot ? (box() | size(6, 6) | bg(hue.fade(pulse)) | radius(3.0f)).build() : Node{}),
+                           text_owned(tb.title.empty() ? tb.process : tb.title) | font(fs * 0.98f)
                                | (on ? semibold : weight(FontWeight::medium)) | fg(title_col) | ellipsis | grow() | min_size(0, 0))
                        | gap(t.spaced(5)) | align(Align::center) | width(pct(100));
-        Node sub = (text_owned(line2) | font(t.font_size * 0.78f)
+        Node sub = !o.subtitle ? Node{} : (text_owned(line2) | font(fs * 0.78f)
                     | fg(!tb.host.empty() && tb.host_danger ? t.danger : tb.running ? mix(hue, t.text_secondary, 0.3f) : t.text_disabled)
                     | ellipsis).build();
 
-        items.push_back((h(node(tab_icon(t, tb, time, on)),
+        items.push_back((h(node(o.icon ? tab_icon(t, tb, time, on, std::min(24.0f, tab_h - 6.0f)) : Node{}),
                            v(std::move(title_row), node(std::move(sub))) | gap(t.spaced(1)) | grow() | min_size(0, 0),
                            h(node(std::move(trailing))) | min_size(20, 0) | align(Align::center) | justify(Justify::end))
                          | gap(t.spaced(9)) | align(Align::center) | pad(0, t.spaced(7), 0, t.spaced(9))
                          | width(0) | grow() | shrink() | min_size(o.min_tab, tab_h) | max_size(o.max_tab, tab_h) | height(tab_h)
-                         | radius(t.rounded(10))
-                         | bg(on && !slide ? pill_base
+                         | radius(rad)
+                         | bg(on && !slide ? on_bg
                               : flash > 0 ? t.tint(flash_col, 0.28f * flash)
                               : hov ? mix(t.surface, colors::white, 0.035f) : t.surface.fade(0.0f))
-                         | border(t.stroke(1), on && !slide ? pill_edge : flash > 0 ? t.tint(flash_col, 0.55f * flash) : t.border.fade(0.0f))
+                         | border(t.stroke(1), on && !slide && lifted ? pill_edge : flash > 0 ? t.tint(flash_col, 0.55f * flash) : t.border.fade(0.0f))
                          | pointer_cursor | role(a11y::Role::tab) | selected(on) | label(tb.title)
                          | id_of(id, i)).build());
     }
 
     // New tab + profile menu, as one rounded group.
     const auto plus = part_id(id, part_inc), menu = part_id(id, part_menu);
-    items.push_back((h(h(text<"+"> | font(t.font_size * 1.35f) | fg(c.hovered(plus) ? t.text_primary : t.text_secondary))
-                           | size(30, 30) | center | radius(t.rounded(8)) | bg(c.hovered(plus) ? mix(t.surface, colors::white, 0.06f) : t.surface.fade(0.0f))
+    if (o.new_button) items.push_back((h(h(text<"+"> | font(t.font_size * 1.35f) | fg(c.hovered(plus) ? t.text_primary : t.text_secondary))
+                           | size(30, 30) | center | radius(std::min(rad, 8.0f)) | bg(c.hovered(plus) ? mix(t.surface, colors::white, 0.06f) : t.surface.fade(0.0f))
                            | pointer_cursor | label("new tab") | id_of(id, part_inc),
                        h(text<"\u2304"> | font(t.font_size * 0.9f) | fg(c.hovered(menu) ? t.text_primary : t.text_disabled))
-                           | size(20, 30) | center | radius(t.rounded(8)) | bg(c.hovered(menu) ? mix(t.surface, colors::white, 0.06f) : t.surface.fade(0.0f))
+                           | size(20, 30) | center | radius(std::min(rad, 8.0f)) | bg(c.hovered(menu) ? mix(t.surface, colors::white, 0.06f) : t.surface.fade(0.0f))
                            | pointer_cursor | label("new tab menu") | id_of(id, part_menu))
                      | gap(t.spaced(1)) | align(Align::center) | margin(0, 0, 0, 4)).build());
     items.push_back((spacer()).build());
@@ -293,15 +332,44 @@ template <ControlContext C>
     // The sliding pill, behind the tabs, in strip coordinates.
     std::vector<Node> layers;
     if (slide && active >= 0) {
-        const Rect r = motion->pill.rect();
-        const Vec2 o2 = motion->strip.rect().origin;
+        // The marker in strip coordinates. Both rects are measured from layout,
+        // so use the strip's MEASURED origin (its target), never its spring: a
+        // strip that moved (sliding in, a resize) must not drag the marker off.
+        Rect r = motion->pill.rect();
+        const Vec2 tpos = motion->pill.position.target(), tsize = motion->pill.extent.target();
+        if (o.motion == TabMotion::instant) r = Rect{tpos, tsize};
+        float left = r.left(), right = r.right();
+        if (o.motion == TabMotion::stretch) {   // elastic: the edge facing the destination leads
+            const float k = std::clamp(o.stretch, 0.0f, 0.95f);
+            if (tpos.x > left + 0.5f) right += (tpos.x + tsize.x - right) * k;
+            else if (tpos.x < left - 0.5f) left += (tpos.x - left) * k;
+        }
+        r = Rect{Vec2{left, r.top()}, Vec2{right - left, r.height()}};
+        const Vec2 o2 = motion->strip.position.target();
+        const std::string marker_id = std::string{id} + ".marker";
         const float x = r.left() - o2.x, y = r.top() - o2.y;
-        layers.push_back((box() | size(r.width(), r.height()) | linear_gradient(pill_top, pill_base) | border(t.stroke(1), pill_edge)
-                          | radius(t.rounded(10)) | elevation(t.lift(4)) | absolute(x, y)).build());
-        layers.push_back((box() | size(18, 2.5f) | bg(active_hue) | radius(t.rounded(1.25f))
-                          | absolute(x + r.width() * 0.5f - 9.0f, y + r.height() - 2.5f)).build());
+        switch (o.style) {
+            case S::pill:
+                layers.push_back((box() | size(r.width(), r.height()) | linear_gradient(pill_top, pill_base) | border(t.stroke(1), pill_edge)
+                                  | radius(rad) | elevation(t.lift(4)) | absolute(x, y) | id_of(marker_id)).build());
+                layers.push_back((box() | size(18, 2.5f) | bg(active_hue) | radius(1.25f)
+                                  | absolute(x + r.width() * 0.5f - 9.0f, y + r.height() - 2.5f)).build());
+                break;
+            case S::underline: {   // the tab's width, on the strip's edge (where the hairline is)
+                const float inset = std::min(rad, 6.0f) + 4.0f;
+                const float bw = std::max(r.width() - 2.0f * inset, 16.0f), bh = std::max(t.mark, 2.0f);
+                layers.push_back((box() | size(bw, bh) | bg(active_hue) | radius(bh * 0.5f)
+                                  | absolute(x + inset, o.bottom ? 0.0f : o.height - bh) | id_of(marker_id)).build());
+                break;
+            }
+            case S::flat:
+                layers.push_back((box() | size(r.width(), r.height()) | bg(pill_base) | radius(rad) | absolute(x, y) | id_of(marker_id)).build());
+                layers.push_back((box() | size(r.width(), 2.0f) | bg(active_hue) | radius(rad > 0 ? 1.0f : 0.0f)
+                                  | absolute(x, o.bottom ? y + r.height() - 2.0f : y)).build());
+                break;
+        }
     }
-    layers.push_back((box() | size(1e4f, 1) | bg(var::border) | absolute(0, o.height - 1.0f)).build());
+    layers.push_back((box() | size(1e4f, 1) | bg(var::border) | absolute(0, o.bottom ? 0.0f : o.height - 1.0f)).build());
     layers.push_back((h_list(std::move(items), 4.0f) | align(Align::center) | height(o.height) | width(pct(100)) | pad(0, t.spaced(6)) | clip).build());
 
     return (z(h_list(std::move(layers))) | width(pct(100)) | height(o.height)

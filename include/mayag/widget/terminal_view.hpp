@@ -108,6 +108,9 @@ struct TermViewOptions {
     /// its cell (the app eases it toward 0). With `cursor_trail`, ghosts are
     /// drawn from there to the cell -- a short comet as it travels.
     float cursor_dx = 0.0f, cursor_dy = 0.0f;
+    /// The cursor's opacity: an app fading its blink in and out passes the
+    /// phase here (with cursor_on true) instead of toggling cursor_on.
+    float cursor_alpha = 1.0f;
     bool  cursor_trail = false;
     /// Smooth scrolling: every row is drawn this many px lower (the app passes
     /// one extra row above the viewport and a negative offset of up to a row,
@@ -449,7 +452,8 @@ template <ControlContext C>
         const TermCell* under = g.cursor_col < static_cast<int>(g.lines[static_cast<std::size_t>(g.cursor_row)].cells.size())
                                     ? &g.lines[static_cast<std::size_t>(g.cursor_row)].cells[static_cast<std::size_t>(g.cursor_col)] : nullptr;
         const float w = (under && under->width == 2 ? 2.0f : 1.0f) * cw;
-        const Color<Srgb> cc = rgb_of(th.cursor);
+        const float ca = std::clamp(o.focused ? o.cursor_alpha : 1.0f, 0.0f, 1.0f);
+        const Color<Srgb> cc = rgb_of(th.cursor, ca);
         if (!o.focused) {   // hollow box: the pane is not receiving keys
             layers.push_back((box() | size(w, ch) | border(1.2f, cc) | absolute(x, y)).build());
         } else if (g.cursor_shape == TermCursorShape::beam) {
@@ -459,7 +463,7 @@ template <ControlContext C>
         } else {
             rect(x, y, w, ch, cc);
             if (!moving && under != nullptr && !under->text.empty() && under->text != " ")
-                layers.push_back((h(text_owned(under->text) | font(o.font_size) | family(o.family) | fg(rgb_of(th.cursor_text)) | no_ligatures
+                layers.push_back((h(text_owned(under->text) | font(o.font_size) | family(o.family) | fg(rgb_of(th.cursor_text, ca)) | no_ligatures
                                     | (((under->flags & term_attr::bold) != 0) ? bold : weight(FontWeight::regular)))
                                   | size(w + cw, ch) | align(Align::center) | absolute(x, y)).build());
         }
