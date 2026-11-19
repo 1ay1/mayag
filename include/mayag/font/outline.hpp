@@ -399,18 +399,18 @@ class GlyfSource {
         // ---- variation: displace points per the requested axis coords ----
         // gvar deltas apply to the base outline before it becomes contours,
         // so any weight/width/optical-size is baked into the geometry that
-        // the rasteriser and metrics later see.
+        // the rasteriser and metrics later see. The varied points stay
+        // FRACTIONAL, as CoreText and HarfBuzz keep them: rounding to font
+        // units moved SF Bold Italic's 'o' top from 1127.25 to 1127, which
+        // changed the autohinter's x-height and drew 14 px bold italic caps
+        // 0.3 px high.
+        std::vector<float> fx(n_points), fy(n_points);
+        for (std::size_t i = 0; i < n_points; ++i) {
+            fx[i] = static_cast<float>(xs[i]);
+            fy[i] = static_cast<float>(ys[i]);
+        }
         if (coords_ != nullptr && !coords_->empty() && gvar_header_.ok) {
-            std::vector<float> fx(n_points), fy(n_points);
-            for (std::size_t i = 0; i < n_points; ++i) {
-                fx[i] = static_cast<float>(xs[i]);
-                fy[i] = static_cast<float>(ys[i]);
-            }
             var::apply_gvar(gvar_, gvar_header_, gid, *coords_, fx, fy, ends);
-            for (std::size_t i = 0; i < n_points; ++i) {
-                xs[i] = static_cast<std::int32_t>(std::lround(fx[i]));
-                ys[i] = static_cast<std::int32_t>(std::lround(fy[i]));
-            }
         }
 
         // ---- build contours ----
@@ -418,7 +418,7 @@ class GlyfSource {
         for (std::uint16_t c = 0; c < n_contours; ++c) {
             const std::size_t last = ends[c];
             if (last < start || last >= n_points) break;
-            build_contour(flags, xs, ys, start, last, out);
+            build_contour(flags, fx, fy, start, last, out);
             start = last + 1;
         }
     }
@@ -430,15 +430,15 @@ class GlyfSource {
     /// Handling both is what separates a decoder that renders most fonts from
     /// one that renders all of them.
     static void build_contour(const std::vector<std::uint8_t>& flags,
-                              const std::vector<std::int32_t>& xs,
-                              const std::vector<std::int32_t>& ys,
+                              const std::vector<float>& xs,
+                              const std::vector<float>& ys,
                               std::size_t first, std::size_t last, Outline& out) {
         const std::size_t n = last - first + 1;
         if (n < 2) return;
 
         const auto pt = [&](std::size_t i) -> Vec2 {
             const std::size_t k = first + (i % n);
-            return Vec2{static_cast<float>(xs[k]), static_cast<float>(ys[k])};
+            return Vec2{xs[k], ys[k]};
         };
         const auto on = [&](std::size_t i) -> bool {
             return (flags[first + (i % n)] & detail::flag_on_curve) != 0;
@@ -730,6 +730,11 @@ class CffSource {
     }
 
     [[nodiscard]] bool valid() const noexcept { return charstrings_.count() > 0; }
+    /// The Private DICT's StdHW (dominant horizontal stem, font units), 0
+    /// when absent or CID-keyed. CoreGraphics' autohinter takes its stem
+    /// from exactly this for CFF fonts (tools/apple_stems.c: 36 of 36 system
+    /// CFF faces match round(StdHW * 1000 / upem)).
+    [[nodiscard]] float std_hw() const noexcept { return std_hw_; }
 
     [[nodiscard]] Outline load(std::uint16_t gid) const {
         Outline out;
@@ -1134,6 +1139,8 @@ class CffSource {
 
             if (const auto* dw = cff::dict_get(priv, 20); dw && !dw->empty()) default_width_ = (*dw)[0];
             if (const auto* nw = cff::dict_get(priv, 21); nw && !nw->empty()) nominal_width_ = (*nw)[0];
+            if (const auto* hw = cff::dict_get(priv, 10); hw && !hw->empty() && cff::dict_get(top_dict, 0x0C1E) == nullptr)
+                std_hw_ = (*hw)[0];
             if (const auto* ls = cff::dict_get(priv, 19); ls && !ls->empty()) {
                 local_subrs_ = cff::parse_index(r, off + static_cast<std::size_t>((*ls)[0]));
             }
@@ -1197,6 +1204,7 @@ class CffSource {
     std::size_t    fd_select_offset_ = 0;
     float          default_width_ = 0.0f;
     float          nominal_width_ = 0.0f;
+    float          std_hw_ = 0.0f;
     std::uint16_t  num_glyphs_ = 0;
     bool           is_cid_ = false;
 };
@@ -1606,6 +1614,9 @@ class GlyphSource {
     [[nodiscard]] bool header_box(std::uint16_t gid, std::int16_t box[4]) const noexcept {
         return kind_ == Kind::glyf && glyf_.header_box(gid, box);
     }
+
+    /// CFF only: the Private DICT's StdHW in font units, else 0.
+    [[nodiscard]] float cff_std_hw() const noexcept { return kind_ == Kind::cff ? cff_.std_hw() : 0.0f; }
 
     [[nodiscard]] Outline load(std::uint16_t gid) const {
         switch (kind_) {

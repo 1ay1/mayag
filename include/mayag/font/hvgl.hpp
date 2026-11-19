@@ -89,7 +89,7 @@ class HvglSource {
         // The root part's axes are the font's fvar axes, in order, already
         // normalised (avar applied) by Face.
         std::vector<double> root(coords_ != nullptr ? coords_->size() : 0, 0.0);
-        for (std::size_t i = 0; i < root.size(); ++i) root[i] = (*coords_)[i];
+        for (std::size_t i = 0; i < root.size(); ++i) root[i] = static_cast<double>((*coords_)[i]);
         std::size_t budget = 1 << 16;   // parts visited, for hostile trees
         part(gid, root, {}, {}, Motion{}, out, 0, budget);
         return out;

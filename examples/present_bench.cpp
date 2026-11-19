@@ -37,6 +37,7 @@
 
 using namespace mayag;
 
+#if defined(MAYAG_WITH_COCOA)
 namespace {
 
 /// CPU time burned by THIS THREAD, which is the number that matters.
@@ -133,8 +134,9 @@ void report(const char* name, const Stats& wall, const Stats& cpu, double budget
 }
 
 }  // namespace
+#endif
 
-int main(int argc, char** argv) {
+int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 #if !defined(MAYAG_WITH_COCOA)
     std::printf("present_bench needs a real window; build with MAYAG_WITH_COCOA=ON\n");
     return 0;

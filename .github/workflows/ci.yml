@@ -19,22 +19,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # TOOLCHAIN FLOOR: jaal needs C++26 structured binding packs
+          # (P1061) for its Sendable checks; without them jaal/meta/fields.hpp
+          # is a hard #error. P1061 landed in GCC 16 and clang 22, neither of
+          # which is in the runner images: g++-16 comes from
+          # ubuntu-toolchain-r/test, clang-22 from apt.llvm.org, gcc@16 from
+          # Homebrew. MSVC builds on jaal's shallow rules.
           - name: linux-gcc
             os: ubuntu-24.04
-            cxx: g++-14
-            install: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+            cxx: g++-16
+            install: sh .github/ci/install-linux.sh gcc
 
           - name: linux-clang
             os: ubuntu-24.04
-            cxx: clang++-19
-            install: |
-              sudo apt-get update
-              sudo apt-get install -y ninja-build clang-19 libstdc++-14-dev
+            cxx: clang++-22
+            install: sh .github/ci/install-linux.sh clang
 
           - name: macos-gcc
-            os: macos-14
-            cxx: g++-14
-            install: brew install gcc@14 ninja
+            os: macos-15
+            cxx: g++-16
+            install: brew install gcc@16 ninja
 
           - name: windows-msvc
             os: windows-2022
@@ -95,21 +99,24 @@ jobs:
           submodules: recursive
       - name: Install compositor and toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y g++-14 ninja-build weston \
+          sh .github/ci/install-linux.sh gcc
+          sudo apt-get install -y weston gdb \
             libwayland-client0 libxkbcommon0 \
             glslc mesa-vulkan-drivers libvulkan1 vulkan-tools
       - name: Configure
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=g++-14
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=g++-16
       - name: Build
         run: cmake --build build -j --target mayag_wayland_tests mayag_vulkan_tests mayag_counter
 
       # No compositor: the backend must degrade, not crash. This is the
-      # property that lets the same binary ship to every Linux box.
+      # property that lets the same binary ship to every Linux box. Run
+      # under gdb so a crash leaves a backtrace in the log.
       - name: Degrades without a compositor
         run: |
-          env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET ./build/mayag_wayland_tests
-          env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET ./build/examples/mayag_counter --headless
+          unset WAYLAND_DISPLAY WAYLAND_SOCKET
+          gdbrun() { gdb -q -batch -return-child-result -ex run -ex 'thread apply all bt 20' --args "$@"; }
+          gdbrun ./build/mayag_wayland_tests
+          gdbrun ./build/examples/mayag_counter --headless
 
       # The GPU-vs-software equivalence test, against Mesa's software Vulkan
       # device (lavapipe). Proves the Vulkan backend produces the reference
@@ -172,11 +179,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - run: sh .github/ci/install-linux.sh gcc
       - name: Build with -Werror
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_CXX_COMPILER=g++-14 \
+                -DCMAKE_CXX_COMPILER=g++-16 \
                 -DCMAKE_CXX_FLAGS="-Werror"
           cmake --build build -j
 
@@ -191,11 +198,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build
+      - run: sh .github/ci/install-linux.sh gcc
       - name: Build and test with -fsanitize=${{ matrix.san }}
         run: |
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-                -DCMAKE_CXX_COMPILER=g++-14 \
+                -DCMAKE_CXX_COMPILER=g++-16 \
                 -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.san }} -fno-omit-frame-pointer" \
                 -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.san }}"
           # Every suite that touches the runtime: the tiled renderer's

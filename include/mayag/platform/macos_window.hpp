@@ -165,7 +165,7 @@ class MacWindow {
         unsigned long style = style_titled | style_closable | style_miniaturizable;
         if (cfg.resizable) style |= style_resizable;
 
-        const CGRect frame = mayag_cgrect(0, 0, cfg.size.x, cfg.size.y);
+        const CGRect frame = mayag_cgrect(0, 0, static_cast<double>(cfg.size.x), static_cast<double>(cfg.size.y));
 
         id win = msg_cls<id>(objc_getClass("NSWindow"), sel("alloc"));
         win = msg<id>(win, sel("initWithContentRect:styleMask:backing:defer:"),

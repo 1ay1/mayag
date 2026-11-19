@@ -129,7 +129,8 @@ struct Piece { bool cubic; Vec2 p0, c1, c2, p3; };
 
 inline void split_cubic(const Piece& c, double t, Piece& a, Piece& b) {
     const auto lerp = [](Vec2 u, Vec2 v, double s) {
-        const double ux = u.x, uy = u.y, vx = v.x, vy = v.y;
+        const double ux = static_cast<double>(u.x), uy = static_cast<double>(u.y),
+                     vx = static_cast<double>(v.x), vy = static_cast<double>(v.y);
         return Vec2{static_cast<float>(ux + (vx - ux) * s), static_cast<float>(uy + (vy - uy) * s)};
     };
     const Vec2 ab = lerp(c.p0, c.c1, t), bc = lerp(c.c1, c.c2, t), cd = lerp(c.c2, c.p3, t);

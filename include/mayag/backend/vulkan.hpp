@@ -36,7 +36,18 @@
 #if defined(__linux__) || defined(__FreeBSD__) || defined(_WIN32)
 
 #if defined(_WIN32)
+#  ifndef NOMINMAX
+#    define NOMINMAX   // windows.h min/max macros break every std::min in the font engine
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
 #  include <windows.h>
+// minwindef.h defines IN, OUT and OPTIONAL as empty macros; IN is also a
+// Unicode line-break class (LB::IN).
+#  undef IN
+#  undef OUT
+#  undef OPTIONAL
 #else
 #  include <dlfcn.h>
 #endif

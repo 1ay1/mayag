@@ -1161,6 +1161,7 @@ class window_host {
             po.measurer     = &measurer;
             po.glyphs       = &bindings_->glyphs;
             po.debug_bounds = cfg_.debug_bounds;
+            po.clear_color  = theme_.background;
             render::paint(tree_, draws_, po);
             // The atlas had to move glyphs mid-paint (it overflowed): uvs
             // recorded before the move are stale. Paint again; the second

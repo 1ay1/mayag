@@ -438,10 +438,12 @@ glyph as a PNG (Google's `CBDT`/`CBLC`, Apple's `sbix`), so the engine:
 2. **parses `CBLC`/`CBDT` and `sbix`** to locate a glyph's strike and read its
    PNG bytes and placement metrics, choosing strikes the way HarfBuzz does
    (the smallest at least as large as the drawn size, `dupe` entries
-   followed) and shrinking them with the same bicubic CoreText uses (fitted
-   against `CTLineDraw`: closer than box, bilinear, Lanczos or Hamming at
-   every size), its support widened with the reduction and done in
-   premultiplied space, so a flag's 1 px border survives a 160 → 13 px
+   followed) and resizing them exactly as CoreGraphics' high-quality
+   `CGContextDrawImage` does, with weights measured texel by texel. Shrinking
+   uses Catmull-Rom with corner-aligned sample centres, widened with the
+   reduction and clamped at the edges. Enlarging uses an eased bilinear
+   filter snapped to eighths. Both run in premultiplied space and land within
+   0.3/255 of CoreGraphics, so a flag's 1 px border survives a 160 → 13 px
    reduction;
 3. **packs the RGBA into a colour plane** of the same atlas as coverage glyphs,
    so a 😀 is cached, packed and evicted through the one glyph path; and
@@ -1332,6 +1334,12 @@ hardest Latin font a UI meets).
   along its normal, FreeType's embolden scheme) for bitmap glyphs, and shifts
   the threshold for distance-field glyphs, so weight is continuous across the
   bitmap/SDF switch.
+- **Each platform's native look.** The CoreGraphics-specific behaviour
+  (smoothing growth and CG's curve flattening) is the default on Apple
+  platforms only. Elsewhere text draws exact outlines with light vertical
+  hinting, closer to FreeType and DirectWrite. `FontConfig::coregraphics()` and
+  `FontConfig::portable()` choose a look explicitly, and
+  `-DMAYAG_COREGRAPHICS_TEXT=0/1` overrides the platform default.
 - **Gamma-space text compositing.** Shapes blend in linear light; text is
   blended as CoreGraphics blends it, a per-channel lerp of sRGB-ENCODED
   values, because fonts are designed for that weight. In linear light the

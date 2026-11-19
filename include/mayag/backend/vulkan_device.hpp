@@ -26,9 +26,21 @@
 #include "software.hpp"
 
 // dup()/close(): a dmabuf fd is borrowed, and Vulkan takes ownership of the
-// descriptor it is handed, so import duplicates first.
-#if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
+// descriptor it is handed, so import duplicates first. The Windows CRT
+// spells them _dup/_close (the fd-import paths never run there, but they
+// must compile).
+#if defined(_WIN32)
+#include <io.h>
+namespace mayag::backend::detail {
+inline int fd_dup(int fd) noexcept { return ::_dup(fd); }
+inline int fd_close(int fd) noexcept { return ::_close(fd); }
+}  // namespace mayag::backend::detail
+#else
 #include <unistd.h>
+namespace mayag::backend::detail {
+inline int fd_dup(int fd) noexcept { return ::dup(fd); }
+inline int fd_close(int fd) noexcept { return ::close(fd); }
+}  // namespace mayag::backend::detail
 #endif
 
 #include <array>
@@ -577,7 +589,7 @@ class VulkanDevice {
                 return std::unexpected(ImportError::unsupported_format);
             }
         }
-        const int dup_fd = ::dup(d.planes[0].fd);
+        const int dup_fd = detail::fd_dup(d.planes[0].fd);
         if (dup_fd < 0) {
             api_->DestroyImage(device_, image, nullptr);
             return std::unexpected(ImportError::out_of_memory);
@@ -603,7 +615,7 @@ class VulkanDevice {
 
         vk::VkDeviceMemory mem = nullptr;
         if (api_->AllocateMemory(device_, &mai, nullptr, &mem) != vk::VK_SUCCESS) {
-            ::close(dup_fd);              // Vulkan did not take it after all
+            detail::fd_close(dup_fd);              // Vulkan did not take it after all
             api_->DestroyImage(device_, image, nullptr);
             return std::unexpected(ImportError::out_of_memory);
         }
@@ -721,7 +733,7 @@ class VulkanDevice {
 
         // The fd is BORROWED, and Vulkan takes ownership of what it is
         // given -- the same contract as a dmabuf, for the same reason.
-        const int dup_fd = ::dup(p.fd);
+        const int dup_fd = detail::fd_dup(p.fd);
         if (dup_fd < 0) { api_->DestroySemaphore(device_, sem, nullptr); return false; }
 
         vk::VkImportSemaphoreFdInfoKHR info{};
@@ -730,7 +742,7 @@ class VulkanDevice {
         info.handleType = vk::VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
         info.fd = dup_fd;
         if (api_->ImportSemaphoreFdKHR(device_, &info) != vk::VK_SUCCESS) {
-            ::close(dup_fd);
+            detail::fd_close(dup_fd);
             api_->DestroySemaphore(device_, sem, nullptr);
             return false;
         }

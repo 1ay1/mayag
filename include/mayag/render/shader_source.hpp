@@ -109,6 +109,18 @@ inline float mg_text_gamma(float cov, float4 premul) {
         ? (1.0 - mg_srgb_to_linear(1.0 - cov * (1.0 - enc))) / (1.0 - lum) : cov;
     return clamp(mix(on_white, on_black, smoothstep(0.35, 0.65, enc)), 0.0, 1.0);
 }
+// kernel::apply_text_gamma(cov, color, backdrop), verbatim.
+inline float mg_text_gamma_on(float cov, float4 premul, float4 backdrop) {
+    if (backdrop.w < 0.5) return mg_text_gamma(cov, premul);
+    if (cov <= 0.0 || cov >= 1.0) return cov;
+    float a = premul.w > 1e-4 ? premul.w : 1.0;
+    float s = clamp((0.2126 * premul.x + 0.7152 * premul.y + 0.0722 * premul.z) / a, 0.0, 1.0);
+    float d = clamp(0.2126 * backdrop.x + 0.7152 * backdrop.y + 0.0722 * backdrop.z, 0.0, 1.0);
+    if (abs(s - d) < 0.02) return mg_text_gamma(cov, premul);
+    float es = mg_linear_to_srgb(s), ed = mg_linear_to_srgb(d);
+    float want = mg_srgb_to_linear(ed + (es - ed) * cov);
+    return clamp((want - d) / (s - d), 0.0, 1.0);
+}
 
 inline float mg_shadow(float d, float blur) {
     if (blur <= 0.0f) return d <= 0.0f ? 1.0f : 0.0f;
@@ -317,7 +329,7 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
             return float4(r, 1.0);
         }
 #endif
-        cov = mg_text_gamma(cov, v.color);
+        cov = mg_text_gamma_on(cov, v.color, v.color2);
     } else {
         cov = mg_coverage(mg_rounded_box(v.local, v.half_size, v.radii), px);
     }

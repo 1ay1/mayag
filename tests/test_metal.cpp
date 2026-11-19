@@ -258,6 +258,7 @@ int main() {
                                  Pol{"dark on light", rgb<0x1C1F24>, rgb<0xFAFAFA>}}) {
                 DrawList tdl;
                 tdl.fill_rect(Rect{0, 0, static_cast<float>(w), static_cast<float>(h)}, p.bg);
+                tdl.set_text_backdrop(p.bg);   // as the painter does over an opaque fill
                 TextStyle ts{};
                 ts.color = p.fg;
                 ts.size = 14.0f;   // bitmap glyphs at subpixel phases
@@ -290,6 +291,9 @@ int main() {
                 check(n > 500, "the text inked pixels");
                 // Bilinear vs analytic sampling of the SDF legitimately moves
                 // edge values a little; a missing correction moves them ~20.
+                // Holds for both blends: framebuffer fetch (exact) and the
+                // coverage reshaping non-Apple GPUs get, which is exact too
+                // against a known backdrop (kernel::apply_text_gamma).
                 check(std::abs(mean) < 2.5 && mad < 6.0,
                       "GPU and CPU text agree per pixel (no missing coverage correction)");
             }

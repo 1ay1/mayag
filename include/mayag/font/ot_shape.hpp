@@ -74,6 +74,11 @@ struct FontFuncs {
     /// Tracking added to each grapheme's advance, font units (Apple `trak`;
     /// the caller resolves it for the point size).
     float tracking = 0.0f;
+    /// CoreText instead tracks EVERY glyph that advances (an Indic pre-base
+    /// matra and its consonant each get it: CTRunGetPositions, SF
+    /// Devanagari), still before mark attachment so marks stay on their
+    /// anchors. HarfBuzz tracks once per grapheme.
+    bool track_every_glyph = false;
     /// Ink extents in font units, y-up: x_bearing, y_bearing (top),
     /// width, height (negative, downward). Only used to place marks when a
     /// font has no GPOS mark positioning.
@@ -1273,7 +1278,10 @@ inline void shape(const ShapePlan& plan, const Layout& l, const FontFuncs& font,
     position(l, plan.map, b, font.coords, zero, adjust, &pc, plan.apply_gpos, [&](Buffer& buf) {
         if (!plan.apply_gpos && plan.apply_kerx && !font.kerx_table.empty()) detail::kerx_pass(l, buf, plan.kern_mask, font);
         if (plan.apply_kern && (font.legacy_kern || !font.kern_table.empty())) detail::kern_machine(l, buf, plan.kern_mask, font);
-        if (font.tracking != 0.0f) {   // hb_aat_layout_track: once per grapheme
+        if (font.tracking != 0.0f && font.track_every_glyph) {
+            for (std::size_t i = 0; i < buf.len(); ++i)
+                if (buf.pos[i].x_advance != 0.0f) buf.pos[i].x_advance += font.tracking;
+        } else if (font.tracking != 0.0f) {   // hb_aat_layout_track: once per grapheme
             const std::size_t n = buf.len();
             std::size_t start = 0;
             for (std::size_t i = 1; i <= n; ++i) {

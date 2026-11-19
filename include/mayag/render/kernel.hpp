@@ -137,7 +137,7 @@ inline constexpr u32 FLAG_GLYPH_SDF = 128u;
 
 /// Rounded box with per-corner radii (tl, tr, br, bl). `p` is relative to the
 /// box CENTRE, `b` is the half-size. Inigo Quilez's formulation.
-[[nodiscard]] constexpr f32 rounded_box(vec2 p, vec2 b, vec4 radii) noexcept {
+[[nodiscard]] inline f32 rounded_box(vec2 p, vec2 b, vec4 radii) noexcept {
     f32 r = (p.x > 0.0f) ? ((p.y > 0.0f) ? radii.z : radii.y)
                          : ((p.y > 0.0f) ? radii.w : radii.x);
     r = mg::min(r, mg::min(b.x, b.y));
@@ -335,6 +335,28 @@ inline constexpr u32 FLAG_GLYPH_SDF = 128u;
                 linear_to_srgb(mg::clamp(premul_color.y / a, 0.0f, 1.0f)) * t,
                 linear_to_srgb(mg::clamp(premul_color.z / a, 0.0f, 1.0f)) * t,
                 t};
+}
+
+/// The same reshaping against the ACTUAL backdrop, when the painter knows
+/// it (`backdrop` = the opaque linear colour the text sits on, w = 1; w = 0
+/// means unknown and falls back to the black/white design backdrops). For a
+/// luminance pair (S text, D backdrop) the encoded-space blend gives
+/// dec(enc(D) + (enc(S) - enc(D)) c); the linear hardware blend gives
+/// D + (S - D) c', so c' = (that - D) / (S - D), exact for that pair. Text
+/// on a dark grey (0x15) panel was off by 2.6/255 with the design backdrop.
+/// The fallback for GPUs that cannot blend in encoded space
+/// (encoded_text_source); exact per luminance, not per channel.
+[[nodiscard]] inline f32 apply_text_gamma(f32 cov, vec4 premul_color, vec4 backdrop) noexcept {
+    if (backdrop.w < 0.5f) return apply_text_gamma(cov, premul_color);
+    if (cov <= 0.0f || cov >= 1.0f) return cov;
+    const f32 a = premul_color.w > 1e-4f ? premul_color.w : 1.0f;
+    const f32 s = mg::clamp((0.2126f * premul_color.x + 0.7152f * premul_color.y + 0.0722f * premul_color.z) / a,
+                            0.0f, 1.0f);
+    const f32 d = mg::clamp(0.2126f * backdrop.x + 0.7152f * backdrop.y + 0.0722f * backdrop.z, 0.0f, 1.0f);
+    if (mg::abs(s - d) < 0.02f) return apply_text_gamma(cov, premul_color);   // no contrast to solve for
+    const f32 es = linear_to_srgb(s), ed = linear_to_srgb(d);
+    const f32 want = srgb_to_linear(ed + (es - ed) * cov);
+    return mg::clamp((want - d) / (s - d), 0.0f, 1.0f);
 }
 
 /// Fallback half-width of the SDF threshold band, in normalised field units,
@@ -564,11 +586,12 @@ struct Env {
     // ── coverage ────────────────────────────────────────────────────
     f32 cov;
     if (f.kind == KIND_GLYPH) {
-        // Linear-light blending against an unseen backdrop: the coverage is
-        // reshaped to approximate CoreGraphics' encoded-space blend. Only a
-        // backend that cannot blend glyphs in encoded space lands here;
-        // Vulkan uses encoded_text_source through a UNORM view instead.
-        cov = apply_text_gamma(glyph_coverage(f, env), f.color);
+        // Linear-light blending: the coverage is reshaped to approximate
+        // CoreGraphics' encoded-space blend, exactly against the backdrop
+        // when the painter knows it (color2, w = 1). Only a backend that
+        // cannot blend glyphs in encoded space lands here; Vulkan with a
+        // UNORM view uses encoded_text_source instead.
+        cov = apply_text_gamma(glyph_coverage(f, env), f.color, f.color2);
     } else {
         cov = shape_coverage(f);
     }

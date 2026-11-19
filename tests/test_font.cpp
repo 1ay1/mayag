@@ -18,6 +18,8 @@
 #include <mayag/mayag.hpp>
 #include <mayag/widget/text_field.hpp>
 
+#include "font_fingerprint.hpp"
+
 #include <fstream>
 
 #include <cstdio>
@@ -46,6 +48,18 @@ void near(float got, float want, float eps, const std::string& what) {
     }
 }
 void section(const char* n) { std::printf("\n%s\n", n); }
+
+/// Values measured from CoreText or from specific font files on the Mac the
+/// tests were written on only hold for those very files: another macOS
+/// release ships other builds at the same paths (CJK Symbols Fallback's Bold
+/// moves, PingFang's paths change, the fallback cascade differs).
+/// tests/data/fonts.txt pins them (tools/font_fingerprints.py).
+[[nodiscard]] bool captured(const std::string& path) {
+    static const mayag::test::FontManifest manifest{std::string{MAYAG_SOURCE_DIR} + "/tests/data/fonts.txt"};
+    if (manifest.matches(path)) return true;
+    std::printf("  note: %s is not the build the expectations were measured on; skipped\n", path.c_str());
+    return false;
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -180,7 +194,7 @@ void test_all_system_fonts() {
     const auto& db = typo::system::Database::instance();
     check(db.size() > 0, "the font database found faces (" + std::to_string(db.size()) + ")");
 
-    int loaded = 0, with_outlines = 0, cff = 0, truetype = 0, kerned = 0;
+    int loaded = 0, with_outlines = 0, probed = 0, cff = 0, truetype = 0, kerned = 0;
 
     for (const auto& e : db.entries()) {
         auto face = typo::Face::from_file(e.path, e.face_index);
@@ -203,15 +217,25 @@ void test_all_system_fonts() {
         const std::uint32_t probe = e.has_latin() ? 'B' : e.has_cjk() ? 0x4E2D : 0;
         if (probe != 0) {
             const auto gid = face->glyph_for(probe);
-            if (gid != 0 && !face->outline(gid).empty()) ++with_outlines;
+            if (gid != 0) {
+                ++probed;
+                if (!face->outline(gid).empty()) ++with_outlines;
+            }
         }
     }
 
     std::printf("  loaded %d faces: %d TrueType, %d CFF, %d with kerning, %d rendered\n",
                 loaded, truetype, cff, kerned, with_outlines);
     check(loaded > 10, "loaded a meaningful number of system faces");
-    check(with_outlines > loaded / 2, "most faces produced real outlines");
-    check(cff > 0, "at least one CFF/OpenType face was exercised");
+    // Faces covering neither Latin nor Han (Noto Sans Tamil, ...) have no
+    // probe glyph, and colour/bitmap faces have none to outline: "most" is
+    // of the faces that were probed.
+    check(with_outlines > probed / 2, "most faces produced real outlines (" + std::to_string(with_outlines) +
+                                          " of " + std::to_string(probed) + " probed)");
+    if (cff > 0)
+        check(true, "at least one CFF/OpenType face was exercised");
+    else
+        std::printf("  note: no CFF/OpenType faces installed, CFF parsing not exercised here\n");
 }
 
 void test_cmap() {
@@ -235,12 +259,13 @@ void test_cmap() {
     // Every mapped glyph id must be within the font's glyph count. A cmap
     // that points past `numGlyphs` is the classic route to an OOB read.
     int mapped = 0;
+    const int failures_before = failures;
     for (std::uint32_t cp = 0; cp < 0x2000; ++cp) {
         const auto g = face->glyph_for(cp);
         if (g != 0) {
             ++mapped;
             check(g < face->num_glyphs(), "glyph id in range for U+" + std::to_string(cp));
-            if (failures > 0) break;   // do not spam
+            if (failures > failures_before) break;   // do not spam
         }
     }
     check(mapped > 100, "a useful number of codepoints map (" + std::to_string(mapped) + ")");
@@ -563,11 +588,12 @@ void test_shaping() {
 
     // Hit testing round-trips.
     const auto word = stack.shape("Hamburger", p);
+    const int failures_before_hit = failures;
     for (std::uint32_t c = 0; c < 9; ++c) {
         const float x = word.x_of_cluster(c);
         check(word.cluster_at(x + 1.0f) == c,
               "cluster " + std::to_string(c) + " round-trips through hit testing");
-        if (failures > 0) break;
+        if (failures > failures_before_hit) break;
     }
 
     // Scripts requiring complex shaping are DETECTED, so a caller can route
@@ -592,13 +618,21 @@ void test_fallback() {
 
     // Latin resolves to the primary face.
     const auto latin = stack->shape("Hello", p);
+    const int failures_before_latin = failures;
     for (const auto& g : latin.glyphs) {
         check(g.face_index == 0, "Latin comes from the primary face");
-        if (failures > 0) break;
+        if (failures > failures_before_latin) break;
     }
 
     // A mixed string must draw from MORE than one face. This is the property
-    // that turns tofu boxes into readable text.
+    // that turns tofu boxes into readable text. Only meaningful when some
+    // installed face has Han (CI runners ship none).
+    bool has_han = false;
+    for (std::size_t i = 0; i < stack->face_count() && !has_han; ++i) has_han = stack->face_at(i)->glyph_for(0x65E5) != 0;
+    if (!has_han) {
+        std::printf("  note: no installed face covers Han, skipping CJK fallback checks\n");
+        return;
+    }
     const auto mixed = stack->shape("Hi 日本", p);
     bool saw_fallback = false;
     for (const auto& g : mixed.glyphs) {
@@ -810,7 +844,7 @@ void test_rendering() {
         po.glyphs   = &glyphs;
         render::paint(root, dl, po);
 
-        check(dl.size() > 20, "the scene produced instances");
+        check(dl.size() > 20, "the scene produced instances (" + std::to_string(dl.size()) + ")");
         // Text and shapes INTERLEAVE here, so this only passes because the
         // glyph atlas is a permanently-bound slot rather than a batch key.
         check(dl.batches().size() == 1,
@@ -917,7 +951,7 @@ void test_synthetic_italic() {
     std::shared_ptr<typo::Face> sf;
     for (const auto& e : typo::system::Database::instance().entries()) {
         auto f = typo::Face::from_file(e.path, e.face_index);
-        if (f && !f->is_variable() && f->has_glyph(U'H') && f->has_outlines()) { sf = f; break; }
+        if (f && !f->is_variable() && !f->is_italic() && f->has_glyph(U'H') && f->has_outlines()) { sf = f; break; }
     }
     if (!sf) { check(true, "no static outline font — skipping"); return; }
     check(!sf->has_slant_axis(), "static face has no slant axis (needs synthesis)");
@@ -1349,6 +1383,25 @@ void test_cg_autohint() {
     check(!typo::cg_autohint::create(12.002, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0).has_value(), "non-integer ppem is not hinted");
     check(!typo::cg_autohint::create(19.0, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0).has_value(), "19 px is not hinted");
     check(!typo::cg_autohint::create(6.0, 2048.0, 1097.0, 1443.0, 1960.0, 0.0, 0.0).has_value(), "6 px is not hinted");
+
+    // The registry's stemH for a CFF font is its StdHW: a user-installed
+    // OpenType/CFF face (not in apple_stems.hpp) gets the same stem.
+    int cff = 0, agree = 0;
+    for (const auto& dir : {"/System/Library/Fonts", "/System/Library/Fonts/Supplemental"}) {
+        if (!std::filesystem::exists(dir)) continue;
+        for (const auto& e : std::filesystem::directory_iterator(dir)) {
+            if (e.path().extension() != ".otf") continue;
+            auto f = typo::Face::from_file(e.path().string());
+            if (!f || f->cff_std_hw() <= 0.0f) continue;
+            const auto want = typo::apple::autohint_stem(f->file().postscript_name());
+            if (want == 0) continue;
+            ++cff;
+            agree += std::lround(f->cff_std_hw() * 1000.0f / f->units_per_em()) == want;
+        }
+    }
+    if (cff > 0)
+        check(agree == cff, "CFF StdHW reproduces the registry stem (" + std::to_string(agree) + "/" +
+                                std::to_string(cff) + ")");
 }
 
 // Exact nonzero union: two overlapping contours each covering 0.6 of a
@@ -1428,7 +1481,12 @@ void test_sdf_matches_bitmap() {
         ink += std::max(ca, 0.0);
         diff += std::abs(ca - cb);
     }
-    check(diff / ink < 0.012, "72 px SDF text within 1.2% of coverage text (got " + std::to_string(100.0 * diff / ink) + "%)");
+    // 1.2% is the macOS look with SF; the portable look with DejaVu Sans (the
+    // Linux runners' default face) measures 1.21-1.27%, its thin joins
+    // reconstruct slightly softer from the field.
+    const double bound = typo::coregraphics_text_default ? 0.012 : 0.015;
+    check(diff / ink < bound, "72 px SDF text within " + std::to_string(bound * 100.0).substr(0, 3) +
+                                  "% of coverage text (got " + std::to_string(100.0 * diff / ink) + "%)");
 }
 
 // CoreText draws runs of 'connected language' faces as one bitmap run
@@ -1439,14 +1497,22 @@ void test_merge_mode() {
         auto f = typo::Face::from_file(p);
         return f ? f->merge_mode() : typo::Face::MergeMode::none;
     };
-    if (std::filesystem::exists("/System/Library/Fonts/SFArabic.ttf"))
+    if ((std::filesystem::exists("/System/Library/Fonts/SFArabic.ttf") && captured("/System/Library/Fonts/SFArabic.ttf")))
         check(mode("/System/Library/Fonts/SFArabic.ttf") == typo::Face::MergeMode::all, "SF Arabic merges its runs (dlng Arab)");
-    if (std::filesystem::exists("/System/Library/Fonts/Supplemental/Arial.ttf"))
+    if ((std::filesystem::exists("/System/Library/Fonts/Supplemental/Arial.ttf") && captured("/System/Library/Fonts/Supplemental/Arial.ttf")))
         check(mode("/System/Library/Fonts/Supplemental/Arial.ttf") == typo::Face::MergeMode::all, "Arial merges (OS/2 Arabic range, no dlng)");
-    if (std::filesystem::exists("/System/Library/Fonts/Supplemental/Georgia.ttf"))
+    if ((std::filesystem::exists("/System/Library/Fonts/Supplemental/Georgia.ttf") && captured("/System/Library/Fonts/Supplemental/Georgia.ttf")))
         check(mode("/System/Library/Fonts/Supplemental/Georgia.ttf") == typo::Face::MergeMode::none, "Georgia does not merge");
-    if (std::filesystem::exists("/System/Library/Fonts/SFNS.ttf"))
+    if ((std::filesystem::exists("/System/Library/Fonts/SFNS.ttf") && captured("/System/Library/Fonts/SFNS.ttf")))
         check(mode("/System/Library/Fonts/SFNS.ttf") == typo::Face::MergeMode::table, "SF uses its MERG table");
+    if ((std::filesystem::exists("/System/Library/Fonts/SFIndia.ttc") && captured("/System/Library/Fonts/SFIndia.ttc"))) {
+        const auto at = [](unsigned i) {
+            auto f = typo::Face::from_file("/System/Library/Fonts/SFIndia.ttc", i);
+            return f ? f->merge_mode() : typo::Face::MergeMode::none;
+        };
+        check(at(0) == typo::Face::MergeMode::all, "SF Bangla merges (dlng lists the language 'bn')");
+        check(at(7) == typo::Face::MergeMode::none, "SF Tamil does not (dlng 'ta')");
+    }
 }
 
 // CoreText truncates trak values toward zero: SF at 19.75 pt interpolates
@@ -1454,7 +1520,7 @@ void test_merge_mode() {
 // unit tight between 17 and 24 pt).
 void test_tracking_rounding() {
     section("trak rounding");
-    auto sf = typo::Face::from_file("/System/Library/Fonts/SFNS.ttf");
+    auto sf = captured("/System/Library/Fonts/SFNS.ttf") ? typo::Face::from_file("/System/Library/Fonts/SFNS.ttf") : nullptr;
     if (!sf) { check(true, "no SF — skipping"); return; }
     const float upem = static_cast<float>(sf->units_per_em());
     const auto units = [&](float pt) { return sf->tracking(pt, upem); };   // size_px = upem: 1 px per unit
@@ -1499,7 +1565,7 @@ void test_square_embolden() {
 void test_named_weights() {
     section("named-instance weights");
     const char* cjk = "/System/Library/Fonts/CJKSymbolsFallback.ttc";
-    if (!std::filesystem::exists(cjk)) { check(true, "no CJK Symbols Fallback — skipping"); return; }
+    if (!std::filesystem::exists(cjk) || !captured(cjk)) { check(true, "no captured CJK Symbols Fallback — skipping"); return; }
     auto f = typo::Face::from_file(cjk, 0);
     check(f != nullptr && f->is_variable(), "CJK Symbols Fallback loads as a variable face");
     if (!f) return;
@@ -1507,9 +1573,46 @@ void test_named_weights() {
     near(f->wght_for(700.0f), 725.0f, 0.01f, "Bold (700) -> wght 725");
     near(f->wght_for(100.0f), 250.0f, 0.01f, "Thin (100) -> wght 250");
     near(f->wght_for(450.0f), 569.0f, 0.01f, "between named weights interpolates");
-    if (auto sf = typo::Face::from_file("/System/Library/Fonts/SFNS.ttf")) {
+    if (auto sf = captured("/System/Library/Fonts/SFNS.ttf") ? typo::Face::from_file("/System/Library/Fonts/SFNS.ttf") : nullptr) {
+        // CoreText resolves NSFontWeight* to each face's named instance:
+        // SF Medium is wght 510, Semibold 590, Ultralight (CSS 100) 30.9.
         near(sf->wght_for(400.0f), 400.0f, 0.01f, "SF Regular stays at 400");
-        near(sf->wght_for(500.0f), 500.0f, 0.01f, "SF keeps CSS weights verbatim");
+        near(sf->wght_for(500.0f), 510.0f, 0.01f, "SF Medium (500) -> its named instance, wght 510");
+        near(sf->wght_for(600.0f), 590.0f, 0.01f, "SF Semibold (600) -> wght 590");
+        near(sf->wght_for(100.0f), 30.925f, 0.01f, "CSS 100 is Apple's Ultralight, the lighter of the two");
+        near(sf->wght_for(200.0f), 110.725f, 0.01f, "CSS 200 is Apple's Thin");
+    }
+    if (auto ar = captured("/System/Library/Fonts/SFArabic.ttf") ? typo::Face::from_file("/System/Library/Fonts/SFArabic.ttf") : nullptr) {
+        near(ar->wght_for(700.0f), 711.111f, 0.01f, "SF Arabic Bold sits at wght 711.1, not SF's 700");
+    }
+    if (auto it = captured("/System/Library/Fonts/SFNSItalic.ttf") ? typo::Face::from_file("/System/Library/Fonts/SFNSItalic.ttf") : nullptr) {
+        // SF Italic's weights also move YAXS: Bold Italic is YAXS 430.
+        float yaxs = 0.0f;
+        it->weight_axes_for(700.0f, [&](std::uint32_t tag, float v) { if (tag == typo::ot::tag("YAXS")) yaxs = v; });
+        near(yaxs, 430.0f, 0.01f, "SF Bold Italic pins YAXS 430 with its weight");
+        near(it->wght_for(400.0f), 400.0f, 0.01f, "'Regular Italic' is the 400 instance");
+        // gvar output stays fractional (CoreText: 'o' top 1127.25 at
+        // Bold Italic, opsz 17), never rounded to font units.
+        const std::pair<std::uint32_t, float> bi[] = {{typo::var::tag_wght, 700.0f}, {typo::var::tag_opsz, 17.0f}, {typo::ot::tag("YAXS"), 430.0f}};
+        it->set_variations(bi);
+        const auto o = it->outline(it->glyph_for('o'));
+        float top = -1e9f;
+        for (const auto& c : o.contours) {
+            top = std::max(top, c.start.y);
+            for (const auto& sg : c.segments) top = std::max(top, sg.to.y);
+        }
+        near(top, 1127.25f, 0.01f, "varied glyf points keep their fraction (SF Bold Italic 'o' top 1127.25)");
+    }
+    // Italic SF uses the real italic design (SFNSItalic.ttf), as CoreText
+    // does, not a sheared upright.
+    if (auto stack = typo::system::default_stack(typo::FontConfig::coregraphics());
+        stack && stack->face_count() > 0 && stack->primary()->family() == "System Font") {
+        TextStyle ts;
+        ts.size = 16.0f;
+        ts.italic = true;
+        const auto r = stack->shaped("Hamburg", typo::detail::shape_params_of(ts));
+        check(!r->glyphs.empty() && stack->face_at(r->glyphs[0].face_index)->is_italic(),
+              "italic SF text is set in SF Italic");
     }
 }
 
@@ -1521,7 +1624,7 @@ void test_named_weights() {
 void test_hvgl() {
     section("hvgl outlines");
     const char* pf = "/System/Library/PrivateFrameworks/FontServices.framework/Resources/Reserved/PingFangUI.ttc";
-    if (!std::filesystem::exists(pf)) { check(true, "no PingFang UI — skipping"); return; }
+    if (!std::filesystem::exists(pf) || !captured(pf)) { check(true, "no captured PingFang UI — skipping"); return; }
     auto f = typo::Face::from_file(pf, 5);
     check(f != nullptr, "PingFang UI Display loads (hvgl outlines)");
     if (!f) return;
@@ -1728,7 +1831,7 @@ void test_coretext_parity() {
     // SF names itself "System Font" (SFNS.ttf); newer builds may say "SF Pro".
     const bool is_sf = f != nullptr && f->is_variable() &&
                        (f->family() == "System Font" || f->family().starts_with("SF Pro"));
-    if (!is_sf) {
+    if (!is_sf || !captured("/System/Library/Fonts/SFNS.ttf")) {
         std::printf("  (skipped: SF is not the primary UI face here)\n");
         return;
     }
@@ -1755,19 +1858,42 @@ void test_coretext_parity() {
               std::to_string(static_cast<int>(size)) + " px glyph positions match CoreText (worst " +
               std::to_string(worst) + " px)");
     }
-    TextStyle bold;
-    bold.size = 13.0f;
-    bold.weight = FontWeight::bold;
-    near(stack->shaped(s, typo::detail::shape_params_of(bold))->width, 149.963f, 0.01f,
+    TextStyle bold_style;
+    bold_style.size = 13.0f;
+    bold_style.weight = FontWeight::bold;
+    near(stack->shaped(s, typo::detail::shape_params_of(bold_style))->width, 149.963f, 0.01f,
          "bold kerning deltas follow the weight axis (line width matches CoreText)");
+
+    // Tracking goes on every advancing glyph and BEFORE mark attachment
+    // (CTRunGetPositions for SF Devanagari at 16 px): the u-sign under da
+    // sits at 8.992, not 9.36, and the line is 35.904 px wide.
+    TextStyle deva;
+    deva.size = 16.0f;
+    const auto dr = stack->shaped("\u0926\u0941\u0928\u093F\u092F\u093E", typo::detail::shape_params_of(deva));
+    if (dr && dr->glyphs.size() == 7 && stack->face_at(dr->glyphs[0].face_index)->file().postscript_name() == ".SFDevanagari-Regular") {
+        near(dr->glyphs[0].advance + dr->glyphs[1].offset.x, 8.992f, 0.002f, "Devanagari mark stays on its anchor under trak tracking");
+        near(dr->width, 35.904f, 0.002f, "tracked Devanagari line width matches CoreText");
+    }
 }
 
 /// Font smoothing and subpixel positioning: what makes the rasteriser draw
 /// what CoreText draws instead of a thin, grid-snapped approximation.
 void test_smoothing() {
     section("smoothing and subpixel phases");
-    auto stack = typo::system::default_stack();
+    // The macOS look is the platform default only on Apple; ask for it
+    // explicitly so these checks hold everywhere.
+    auto stack = typo::system::default_stack(typo::FontConfig::coregraphics());
     if (stack == nullptr || stack->face_count() == 0) return;
+    {
+        constexpr typo::FontConfig dflt{};
+        constexpr auto cg = typo::FontConfig::coregraphics();
+        constexpr auto pt = typo::FontConfig::portable();
+        check(cg.smoothing > 0.0f && cg.cg_flattening && pt.smoothing == 0.0f && !pt.cg_flattening,
+              "coregraphics() and portable() presets select the two looks");
+        check((dflt.smoothing > 0.0f) == typo::coregraphics_text_default &&
+                  dflt.cg_flattening == typo::coregraphics_text_default,
+              "FontConfig{} follows the platform's native look");
+    }
     const std::uint16_t gid = stack->face_at(0)->glyph_for('l');
     if (gid == 0) return;
 
@@ -1789,12 +1915,12 @@ void test_smoothing() {
     typo::FontConfig off = stack->config();
     off.smoothing = 0.0f;
     auto plain = typo::system::default_stack(off);
-    const double light = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, 4), *stack);
+    const double light_ink = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, 4), *stack);
     const double dark  = ink(stack->glyph(0, gid, 13.0f, 400.0f, {}, false, 0, 0), *stack);
     const double none  = ink(plain->glyph(0, gid, 13.0f), *plain);
-    check(light > none * 1.05, "smoothing thickens light text (" + std::to_string(light) +
+    check(light_ink > none * 1.05, "smoothing thickens light text (" + std::to_string(light_ink) +
                                    " vs " + std::to_string(none) + ")");
-    check(dark > none && dark < light, "dark text is grown less than light at 13 px");
+    check(dark > none && dark < light_ink, "dark text is grown less than light at 13 px");
     // CoreGraphics' growth: min(0.3, (0.0058 + 0.0025 level) px per px), level =
     // round(4 * linear luminance of the text colour).
     near(stack->smoothing_px(16.0f, 0), 0.0928f, 1e-4f, "black text at 16 px grows 0.0928 px");
@@ -1909,9 +2035,13 @@ void test_complex_text() {
         check(!ka->glyphs.empty() && ki->glyphs[1].glyph_id == ka->glyphs[0].glyph_id,
               "Devanagari pre-base matra is reordered before the consonant");
     }
-    // A conjunct forms: क्ष shapes to fewer glyphs than its 3 characters.
+    // A conjunct forms: क्ष shapes to fewer glyphs than its 3 characters
+    // (when an installed face covers Devanagari at all).
     const auto ksa = stack->shaped("\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\xb7", sp);
-    check(!ksa->glyphs.empty() && ksa->glyphs.size() < 3, "Devanagari conjunct क्ष forms a ligature");
+    if (ksa->glyphs.empty() || ksa->glyphs[0].missing)
+        std::printf("  note: no installed face covers Devanagari, skipping the conjunct check\n");
+    else
+        check(ksa->glyphs.size() < 3, "Devanagari conjunct क्ष forms a ligature");
 
     // Combining marks attach: ễ as e + U+0302 + U+0303 has the marks at
     // zero advance on the base's cluster.
@@ -2092,6 +2222,10 @@ void test_language() {
 void test_apple_cascade() {
     section("macOS fallback cascade (vs CoreText)");
 #if defined(__APPLE__)
+    // apple_cascade.hpp was derived from one macOS release; another ships a
+    // different fallback set (macOS 15 picks Arial Unicode MS for symbols
+    // that 27 sends to SF Devanagari and SF Tamil).
+    if (!captured("/System/Library/Fonts/SFIndia.ttc") || !captured("/System/Library/Fonts/SFNS.ttf")) return;
     auto stack = typo::system::default_stack();
     struct Want { char32_t cp; const char* family; };
     for (const Want w : {Want{0x5D0, ".SF Hebrew"}, Want{0x627, ".SF Arabic"}, Want{0x915, ".SF Devanagari"},
@@ -2117,6 +2251,28 @@ void test_apple_cascade() {
 /// face CTFontCreateUIFontForLanguage falls back to), measured on macOS.
 void test_emoji_placement() {
     section("emoji placement (vs CoreText)");
+    {
+        // scale_rgba is CoreGraphics' kCGInterpolationHigh, weights measured
+        // with one-hot rows through CGContextDrawImage: shrinking 20 -> 10,
+        // texel 8 lands 0.09 / 0.45 / -0.04 on outputs 3..5; enlarging
+        // 10 -> 16, texel 3 gives outputs 4, 5, 6 0.12, 0.94, 0.50.
+        const auto row = [](int sw, int dw, int k) {
+            std::vector<std::uint8_t> src(static_cast<std::size_t>(sw) * 4, 0);
+            for (int i = 0; i < sw; ++i) { src[i * 4 + 0] = i == k ? 228 : 128; src[i * 4 + 3] = 255; }
+            const auto o = mayag::typo::scale_rgba(src, sw, 1, dw, 1);
+            std::vector<float> w(static_cast<std::size_t>(dw));
+            for (int x = 0; x < dw; ++x) w[static_cast<std::size_t>(x)] = (static_cast<float>(o[x * 4]) - 128.0f) / 100.0f;
+            return w;
+        };
+        const auto d = row(20, 10, 8);
+        near(d[3], 0.09f, 0.025f, "shrink: Catmull-Rom tap on the near side");
+        near(d[4], 0.45f, 0.025f, "shrink: corner-aligned centre weight");
+        near(d[5], -0.04f, 0.025f, "shrink: negative lobe");
+        const auto u = row(10, 16, 3);
+        near(u[4], 0.12f, 0.02f, "enlarge: eased bilinear, 1/8 step");
+        near(u[5], 0.94f, 0.02f, "enlarge: eased bilinear, 15/16");
+        near(u[6], 0.50f, 0.02f, "enlarge: eased bilinear, half");
+    }
 #if defined(__APPLE__)
     using namespace mayag::typo;
     auto ui = Face::from_file("/System/Library/Fonts/Apple Color Emoji.ttc", 1);
