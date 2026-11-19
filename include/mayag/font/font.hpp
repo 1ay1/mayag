@@ -804,6 +804,7 @@ struct FontConfig {
         c.cg_flattening = true;
         c.cg_autohint   = true;
         c.oblique_fallback = false;
+        c.merge_glyphs  = true;
         return c;
     }
     /// The FreeType/DirectWrite look regardless of platform: exact outlines
@@ -816,6 +817,7 @@ struct FontConfig {
         c.cg_flattening = false;
         c.cg_autohint   = true;
         c.oblique_fallback = true;
+        c.merge_glyphs  = false;
         return c;
     }
 
@@ -871,6 +873,11 @@ struct FontConfig {
     /// Browsers and Pango do; CoreText leaves them upright, so the macOS
     /// look does too.
     bool       oblique_fallback = !coregraphics_text_default;
+    /// Draw runs of "connected language" faces (Arabic, Indic; MERG tables)
+    /// as one max()-combined bitmap where glyphs overlap, as CoreText does
+    /// (EnumerateOverlappingGlyphs). FreeType and DirectWrite composite each
+    /// glyph on its own, so the portable look does too.
+    bool       merge_glyphs = coregraphics_text_default;
     /// Glyphs untouched for this many frames become eviction candidates.
     std::uint64_t glyph_ttl_frames = 600;
 };
@@ -2453,7 +2460,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                 const auto& g0 = shaped.glyphs[placed[k].i];
                 const Face* face = stack_->face_at(g0.face_index);
                 std::size_t e = k + 1;
-                if (face != nullptr && face->merge_mode() != Face::MergeMode::none && !face->is_color()) {
+                if (face != nullptr && stack_->config().merge_glyphs && face->merge_mode() != Face::MergeMode::none && !face->is_color()) {
                     // Extend over the same face; MERG faces only while the
                     // table asks for the pair to be merged.
                     while (e < placed.size() && shaped.glyphs[placed[e].i].face_index == g0.face_index) {

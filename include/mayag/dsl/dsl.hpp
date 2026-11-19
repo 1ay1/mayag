@@ -313,6 +313,12 @@ template <typename Rules, NodeKind Kind, caps::Set Caps, typename... Kids>
 struct ElemR;
 
 namespace detail {
+/// The usual visitor-overload set.
+template <typename... F>
+struct overloaded : F... { using F::operator()...; };
+template <typename... F>
+overloaded(F...) -> overloaded<F...>;
+
 /// Add one child of any accepted kind to `parent`: a compile-time element
 /// (built), a runtime Node, a std::vector<Node> or a fragment (both spliced,
 /// so the parent's gap and wrap apply across them). Defined below.
@@ -614,6 +620,17 @@ template <Child... Kids>
             if (!first) n.style().layout.position = Positioning::absolute;
             first = false;
         };
+        const auto pin_elem = [&](auto& el) {
+            if (!first) el.style.mut().layout.position = Positioning::absolute;
+            first = false;
+        };
+        // One overload per element kind of a runtime range, chosen by overload
+        // resolution instead of `if constexpr`: MSVC instantiated the discarded
+        // branch of the generic version for vector<Node> (C2228).
+        const auto pin_one = detail::overloaded{
+            [&](Node& n) { pin_node(n); },
+            [&](auto& el) { pin_elem(el); },
+        };
         const auto pin = [&](auto& kid) {
             using K = std::remove_cvref_t<decltype(kid)>;
             // For a wrapped runtime node, mark the PAYLOAD absolute. Writing to
@@ -623,21 +640,13 @@ template <Child... Kids>
             if constexpr (requires { kid.payload.style(); }) {
                 pin_node(kid.payload);
             } else if constexpr (Element<K>) {
-                if (!first) kid.style.mut().layout.position = Positioning::absolute;
-                first = false;
+                pin_elem(kid);
             } else if constexpr (std::same_as<K, Node>) {
                 pin_node(kid);
             } else if constexpr (std::same_as<K, Fragment>) {
                 for (auto& n : kid.nodes) pin_node(n);
             } else {
-                for (auto& x : kid) {
-                    // Spelled on the TYPE, not the local: MSVC instantiated the
-                    // discarded branch of a requires-on-a-local inside this
-                    // generic lambda (C2228 on Node::style.mut()).
-                    using X = std::remove_cvref_t<decltype(x)>;
-                    if constexpr (requires(X& y) { y.style(); }) pin_node(x);
-                    else { if (!first) x.style.mut().layout.position = Positioning::absolute; first = false; }
-                }
+                for (auto& x : kid) pin_one(x);
             }
         };
         if constexpr (sizeof...(Kids) > 0) (pin(std::get<I>(e.kids.get())), ...);
