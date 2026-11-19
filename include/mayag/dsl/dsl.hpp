@@ -159,6 +159,15 @@ constexpr Diagnostic forbidden_capability(std::string_view mod, caps::Set presen
     return d;
 }
 
+/// static_assert with a computed message (P2741) where the compiler has it;
+/// elsewhere (MSVC) the same check with a fixed message, so the DSL still
+/// rejects the misuse, only less specifically.
+#if defined(__cpp_static_assert) && __cpp_static_assert >= 202306L
+#  define MAYAG_DSL_ASSERT(cond, msg, fallback) static_assert(cond, msg)
+#else
+#  define MAYAG_DSL_ASSERT(cond, msg, fallback) static_assert(cond, fallback)
+#endif
+
 // ════════════════════════════════════════════════════════════════════════
 // Modifier protocol
 // ════════════════════════════════════════════════════════════════════════
@@ -207,12 +216,15 @@ consteval void check_modifier() {
     if constexpr (requires { M::is_composite; }) {
         M::template check<C>();
     } else {
-        static_assert((M::needs & ~C) == 0,
-                      missing_capability(M::label, caps::first_missing(M::needs, C)));
-        static_assert(needs_any_of<M>() == 0 || (needs_any_of<M>() & C) != 0,
-                      missing_capability(M::label, needs_any_of<M>()));
-        static_assert((M::bans & C) == 0,
-                      forbidden_capability(M::label, M::bans & C));
+        MAYAG_DSL_ASSERT((M::needs & ~C) == 0,
+                         missing_capability(M::label, caps::first_missing(M::needs, C)),
+                         "mayag: this modifier is not valid on this element (missing capability)");
+        MAYAG_DSL_ASSERT(needs_any_of<M>() == 0 || (needs_any_of<M>() & C) != 0,
+                         missing_capability(M::label, needs_any_of<M>()),
+                         "mayag: this modifier is not valid on this element (missing capability)");
+        MAYAG_DSL_ASSERT((M::bans & C) == 0,
+                         forbidden_capability(M::label, M::bans & C),
+                         "mayag: this modifier conflicts with one already set on this element");
     }
 }
 
@@ -224,10 +236,12 @@ consteval void check_sequence() {
     if constexpr (Bans || requires { M::is_composite; }) {
         check_modifier<C, M>();
     } else {
-        static_assert((M::needs & ~C) == 0,
-                      missing_capability(M::label, caps::first_missing(M::needs, C)));
-        static_assert(needs_any_of<M>() == 0 || (needs_any_of<M>() & C) != 0,
-                      missing_capability(M::label, needs_any_of<M>()));
+        MAYAG_DSL_ASSERT((M::needs & ~C) == 0,
+                         missing_capability(M::label, caps::first_missing(M::needs, C)),
+                         "mayag: this modifier is not valid on this element (missing capability)");
+        MAYAG_DSL_ASSERT(needs_any_of<M>() == 0 || (needs_any_of<M>() & C) != 0,
+                         missing_capability(M::label, needs_any_of<M>()),
+                         "mayag: this modifier is not valid on this element (missing capability)");
     }
     if constexpr (sizeof...(Rest) > 0) check_sequence<C | M::gives, Bans, Rest...>();
 }

@@ -137,7 +137,7 @@ inline constexpr u32 FLAG_GLYPH_SDF = 128u;
 
 /// Rounded box with per-corner radii (tl, tr, br, bl). `p` is relative to the
 /// box CENTRE, `b` is the half-size. Inigo Quilez's formulation.
-[[nodiscard]] constexpr f32 rounded_box(vec2 p, vec2 b, vec4 radii) noexcept {
+[[nodiscard]] inline f32 rounded_box(vec2 p, vec2 b, vec4 radii) noexcept {
     f32 r = (p.x > 0.0f) ? ((p.y > 0.0f) ? radii.z : radii.y)
                          : ((p.y > 0.0f) ? radii.w : radii.x);
     r = mg::min(r, mg::min(b.x, b.y));
