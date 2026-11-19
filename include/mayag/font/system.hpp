@@ -19,9 +19,7 @@
 #include "../core/locale.hpp"
 #include "mapped_file.hpp"
 #include "last_resort.hpp"
-#if defined(__APPLE__)
-#include "apple_cascade.hpp"
-#endif
+#include "apple_cascade.hpp"   // used wherever the Mac font files are present
 
 #include <jaal/kernel/pool.hpp>
 
@@ -37,6 +35,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -716,7 +715,9 @@ class Database {
 #elif defined(_WIN32)
     return {"Segoe UI Variable Text", "Segoe UI", "Tahoma", "Arial"};
 #else
-    return {"Inter", "Cantarell", "Ubuntu", "Noto Sans", "DejaVu Sans", "Liberation Sans"};
+    // The macOS faces first when installed (SF Pro from developer.apple.com,
+    // or a Mac's System Font copied over): the macOS look is the default.
+    return {"System Font", "SF Pro Text", "SF Pro", "Inter", "Cantarell", "Ubuntu", "Noto Sans", "DejaVu Sans", "Liberation Sans"};
 #endif
 }
 
@@ -726,7 +727,7 @@ class Database {
 #elif defined(_WIN32)
     return {"Cascadia Mono", "Consolas", "Courier New"};
 #else
-    return {"JetBrains Mono", "Fira Code", "Source Code Pro", "DejaVu Sans Mono", "Liberation Mono"};
+    return {"SF Mono", "Menlo", "JetBrains Mono", "Fira Code", "Source Code Pro", "DejaVu Sans Mono", "Liberation Mono"};
 #endif
 }
 
@@ -737,7 +738,7 @@ class Database {
 #elif defined(_WIN32)
     return {"Segoe UI Emoji"};
 #else
-    return {"Noto Color Emoji", "Twemoji", "JoyPixels"};
+    return {"Apple Color Emoji", "Noto Color Emoji", "Twemoji", "JoyPixels"};
 #endif
 }
 
@@ -868,7 +869,6 @@ namespace detail {
     };
     const auto add_entry = [&](const FontEntry* e) {
         if (e == nullptr || already(e)) return false;
-#if defined(__APPLE__)
         // The UI font's emoji fallback is face 1 of Apple Color Emoji.ttc,
         // .AppleColorEmojiUI: the same images, spaced by its own UI `trak`
         // (CTFontCreateUIFontForLanguage cascades to it, never to face 0).
@@ -883,7 +883,6 @@ namespace detail {
                     return true;
                 }
         }
-#endif
         if (auto face = Face::from_file(e->path, e->face_index)) {
             added.emplace_back(e->path, e->face_index);
             stack->add(std::move(face));
@@ -935,8 +934,20 @@ namespace detail {
     //     to the very face CTFontCreateForString picks. Faces are found by
     //     PostScript family (variable fonts list named instances, so the
     //     measured index is not a face index), so a moved file still matches.
-#if defined(__APPLE__)
+    //     Not Apple-only: on Linux/Windows the same files, copied from a Mac
+    //     into any font directory (~/.local/share/fonts/...), are found by
+    //     file name and give the identical cascade. Absent files are skipped.
     if (primary.empty()) {
+        std::unordered_map<std::string, std::string> by_name;   // file name -> path, built once
+        const auto locate = [&](std::string_view measured) -> std::string {
+            std::error_code ec;
+            if (std::filesystem::exists(std::string{measured}, ec)) return std::string{measured};
+            if (by_name.empty())
+                for (const auto& e : db.entries())
+                    by_name.emplace(std::filesystem::path{e.path}.filename().string(), e.path);
+            const auto it = by_name.find(std::filesystem::path{std::string{measured}}.filename().string());
+            return it != by_name.end() ? it->second : std::string{};
+        };
         const auto family_of = [](std::string_view ps) {
             const auto dash = ps.rfind('-');
             return dash == std::string_view::npos ? ps : ps.substr(0, dash);
@@ -946,9 +957,8 @@ namespace detail {
         std::size_t entry_no = 0;
         for (const auto& c : apple::ui_cascade) {
             const std::size_t this_entry = entry_no++;
-            const std::string path{c.path};
-            std::error_code ec;
-            if (!std::filesystem::exists(path, ec)) continue;
+            const std::string path = locate(c.path);
+            if (path.empty()) continue;
             const std::string_view want = family_of(c.postscript);
             // Most files hold one face, or keep the measured index; try it
             // first, then every face of the collection.
@@ -1010,7 +1020,6 @@ namespace detail {
             }
         }
     }
-#endif
 
     // 2. One covering face for EVERY script the machine has a font for. This
     //    is what makes tofu structurally impossible: if any installed face
