@@ -138,6 +138,11 @@ struct MouseDown {
     MouseButton button = MouseButton::left;
     Mods        mods{};
     int         click_count = 1;   ///< 2 = double-click, 3 = triple
+    /// When the press happened, in seconds on the platform's input clock
+    /// (any epoch; only differences are used). < 0: unknown, the runtime
+    /// uses the time it handles the event -- which a busy frame delays, so
+    /// a backend that has the real timestamp should always pass it.
+    double      time = -1.0;
     friend constexpr bool operator==(const MouseDown&, const MouseDown&) = default;
 };
 

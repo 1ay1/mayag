@@ -139,6 +139,17 @@ class Headless {
         move_to(p);
         push(MouseDown{p, b, Mods{}, 1});
     }
+    /// `n` clicks at `p`, `gap` seconds apart, with NO platform click count
+    /// (like Wayland): the interaction layer must recognise the sequence
+    /// from timing and place, as it does for a real user. `mods` on every
+    /// press (alt-click, shift-click).
+    void timed_clicks(Vec2 p, int n, double gap = 0.12, Mods mods = {}, MouseButton b = MouseButton::left) {
+        move_to(p);
+        for (int i = 0; i < n; ++i) {
+            push(MouseDown{p, b, mods, 0, time_ + gap * static_cast<double>(i)});
+            push(MouseUp{p, b, mods});
+        }
+    }
     void release(Vec2 p, MouseButton b = MouseButton::left) {
         move_to(p);
         push(MouseUp{p, b, Mods{}});

@@ -313,17 +313,41 @@ class EditorState {
         const Range r = word_at(p);
         sels = {Selection{r.start, r.end}};
         primary = 0;
+        drag_unit_ = DragUnit::word;
+        drag_origin_ = r;
     }
     void select_line_at(int l) {
         l = std::clamp(l, 0, line_count() - 1);
         const Pos end = l + 1 < line_count() ? Pos{l + 1, 0} : Pos{l, line_len(l)};
         sels = {Selection{{l, 0}, end}};
         primary = 0;
+        drag_unit_ = DragUnit::line;
+        drag_origin_ = {{l, 0}, end};
     }
-    /// Drag: move the primary head, keeping its anchor.
+    /// A press: where a drag that follows will extend from, and by what.
+    /// count 1 places a caret (char drag), 2 selects the word (word drag),
+    /// 3+ the line (line drag) -- the behaviour of every desktop editor.
+    void press_at(Pos p, int count, bool extend = false, bool add = false) {
+        if (count >= 3) { select_line_at(clamp(p).line); return; }
+        if (count == 2) { select_word_at(p); return; }
+        drag_unit_ = DragUnit::character;
+        if (add) add_cursor_at(p); else set_cursor(p, extend);
+    }
+    /// Drag: move the primary head, keeping its anchor -- by characters, or
+    /// after a double/triple press by whole words/lines, always keeping the
+    /// word/line the drag started on selected.
     void drag_to(Pos p) {
         p = clamp(p);
-        sels[static_cast<std::size_t>(primary)].head = p;
+        Selection& s = sels[static_cast<std::size_t>(primary)];
+        if (drag_unit_ == DragUnit::character) {
+            s.head = p;
+        } else {
+            const Range here = drag_unit_ == DragUnit::word
+                ? word_at(p)
+                : Range{{p.line, 0}, p.line + 1 < line_count() ? Pos{p.line + 1, 0} : Pos{p.line, line_len(p.line)}};
+            if (p < drag_origin_.start) { s.anchor = drag_origin_.end; s.head = here.start; }
+            else { s.anchor = drag_origin_.start; s.head = std::max(here.end, drag_origin_.end); }
+        }
         normalize();
     }
     void select_all() { sels = {Selection{{0, 0}, doc_end()}}; primary = 0; }
@@ -1095,6 +1119,9 @@ class EditorState {
     mutable std::vector<Symbol> symbols_;
     mutable std::uint64_t    symbols_version_ = ~std::uint64_t{0};
     mutable const Language*  symbols_lang_ = nullptr;
+    enum class DragUnit : std::uint8_t { character, word, line };
+    DragUnit drag_unit_ = DragUnit::character;
+    Range    drag_origin_{};
     mutable int              symbols_tab_ = 0;
     mutable const std::string* symbols_lines_ = nullptr;
     mutable std::size_t      symbols_count_ = 0;

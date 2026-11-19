@@ -51,6 +51,8 @@ struct Gesture {
     /// should not have to enumerate every count. A text field wanting
     /// select-word on double and select-line on triple reads this directly.
     int           click_count = 1;
+    /// Modifiers held at the press (alt-click adds a caret, shift extends).
+    Mods          mods{};
 
     friend bool operator==(const Gesture&, const Gesture&) = default;
 };
@@ -68,6 +70,24 @@ class Interaction {
     /// Forget the press in progress: the window manager took the pointer
     /// (an interactive move), so no release will arrive for it.
     void cancel_press() noexcept { pressed_ = 0; dragged_ = false; }
+
+    /// Re-resolve hover against a NEW tree under a pointer that has not
+    /// moved: a menu closed, a list scrolled, a row was rebuilt. Without
+    /// this, hover is only updated by motion, so whatever was under the
+    /// pointer before the change stays lit (or a vanished overlay's node
+    /// stays "hovered") until the user wiggles the mouse. Not while a
+    /// button is held: a press keeps its node (pointer capture). Returns the
+    /// leave/enter gestures the change implies.
+    [[nodiscard]] std::vector<Gesture> rehover(const Node& root, bool pointer_inside = true) {
+        std::vector<Gesture> out;
+        if (pressed_ != 0) return out;
+        const std::uint64_t now_over = pointer_inside ? identify(root, cursor_) : 0;
+        if (now_over == hovered_) return out;
+        if (hovered_ != 0) out.push_back(Gesture{Gesture::Kind::leave, hovered_, cursor_});
+        hovered_ = now_over;
+        if (hovered_ != 0) out.push_back(Gesture{Gesture::Kind::enter, hovered_, cursor_});
+        return out;
+    }
 
     [[nodiscard]] bool is_hovered(std::uint64_t id) const noexcept {
         return id != 0 && hovered_ == id;
@@ -140,24 +160,51 @@ class Interaction {
             else if constexpr (std::is_same_v<T, MouseDown>) {
                 cursor_ = e.position;
                 const std::uint64_t hit = identify_control(root, e.position);
+                const double t = e.time >= 0.0 ? e.time : now_seconds;
 
                 pressed_           = hit;
                 press_inside_      = true;
                 press_origin_      = e.position;
                 press_button_      = e.button;
-                press_click_count_ = e.click_count;
+                press_mods_        = e.mods;
+                // The multi-click COUNT is decided here, at the press: an
+                // editor selects the word on the SECOND PRESS of a double
+                // click (and drags by words from there), not on its release.
+                // The platform's count when it has one; otherwise derived
+                // from this press's time and place against the last press.
+                press_click_count_ = e.click_count > 0 ? e.click_count : synthesise_count(hit, e.position, t, e.button);
+                last_press_time_   = t;
+                last_press_pos_    = e.position;
+                last_press_node_   = hit;
+                last_press_button_ = e.button;
+                last_press_count_  = press_click_count_;
                 dragged_           = false;
 
-                // Clicking anywhere moves keyboard focus there — including to
-                // nothing, which is how you dismiss a text field.
-                focused_ = hit;
+                // Clicking moves keyboard focus there -- including to nothing,
+                // which is how you dismiss a text field. Except MOMENTARY
+                // controls (buttons, tabs, menu items): as on macOS, GTK and
+                // the web, a mouse click does not leave them holding focus,
+                // or the next Space typed into the editor beside them would
+                // press them again. Tab still reaches every control.
+                {
+                    const Node* n = hit ? root.find(hit) : nullptr;
+                    using R = a11y::Role;
+                    const R r = n ? n->style().a11y_role : R::none;
+                    const bool momentary = r == R::button || r == R::tab || r == R::menu_item;
+                    focused_ = momentary ? 0 : hit;
+                    // ...but Tab continues FROM it (the sequential focus
+                    // navigation starting point of the HTML spec).
+                    tab_anchor_ = hit;
+                }
                 focus_by_key_ = false;
 
                 if (hit != 0) {
                     const Node* n = root.find(hit);
                     const Vec2 local = n ? e.position - n->frame().origin : Vec2{};
-                    out.push_back(Gesture{Gesture::Kind::press, hit, e.position, local,
-                                          Vec2{}, e.button});
+                    Gesture g{Gesture::Kind::press, hit, e.position, local, Vec2{}, e.button};
+                    g.click_count = press_click_count_;
+                    g.mods = e.mods;
+                    out.push_back(g);
                 }
             }
 
@@ -182,36 +229,21 @@ class Interaction {
                     // IS a click, on every platform. An earlier version also
                     // required `!dragged_`, which broke exactly that case.
                     if (hit == was) {
-                        // The click COUNT comes from the platform when the
-                        // platform knows it.
-                        //
-                        // macOS, Windows and X11 all track click sequences
-                        // themselves, using the user's configured interval
-                        // and their own notion of proximity. Re-deriving it
-                        // from timestamps means fighting the OS and losing:
-                        // the threshold is a system preference, it changes
-                        // while the app runs, and accessibility settings can
-                        // stretch it dramatically. An earlier version
-                        // decoded `clickCount` from NSEvent and then threw
-                        // it away to recompute a worse answer.
-                        //
-                        // The fallback below exists for backends that give
-                        // us nothing (a raw framebuffer, a test harness).
-                        const int count = press_click_count_ > 0
-                            ? press_click_count_
-                            : synthesise_count(was, e.position, now_seconds);
-
+                        // The click completes the press, so it carries the
+                        // count the press was given (see MouseDown above).
                         Gesture g{Gesture::Kind::click, was, e.position, local,
                                   Vec2{}, e.button};
-                        g.click_count = count;
+                        g.click_count = press_click_count_ > 0 ? press_click_count_ : 1;
+                        g.mods = press_mods_;
                         out.push_back(g);
-
-                        last_click_node_  = was;
-                        last_click_time_  = now_seconds;
-                        last_click_pos_   = e.position;
-                        last_click_count_ = count;
+                    } else {
+                        // Released elsewhere: a cancelled click does not
+                        // continue a sequence.
+                        last_press_count_ = 0;
                     }
                 }
+                // A drag ends any sequence: the next press is a fresh click.
+                if (dragged_) last_press_count_ = 0;
 
                 pressed_ = 0;
                 dragged_ = false;
@@ -263,7 +295,9 @@ class Interaction {
         collect_focusable(root, order);
         if (order.empty()) { focused_ = 0; return; }
 
-        auto it = std::find(order.begin(), order.end(), focused_);
+        const std::uint64_t from = focused_ != 0 ? focused_ : tab_anchor_;
+        tab_anchor_ = 0;
+        auto it = std::find(order.begin(), order.end(), from);
         if (it == order.end()) {
             focused_ = backward ? order.back() : order.front();
             return;
@@ -334,12 +368,21 @@ class Interaction {
     /// it counts to any depth rather than stopping at "double", so a text
     /// field can implement select-word / select-line / select-paragraph
     /// without the interaction layer needing to know those concepts exist.
-    [[nodiscard]] int synthesise_count(std::uint64_t node, Vec2 p, double now) const noexcept {
-        const bool continues =
-            node == last_click_node_ &&
-            (now - last_click_time_) < multi_click_seconds_ &&
-            (p - last_click_pos_).length() < multi_click_slop_;
-        return continues ? last_click_count_ + 1 : 1;
+    ///
+    /// A sequence is the SAME BUTTON pressed again within the interval and
+    /// the slop of the previous press. The node is compared only when both
+    /// presses hit a stable control: a view that rebuilt between the two
+    /// presses (a toggled row, a selection redraw -- what the first click
+    /// is usually FOR) may give the same place a fresh id, and requiring id
+    /// equality is exactly how a double click on a list row turned into two
+    /// singles. Position is what the user's hand did.
+    [[nodiscard]] int synthesise_count(std::uint64_t node, Vec2 p, double now, MouseButton b) const noexcept {
+        const bool same_place = (p - last_press_pos_).length() < multi_click_slop_ &&
+                                (node == last_press_node_ || node == 0 || last_press_node_ == 0 ||
+                                 (p - last_press_pos_).length() < multi_click_slop_ * 0.5f);
+        const bool continues = last_press_count_ > 0 && b == last_press_button_ && same_place &&
+                               now >= last_press_time_ && (now - last_press_time_) < multi_click_seconds_;
+        return continues ? last_press_count_ + 1 : 1;
     }
 
     static void hit_recurse(const Node& n, Vec2 p, std::uint64_t& found, bool controls_only) {
@@ -381,10 +424,14 @@ class Interaction {
     MouseButton   press_button_ = MouseButton::left;
     bool          dragged_ = false;
 
-    std::uint64_t last_click_node_ = 0;
-    double        last_click_time_ = -1.0;
-    Vec2          last_click_pos_{};
-    int           last_click_count_ = 0;
+    // The previous press, for multi-click sequences (synthesise_count).
+    std::uint64_t last_press_node_ = 0;
+    double        last_press_time_ = -1.0e9;
+    Vec2          last_press_pos_{};
+    MouseButton   last_press_button_ = MouseButton::left;
+    int           last_press_count_ = 0;
+    Mods          press_mods_{};
+    std::uint64_t tab_anchor_ = 0;   ///< where Tab continues from after a click on a momentary control
     /// Click count reported by the platform on the current press; 0 when the
     /// backend does not supply one.
     int           press_click_count_ = 0;

@@ -427,7 +427,7 @@ namespace sheets {
 }
 
 /// Glass: translucent, blurred surfaces over whatever is behind them, pill
-/// controls, and an accent that glows.
+/// controls, and a bright accent.
 [[nodiscard]] inline const Sheet& glass() {
     using namespace dsl;
     static const Sheet s = [] {
@@ -442,7 +442,6 @@ namespace sheets {
             when(state::disabled, opacity(0.45f)),
             transition());
         x.primary = extend(x.button, bg(var::accent.fade(0.9f)), border_color(var::accent), fg(var::on_accent),
-                           shadow(18.0f, var::accent.fade(0.55f), {0.0f, 4.0f}),
                            hovered(bg(var::accent), border_color(var::accent)));
         x.danger  = extend(x.button, bg(var::danger.fade(0.85f)), border_color(var::danger), fg(var::on_danger),
                            shadow(18.0f, var::danger.fade(0.5f), {0.0f, 4.0f}));
@@ -460,7 +459,7 @@ namespace sheets {
         x.knob  = look(radius(var::radius_full), bg(var::text_primary), elevation(var::depth(2)),
                        when(state::group(state::checked), bg(var::on_accent)), transition(var::motion_emphasis));
         x.slider_track = look(bg(var::text_primary.fade(0.12f)), radius(var::radius_full));
-        x.slider_fill  = look(bg(var::accent), radius(var::radius_full), shadow(10.0f, var::accent.fade(0.7f)));
+        x.slider_fill  = look(bg(var::accent), radius(var::radius_full));
         x.slider_knob  = look(bg(var::text_primary), radius(var::radius_full), elevation(var::depth(2)),
                               when(state::group(state::hover), scale(1.15f)),
                               when(state::group(state::pressed), scale(1.3f)),
@@ -470,7 +469,7 @@ namespace sheets {
     return s;
 }
 
-/// Terminal: square, outlined in the accent, phosphor glow, no fills until
+/// Terminal: square, outlined in the accent, no fills until
 /// you touch something.
 [[nodiscard]] inline const Sheet& terminal() {
     using namespace dsl;
@@ -480,7 +479,7 @@ namespace sheets {
         x.button = look(
             pad(var::space(1), var::space(2)), radius(0.0f),
             bg(var::accent.fade(0.0f)), border(var::line, var::accent), fg(var::accent),
-            hovered(bg(var::accent), fg(var::on_accent), shadow(14.0f, var::accent.fade(0.6f))),
+            hovered(bg(var::accent), fg(var::on_accent)),
             pressed(bg(var::accent_active), fg(var::on_accent)),
             focus_visible(border(var::line_focus, var::focus_ring)),
             when(state::disabled, opacity(0.4f)),
@@ -490,7 +489,7 @@ namespace sheets {
                            hovered(bg(var::danger), fg(var::on_danger)));
         x.ghost   = extend(x.button, border_color(var::accent.fade(0.3f)));
         x.card  = look(pad(var::space(2)), gap(var::space(1)), radius(0.0f), bg(var::surface),
-                       border(var::line, var::accent.fade(0.45f)), shadow(18.0f, var::accent.fade(0.10f)));
+                       border(var::line, var::accent.fade(0.45f)));
         x.panel = x.card;
         x.glass = x.card;
         x.track = look(radius(0.0f), bg(var::accent.fade(0.0f)), border(var::line, var::accent),
@@ -498,17 +497,17 @@ namespace sheets {
                        focus_visible(border(var::line_focus, var::focus_ring)),
                        when(state::disabled, opacity(0.4f)), transition());
         x.knob  = look(radius(0.0f), bg(var::accent.fade(0.5f)),
-                       when(state::group(state::checked), bg(var::accent), shadow(10.0f, var::accent.fade(0.8f))),
+                       when(state::group(state::checked), bg(var::accent)),
                        transition(var::motion_emphasis));
         x.slider_track = look(bg(var::accent.fade(0.18f)), radius(0.0f));
-        x.slider_fill  = look(bg(var::accent), radius(0.0f), shadow(8.0f, var::accent.fade(0.7f)));
-        x.slider_knob  = look(bg(var::accent), radius(0.0f), shadow(12.0f, var::accent.fade(0.8f)),
+        x.slider_fill  = look(bg(var::accent), radius(0.0f));
+        x.slider_knob  = look(bg(var::accent), radius(0.0f),
                               when(state::group(state::pressed), scale(1.25f)), transition());
 
         // Chrome: hairlines, square, and light only where the eye should go.
         x.strip = look(bg(var::surface));
         x.tab = look(
-            bg(var::surface.fade(0.0f)), fg(var::text_disabled),
+            bg(var::surface.fade(0.0f)), fg(var::text_secondary),
             inner_shadow(0.0f, var::border.fade(0.7f), {-1.0f, 0.0f}),
             hovered(bg(var::accent.fade(0.05f)), fg(var::text_secondary)),
             when(state::selected, bg(var::background), fg(var::text_primary)),
@@ -517,11 +516,11 @@ namespace sheets {
                       when(state::group(state::selected), bg(var::accent)),
                       transition());
         x.segment = look(
-            radius(0.0f), bg(var::accent.fade(0.0f)), fg(var::text_disabled),
+            radius(0.0f), bg(var::accent.fade(0.0f)), fg(var::text_secondary),
             border(var::line, var::accent.fade(0.0f)),
             hovered(bg(var::accent.fade(0.06f)), fg(var::text_primary)),
             when(state::checked, bg(var::accent.fade(0.13f)), fg(var::accent), border_color(var::accent.fade(0.65f)),
-                 shadow(12.0f, var::accent.fade(0.22f))),
+                 border_color(var::accent.fade(0.65f))),
             focus_visible(border_color(var::focus_ring)),
             transition());
         x.item = look(
@@ -533,6 +532,99 @@ namespace sheets {
         // Panes are cells of the split; the gutters (pane_split's divider)
         // draw the lines between them. Focus is the accent rail on the
         // focused pane's title strip (pane_frame), so the frame itself is bare.
+        x.pane = look(transition());
+        return x;
+    }();
+    return s;
+}
+
+/// Refined: the look of a serious tool. Flat; depth comes from TONE (each
+/// surface a small lightness step from the one behind it) and hairlines,
+/// never from glow. The accent marks state -- checked, selected, the
+/// primary action, focus -- and nothing else. Focus is a crisp 1px ring.
+/// Only things that float (menus, dialogs) cast a shadow, and it is
+/// neutral and soft. Every size and radius is a token, so density and
+/// roundness knobs reach it.
+[[nodiscard]] inline const Sheet& refined() {
+    using namespace dsl;
+    static const Sheet s = [] {
+        Sheet x = Sheet::standard();
+        x.label = look(font(var::font_md), weight(FontWeight::medium));
+
+        // ── buttons: quiet by default, one strong primary ────────────────
+        x.button = look(
+            pad(var::space(0.75f), var::space(1.5f)), radius(var::radius_sm),
+            bg(var::surface_raised), border(var::line, var::border), fg(var::text_primary),
+            hovered(bg(var::tint(var::text_primary, 0.94f)), border_color(var::border_strong)),
+            pressed(bg(var::surface)),
+            focus_visible(border(var::line, var::focus_ring)),
+            when(state::disabled, opacity(0.4f)),
+            transition());
+        x.primary = extend(x.button,
+            bg(var::accent), border_color(var::accent), fg(var::on_accent),
+            hovered(bg(var::accent_hover), border_color(var::accent_hover)),
+            pressed(bg(var::accent_active), border_color(var::accent_active)));
+        x.danger = extend(x.button, fg(var::danger),
+            hovered(bg(var::danger), border_color(var::danger), fg(var::on_danger)));
+        x.ghost = extend(x.button,
+            bg(var::surface_raised.fade(0.0f)), border_color(var::border.fade(0.0f)), fg(var::text_secondary),
+            hovered(bg(var::surface_raised), border_color(var::border), fg(var::text_primary)));
+
+        // ── surfaces ────────────────────────────────────────────────────
+        x.card  = look(pad(var::space(2)), gap(var::space(1)), bg(var::surface),
+                       border(var::line, var::border), radius(var::radius_md));
+        x.panel = look(pad(var::space(1.5f)), gap(var::space(1)), bg(var::surface),
+                       border(var::line, var::border_strong), radius(var::radius_md),
+                       shadow(32.0f, colors::black.fade(0.28f), {0.0f, 12.0f}, -8.0f),
+                       shadow(2.0f, colors::black.fade(0.18f), {0.0f, 1.0f}));
+        x.glass = x.panel;
+
+        // ── switch: a recessed track; the knob is a flat disc ─────────
+        x.track = look(
+            radius(var::radius_full), bg(var::background), border(var::line, var::border_strong),
+            hovered(border_color(var::text_disabled)),
+            when(state::checked, bg(var::accent), border_color(var::accent)),
+            when(state::checked && state::hover, bg(var::accent_hover), border_color(var::accent_hover)),
+            focus_visible(border(var::line, var::focus_ring)),
+            when(state::disabled, opacity(0.4f)),
+            transition());
+        x.knob = look(
+            radius(var::radius_full), bg(var::text_secondary),
+            when(state::group(state::hover), bg(var::text_primary)),
+            when(state::group(state::checked), bg(var::on_accent)),
+            transition(var::motion_ui));
+
+        // ── slider: a hairline track, the filled part in the accent ──────
+        x.slider_track = look(bg(var::border), radius(var::radius_full));
+        x.slider_fill  = look(bg(var::accent), radius(var::radius_full));
+        x.slider_knob  = look(
+            bg(var::text_primary), radius(var::radius_full), border(var::line_strong, var::background),
+            when(state::group(state::hover), bg(var::accent_hover)),
+            when(state::group(state::pressed), bg(var::accent)),
+            when(state::group(state::focus_visible), border(var::line, var::focus_ring)),
+            transition());
+
+        // ── chrome ──────────────────────────────────────────────────────
+        x.strip = look(bg(var::surface));
+        x.tab = look(
+            bg(var::surface.fade(0.0f)), fg(var::text_secondary),
+            inner_shadow(0.0f, var::border, {-1.0f, 0.0f}),
+            hovered(bg(var::surface_raised.fade(0.6f)), fg(var::text_primary)),
+            when(state::selected, bg(var::background), fg(var::text_primary)),
+            transition());
+        x.mark = look(bg(var::accent.fade(0.0f)), when(state::group(state::selected), bg(var::accent)), transition());
+        x.segment = look(
+            radius(var::radius_sm), bg(var::surface_raised.fade(0.0f)), fg(var::text_secondary),
+            border(var::line, var::border.fade(0.0f)),
+            hovered(fg(var::text_primary)),
+            when(state::checked, bg(var::surface_raised), fg(var::text_primary), border_color(var::border_strong)),
+            focus_visible(border_color(var::focus_ring)),
+            transition());
+        x.item = look(
+            radius(var::radius_sm), bg(var::surface_raised.fade(0.0f)), fg(var::text_secondary),
+            hovered(bg(var::surface_raised.fade(0.7f)), fg(var::text_primary)),
+            when(state::selected, bg(var::surface_raised), fg(var::text_primary)),
+            transition());
         x.pane = look(transition());
         return x;
     }();
@@ -563,7 +655,7 @@ namespace looks {
     return t;
 }
 
-/// Frosted glass over a deep background; glowing accent.
+/// Frosted glass over a deep background.
 [[nodiscard]] inline Theme glass(Seed s = {.accent = rgb<0x9B6CFF>, .mode = Mode::dark, .roundness = 1.6f,
                                            .depth = 1.4f, .motion = 0.9f}) {
     Theme t = derive(s);
@@ -572,6 +664,15 @@ namespace looks {
         t.surface    = mix(t.surface, t.accent, 0.06f);
     }
     t.sheet = &sheets::glass();
+    return t;
+}
+
+/// Refined: neutral, flat, precise. A low-chroma accent by default, so
+/// it reads as a tool, not a toy; surfaces stepped in Oklch lightness.
+[[nodiscard]] inline Theme refined(Seed s = {.accent = rgb<0x6E8BF5>, .mode = Mode::dark, .roundness = 0.7f,
+                                             .density = 0.9f, .depth = 0.0f}) {
+    Theme t = derive(s);
+    t.sheet = &sheets::refined();
     return t;
 }
 

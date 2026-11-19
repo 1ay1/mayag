@@ -3,6 +3,7 @@
 
 #include "control.hpp"
 
+#include <cctype>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,12 +17,18 @@ template <ControlContext C, Element Control>
 [[nodiscard]] inline Node setting_row(const C& c, std::string_view title_text,
                                       std::string_view description_text, Control control) {
     const Theme& t = c.theme;
-    return (h(v(text_owned(std::string{title_text}) | font(t.font_size) | fg(var::text_primary),
-                text_owned(std::string{description_text}) | font(t.font_size * 0.86f)
-                    | fg(var::text_secondary) | wrap_text | line_height(1.35f))
-                | gap(t.spaced(3)) | grow() | min_size(0, 0),
+    // A form row: the title in the body size at medium weight, its hint one
+    // step smaller and quieter; the control right-aligned on the row's
+    // centre line. The row tints on hover so the eye can track which
+    // control belongs to which label across a wide panel.
+    return (h(v(text_owned(std::string{title_text}) | font(t.font_size * 0.95f) | weight(FontWeight::medium)
+                    | fg(var::text_primary),
+                text_owned(std::string{description_text}) | font(t.font_size * 0.82f)
+                    | fg(var::text_disabled) | wrap_text | line_height(1.35f))
+                | gap(t.spaced(2)) | grow() | min_size(0, 0),
               v(std::move(control)) | align(Align::end))
-            | gap(t.spaced(24)) | align(Align::center) | pad(t.spaced(14), t.spaced(18)) | width(pct(100))).build();
+            | gap(t.spaced(24)) | align(Align::center) | pad(t.spaced(10), t.spaced(14)) | width(pct(100))
+            | bg(var::surface_raised.fade(0.0f)) | hovered(bg(var::surface_raised.fade(0.45f))) | transition()).build();
 }
 
 /// A titled card of setting rows with hairlines between them.
@@ -34,11 +41,13 @@ template <ControlContext C>
         if (i > 0) body.push_back((box() | height(1) | width(pct(100)) | bg(t.border.fade(0.7f))).build());
         body.push_back(std::move(rows[i]));
     }
-    return (v(text_owned(std::string{title_text}) | font(t.font_size * 0.78f) | semibold
-                  | tracking(0.8f) | fg(var::text_secondary) | pad(0, t.spaced(4)),
+    std::string caps;
+    for (char ch : title_text) caps.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+    return (v(text_owned(std::move(caps)) | font(t.font_size * 0.72f) | semibold
+                  | tracking(1.1f) | fg(var::text_disabled) | pad(0, t.spaced(2)),
               v(v_list(std::move(body)))
                   | width(pct(100))
-                  | bg(var::surface) | border(t.stroke(1), t.border) | radius(t.radius_medium))
+                  | bg(var::background) | border(t.stroke(1), t.border) | radius(t.radius_medium) | clip)
             | gap(t.spaced(8)) | width(pct(100))).build();
 }
 

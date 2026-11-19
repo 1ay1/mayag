@@ -50,9 +50,14 @@ struct Clicked {
     Vec2          local{};        ///< relative to the node's frame
     int           count = 1;
     MouseButton   button = MouseButton::left;
+    Mods          mods{};         ///< held at the press
 };
 struct Activated { std::uint64_t node = 0; };
-struct Pressed  { std::uint64_t node = 0; Vec2 local{}; MouseButton button = MouseButton::left; };
+/// `count` is the press's place in a multi-click sequence (2 on the second
+/// press of a double click), known AT the press -- so an editor can select
+/// the word on the second press, as every editor does, not on its release.
+struct Pressed  { std::uint64_t node = 0; Vec2 local{}; MouseButton button = MouseButton::left;
+                  int count = 1; Mods mods{}; };
 struct Released { std::uint64_t node = 0; Vec2 local{}; MouseButton button = MouseButton::left; };
 struct Entered  { std::uint64_t node = 0; };
 struct Left     { std::uint64_t node = 0; };

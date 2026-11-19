@@ -900,7 +900,33 @@ class WaylandWindow {
     }
 
     /// Wayland has no protocol for this; GTK and Qt both default to 400 ms.
-    [[nodiscard]] double double_click_interval() const noexcept { return 0.4; }
+    /// Wayland has no protocol for it, so read what the desktop says: the
+    /// MAYAG_DOUBLE_CLICK_MS override, else GNOME's / GTK's
+    /// org.gnome.desktop.peripherals.mouse double-click (via the
+    /// gtk-3.0/4.0 settings.ini gtk-double-click-time), else 500 ms -- the
+    /// common desktop default (400 ms reads a relaxed double click as two
+    /// singles, which users report as "double click doesn't work").
+    [[nodiscard]] double double_click_interval() const noexcept {
+        const auto ms_to_s = [](long ms) { return ms >= 150 && ms <= 2000 ? static_cast<double>(ms) / 1000.0 : 0.0; };
+        if (const char* v = std::getenv("MAYAG_DOUBLE_CLICK_MS"))
+            if (const double s = ms_to_s(std::strtol(v, nullptr, 10)); s > 0.0) return s;
+        const char* home = std::getenv("HOME");
+        const char* xdg = std::getenv("XDG_CONFIG_HOME");
+        const std::string base = xdg && *xdg ? std::string{xdg} : (home ? std::string{home} + "/.config" : std::string{});
+        for (const char* f : {"/gtk-4.0/settings.ini", "/gtk-3.0/settings.ini"}) {
+            if (base.empty()) break;
+            if (std::FILE* fp = std::fopen((base + f).c_str(), "r")) {
+                char line[256];
+                double found = 0.0;
+                while (std::fgets(line, sizeof line, fp))
+                    if (std::strncmp(line, "gtk-double-click-time", 21) == 0)
+                        if (const char* eq = std::strchr(line, '=')) found = ms_to_s(std::strtol(eq + 1, nullptr, 10));
+                std::fclose(fp);
+                if (found > 0.0) return found;
+            }
+        }
+        return 0.5;
+    }
 
     void set_title(std::string_view t) {
         if (toplevel_ == nullptr) return;
@@ -1937,7 +1963,10 @@ class WaylandWindow {
             // ran and a double-click was impossible on this backend. macOS
             // sends a real clickCount from NSEvent, which is why it worked
             // there and only there.
-            w->pending_.push_back(MouseDown{w->pointer_pos_, b, w->mods_, 0});
+            // The compositor's timestamp: a double click is timed from when
+            // the user pressed, not from when a (possibly busy) frame got
+            // round to handling the event.
+            w->pending_.push_back(MouseDown{w->pointer_pos_, b, w->mods_, 0, static_cast<double>(time_ms) / 1000.0});
         } else {
             w->pending_.push_back(MouseUp{w->pointer_pos_, b, w->mods_});
         }

@@ -843,14 +843,21 @@ class window_host {
             return;
         }
 
-        // Tab moves focus; Enter/Space on the focused node is a click.
+        // Tab moves focus; Enter/Space on the focused node is a click --
+        // EXCEPT in a text-entry node (a terminal, a code editor, a field:
+        // role text_field), which owns those keys the way a browser input
+        // owns Tab-in-a-textarea. A terminal that loses Tab to focus
+        // traversal cannot complete a path; one that turns Enter into a
+        // click cannot run a command.
         if (const auto* k = std::get_if<KeyEvent>(&ev)) {
-            if (k->key == Key::tab && !k->mods.ctrl && !k->mods.super) {
+            const Node* fnode = node_by_id(input_.focused());
+            const bool text_entry = fnode != nullptr && fnode->style().a11y_role == a11y::Role::text_field;
+            if (k->key == Key::tab && !k->mods.ctrl && !k->mods.super && !text_entry) {
                 input_.focus_next(tree_, k->mods.shift);
                 dirty_ = true;
             }
             if ((k->key == Key::enter || k->key == Key::space) &&
-                input_.focused() != 0 && k->mods.none()) {
+                input_.focused() != 0 && k->mods.none() && !text_entry) {
                 // An inline on_click on the focused node answers first: an
                 // element that says what a click does needs no on(Activated).
                 const auto before = handled_.size();
@@ -939,9 +946,9 @@ class window_host {
         for (const auto& g : gestures) {
             collect_handlers(g);
             switch (g.kind) {
-                case K::click:    (void)emit(cx, Clicked{g.node_id, g.local, g.click_count, g.button}); break;
+                case K::click:    (void)emit(cx, Clicked{g.node_id, g.local, g.click_count, g.button, g.mods}); break;
                 case K::activate: (void)emit(cx, Activated{g.node_id}); break;
-                case K::press:    (void)emit(cx, Pressed{g.node_id, g.local, g.button}); break;
+                case K::press:    (void)emit(cx, Pressed{g.node_id, g.local, g.button, g.click_count, g.mods}); break;
                 case K::release:  (void)emit(cx, Released{g.node_id, g.local, g.button}); break;
                 case K::enter:    (void)emit(cx, Entered{g.node_id}); break;
                 case K::leave:    (void)emit(cx, Left{g.node_id}); break;
@@ -966,24 +973,66 @@ class window_host {
     /// handled_ until a kernel is at hand (flush_handled).
     void collect_handlers(const Gesture& g) {
         using K = Gesture::Kind;
-        const Node* n = node_by_id(g.node_id);
-        if (n == nullptr || n->cascade() == nullptr || n->cascade()->handlers.empty()) return;
-        const auto run = [&](On on, const auto& event) {
-            for (const auto& h : n->cascade()->handlers)
-                if (h.on == on) {
-                    HandlerResult r = h.call(h.fn, &event);
-                    if (r.msg) handled_.push_back(std::move(r));
-                }
+        // BUBBLING, as in the DOM: a gesture runs the handlers of the node
+        // it landed on, else of its nearest ancestor that handles that kind
+        // of gesture. A widget can wrap a control and own its interaction
+        // (an editor wrapping code_view, a panel wrapping a list) without
+        // reaching into the control's children; the nearest handler wins,
+        // so an inner control's own handler is never doubled by an outer one.
+        // Enter/leave are about one node and do not bubble.
+        std::vector<const Node*> path;
+        const auto find_path = [&](const auto& self, const Node& n) -> bool {
+            path.push_back(&n);
+            if (n.style().id == g.node_id) return true;
+            for (const auto& k : n.children()) if (self(self, k)) return true;
+            path.pop_back();
+            return false;
         };
-        switch (g.kind) {
-            case K::click:    run(On::click, Clicked{g.node_id, g.local, g.click_count, g.button}); break;
-            case K::activate: run(On::click, Clicked{g.node_id, {}, 1, MouseButton::left}); break;
-            case K::press:    run(On::press, Pressed{g.node_id, g.local, g.button}); break;
-            case K::release:  run(On::release, Released{g.node_id, g.local, g.button}); break;
-            case K::enter:    run(On::enter, Entered{g.node_id}); break;
-            case K::leave:    run(On::leave, Left{g.node_id}); break;
-            case K::drag:     run(On::drag, Dragged{g.node_id, g.local, g.delta}); break;
-            case K::scroll:   run(On::scroll, Scrolled{g.node_id, g.local, g.delta}); break;
+        if (!find_path(find_path, tree_)) {
+            for (const auto& o : overlays_.items()) {
+                path.clear();
+                if (find_path(find_path, o.content)) break;
+            }
+            if (path.empty() || path.back()->style().id != g.node_id) return;
+        }
+        const bool bubbles = g.kind != K::enter && g.kind != K::leave;
+        const On on = [&] {
+            switch (g.kind) {
+                case K::click: case K::activate: return On::click;
+                case K::press:   return On::press;
+                case K::release: return On::release;
+                case K::enter:   return On::enter;
+                case K::leave:   return On::leave;
+                case K::drag:    return On::drag;
+                case K::scroll:  return On::scroll;
+            }
+            return On::click;
+        }();
+        for (auto it = path.rbegin(); it != path.rend(); ++it) {
+            const Node& n = **it;
+            const bool has = n.cascade() != nullptr &&
+                std::ranges::any_of(n.cascade()->handlers, [&](const auto& h) { return h.on == on; });
+            if (!has) { if (!bubbles) return; continue; }
+            // `local` relative to the node whose handler runs.
+            const Vec2 local = g.position - n.frame().origin;
+            const auto run = [&](const auto& event) {
+                for (const auto& h : n.cascade()->handlers)
+                    if (h.on == on) {
+                        HandlerResult r = h.call(h.fn, &event);
+                        if (r.msg) handled_.push_back(std::move(r));
+                    }
+            };
+            switch (g.kind) {
+                case K::click:    run(Clicked{g.node_id, local, g.click_count, g.button, g.mods}); break;
+                case K::activate: run(Clicked{g.node_id, {}, 1, MouseButton::left}); break;
+                case K::press:    run(Pressed{g.node_id, local, g.button, g.click_count, g.mods}); break;
+                case K::release:  run(Released{g.node_id, local, g.button}); break;
+                case K::enter:    run(Entered{g.node_id}); break;
+                case K::leave:    run(Left{g.node_id}); break;
+                case K::drag:     run(Dragged{g.node_id, local, g.delta}); break;
+                case K::scroll:   run(Scrolled{g.node_id, local, g.delta}); break;
+            }
+            break;
         }
         if (!handled_.empty()) dirty_ = true;
     }
@@ -1271,6 +1320,22 @@ class window_host {
         // layout changed a scroll region's size (a scrollbar drawn from last
         // frame's numbers is now stale and needs one more pass).
         update_cursor();   // the view may have changed under a still pointer
+        // ...and so may HOVER: a closed menu, a scrolled list, a rebuilt row.
+        // Re-resolve it against the new layout so the right thing is lit
+        // without a mouse wiggle; enter/leave handlers (on_enter/on_leave)
+        // run, queued like any handler message.
+        {
+            const Vec2 p = input_.cursor();
+            const Overlay* over = overlays_.empty() ? nullptr : overlays_.hit(p);
+            bool modal_blocks = false;
+            if (over == nullptr) for (const auto& o : overlays_.items()) modal_blocks = modal_blocks || o.dismiss == Dismiss::modal;
+            static const Node empty{};
+            const auto changed = input_.rehover(over ? over->content : (modal_blocks ? empty : tree_));
+            if (!changed.empty()) {
+                for (const auto& g : changed) collect_handlers(g);
+                dirty_ = true;
+            }
+        }
         motion_pending_ = animation_was_requested() || tracked_.animating() ||
                           take_scroll_geometry_changed() ||
                           // A `starting(...)` look lasts exactly one frame;
