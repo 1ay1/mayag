@@ -49,6 +49,7 @@
 #include "../backend/software.hpp"
 #include "../backend/tiled.hpp"
 #include "../core/geometry.hpp"
+#include "../core/locale.hpp"
 #include "../core/startup.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
@@ -1880,8 +1881,6 @@ class WaylandWindow {
     static void on_kb_repeat(void* data, wl::proxy*, std::int32_t rate,
                              std::int32_t delay) {
         Impl* w = self(data);
-        w->repeat_rate_  = rate;
-        w->repeat_delay_ = delay;
         w->repeat_.rate  = rate;
         w->repeat_.delay = delay;
         if (rate <= 0) w->repeat_.cancel();
@@ -2000,12 +1999,7 @@ class WaylandWindow {
             // them. Built once; a keymap change keeps it.
             if (compose_state_ == nullptr && xkb_.compose_table_new != nullptr &&
                 xkb_.compose_state_new != nullptr) {
-                const char* locale = nullptr;
-                for (const char* var : {"LC_ALL", "LC_CTYPE", "LANG"}) {
-                    const char* v = ::getenv(var);
-                    if (v != nullptr && *v != '\0') { locale = v; break; }
-                }
-                compose_table_ = xkb_.compose_table_new(xkb_context_, locale != nullptr ? locale : "C", 0);
+                compose_table_ = xkb_.compose_table_new(xkb_context_, mayag::locale::ctype_name().c_str(), 0);
                 if (compose_table_ != nullptr) compose_state_ = xkb_.compose_state_new(compose_table_, 0);
             }
         }
@@ -2259,8 +2253,6 @@ class WaylandWindow {
     std::uint64_t frames_presented_ = 0;
     std::uint64_t frames_skipped_   = 0;   ///< identical frames not resubmitted
     std::uint64_t frames_dropped_   = 0;
-    std::int32_t  repeat_rate_      = 25;
-    std::int32_t  repeat_delay_     = 600;
     wldetail::KeyRepeat repeat_{};
 
     // Input methods (zwp_text_input_v3). The manager is global; the text

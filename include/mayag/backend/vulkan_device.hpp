@@ -2107,9 +2107,7 @@ class VulkanDevice {
     /// Pixels a backdrop reads: its rect, plus the blur taps (+-r) and the
     /// footprint of the mip they're read from.
     [[nodiscard]] static vk::VkRect2D backdrop_region(const Instance& in, std::uint32_t vw, std::uint32_t vh) {
-        const float r = num::max(in.params.x, 0.0f);
-        const float pad = 1.5f * r + 4.0f;
-        const Rect area = Rect{in.rect.x, in.rect.y, in.rect.z, in.rect.w}.expand(pad);
+        const Rect area = Rect{in.rect.x, in.rect.y, in.rect.z, in.rect.w}.expand(kernel::backdrop_reach(in.params.x));
         return clamp_scissor(area, vw, vh);
     }
 

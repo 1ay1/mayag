@@ -795,29 +795,36 @@ enum class RenderMode : std::uint8_t {
 #endif
 inline constexpr bool coregraphics_text_default = MAYAG_COREGRAPHICS_TEXT != 0;
 
+/// A text look: the five settings that make text read as macOS or as
+/// FreeType/DirectWrite, defined ONCE here. FontConfig's defaults, its
+/// coregraphics()/portable() presets and the platform default all come from
+/// these two values.
+struct TextLook {
+    float smoothing;          ///< outline growth, device px per side (CoreGraphics: 0.30)
+    bool  cg_flattening;      ///< under-flatten curves as CoreGraphics does
+    bool  cg_autohint;        ///< vertical autohint at small ppem
+    bool  oblique_fallback;   ///< shear fallback faces inside italic runs
+    bool  merge_glyphs;       ///< dlng-driven glyph merging (CoreText)
+    [[nodiscard]] static constexpr TextLook coregraphics() noexcept { return {0.30f, true, true, false, true}; }
+    [[nodiscard]] static constexpr TextLook portable() noexcept { return {0.0f, false, true, true, false}; }
+    [[nodiscard]] static constexpr TextLook platform() noexcept {
+        return coregraphics_text_default ? coregraphics() : portable();
+    }
+};
+
 struct FontConfig {
     /// The macOS look regardless of platform: CoreGraphics smoothing,
     /// flattening and vertical autohinting, pixel-matched to CoreText.
-    [[nodiscard]] static constexpr FontConfig coregraphics() noexcept {
-        FontConfig c;
-        c.smoothing     = 0.30f;
-        c.cg_flattening = true;
-        c.cg_autohint   = true;
-        c.oblique_fallback = false;
-        c.merge_glyphs  = true;
-        return c;
-    }
+    [[nodiscard]] static constexpr FontConfig coregraphics() noexcept { return with_look(TextLook::coregraphics()); }
     /// The FreeType/DirectWrite look regardless of platform: exact outlines
     /// (no smoothing growth, accurate flattening) with light vertical
     /// hinting, i.e. FreeType's default "light" mode: x-height and cap
     /// height on whole pixels at small sizes, no horizontal distortion.
-    [[nodiscard]] static constexpr FontConfig portable() noexcept {
+    [[nodiscard]] static constexpr FontConfig portable() noexcept { return with_look(TextLook::portable()); }
+    [[nodiscard]] static constexpr FontConfig with_look(TextLook l) noexcept {
         FontConfig c;
-        c.smoothing     = 0.0f;
-        c.cg_flattening = false;
-        c.cg_autohint   = true;
-        c.oblique_fallback = true;
-        c.merge_glyphs  = false;
+        c.smoothing = l.smoothing; c.cg_flattening = l.cg_flattening; c.cg_autohint = l.cg_autohint;
+        c.oblique_fallback = l.oblique_fallback; c.merge_glyphs = l.merge_glyphs;
         return c;
     }
 
@@ -859,25 +866,25 @@ struct FontConfig {
     /// mayag's stems came out 0.6 px thinner than every native Mac app's and
     /// body text read thin and grey beside them. 0 turns it off; other
     /// values scale it.
-    float      smoothing              = coregraphics_text_default ? 0.30f : 0.0f;
+    float      smoothing              = TextLook::platform().smoothing;
     /// CoreGraphics' vertical autohinter (cg_autohint.hpp): at integer device
     /// ppem 7-18, x-height and cap height snap to whole pixels, as every
     /// macOS app draws them.
-    bool       cg_autohint = true;
+    bool       cg_autohint = TextLook::platform().cg_autohint;
     /// Flatten glyph curves exactly as CoreGraphics does (raster.hpp,
     /// cg_glyph_flattening): macOS under-flattens, and its glyphs carry
     /// that ink deficit (~4% on an SF 'o' at 24 px).
-    bool       cg_flattening = coregraphics_text_default;
+    bool       cg_flattening = TextLook::platform().cg_flattening;
     /// Shear fallback faces when an italic run falls back to a face with no
     /// italic of its own (SF Arabic or PingFang inside italic SF text).
     /// Browsers and Pango do; CoreText leaves them upright, so the macOS
     /// look does too.
-    bool       oblique_fallback = !coregraphics_text_default;
+    bool       oblique_fallback = TextLook::platform().oblique_fallback;
     /// Draw runs of "connected language" faces (Arabic, Indic; MERG tables)
     /// as one max()-combined bitmap where glyphs overlap, as CoreText does
     /// (EnumerateOverlappingGlyphs). FreeType and DirectWrite composite each
     /// glyph on its own, so the portable look does too.
-    bool       merge_glyphs = coregraphics_text_default;
+    bool       merge_glyphs = TextLook::platform().merge_glyphs;
     /// Glyphs untouched for this many frames become eviction candidates.
     std::uint64_t glyph_ttl_frames = 600;
 };

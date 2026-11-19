@@ -130,6 +130,22 @@ inline constexpr u32 FLAG_INSET     = 32u;
 inline constexpr u32 FLAG_DASHED    = 64u;
 inline constexpr u32 FLAG_GLYPH_SDF = 128u;
 
+// ── instance reach ──────────────────────────────────────────────────────────
+// How far past its rect an instance can paint, in px: a 1 px antialiasing
+// skirt, or a drop shadow's blur falloff. The GPU vertex shader grows its
+// quad by exactly this (transpiled), and the CPU rasteriser, the tile binner
+// and the GPU pass planner bound the instance with it, so no copy can drift.
+[[nodiscard]] inline f32 quad_pad(u32 kind, u32 flags, f32 param0) noexcept {
+    if (kind == KIND_SHADOW && (flags & FLAG_INSET) == 0u) return param0 * 3.0f + 2.0f;
+    return 1.0f;
+}
+
+/// How far past its rect a backdrop READS (blur taps at +-r plus the mip
+/// footprint they sample): the region captured before it draws.
+[[nodiscard]] inline f32 backdrop_reach(f32 radius) noexcept {
+    return 1.5f * mg::max(radius, 0.0f) + 4.0f;
+}
+
 // ── signed distance fields ──────────────────────────────────────────────
 // Negative inside, zero on the boundary, positive outside, unit gradient.
 // That last property is why `coverage()` is a correct analytic antialias at

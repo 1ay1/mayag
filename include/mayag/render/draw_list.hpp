@@ -18,6 +18,7 @@
 #include "../core/color.hpp"
 #include "../core/geometry.hpp"
 #include "../style/style.hpp"
+#include "kernel.hpp"   // KIND_* / FLAG_*: the one definition shader and CPU share
 
 #include <cstdint>
 #include <cstring>
@@ -70,16 +71,16 @@ struct ImageData {
 /// What the shader should compute for this instance. Kept in the instance data
 /// rather than in pipeline state, so different shapes still batch together.
 enum class ShapeKind : std::uint32_t {
-    rounded_box   = 0,
-    circle        = 1,
-    ring          = 2,   ///< annulus; `param0` is the ring width
-    line          = 3,   ///< capsule between two points
-    glyph         = 4,   ///< samples the glyph atlas as coverage
-    texture       = 5,   ///< samples an image
-    shadow        = 6,   ///< blurred box, analytic
-    arc           = 7,   ///< partial ring; param0/param1 are start/sweep radians
-    color_glyph   = 8,   ///< samples an RGBA colour-glyph atlas (emoji), untinted
-    backdrop      = 9,   ///< blurs the pixels already behind it (frosted glass)
+    rounded_box   = kernel::KIND_ROUNDED_BOX,
+    circle        = kernel::KIND_CIRCLE,
+    ring          = kernel::KIND_RING,   ///< annulus; `param0` is the ring width
+    line          = kernel::KIND_LINE,   ///< capsule between two points
+    glyph         = kernel::KIND_GLYPH,   ///< samples the glyph atlas as coverage
+    texture       = kernel::KIND_TEXTURE,   ///< samples an image
+    shadow        = kernel::KIND_SHADOW,   ///< blurred box, analytic
+    arc           = kernel::KIND_ARC,   ///< partial ring; param0/param1 are start/sweep radians
+    color_glyph   = kernel::KIND_COLOR_GLYPH,   ///< samples an RGBA colour-glyph atlas (emoji), untinted
+    backdrop      = kernel::KIND_BACKDROP,   ///< blurs the pixels already behind it (frosted glass)
 };
 
 /// One GPU instance. Layout is deliberately 16-byte-aligned vec4 groups so the
@@ -118,15 +119,15 @@ static_assert(std::is_trivially_copyable_v<Instance>);
 
 namespace instance_flags {
 inline constexpr std::uint32_t none              = 0;
-inline constexpr std::uint32_t gradient          = 1u << 0;
-inline constexpr std::uint32_t gradient_radial   = 1u << 1;
-inline constexpr std::uint32_t gradient_angular  = 1u << 2;
-inline constexpr std::uint32_t gradient_srgb     = 1u << 3;
-inline constexpr std::uint32_t stroke_only       = 1u << 4;   ///< hollow: border, no fill
-inline constexpr std::uint32_t inset             = 1u << 5;   ///< inner shadow
-inline constexpr std::uint32_t dashed            = 1u << 6;
+inline constexpr std::uint32_t gradient          = kernel::FLAG_GRADIENT;
+inline constexpr std::uint32_t gradient_radial   = kernel::FLAG_RADIAL;
+inline constexpr std::uint32_t gradient_angular  = kernel::FLAG_ANGULAR;
+inline constexpr std::uint32_t gradient_srgb     = kernel::FLAG_SRGB;
+inline constexpr std::uint32_t stroke_only       = kernel::FLAG_STROKE;   ///< hollow: border, no fill
+inline constexpr std::uint32_t inset             = kernel::FLAG_INSET;   ///< inner shadow
+inline constexpr std::uint32_t dashed            = kernel::FLAG_DASHED;
 /// This glyph's atlas entry is a distance field, not coverage.
-inline constexpr std::uint32_t glyph_sdf         = 1u << 7;
+inline constexpr std::uint32_t glyph_sdf         = kernel::FLAG_GLYPH_SDF;
 }  // namespace instance_flags
 
 /// A contiguous run of instances sharing render state.

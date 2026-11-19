@@ -22,6 +22,8 @@
 #include <mayag/backend/vulkan.hpp>
 #endif
 
+#include <mayag/render/shader_source.hpp>
+#include <string_view>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -128,7 +130,47 @@ class ChalkBackend final : public backend::Device {
 
 }  // namespace
 
+// ── one source of truth: the hand-written Metal shader ────────────────────────
+//
+// Vulkan's shader is transpiled from render/kernel.hpp; the MSL in
+// shader_source.hpp is still hand-written (it cannot be built or tested off
+// Apple). Every constant it spells out must equal the kernel's, checked here
+// on EVERY platform, so a kind/flag renumbered in the kernel fails CI on
+// Linux instead of silently mis-shading on a Mac.
+static int check_metal_mirrors() {
+    namespace k = mayag::kernel;
+    const std::string_view msl = mayag::render::shaders::msl_shaders;
+    struct C { const char* name; unsigned v; };
+    const C want[] = {
+        {"KIND_ROUNDED_BOX", k::KIND_ROUNDED_BOX}, {"KIND_RING", k::KIND_RING}, {"KIND_LINE", k::KIND_LINE},
+        {"KIND_GLYPH", k::KIND_GLYPH}, {"KIND_TEXTURE", k::KIND_TEXTURE}, {"KIND_SHADOW", k::KIND_SHADOW},
+        {"KIND_ARC", k::KIND_ARC}, {"KIND_COLOR_GLYPH", k::KIND_COLOR_GLYPH},
+        {"FLAG_GRADIENT", k::FLAG_GRADIENT}, {"FLAG_RADIAL", k::FLAG_RADIAL}, {"FLAG_ANGULAR", k::FLAG_ANGULAR},
+        {"FLAG_SRGB", k::FLAG_SRGB}, {"FLAG_STROKE", k::FLAG_STROKE}, {"FLAG_INSET", k::FLAG_INSET},
+        {"FLAG_GLYPH_SDF", k::FLAG_GLYPH_SDF},
+    };
+    int bad = 0;
+    for (const C& c : want) {
+        const std::string needle = std::string{c.name} + " = " + std::to_string(c.v) + "u";
+        if (msl.find(needle) == std::string_view::npos) {
+            std::printf("  FAIL  Metal shader's %s is not the kernel's %u\n", c.name, c.v);
+            ++bad;
+        }
+    }
+    // The vertex quad pad: kernel::quad_pad, spelled with the same numbers.
+    const std::string pad = "(I.kind == " + std::to_string(k::KIND_SHADOW) + "u && (I.flags & " +
+                            std::to_string(k::FLAG_INSET) + "u) == 0u) ? I.params.x * 3.0 + 2.0 : 1.0";
+    if (msl.find(pad) == std::string_view::npos || k::quad_pad(k::KIND_SHADOW, 0u, 4.0f) != 14.0f ||
+        k::quad_pad(k::KIND_GLYPH, 0u, 4.0f) != 1.0f) {
+        std::printf("  FAIL  Metal shader's quad pad differs from kernel::quad_pad\n");
+        ++bad;
+    }
+    std::printf("metal shader mirrors kernel.hpp: %s\n", bad == 0 ? "ok" : "DRIFT");
+    return bad;
+}
+
 int main() {
+    if (check_metal_mirrors() != 0) return 1;
     std::printf("mayag backend boundary\n======================\n");
 
     // ── what the core knows ─────────────────────────────────────────

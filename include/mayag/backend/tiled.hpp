@@ -255,10 +255,7 @@ class Tiled {
     /// Screen-space extent an instance can touch, including blur falloff.
     [[nodiscard]] static Rect instance_bounds(const Instance& inst) {
         const Rect shape{inst.rect.x, inst.rect.y, inst.rect.z, inst.rect.w};
-        const auto kind = static_cast<ShapeKind>(inst.kind);
-        float pad = 1.0f;
-        if (kind == ShapeKind::shadow && (inst.flags & instance_flags::inset) == 0u) pad = inst.params.x * 3.0f + 2.0f;
-        return shape.expand(pad);
+        return shape.expand(kernel::quad_pad(inst.kind, inst.flags, inst.params.x));
     }
 
     /// True when this instance paints the ENTIRE tile at full opacity, so

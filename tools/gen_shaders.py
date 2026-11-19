@@ -258,7 +258,7 @@ void main() {
     // Shadows need the quad grown so the blur is not clipped at the edge, and
     // every other quad gets a 1px skirt so an antialiased edge has somewhere
     // to ramp. That padding is GEOMETRY ONLY.
-    float pad = (i_meta.x == 6u && (i_meta.y & 32u) == 0u) ? i_params.x * 3.0 + 2.0 : 1.0;
+    float pad = quad_pad(i_meta.x, i_meta.y, i_params.x);
 
     vec2 shape_half = i_rect.zw * 0.5;
     vec2 half_size  = shape_half + vec2(pad);
@@ -393,7 +393,10 @@ def emit_glsl():
     prog = prog.replace("Shaded result;", "Shaded result; result.discarded = false;")
     prog = prog.replace("{ result.discarded = true; return result; }",
                         "{ result.discarded = true; return result; }")
-    return GLSL_VERTEX, GLSL_FRAGMENT_HEAD + maths + prog + GLSL_FRAGMENT_MAIN
+    vert = GLSL_VERTEX.replace("void main() {",
+                               "// ── GENERATED from kernel.hpp: constants and instance reach ──\n"
+                               + translate(constants_block(read_kernel()), "glsl") + "\nvoid main() {", 1)
+    return vert, GLSL_FRAGMENT_HEAD + maths + prog + GLSL_FRAGMENT_MAIN
 
 
 # ── SPIR-V ──────────────────────────────────────────────────────────────

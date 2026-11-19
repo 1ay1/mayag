@@ -16,6 +16,7 @@
 // the first few kilobytes of each, not the whole 20 MB CJK file.
 
 #include "font.hpp"
+#include "../core/locale.hpp"
 #include "mapped_file.hpp"
 #include "last_resort.hpp"
 #if defined(__APPLE__)
@@ -753,22 +754,9 @@ class Database {
 
 namespace detail {
 
-/// The user's language for font selection, lowercase BCP-47-ish ("zh-tw",
-/// "ja", "en-us"): LANGUAGE's first entry, then LC_ALL, LC_CTYPE, LANG, as
-/// glibc and fontconfig read them. "C"/"POSIX" mean no preference.
-[[nodiscard]] inline std::string user_language() {
-    for (const char* var : {"LANGUAGE", "LC_ALL", "LC_CTYPE", "LANG"}) {
-        const char* v = std::getenv(var);
-        if (v == nullptr || *v == '\0') continue;
-        std::string s{v};
-        if (const auto colon = s.find(':'); colon != std::string::npos) s.resize(colon);
-        if (const auto dot = s.find_first_of(".@"); dot != std::string::npos) s.resize(dot);
-        if (s.empty() || s == "C" || s == "POSIX") continue;
-        for (char& c : s) c = c == '_' ? '-' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return s;
-    }
-    return {};
-}
+/// The user's language for font selection (core/locale.hpp, shared with
+/// Compose).
+[[nodiscard]] inline std::string user_language() { return mayag::locale::language(); }
 
 /// Noto CJK region for Han text, from the user's language: the same
 /// codepoint is drawn differently in China, Taiwan, Hong Kong, Japan and

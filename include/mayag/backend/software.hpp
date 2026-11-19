@@ -111,22 +111,25 @@ class Framebuffer {
     /// and background colour tried, including coloured text, where blending
     /// in linear light is off by up to 30/255 at glyph edges).
     void blend_text(int x, int y, Vec4 src_premul, float cov) noexcept {
-        if (cov <= 0.0f) return;
-        const float a = src_premul.w;
-        if (a <= 0.0f) return;
+        if (cov <= 0.0f || src_premul.w <= 0.0f) return;
         Vec4& dst = at(x, y);
-        const float t = num::saturate(cov * a);
+        // THE formula is kernel::encoded_text_source: the encoded source of a
+        // premultiplied "over" in encoded space, which is what the GPU's
+        // fixed-function blend applies on a UNORM view. Here the same "over"
+        // is done in software on the encoded destination, so CPU and GPU
+        // cannot disagree on the blend.
+        const Vec4 s = kernel::encoded_text_source(cov, src_premul);
         const auto enc = [](float v) { return kernel::linear_to_srgb(num::saturate(v)); };
         const auto dec = [](float v) { return kernel::srgb_to_linear(num::saturate(v)); };
         // Destination is premultiplied over an opaque backdrop in practice;
-        // un-premultiply defensively so a translucent layer still blends
-        // its colour, then keep its alpha moving toward the source's.
+        // un-premultiply defensively so a translucent layer still blends its
+        // colour, then keep its alpha moving toward the source's.
         const float da = dst.w > 1e-6f ? dst.w : 1.0f;
-        const float sr = src_premul.x / a, sg = src_premul.y / a, sb = src_premul.z / a;
-        const float r = dec(enc(dst.x / da) + (enc(sr) - enc(dst.x / da)) * t);
-        const float g = dec(enc(dst.y / da) + (enc(sg) - enc(dst.y / da)) * t);
-        const float b = dec(enc(dst.z / da) + (enc(sb) - enc(dst.z / da)) * t);
-        const float oa = dst.w + (1.0f - dst.w) * t;
+        const float k = 1.0f - s.w;
+        const float r = dec(s.x + enc(dst.x / da) * k);
+        const float g = dec(s.y + enc(dst.y / da) * k);
+        const float b = dec(s.z + enc(dst.z / da) * k);
+        const float oa = dst.w + (1.0f - dst.w) * s.w;
         dst = Vec4{r * oa, g * oa, b * oa, oa};
     }
 
@@ -371,8 +374,7 @@ class Software {
 
         // Grow the iteration bounds for blurred shapes so the falloff is not
         // cut off at the geometric edge.
-        float pad = 1.0f;
-        if (kind == ShapeKind::shadow && (inst.flags & instance_flags::inset) == 0u) pad = inst.params.x * 3.0f + 2.0f;
+        const float pad = kernel::quad_pad(inst.kind, inst.flags, inst.params.x);
 
         // Snap THEN clip: the scissor is integer and inside the framebuffer,
         // so the pixel bounds can never leave it (clipping first and snapping

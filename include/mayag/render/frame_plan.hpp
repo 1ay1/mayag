@@ -116,10 +116,8 @@ class FramePlanner {
     /// intersected with its batch clip and the target.
     [[nodiscard]] static Box bounds(const Instance& in, const Batch& b, std::uint32_t vw, std::uint32_t vh) noexcept {
         const auto kind = static_cast<ShapeKind>(in.kind);
-        float pad = 1.0f;
-        if (kind == ShapeKind::shadow && (in.flags & instance_flags::inset) == 0)
-            pad = in.params.x * 3.0f + 2.0f;
-        if (kind == ShapeKind::backdrop) pad = 1.5f * std::max(in.params.x, 0.0f) + 4.0f;
+        float pad = kernel::quad_pad(in.kind, in.flags, in.params.x);
+        if (kind == ShapeKind::backdrop) pad = kernel::backdrop_reach(in.params.x);
         Box r{in.rect.x - pad, in.rect.y - pad, in.rect.x + in.rect.z + pad, in.rect.y + in.rect.w + pad};
         const Rect& c = b.clip;
         if (c.size.x < 1e8f && c.size.y < 1e8f && c.size.x > 0.0f && c.size.y > 0.0f) {
