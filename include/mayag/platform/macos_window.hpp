@@ -536,6 +536,15 @@ class MacWindow {
 #endif
         images_.upload(id, std::move(img));
     }
+    /// Rows of an uploaded image moved in place on the GPU (Metal). false:
+    /// not possible here; send the pixels instead.
+    bool move_image_rows(std::uint32_t id, int x, int y, int w, int h, int dy) {
+#if defined(MAYAG_WITH_METAL)
+        if (gpu_enabled_) return gpu_.move_image_rows(id, x, y, w, h, dy);
+#endif
+        (void)id, (void)x, (void)y, (void)w, (void)h, (void)dy;
+        return false;
+    }
     /// Rewrite rectangles of an uploaded image in place (Metal). false:
     /// upload it whole instead.
     bool update_image_regions(std::uint32_t id, int w, int h, const std::vector<std::array<int, 4>>& rects,

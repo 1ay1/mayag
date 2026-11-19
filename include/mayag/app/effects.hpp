@@ -69,6 +69,9 @@ using release_image = jaal::pure_fx<ReleaseImage, "release_image">;
 /// cannot happen (first frame, a resize, a backend without it).
 struct PatchData {
     int width = 0, height = 0;
+    /// Rows moved first (x, y, w, h, dy: rows y..y+h take what was at
+    /// row + dy), on the GPU where the window can (move_image_rows).
+    std::optional<std::array<int, 5>> move;
     std::vector<std::array<int, 4>> rects;  // x, y, w, h
     std::vector<std::uint8_t> pixels;
     std::optional<jaal::shared<ImageData>> whole;

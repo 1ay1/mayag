@@ -527,6 +527,50 @@ class MetalDevice {
         return true;
     }
 
+    /// Rows y..y+h (columns x..x+w) of image `key` take what was at row + dy,
+    /// on the GPU: the pixels already there move, nothing crosses from the
+    /// CPU. Through a scratch texture (a blit cannot read and write
+    /// overlapping parts of one texture). Ordered on the queue ahead of the
+    /// next frame's draw, and ahead of any replaceRegion after it (waits).
+    bool move_image_rows(std::uint32_t key, int x, int y, int w, int h, int dy) {
+        using namespace mtl;
+        const auto it = images_.find(key);
+        if (it == images_.end() || it->second.texture == nullptr || w <= 0 || h <= 0) return false;
+        const int iw = it->second.w, ih = it->second.h;
+        if (x < 0 || y < 0 || x + w > iw || y + h > ih || y + dy < 0 || y + h + dy > ih) return false;
+        if (scratch_ == nullptr || scratch_w_ < w || scratch_h_ < h) {
+            if (scratch_ != nullptr) msg<void>(scratch_, sel("release"));
+            id desc = msg_cls<id>(objc_getClass("MTLTextureDescriptor"),
+                                  sel("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
+                                  static_cast<std::uint64_t>(71), static_cast<std::uint64_t>(std::max(w, iw)),
+                                  static_cast<std::uint64_t>(std::max(h, ih)), static_cast<BOOL>(NO));
+            msg<void>(desc, sel("setStorageMode:"), static_cast<std::uint64_t>(2));  // private: GPU only
+            scratch_ = msg<id>(device_, sel("newTextureWithDescriptor:"), desc);
+            if (scratch_ == nullptr) return false;
+            scratch_w_ = std::max(w, iw);
+            scratch_h_ = std::max(h, ih);
+        }
+        struct Origin { std::uint64_t x, y, z; };
+        struct Size { std::uint64_t w, h, d; };
+        const Size size{static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h), 1};
+        id cmd = msg<id>(queue_, sel("commandBuffer"));
+        id blit = msg<id>(cmd, sel("blitCommandEncoder"));
+        const SEL copy = sel("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:"
+                             "toTexture:destinationSlice:destinationLevel:destinationOrigin:");
+        msg<void>(blit, copy, it->second.texture, std::uint64_t{0}, std::uint64_t{0},
+                  Origin{static_cast<std::uint64_t>(x), static_cast<std::uint64_t>(y + dy), 0}, size, scratch_,
+                  std::uint64_t{0}, std::uint64_t{0}, Origin{0, 0, 0});
+        msg<void>(blit, copy, scratch_, std::uint64_t{0}, std::uint64_t{0}, Origin{0, 0, 0}, size, it->second.texture,
+                  std::uint64_t{0}, std::uint64_t{0},
+                  Origin{static_cast<std::uint64_t>(x), static_cast<std::uint64_t>(y), 0});
+        msg<void>(blit, sel("endEncoding"));
+        msg<void>(cmd, sel("commit"));
+        // replaceRegion (the tiles after this move) is a CPU write, not on
+        // the queue: the move must be done before it lands.
+        msg<void>(cmd, sel("waitUntilCompleted"));
+        return true;
+    }
+
     void release_image(std::uint32_t key) {
         using namespace mtl;
         const auto it = images_.find(key);
@@ -963,6 +1007,8 @@ class MetalDevice {
         int w = 0, h = 0;
     };
     std::map<std::uint32_t, Image> images_;  // image(id) textures
+    id            scratch_ = nullptr;          // move_image_rows' staging texture
+    int           scratch_w_ = 0, scratch_h_ = 0;
     std::uint32_t atlas_generation_ = 0;
     bool          atlas_uploaded_ = false;
     Vec2          viewport_{};
