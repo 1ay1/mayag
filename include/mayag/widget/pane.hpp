@@ -65,8 +65,15 @@ template <ControlContext C>
             | id_of(id)).build();
 }
 
-template <ControlContext C>
-[[nodiscard]] inline Node pane_split(const C& c, std::string_view id, Axis axis, float ratio, Node first, Node second) {
+/// `divider_mods...` are responders piped onto the divider: the split's
+/// whole interaction can travel with it instead of living in on(Dragged):
+///
+///     pane_split(c, "s", axis, r, a, b,
+///                on_drag([](const Dragged& d) { return Nudge{d.delta.x}; }),
+///                on_click([](const Clicked& k) { return k.count == 2 ? Even{} : ...; }))
+template <ControlContext C, Responder... Mods>
+[[nodiscard]] inline Node pane_split(const C& c, std::string_view id, Axis axis, float ratio, Node first, Node second,
+                                     Mods... divider_mods) {
     const Theme& t = c.theme;
     const auto did = part_id(id, part_bar);
     const bool hot = c.hovered(did) || c.pressed(did);
@@ -77,6 +84,7 @@ template <ControlContext C>
            | width(5) | height(pct(100)) | center | cursor(CursorShape::resize_h) | role(a11y::Role::separator) | id_of(id, part_bar)).build()
         : (v(node((box() | height(hot ? 2.0f : 1.0f) | width(pct(100)) | bg(hot ? t.accent : t.border)).build()))
            | height(5) | width(pct(100)) | center | cursor(CursorShape::resize_v) | role(a11y::Role::separator) | id_of(id, part_bar)).build();
+    if constexpr (sizeof...(Mods) > 0) divider = (node(std::move(divider)) | ... | divider_mods).build();
     // Grow factors carry the ratio, so the split scales with the window.
     // Wrapped, not piped: piping onto node(x) would replace x's own style.
     auto a = v(node(std::move(first))) | grow(r * 100.0f) | min_size(0, 0);

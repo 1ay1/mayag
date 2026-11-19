@@ -100,6 +100,10 @@ struct TermViewOptions {
     float bell = 0.0f;              ///< 0..1 visual-bell flash strength
     bool  marks = true;             ///< draw shell-integration marks in a margin
     float opacity = 1.0f;           ///< background opacity (translucent windows)
+    /// The face role cells are set in. FontFamily::mono by default: a
+    /// stack with a monospace face (FontStack::add_family) gets a true grid;
+    /// one without falls back to its UI chain, as before.
+    FontFamily family = FontFamily::mono;
 };
 
 /// Geometry of the last draw, for hit testing and for sizing the pty
@@ -124,8 +128,8 @@ struct TermMetrics {
 
 namespace detail {
 template <class C>
-[[nodiscard]] float term_cell_width(const C& c, float size) {
-    TextStyle st; st.size = size;
+[[nodiscard]] float term_cell_width(const C& c, float size, FontFamily fam = FontFamily::mono) {
+    TextStyle st; st.size = size; st.family = fam;
     if constexpr (requires { c.c.measurer(); }) { const float w = c.c.measurer().advance("MMMMMMMMMM", st) / 10.0f; if (w > 0) return w; }
     else if constexpr (requires { c.measurer(); }) { const float w = c.measurer().advance("MMMMMMMMMM", st) / 10.0f; if (w > 0) return w; }
     return size * 0.6f;
@@ -258,7 +262,7 @@ void term_draw_cell(char32_t cp, float x, float y, float cw, float ch, Color<Srg
 template <ControlContext C>
 [[nodiscard]] inline Node terminal_view(const C& c, std::string_view id, const TermGrid& g, const TermTheme& th,
                                         const TermViewOptions& o, TermMetrics* out_metrics = nullptr) {
-    const float cw = detail::term_cell_width(c, o.font_size);
+    const float cw = detail::term_cell_width(c, o.font_size, o.family);
     const float ch = std::round(o.font_size * o.line_height);
     const float margin = o.marks ? 10.0f : 0.0f;
     const float ox = o.padding + margin, oy = o.padding;
@@ -366,7 +370,7 @@ template <ControlContext C>
             }
             const bool hidden = (a.flags & term_attr::hidden) != 0;
             if (visible && !hidden) {
-                auto t = text_owned(text) | font(o.font_size) | fg(fa) | no_ligatures | clip_text
+                auto t = text_owned(text) | font(o.font_size) | family(o.family) | fg(fa) | no_ligatures | clip_text
                        | (((a.flags & term_attr::bold) != 0) ? bold : weight(FontWeight::regular));
                 Node n = t.build();
                 if ((a.flags & term_attr::italic) != 0) n.style().text.italic = true;
@@ -422,13 +426,13 @@ template <ControlContext C>
         } else {
             rect(x, y, w, ch, cc);
             if (under != nullptr && !under->text.empty() && under->text != " ")
-                layers.push_back((h(text_owned(under->text) | font(o.font_size) | fg(rgb_of(th.cursor_text)) | no_ligatures
+                layers.push_back((h(text_owned(under->text) | font(o.font_size) | family(o.family) | fg(rgb_of(th.cursor_text)) | no_ligatures
                                     | (((under->flags & term_attr::bold) != 0) ? bold : weight(FontWeight::regular)))
                                   | size(w + cw, ch) | align(Align::center) | absolute(x, y)).build());
         }
         // IME preedit: underlined composition at the cursor.
         if (!g.preedit.empty()) {
-            layers.push_back((h(text_owned(g.preedit) | font(o.font_size) | fg(rgb_of(th.fg)) | underline)
+            layers.push_back((h(text_owned(g.preedit) | font(o.font_size) | family(o.family) | fg(rgb_of(th.fg)) | underline)
                               | height(ch) | align(Align::center) | pad(0, 2) | bg(rgb_of(th.bg))
                               | border(1, rgb_of(th.cursor)) | absolute(x, y)).build());
         }
@@ -439,8 +443,8 @@ template <ControlContext C>
         const bool typed = !g.hint_typed.empty() && hnt.label.rfind(g.hint_typed, 0) == 0;
         if (!g.hint_typed.empty() && !typed) continue;
         std::vector<Node> parts;
-        if (typed) parts.push_back((text_owned(g.hint_typed) | font(o.font_size * 0.92f) | bold | fg(rgb_of(th.hint_typed_fg))).build());
-        parts.push_back((text_owned(hnt.label.substr(typed ? g.hint_typed.size() : 0)) | font(o.font_size * 0.92f) | bold
+        if (typed) parts.push_back((text_owned(g.hint_typed) | font(o.font_size * 0.92f) | family(o.family) | bold | fg(rgb_of(th.hint_typed_fg))).build());
+        parts.push_back((text_owned(hnt.label.substr(typed ? g.hint_typed.size() : 0)) | font(o.font_size * 0.92f) | family(o.family) | bold
                          | fg(rgb_of(th.hint_fg))).build());
         layers.push_back((h(h_list(std::move(parts))) | height(ch) | align(Align::center) | pad(0, 3)
                           | bg(rgb_of(th.hint_bg)) | radius(3) | absolute(col_x(hnt.at.col), row_y(hnt.at.row))).build());
@@ -470,12 +474,21 @@ template <ControlContext C>
 
 namespace mayag::dsl {
 
+/// The 16 ANSI colours markup and engines resolve against (0-7 normal,
+/// 8-15 bright). The default is the palette term_row always drew with.
+using TermPalette = std::array<std::uint32_t, 16>;
+inline constexpr TermPalette default_term_palette{
+    0x15161E, 0xF7768E, 0x9ECE6A, 0xE0AF68, 0x7AA2F7, 0xBB9AF7, 0x7DCFFF, 0xC0CAF5,
+    0x565F89, 0xFF899D, 0xB9F27C, 0xFF9E64, 0x9AB8FF, 0xC7A9FF, 0xA4DAFF, 0xE6E9F5};
+
 /// A TermRowView from a tiny markup, for previews, empty states, tests and
 /// docs (not a VT parser): {r}{g}{y}{b}{m}{c}{w} ANSI colours, {d} dim grey,
-/// {B} bold {I} italic {D} dim {S} strike {R} inverse {U} underline
-/// {~} curly red underline {L} hyperlink 1 {G} green background {0} reset.
-[[nodiscard]] inline TermRowView term_row(std::string_view markup, int cols, TermMark mark = TermMark::none) {
-    static constexpr std::uint32_t pal[8] = {0x15161E, 0xF7768E, 0x9ECE6A, 0xE0AF68, 0x7AA2F7, 0xBB9AF7, 0x7DCFFF, 0xC0CAF5};
+/// {R}{G}{Y}{N}{M}{C}{W} their bright twins, {B} bold {I} italic {D} dim
+/// {S} strike {V} inverse {U} underline {~} curly red underline {L}
+/// hyperlink 1 {K} green background {0} reset. Colours come from `pal`, so
+/// the same markup recolours with the user's scheme.
+[[nodiscard]] inline TermRowView term_row(std::string_view markup, int cols, TermMark mark = TermMark::none,
+                                          const TermPalette& pal = default_term_palette) {
     TermRowView r;
     r.mark = mark;
     TermCell pen;
@@ -488,16 +501,19 @@ namespace mayag::dsl {
                 case '0': pen = TermCell{}; break;
                 case 'r': fgc(pal[1]); break;  case 'g': fgc(pal[2]); break;  case 'y': fgc(pal[3]); break;
                 case 'b': fgc(pal[4]); break;  case 'm': fgc(pal[5]); break;  case 'c': fgc(pal[6]); break;
-                case 'w': fgc(pal[7]); break;  case 'd': fgc(0x565F89); break;
+                case 'w': fgc(pal[7]); break;  case 'd': fgc(pal[8]); break;
+                case 'R': fgc(pal[9]); break;  case 'G': fgc(pal[10]); break; case 'Y': fgc(pal[11]); break;
+                case 'N': fgc(pal[12]); break; case 'M': fgc(pal[13]); break; case 'C': fgc(pal[14]); break;
+                case 'W': fgc(pal[15]); break;
                 case 'B': pen.flags |= term_attr::bold; break;
                 case 'I': pen.flags |= term_attr::italic; break;
                 case 'D': pen.flags |= term_attr::dim; break;
                 case 'S': pen.flags |= term_attr::strike; break;
-                case 'R': pen.flags |= term_attr::inverse; break;
+                case 'V': pen.flags |= term_attr::inverse; break;
                 case 'U': pen.ul_style = TermUnderline::single; break;
-                case '~': pen.ul_style = TermUnderline::curly; pen.ul_color = 0xF7768E; break;
+                case '~': pen.ul_style = TermUnderline::curly; pen.ul_color = pal[1]; break;
                 case 'L': pen.link = 1; break;
-                case 'G': pen.bg = 0x2D3F2D; pen.default_bg = false; break;
+                case 'K': pen.bg = pal[2]; pen.default_bg = false; pen.flags |= term_attr::dim; break;
                 default: break;
             }
             continue;

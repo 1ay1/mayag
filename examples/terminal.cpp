@@ -58,7 +58,7 @@ struct TabData {
                 "{d}  ~ {0}",
                 "{d}  ~ {0}",
                 "",
-                "{R} NORMAL {0} {d}src/cache.rs{0}                                              {d}rust  utf-8  9:24{0}",
+                "{V} NORMAL {0} {d}src/cache.rs{0}                                              {d}rust  utf-8  9:24{0}",
             }, cols, true);
         case Screen::build:
             return term_grid({
@@ -103,7 +103,7 @@ struct TabData {
                 "  {B}CPU{0} [{g}||||||||||||{y}|||{0}            41.2%]   {B}Tasks:{0} 412, 1802 thr; 3 running",
                 "  {B}Mem{0} [{g}||||||||||||||||{b}||||{0}      11.4G/32G]   {B}Load:{0} 2.81 2.40 2.13",
                 "",
-                "{R}  PID USER       CPU%  MEM%  TIME+    Command                              {0}",
+                "{V}  PID USER       CPU%  MEM%  TIME+    Command                              {0}",
                 "  412 ayush      38.1   2.4  3:12.04  cargo build --release",
                 " 1803 ayush      12.7   6.1  41:02.7  mayag_terminal",
                 "  981 _windowser  6.2   1.1  2h04:11  WindowServer",

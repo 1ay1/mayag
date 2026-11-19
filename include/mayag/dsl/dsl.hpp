@@ -38,6 +38,7 @@
 #include <format>
 #include <memory>
 #include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -1363,6 +1364,44 @@ template <GradientStop... Stops>
     return {detail::make_gradient<Stops...>(FillKind::angular_gradient, center_, {1.0f, 1.0f}, 0.5f)};
 }
 
+// ---- multi-stop gradients from RUNTIME stops ----
+//
+// For colours computed from a model (a hue strip from the user's chroma, a
+// preview of a palette the user picked). Same geometry as above; stops past
+// max_gradient_stops are dropped. A mis-ordered stop fails a constexpr call
+// outright and, at run time, is clamped to its predecessor -- a gradient a
+// user configured must never take the window down.
+namespace detail {
+[[nodiscard]] constexpr Fill make_gradient(FillKind kind, std::span<const GradientStop> stops, Vec2 a, Vec2 b,
+                                           float r) {
+    Fill f{.kind = kind, .from = a, .to = b, .radius = r};
+    const std::size_t n = stops.size() < max_gradient_stops ? stops.size() : max_gradient_stops;
+    for (std::size_t i = 0; i < n; ++i) {
+        f.stops[i] = stops[i];
+        if (i > 0 && f.stops[i].position < f.stops[i - 1].position) {
+            if consteval { throw "mayag: gradient stop positions must be non-decreasing"; }
+            f.stops[i].position = f.stops[i - 1].position;
+        }
+    }
+    f.stop_count = static_cast<std::uint8_t>(n);
+    return f;
+}
+}  // namespace detail
+
+[[nodiscard]] constexpr LinearGradient linear_gradient(std::span<const GradientStop> stops,
+                                                       Vec2 a = {0.0f, 0.0f}, Vec2 b = {0.0f, 1.0f}) {
+    return {detail::make_gradient(FillKind::linear_gradient, stops, a, b, 0.5f)};
+}
+[[nodiscard]] constexpr LinearGradient radial_gradient(std::span<const GradientStop> stops,
+                                                       Vec2 center_ = {0.5f, 0.5f}, float r = 0.5f) {
+    return {detail::make_gradient(FillKind::radial_gradient, stops, center_, {1.0f, 1.0f}, r)};
+}
+/// Runtime conic sweep: progress rings, hue wheels from computed colours.
+[[nodiscard]] constexpr LinearGradient conic_gradient(std::span<const GradientStop> stops,
+                                                      Vec2 center_ = {0.5f, 0.5f}) {
+    return {detail::make_gradient(FillKind::angular_gradient, stops, center_, {1.0f, 1.0f}, 0.5f)};
+}
+
 /// Interpolate this gradient in sRGB instead of Oklch. Requires a gradient —
 /// on a solid fill it would be a lie.
 struct SrgbInterp {
@@ -1591,6 +1630,16 @@ struct Ligatures {
 };
 [[nodiscard]] constexpr Ligatures ligatures(bool on = true) { return {on}; }
 inline constexpr Ligatures no_ligatures{false};
+
+/// Set text in a family ROLE: `| family(FontFamily::mono)`, or `| monospace`.
+/// The font stack maps the role to a face (FontStack::add_family).
+struct Family {
+    MAYAG_TEXT_MODIFIER(Family, "family");
+    FontFamily f;
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::family; s.text.family = f; }
+};
+[[nodiscard]] constexpr Family family(FontFamily f) { return {f}; }
+inline constexpr Family monospace{FontFamily::mono};
 
 struct Italic {
     MAYAG_TEXT_MODIFIER(Italic, "italic");

@@ -1158,4 +1158,37 @@ class FontLoad {
     return stack;
 }
 
+/// A face given to a family role by attach_family().
+struct AttachedFamily {
+    std::string name;      ///< the family that won ("JetBrains Mono")
+    std::size_t face = 0;  ///< its index in the stack (select_family)
+};
+
+/// Give `stack` a face for a family ROLE, chosen from a preference list
+/// (`font-family: a, b, c`), with every other static weight and slant of
+/// that family attached as siblings so bold and italic runs use the real
+/// cuts. `families` empty: the platform's monospace list for
+/// FontFamily::mono. Nothing when none of them is installed (the role then
+/// falls back to the UI chain).
+inline std::optional<AttachedFamily> attach_family(FontStack& stack, FontFamily role,
+                                                   std::span<const std::string_view> families = {}) {
+    const Database& db = Database::instance();
+    const auto defaults = mono_font_families();
+    if (families.empty() && role == FontFamily::mono) families = defaults;
+    const FontEntry* e = db.first_available(families, 400, false);
+    if (e == nullptr) return std::nullopt;
+    auto face = Face::from_file(e->path, e->face_index);
+    if (face == nullptr) return std::nullopt;
+    const bool variable = face->is_variable();
+    const std::string fam = e->family;
+    const std::size_t at = stack.add_family(role, std::move(face));
+    if (!variable) {
+        for (const auto& o : db.entries()) {
+            if (o.family != fam || (o.path == e->path && o.face_index == e->face_index)) continue;
+            if (auto sib = Face::from_file(o.path, o.face_index)) stack.add_sibling(at, std::move(sib), o.weight, o.italic);
+        }
+    }
+    return AttachedFamily{fam, at};
+}
+
 }  // namespace mayag::typo::system

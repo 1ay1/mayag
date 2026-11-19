@@ -1,19 +1,29 @@
 #pragma once
-// mayag::widget segmented — the compact one-of-N for 2-5 short options
+// mayag::widget segmented — one of N, as a row of joined segments
 //
-// Interaction: Clicked / Activated on part_id(id, i) -> select option i.
+//   segmented(c, "density", {"compact", "cozy"}, chosen)            // ids only
+//   segmented(c, "density", {"compact", "cozy"}, chosen, pick)      // + handlers
+//
+// Interaction: Clicked / Activated on part_id(id, i) -> choose i. With
+// `pick`, each segment carries `pick(i)` (a message or Edit) as its click
+// handler, so the app needs no on(Clicked) branch.
 
 #include "control.hpp"
+#include "../app/handlers.hpp"
 
+#include <concepts>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace mayag::dsl {
 
-template <ControlContext C>
-[[nodiscard]] inline auto segmented(const C& c, std::string_view id,
-                                    const std::vector<std::string_view>& options, int chosen) {
+namespace detail {
+struct NoPick {};
+
+template <ControlContext C, class Pick>
+[[nodiscard]] inline Node segmented_impl(const C& c, std::string_view id, const std::vector<std::string_view>& options,
+                                         int chosen, const Pick& pick) {
     const Theme& t = c.theme;
     std::vector<Node> segs;
     segs.reserve(options.size());
@@ -21,27 +31,39 @@ template <ControlContext C>
         const auto pid = part_id(id, i);
         const bool on  = static_cast<int>(i) == chosen;
         const bool hov = c.hovered(pid);
-        segs.push_back((h(text_owned(std::string{options[i]})
-                            | font(t.font_size * 0.92f)
-                            | (on ? semibold : weight(FontWeight::regular))
-                            | fg(on ? t.text_primary : hov ? t.text_primary : t.text_secondary))
-                        | pad(t.spaced(5), t.spaced(12)) | center
-                        | bg(on ? t.surface_raised : (hov ? t.surface_raised.fade(0.45f)
-                                                          : t.surface_raised.fade(0.0f)))
-                        | border(t.stroke(1), c.focused(pid) ? t.focus_ring
-                                                   : (on ? t.border : t.border.fade(0.0f)))
-                        | radius(t.radius_small - 2.0f)
-                        | elevation(on ? 1.0f : 0.0f)
-                        | pointer_cursor
-                        | role(a11y::Role::radio) | checked(on) | label(options[i])
-                        | id_of(id, i)).build());
+        auto seg = h(text_owned(std::string{options[i]})
+                         | font(t.font_size * 0.92f)
+                         | (on ? semibold : weight(FontWeight::regular))
+                         | fg(on ? t.text_primary : hov ? t.text_primary : t.text_secondary))
+                 | pad(t.spaced(5), t.spaced(12)) | center
+                 | bg(on ? t.surface_raised : (hov ? t.surface_raised.fade(0.45f) : t.surface_raised.fade(0.0f)))
+                 | border(t.stroke(1), c.focused(pid) ? t.focus_ring : (on ? t.border : t.border.fade(0.0f)))
+                 | radius(t.radius_small - 2.0f)
+                 | elevation(on ? 1.0f : 0.0f)
+                 | pointer_cursor
+                 | role(a11y::Role::radio) | checked(on) | label(options[i])
+                 | id_of(id, i);
+        if constexpr (std::same_as<Pick, NoPick>) segs.push_back(std::move(seg).build());
+        else segs.push_back((std::move(seg) | on_click([m = pick(i)] { return m; })).build());
     }
-    return h(h_list(std::move(segs), 2.0f))
-         | pad(t.spaced(3))
-         | bg(var::surface)
-         | border(t.stroke(1), t.border)
-         | radius(t.radius_small)
-         | role(a11y::Role::group) | label(id);
+    return (h(h_list(std::move(segs), 2.0f))
+            | pad(t.spaced(3)) | bg(var::surface) | border(t.stroke(1), t.border) | radius(t.radius_small)
+            | role(a11y::Role::group) | label(id)).build();
+}
+}  // namespace detail
+
+template <ControlContext C>
+[[nodiscard]] inline auto segmented(const C& c, std::string_view id, const std::vector<std::string_view>& options,
+                                    int chosen) {
+    return node(detail::segmented_impl(c, id, options, chosen, detail::NoPick{}));
+}
+
+/// With its interaction attached: `pick(i)` is the message choosing i.
+template <ControlContext C, class Pick>
+    requires std::invocable<const Pick&, std::size_t>
+[[nodiscard]] inline auto segmented(const C& c, std::string_view id, const std::vector<std::string_view>& options,
+                                    int chosen, Pick pick) {
+    return node(detail::segmented_impl(c, id, options, chosen, pick));
 }
 
 }  // namespace mayag::dsl

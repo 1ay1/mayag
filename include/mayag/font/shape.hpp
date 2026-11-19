@@ -21,6 +21,7 @@
 #include "opentype.hpp"
 #include "variations.hpp"
 #include "../core/geometry.hpp"
+#include "../core/font_family.hpp"
 
 #include <bit>
 #include <cmath>
@@ -843,6 +844,8 @@ struct ShapeParams {
     /// OpenType language-system tags, in priority order (from the text's
     /// BCP 47 language); 0 entries are unused.
     std::array<std::uint32_t, 3> languages{};
+    /// The face role the run asks for (FontStack::add_family).
+    FontFamily family = FontFamily::ui;
 };
 
 /// The seam. `SimpleShaper` below is the default; a HarfBuzz-backed

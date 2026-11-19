@@ -262,6 +262,7 @@ inline void inherit_text(TextStyle& to, const TextStyle& from) noexcept {
     if (take & f::ligatures)   to.ligatures = from.ligatures;
     if (take & f::variations)  to.variations = from.variations;
     if (take & f::language)    to.language = from.language;
+    if (take & f::family)      to.family = from.family;
     to.set |= take;
 }
 

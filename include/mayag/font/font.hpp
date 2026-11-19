@@ -942,6 +942,42 @@ class FontStack : public Shaper {
         return faces_[i]->glyph_for(cp) != 0;
     }
 
+    /// Give a family ROLE its own face (FontFamily::mono -> JetBrains Mono).
+    /// The face is EXCLUSIVE to the role: text in that role tries it first,
+    /// and no other text ever falls back to it -- a monospace face must not
+    /// quietly start rendering the UI's missing glyphs. Returns its index,
+    /// so the role's other weights can join it with add_sibling().
+    std::size_t add_family(FontFamily role, std::shared_ptr<Face> face) {
+        if (face == nullptr) return static_cast<std::size_t>(-1);
+        faces_.push_back(std::move(face));
+        const std::size_t at = faces_.size() - 1;
+        exclusive_.push_back(at);
+        family_face_[index_of(role)] = at;
+        clear_shape_cache();
+        return at;
+    }
+    /// Let `role` be played by a face already added with add_family() --
+    /// switching typefaces live is choosing among preloaded candidates, so
+    /// no file is read on the UI thread. No-op when nothing changes; returns
+    /// false when `face` is not a role face.
+    bool select_family(FontFamily role, std::size_t face) {
+        bool ok = false;
+        for (const std::size_t e : exclusive_) ok = ok || e == face;
+        if (!ok) return false;
+        if (family_face_[index_of(role)] == face) return true;
+        family_face_[index_of(role)] = face;
+        clear_shape_cache();
+        return true;
+    }
+    /// Bumped whenever which glyphs a style resolves to may have changed
+    /// (a face added, a role reassigned): text measured before is stale.
+    [[nodiscard]] std::uint64_t generation() const noexcept { return generation_.load(std::memory_order_relaxed); }
+    /// The face playing `role`, if one was assigned.
+    [[nodiscard]] const Face* family_face(FontFamily role) const noexcept {
+        const std::size_t i = family_face_[index_of(role)];
+        return i < faces_.size() ? faces_[i].get() : nullptr;
+    }
+
     /// Register another weight/style of an already-added face (Menlo Bold for
     /// Menlo Regular). It never takes part in fallback: shaping swaps it in
     /// for `of` when a run asks for a weight closer to its own, which is what
@@ -1032,27 +1068,37 @@ class FontStack : public Shaper {
 
     /// Which face can render `codepoint`, and its glyph id.
     [[nodiscard]] std::pair<std::size_t, std::uint16_t>
-    resolve(std::uint32_t codepoint) const noexcept {
+    resolve(std::uint32_t codepoint, FontFamily role = FontFamily::ui) const noexcept {
+        if (const std::size_t r = family_face_[index_of(role)]; r < faces_.size() && serves(r, codepoint))
+            return {r, faces_[r]->glyph_for(codepoint)};
         if (const std::size_t p = preferred_face(codepoint); p < faces_.size() && serves(p, codepoint))
             return {p, faces_[p]->glyph_for(codepoint)};
         for (std::size_t i = 0; i < faces_.size(); ++i) {
-            if (!siblings_.empty() && is_sibling(i)) continue;   // siblings stand in for a face, never fall back
+            if (stands_in(i)) continue;   // siblings and role faces never fall back
             if (!serves(i, codepoint)) continue;
             return {i, faces_[i]->glyph_for(codepoint)};
         }
         return {0, 0};
     }
 
-    /// Glyph id for the ellipsis (…) in the primary face, or '.' as a fallback
-    /// when the font has no U+2026. Used by ellipsis text truncation.
-    [[nodiscard]] std::uint16_t ellipsis_glyph() const noexcept {
+    /// The face index that leads `role`: its own face, else the primary.
+    [[nodiscard]] std::size_t lead_face(FontFamily role = FontFamily::ui) const noexcept {
+        const std::size_t r = family_face_[index_of(role)];
+        return r < faces_.size() ? r : 0;
+    }
+
+    /// Glyph id for the ellipsis (…) in the face leading `role` (see
+    /// lead_face), or '.' as a fallback when the font has no U+2026. Used by
+    /// ellipsis text truncation.
+    [[nodiscard]] std::uint16_t ellipsis_glyph(FontFamily role = FontFamily::ui) const noexcept {
         if (faces_.empty()) return 0;
-        const Face& f = *faces_.front();
+        const Face& f = *faces_[lead_face(role)];
         if (const std::uint16_t g = f.glyph_for(0x2026); g != 0) return g;
         return f.glyph_for('.');
     }
 
-    [[nodiscard]] FaceMetrics metrics(float size_px) const {
+    [[nodiscard]] FaceMetrics metrics(float size_px, FontFamily role = FontFamily::ui) const {
+        if (const Face* f = family_face(role)) return f->metrics(size_px);
         return faces_.empty() ? FaceMetrics{} : faces_.front()->metrics(size_px);
     }
 
@@ -1098,6 +1144,7 @@ class FontStack : public Shaper {
     }
 
     void clear_shape_cache() {
+        generation_.fetch_add(1, std::memory_order_relaxed);
         std::lock_guard lock{shape_mutex_};
         shapes_.clear();
     }
@@ -1191,7 +1238,7 @@ class FontStack : public Shaper {
                                  (cps[j] >= 0x1F3FB && cps[j] <= 0x1F3FF)))
                     ++j;
                 // The face that covers the whole grapheme, else the base's face.
-                std::size_t fi = resolve(cps[i]).first;
+                std::size_t fi = resolve(cps[i], params.family).first;
                 if (j > i + 1) {
                     const auto covers_all = [&](std::size_t f) {
                         for (std::size_t k = i; k < j; ++k)
@@ -1200,7 +1247,7 @@ class FontStack : public Shaper {
                     };
                     if (!covers_all(fi))
                         for (std::size_t f = 0; f < faces_.size(); ++f) {
-                            if (!siblings_.empty() && is_sibling(f)) continue;
+                            if (stands_in(f)) continue;
                             if (covers_all(f)) { fi = f; break; }
                         }
                 }
@@ -1883,7 +1930,7 @@ class FontStack : public Shaper {
     static bool same_params(const ShapeParams& a, const ShapeParams& b) noexcept {
         if (a.size_px != b.size_px || a.letter_spacing != b.letter_spacing || a.kerning != b.kerning ||
             a.ligatures != b.ligatures || a.weight != b.weight || a.italic != b.italic ||
-            a.axis_count != b.axis_count || a.languages != b.languages)
+            a.axis_count != b.axis_count || a.languages != b.languages || a.family != b.family)
             return false;
         for (std::uint8_t i = 0; i < a.axis_count; ++i)
             if (a.axes[i].tag != b.axes[i].tag || a.axes[i].value != b.axes[i].value) return false;
@@ -1915,7 +1962,8 @@ class FontStack : public Shaper {
         const auto bits = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return std::uint64_t{u}; };
         mix(bits(p.size_px) | bits(p.weight) << 32);
         mix(bits(p.letter_spacing) | std::uint64_t{p.kerning} << 32 | std::uint64_t{p.ligatures} << 33 |
-            std::uint64_t{p.italic} << 34 | std::uint64_t{p.axis_count} << 40);
+            std::uint64_t{p.italic} << 34 | std::uint64_t{p.axis_count} << 40 |
+            std::uint64_t{index_of(p.family)} << 48);
         for (std::uint8_t a = 0; a < p.axis_count; ++a) mix(p.axes[a].tag | bits(p.axes[a].value) << 32);
         for (const std::uint32_t l : p.languages) if (l) mix(l);
         return h;
@@ -1934,6 +1982,22 @@ class FontStack : public Shaper {
     std::vector<Sibling> siblings_;
     [[nodiscard]] bool is_sibling(std::size_t i) const noexcept {
         for (const auto& s : siblings_) if (s.at == i) return true;
+        return false;
+    }
+
+    /// Faces assigned to a family role, and which face plays each role.
+    std::vector<std::size_t> exclusive_;
+    std::atomic<std::uint64_t> generation_{0};
+    std::array<std::size_t, font_family_count> family_face_ = [] {
+        std::array<std::size_t, font_family_count> a{};
+        a.fill(static_cast<std::size_t>(-1));
+        return a;
+    }();
+    /// A face that only ever stands in for another (a sibling weight) or
+    /// plays a role (add_family): never part of the generic fallback chain.
+    [[nodiscard]] bool stands_in(std::size_t i) const noexcept {
+        if (!siblings_.empty() && is_sibling(i)) return true;
+        for (const std::size_t e : exclusive_) if (e == i) return true;
         return false;
     }
 };
@@ -1957,6 +2021,7 @@ namespace detail {
     p.ligatures      = st.ligatures;
     p.weight         = st.effective_weight();
     p.italic         = st.italic;
+    p.family         = st.family;
     // Layout measures in logical units, so st.size IS the logical size here;
     // the painter pinned opsz to the same value before scaling to device px,
     // so measure and draw select the same design.
@@ -2170,16 +2235,22 @@ class StackMeasurer final : public layout::TextMeasurer {
     }
 
     [[nodiscard]] float ascent(const TextStyle& st) const override {
-        return stack_->metrics(st.size).ascent;
+        return stack_->metrics(st.size, st.family).ascent;
     }
 
     [[nodiscard]] Vec2 measure(std::string_view s, const TextStyle& st,
                                float max_width) const override {
         if (s.empty()) {
-            const FaceMetrics fm = stack_->metrics(st.size);
+            const FaceMetrics fm = stack_->metrics(st.size, st.family);
             return {0.0f, st.line_height > 0.0f ? st.size * st.line_height : fm.line_height};
         }
         // Hash the text and width; the style is compared in full on a hit.
+        // A face added or a family role reassigned since makes every entry
+        // stale (the same style now resolves to other glyphs): start over.
+        if (const std::uint64_t g = stack_->generation(); g != memo_gen_) {
+            for (auto& e : memo_) e.key = 0;
+            memo_gen_ = g;
+        }
         std::uint64_t h = 0xcbf29ce484222325ull ^ s.size();
         for (unsigned char c : s) h = (h ^ c) * 0x100000001b3ull;
         std::uint32_t wbits; std::memcpy(&wbits, &max_width, 4);
@@ -2195,9 +2266,10 @@ class StackMeasurer final : public layout::TextMeasurer {
   private:
     static constexpr std::size_t kMemo = 1024;
     mutable std::vector<SizeMemo> memo_ = std::vector<SizeMemo>(kMemo);
+    mutable std::uint64_t memo_gen_ = 0;
 
     [[nodiscard]] Vec2 measure_uncached(std::string_view s, const TextStyle& st, float max_width) const {
-        const FaceMetrics fm = stack_->metrics(st.size);
+        const FaceMetrics fm = stack_->metrics(st.size, st.family);
         const float line_h = st.line_height > 0.0f ? st.size * st.line_height : fm.line_height;
 
         const auto run = stack_->shaped(s, detail::shape_params_of(st));
@@ -2363,7 +2435,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                    const TextStyle& st) const override {
         if (s.empty()) return;
 
-        const FaceMetrics fm = stack_->metrics(st.size);
+        const FaceMetrics fm = stack_->metrics(st.size, st.family);
         const float line_h = st.line_height > 0.0f ? st.size * st.line_height : fm.line_height;
 
         const ShapeParams sp = detail::shape_params_of(st);
@@ -2423,8 +2495,8 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             const bool overflow_line = st.overflow == TextOverflow::ellipsis &&
                                        !wrapping && line.width > box.width() + 0.5f;
             if ((overflow_line || last_clamped_line) && box.width() > 0.0f) {
-                ell_gid = stack_->ellipsis_glyph();
-                ell_glyph = stack_->glyph(0, ell_gid, st.size, st.effective_weight(),
+                ell_gid = stack_->ellipsis_glyph(st.family);
+                ell_glyph = stack_->glyph(stack_->lead_face(st.family), ell_gid, st.size, st.effective_weight(),
                                           {sp.axes.data(), sp.axis_count}, sp.italic);
                 const float ell_w = ell_glyph ? ell_glyph->advance : st.size * 0.5f;
                 const float budget = box.width() - ell_w;

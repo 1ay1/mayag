@@ -135,6 +135,7 @@ inline void apply_base(Style& to, const Style& from, std::uint64_t sets) {
         if (a.set & t::align) b.align = a.align;
         if (a.set & t::ligatures) b.ligatures = a.ligatures;
         if (a.set & t::variations) b.variations = a.variations;
+        if (a.set & t::family) b.family = a.family;
         b.set |= a.set;
     }
 }

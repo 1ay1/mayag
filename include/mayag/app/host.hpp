@@ -307,6 +307,12 @@ struct AppConfig {
     Vec2        size{1024, 640};
     bool        resizable = true;
     bool        vsync     = true;   ///< false: async presents (tearing), input drawn at once: lowest latency
+    /// Ask the compositor for server-side decorations. An app that draws its
+    /// own title bar (a terminal, an editor) turns this off; a tiling WM
+    /// never decorates either way.
+    bool        decorated   = true;
+    /// An alpha-capable surface, for apps whose background is translucent.
+    bool        transparent = false;
     Theme       theme     = themes::midnight;
     /// Animate theme changes: when `P::theme(model)` changes, the WHOLE UI
     /// morphs from the old theme to the new one -- colours in Oklab, radii,
@@ -644,6 +650,8 @@ class window_host {
     [[nodiscard]] W& window() noexcept { return window_; }
     [[nodiscard]] const Interaction& input() const noexcept { return input_; }
     [[nodiscard]] const Node& tree() const noexcept { return tree_; }
+    /// This frame's overlays (menus, modals, toasts), as posted.
+    [[nodiscard]] const OverlayList& overlay_list() const noexcept { return overlays_; }
     /// Read time from `c` (the kernel's clock) instead of a default one.
     void set_clock(const Clock& c) noexcept { clock_ = &c; }
     [[nodiscard]] typename Clock::time_point now_() const noexcept {

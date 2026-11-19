@@ -64,8 +64,8 @@ namespace detail {
 [[nodiscard]] inline platform::WindowConfig window_config(const AppConfig& cfg) {
     return platform::WindowConfig{
         .title = cfg.title, .size = cfg.size,
-        .resizable = cfg.resizable, .decorated = true,
-        .transparent = false, .vsync = cfg.vsync,
+        .resizable = cfg.resizable, .decorated = cfg.decorated,
+        .transparent = cfg.transparent, .vsync = cfg.vsync,
         .background = cfg.theme.background,
     };
 }
@@ -190,8 +190,9 @@ class headless_app {
     void click(std::uint64_t id)      { window_.click(host_.center_of(id)); tick(); }
     /// Click the control showing `label`: the innermost NAMED node (an id<>
     /// or a handler) around the first text equal to it. Tests read like the
-    /// UI: `rt.click_text("Save")`. Returns false (and clicks nothing) when
-    /// no such text is on screen.
+    /// UI: `rt.click_text("Save")`. Overlays are searched first, topmost
+    /// layer first -- a modal's "Save" is the one a user's click would hit.
+    /// Returns false (and clicks nothing) when no such text is on screen.
     bool click_text(std::string_view label) {
         const Node* hit = nullptr;
         const auto find = [&](const auto& self, const Node& n, const Node* named) -> bool {
@@ -200,7 +201,13 @@ class headless_app {
             for (const auto& k : n.children()) if (self(self, k, named)) return true;
             return false;
         };
-        if (!find(find, host_.tree(), nullptr) || hit == nullptr) return false;
+        std::vector<const Overlay*> layers;
+        for (const auto& o : host_.overlay_list().items()) layers.push_back(&o);
+        std::stable_sort(layers.begin(), layers.end(), [](const Overlay* a, const Overlay* b) { return a->layer > b->layer; });
+        bool found = false;
+        for (const Overlay* o : layers) if ((found = find(find, o->content, nullptr))) break;
+        if (!found) found = find(find, host_.tree(), nullptr);
+        if (!found || hit == nullptr) return false;
         window_.click(hit->frame().center());
         tick();
         return true;
