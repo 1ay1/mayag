@@ -1333,12 +1333,30 @@ hardest Latin font a UI meets).
   the threshold for distance-field glyphs, so weight is continuous across the
   bitmap/SDF switch.
 - **Gamma-space text compositing.** Shapes blend in linear light; text is
-  blended as if in gamma space, the way CoreText, DirectWrite and Skia blend
-  it, because fonts are designed for that weight. In linear light the same
-  font reads bold on dark themes and thin on light ones. The kernel reshapes
-  coverage so the hardware's linear blend reproduces the gamma-space result
-  exactly against the design backdrop; one definition serves CPU, Metal and
-  Vulkan.
+  blended as CoreGraphics blends it, a per-channel lerp of sRGB-ENCODED
+  values, because fonts are designed for that weight. In linear light the
+  same font reads bold on dark themes and thin on light ones, and coloured
+  text's edges shift hue. The software reference blends glyphs that way
+  directly; Metal does it with framebuffer fetch on Apple GPUs. **Vulkan**
+  renders glyphs through a UNORM view of the sRGB target
+  (`VK_KHR_swapchain_mutable_format`), so the fixed-function blend runs on
+  the encoded bytes and is the same formula, exact for every text and
+  backdrop colour. A planner (`render/frame_plan.hpp`) puts glyphs in their
+  own passes without changing painter order: overlapping items keep their
+  order, disjoint ones commute, so a screen of labels on cards is 2 passes.
+  Where no UNORM view exists the kernel falls back to reshaping coverage
+  against the design backdrop (exact for grey on black/white, up to ~60/255
+  off for saturated text on light or tinted backgrounds).
+  `MAYAG_TEXT_BLEND=linear` forces the fallback for comparison.
+- **Linux font fallback that matches the desktop.** Picking the most
+  specialised covering face gave Arabic to Noto Kufi (a display design),
+  Hebrew to Noto Rashi (a historical script), and ∀ to a CJK face. On Linux
+  the stack now prefers the standard text design for each script, the one
+  fontconfig's defaults, GNOME, KDE and the browsers resolve to (Noto Sans
+  Arabic, Noto Sans Hebrew, Noto Sans Math restricted to the math blocks,
+  …). It skips scripts the UI font already draws, and chooses the CJK
+  region from the locale (`LANGUAGE`/`LC_ALL`/`LC_CTYPE`/`LANG`): zh-TW gets
+  Traditional Chinese glyphs, zh-HK Hong Kong ones, ko Korean ones.
 - **The GPU draws the CPU's pixels.** Metal (the default on macOS) used to
   interpolate glyph uvs across the antialiasing-padded quad instead of the
   glyph's own rect, stretching every glyph by two pixels: all on-screen text
@@ -1414,10 +1432,30 @@ of rounding and resampling, and `cursor-shape-v1` for themed cursors — which
 replaces the several hundred lines of `XCURSOR_THEME` parsing and cursor-surface
 management that clients usually carry.
 
-Keyboard input maps **evdev scancodes**, which are positional, so shortcuts land
-on the same physical keys on QWERTY, AZERTY, Dvorak and Colemak. Text is
-resolved through `libxkbcommon` when present (dead keys, AltGr, IME-adjacent
-layouts) and degrades to "keys work, exotic text doesn't" when it is absent.
+Keyboard input maps **evdev scancodes** for letters and digits, which are
+positional, so shortcuts land on the same physical keys on QWERTY, AZERTY,
+Dvorak and Colemak. Named keys (Escape, BackSpace, arrows, F-keys) come from
+the keymap's keysym instead, as in GTK and Qt, so `caps:escape`-style remaps
+and virtual keyboards (on-screen, remote desktop, `wtype`) mean what they say.
+Text goes through `libxkbcommon` when present, `dlopen`ed like everything
+else:
+
+- **Compose and dead keys.** The locale's Compose table plus `~/.XCompose`,
+  read the way GTK and Qt read them: `´` then `e` types `é`, the Compose key
+  works, a cancelled sequence types nothing.
+- **Key repeat.** Wayland leaves repeat to the client; mayag generates it at
+  the compositor's announced rate and delay (`wl_keyboard.repeat_info`),
+  stops on release, focus loss or a keymap change, and wakes the loop only
+  while a key is held.
+- **Input methods.** `text-input-unstable-v3`, the protocol fcitx5 and ibus
+  use with GTK4, Qt6 and the browsers. It is enabled while a text field
+  (`role(text_field)`, set by `text_field`, `code_view` and `terminal_view`)
+  has focus. Preedit arrives as `ComposeEvent` and commits as `TextEvent`,
+  the same events the headless backend scripts. `text_field` draws the
+  preedit underlined at the caret, and the caret rectangle goes to the IME
+  so its candidate window opens at the text.
+
+Without libxkbcommon it degrades to "keys work, exotic text doesn't".
 
 Built by default on Linux and BSD; `-DMAYAG_WITH_WAYLAND=OFF` opts out.
 
