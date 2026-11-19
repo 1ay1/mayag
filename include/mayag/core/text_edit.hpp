@@ -23,7 +23,7 @@
 // half an emoji.
 
 #include "../core/geometry.hpp"
-#include "../app/event.hpp"
+#include "event.hpp"
 
 #include <algorithm>
 #include <cstdint>

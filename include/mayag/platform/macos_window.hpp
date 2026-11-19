@@ -18,7 +18,7 @@
 // window instead hands the draw list straight to the GPU and the whole
 // rasterise + encode + CGImage + blit chain disappears.
 
-#include "../app/event.hpp"
+#include "../core/event.hpp"
 #include "../backend/software.hpp"
 #include "../backend/tiled.hpp"
 #include "../render/draw_list.hpp"

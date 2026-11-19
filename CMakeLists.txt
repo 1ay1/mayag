@@ -632,6 +632,10 @@ if(MAYAG_BUILD_TESTS)
     set(_MAYAG_BANLIST ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/lint/banlist.cmake)
     set(_MAYAG_PRUNE   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/lint/prune_allowlist.cmake)
     if(EXISTS ${_MAYAG_BANLIST})
+        # mayag's own layer order (core < style < scene < ... < app < widget).
+        add_test(NAME mayag_layering
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/layering.cmake)
         add_test(NAME mayag_runtime_banlist
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_include.txt

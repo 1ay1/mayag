@@ -16,7 +16,7 @@
 // makes the whole interaction model unit-testable without a window.
 
 #include "../scene/node.hpp"
-#include "event.hpp"
+#include "../core/event.hpp"
 
 #include <chrono>
 #include <cstdint>

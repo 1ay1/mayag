@@ -14,8 +14,8 @@
 #include "../core/color.hpp"
 #include "../core/geometry.hpp"
 #include "../core/scroll_state.hpp"
-#include "../scene/a11y_types.hpp"
-#include "../platform/types.hpp"
+#include "../core/a11y_types.hpp"
+#include "../core/cursor.hpp"
 
 #include <array>
 #include <cstdint>
@@ -478,7 +478,7 @@ struct Style {
 
     // ── cascade ─────────────────────────────────────────────────────────
     //
-    // Inputs to style/cascade.hpp. They describe how this style RESPONDS
+    // Inputs to scene/cascade.hpp. They describe how this style RESPONDS
     // (to state, to time); the painter never reads them.
 
     /// Descendants may style on this node's state: `state::group(state::hover)`.

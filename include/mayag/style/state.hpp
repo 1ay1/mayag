@@ -1,7 +1,7 @@
 #pragma once
 // mayag::state and mayag::var — what a style may depend on
 //
-// Two small vocabularies that the cascade (style/cascade.hpp) resolves at
+// Two small vocabularies that the cascade (scene/cascade.hpp) resolves at
 // render time, so a view never has to:
 //
 //   state::   STATE. A selector is a conjunction of conditions on the node

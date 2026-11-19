@@ -28,7 +28,7 @@
 // same host and the same jaal kernel without a window, for tests.
 
 #include "effects.hpp"
-#include "event.hpp"
+#include "../core/event.hpp"
 #include "host.hpp"
 #include "interaction.hpp"
 #include "latency.hpp"

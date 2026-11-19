@@ -37,7 +37,7 @@ inline constexpr char type_tag = 0;
 /// How a node's style RESPONDS: its state variants and variable bindings.
 ///
 /// Produced by the DSL (`| hovered(...)`, `| when(state::selected, ...)`,
-/// `| vars(...)`) and consumed by the cascade (style/cascade.hpp), which
+/// `| vars(...)`) and consumed by the cascade (scene/cascade.hpp), which
 /// pipes every matching rule onto the node's base style in priority order
 /// before layout. Immutable and shared, so copying a Node never copies it.
 struct Cascade {
@@ -218,7 +218,7 @@ class Node {
     [[nodiscard]] const std::shared_ptr<const Cascade>& cascade() const noexcept { return cascade_; }
     void set_cascade(std::shared_ptr<const Cascade> c) noexcept { cascade_ = std::move(c); }
 
-    /// True once style/cascade.hpp has resolved this tree (inheritance,
+    /// True once scene/cascade.hpp has resolved this tree (inheritance,
     /// variants, tokens). Set on the ROOT only; resolving twice would pipe
     /// every variant on twice, so everything that resolves checks it.
     [[nodiscard]] bool cascaded() const noexcept { return cascaded_; }

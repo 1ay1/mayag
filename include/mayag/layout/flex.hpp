@@ -16,7 +16,7 @@
 // final rects). Both are pure functions over the tree; nothing global.
 
 #include "../scene/node.hpp"
-#include "../style/cascade.hpp"
+#include "../scene/cascade.hpp"
 #include "../style/style.hpp"
 #include "text_metrics.hpp"
 

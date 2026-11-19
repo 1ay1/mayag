@@ -1905,7 +1905,7 @@ template <Modifier M>
 // The cascade: state variants, classes, variables, transitions
 // ════════════════════════════════════════════════════════════════════════
 //
-// A view describes how an element looks in EVERY state; style/cascade.hpp
+// A view describes how an element looks in EVERY state; scene/cascade.hpp
 // decides which state it is in each frame. Nothing here reads the pointer:
 //
 //     constexpr auto button = styles(

@@ -1,7 +1,7 @@
 #pragma once
 // mayag::a11y — the semantic tree (see a11y_types.hpp for the vocabulary)
 
-#include "a11y_types.hpp"
+#include "../core/a11y_types.hpp"
 #include "node.hpp"
 
 #include <string>

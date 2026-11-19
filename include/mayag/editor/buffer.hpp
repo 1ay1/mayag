@@ -25,7 +25,7 @@
 // derived, for the view and for vertical motion.
 
 #include "syntax.hpp"
-#include "../app/event.hpp"
+#include "../core/event.hpp"
 #include "../core/scroll_state.hpp"
 
 #include <algorithm>

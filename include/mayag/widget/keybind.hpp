@@ -8,7 +8,7 @@
 // `conflict` paints the field as an error.
 
 #include "control.hpp"
-#include "../app/event.hpp"
+#include "../core/event.hpp"
 
 #include <string>
 #include <string_view>

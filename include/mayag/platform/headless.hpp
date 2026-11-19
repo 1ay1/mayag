@@ -16,7 +16,7 @@
 // Because it is the same code path the real backends use, a test that passes
 // here exercises the actual runtime loop, not a parallel fake one.
 
-#include "../app/event.hpp"
+#include "../core/event.hpp"
 #include "../backend/software.hpp"
 #include "../backend/tiled.hpp"
 #include "../image/png.hpp"

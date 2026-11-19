@@ -45,7 +45,7 @@
 //     which sleeps on it; dispatch() reads what arrived without blocking. An
 //     idle app is asleep in epoll at 0% CPU.
 
-#include "../app/event.hpp"
+#include "../core/event.hpp"
 #include "../backend/software.hpp"
 #include "../backend/tiled.hpp"
 #include "../core/geometry.hpp"

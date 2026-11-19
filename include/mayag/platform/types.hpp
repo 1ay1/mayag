@@ -4,22 +4,12 @@
 // backend-selection logic that in turn includes the backend.
 
 #include "../core/color.hpp"
+#include "../core/cursor.hpp"   // CursorShape: core vocabulary, re-exported here
 #include "../core/geometry.hpp"
 
 #include <chrono>
 #include <cstdint>
 #include <string>
-
-namespace mayag {
-
-/// Standard cursor shapes.
-enum class CursorShape : int {
-    arrow = 0, text = 1, pointer = 2, crosshair = 3,
-    resize_h = 4, resize_v = 5, resize_nwse = 6, resize_nesw = 7,
-    grab = 8, grabbing = 9, not_allowed = 10, wait = 11,
-};
-
-}  // namespace mayag
 
 namespace mayag::platform {
 

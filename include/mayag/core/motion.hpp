@@ -26,10 +26,12 @@
 
 #include "../core/animation.hpp"
 #include "../core/geometry.hpp"
-#include "../scene/node.hpp"
+// No scene include: core never names Node (observe_all takes any tree with
+// find(id) -> const T* exposing frame()).
 
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
 
 namespace mayag {
 
@@ -140,10 +142,11 @@ class TrackedSet {
     void clear() noexcept { items_.clear(); }
 
     /// Point every tracked value at its node's measured rect.
-    void observe_all(const Node& root) {
+    template <class Tree>
+    void observe_all(const Tree& root) {
         for (const Tracked* t : items_) {
             if (t->target_id == 0) continue;
-            if (const Node* n = root.find(t->target_id)) t->observe(n->frame());
+            if (const auto* n = root.find(t->target_id)) t->observe(n->frame());
         }
     }
 

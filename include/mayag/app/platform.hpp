@@ -22,7 +22,7 @@
 #include "../backend/software.hpp"
 #include "../core/geometry.hpp"
 #include "../platform/types.hpp"
-#include "event.hpp"
+#include "../core/event.hpp"
 
 #include <concepts>
 #include <optional>

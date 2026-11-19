@@ -44,7 +44,7 @@
 #include <mayag/style/style.hpp>
 #include <mayag/style/theme.hpp>
 #include <mayag/style/state.hpp>
-#include <mayag/style/cascade.hpp>
+#include <mayag/scene/cascade.hpp>
 #include <mayag/scene/node.hpp>
 #include <mayag/scene/a11y.hpp>
 
@@ -86,7 +86,7 @@
 
 // ── app: mayag as a jaal host ────────────────────────────────────────────
 // jaal runs the program (update, Cmd, Sub, timers, tasks, streams).
-#include <mayag/app/event.hpp>
+#include <mayag/core/event.hpp>
 #include <mayag/app/interaction.hpp>
 #include <mayag/app/latency.hpp>
 #include <mayag/app/effects.hpp>

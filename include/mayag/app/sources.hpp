@@ -19,7 +19,7 @@
 
 #include "../core/color.hpp"
 #include "../core/geometry.hpp"
-#include "event.hpp"
+#include "../core/event.hpp"
 #include "interaction.hpp"
 
 #include <jaal/jaal.hpp>
