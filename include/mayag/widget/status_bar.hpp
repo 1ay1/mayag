@@ -12,6 +12,7 @@
 // for right items.
 
 #include "control.hpp"
+#include "sheet.hpp"
 
 #include <string>
 #include <vector>
@@ -23,6 +24,10 @@ struct StatusItem {
     std::string icon;
     enum class Tone : std::uint8_t { normal, dim, accent, error, warning, success } tone = Tone::normal;
     bool active = false;   ///< a toggled panel
+    /// Clickable: hover wash and a pointer cursor. A plain readout (the
+    /// encoding, a size) is neither -- a hand over text that does nothing
+    /// is a lie.
+    bool interactive = true;
 };
 
 template <ControlContext C>
@@ -36,11 +41,14 @@ template <ControlContext C>
         const Color<Srgb> col = it.tone == T::error ? t.danger : it.tone == T::warning ? t.warning
                               : it.tone == T::success ? t.success : it.tone == T::accent ? t.accent
                               : it.tone == T::dim ? t.text_disabled : t.text_secondary;
-        return (h(text_owned(it.icon) | font(t.font_size * 0.9f) | fg(it.active ? t.accent : col),
-                  text_owned(it.text) | font(t.font_size * 0.88f) | fg(hov ? t.text_primary : col))
-                | gap(t.spaced(5)) | align(Align::center) | pad(0, t.spaced(7)) | height(pct(100))
-                | bg(hov ? t.surface_raised : it.active ? t.surface_raised.fade(0.6f) : t.surface.fade(0.0f))
-                | pointer_cursor | role(a11y::Role::button) | label(it.text.empty() ? it.icon : it.text)
+        const bool live = it.interactive;
+        auto body = h(text_owned(it.icon) | font(t.font_size * 0.9f) | fg(it.active ? t.accent : col),
+                      text_owned(it.text) | font(t.font_size * 0.88f) | fg(live && hov ? t.text_primary : col))
+                  | gap(t.spaced(5)) | align(Align::center) | pad(0, t.spaced(7)) | height(pct(100))
+                  | bg(live && hov ? t.surface_raised : it.active ? t.surface_raised.fade(0.6f) : t.surface.fade(0.0f))
+                  | transition();
+        if (!live) return (std::move(body) | role(a11y::Role::text)).build();
+        return (std::move(body) | pointer_cursor | role(a11y::Role::button) | label(it.text.empty() ? it.icon : it.text)
                 | id_of(id, part)).build();
     };
     std::vector<Node> l, r;
@@ -48,7 +56,7 @@ template <ControlContext C>
     for (std::size_t i = 0; i < right.size(); ++i) r.push_back(seg(right[i], 100 + i));
     return (h(h(h_list(std::move(l))) | height(pct(100)), spacer(), h(h_list(std::move(r))) | height(pct(100)))
             | align(Align::center) | pad(0, t.spaced(4)) | height(26) | width(pct(100))
-            | bg(var::surface) | border(t.stroke(1), t.border)).build();
+            | with_look(sheet_of(t).strip, t)).build();
 }
 
 }  // namespace mayag::dsl

@@ -928,6 +928,20 @@ class WaylandWindow {
         apply_cursor();
     }
 
+    /// Interactive move from the press in progress (xdg_toplevel.move needs
+    /// that press's serial; the compositor takes the drag from here).
+    void begin_move() {
+        if (toplevel_ != nullptr && seat_ != nullptr && pointer_serial_ != 0)
+            wl::request(toplevel_, wl::toplevel_move, seat_, pointer_serial_);
+    }
+    void minimize() { if (toplevel_ != nullptr) wl::request(toplevel_, wl::toplevel_set_minimized); }
+    void toggle_maximize() {
+        if (toplevel_ == nullptr) return;
+        if (maximized_) wl::request(toplevel_, wl::toplevel_unset_maximized);
+        else wl::request(toplevel_, wl::toplevel_set_maximized);
+        maximized_ = !maximized_;
+    }
+
     /// Clipboard.
     ///
     /// Wayland's data-device model is asynchronous and requires a serial from
@@ -2521,6 +2535,7 @@ class WaylandWindow {
     wl::proxy* cursor_buffer_ = nullptr;
     std::int32_t cursor_hot_x_ = 0, cursor_hot_y_ = 0;
     std::uint32_t key_serial_     = 0;
+    bool          maximized_      = false;
 
     double        start_time_       = 0.0;
     double        refresh_hz_       = 60.0;
@@ -2630,6 +2645,9 @@ class WaylandWindow {
     void mark_input(double at) noexcept { p_->mark_input(at); }
     [[nodiscard]] double event_seconds(std::uint32_t ms) const noexcept { return p_->event_seconds(ms); }
     void set_photon_sink(std::function<void(double)> f) { p_->set_photon_sink(std::move(f)); }
+    void begin_move()                    { p_->begin_move(); }
+    void minimize()                      { p_->minimize(); }
+    void toggle_maximize()               { p_->toggle_maximize(); }
     void set_clipboard(std::string_view text) { p_->set_clipboard(text); }
     [[nodiscard]] std::string get_clipboard() { return p_->get_clipboard(); }
 

@@ -101,6 +101,13 @@ class Headless {
     /// the runtime drops the command on the floor, as it did.
     void set_fullscreen(bool on) { fullscreen_ = on; ++fullscreen_calls_; }
     [[nodiscard]] bool fullscreen() const noexcept { return fullscreen_; }
+    /// Window-manager requests, recorded so a test can see they were made.
+    void begin_move() { ++moves_; }
+    void minimize() { ++minimizes_; }
+    void toggle_maximize() { maximized_ = !maximized_; }
+    [[nodiscard]] int moves() const noexcept { return moves_; }
+    [[nodiscard]] int minimizes() const noexcept { return minimizes_; }
+    [[nodiscard]] bool maximized() const noexcept { return maximized_; }
     [[nodiscard]] int fullscreen_calls() const noexcept { return fullscreen_calls_; }
 
     [[nodiscard]] std::string get_clipboard() { return clipboard_; }
@@ -127,6 +134,15 @@ class Headless {
     }
 
     void move_to(Vec2 p) { push(MouseMove{p, p - last_pos_, Mods{}}); last_pos_ = p; }
+    /// The halves of a click, for drags: press, move_to..., release.
+    void press(Vec2 p, MouseButton b = MouseButton::left) {
+        move_to(p);
+        push(MouseDown{p, b, Mods{}, 1});
+    }
+    void release(Vec2 p, MouseButton b = MouseButton::left) {
+        move_to(p);
+        push(MouseUp{p, b, Mods{}});
+    }
 
     void type(std::string_view s) { push(TextEvent{std::string{s}}); }
 
@@ -261,6 +277,8 @@ class Headless {
     int         fullscreen_calls_ = 0;
     std::string record_dir_;
     int         cursor_ = 0;
+    int         moves_ = 0, minimizes_ = 0;
+    bool        maximized_ = false;
     Vec2        last_pos_{};
     std::uint64_t frames_presented_ = 0;
     bool        text_input_ = false;

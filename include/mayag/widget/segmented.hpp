@@ -9,6 +9,7 @@
 // handler, so the app needs no on(Clicked) branch.
 
 #include "control.hpp"
+#include "sheet.hpp"
 #include "../app/handlers.hpp"
 
 #include <concepts>
@@ -28,18 +29,12 @@ template <ControlContext C, class Pick>
     std::vector<Node> segs;
     segs.reserve(options.size());
     for (std::size_t i = 0; i < options.size(); ++i) {
-        const auto pid = part_id(id, i);
         const bool on  = static_cast<int>(i) == chosen;
-        const bool hov = c.hovered(pid);
         auto seg = h(text_owned(std::string{options[i]})
                          | font(t.font_size * 0.92f)
-                         | (on ? semibold : weight(FontWeight::regular))
-                         | fg(on ? t.text_primary : hov ? t.text_primary : t.text_secondary))
+                         | (on ? semibold : weight(FontWeight::regular)))
                  | pad(t.spaced(5), t.spaced(12)) | center
-                 | bg(on ? t.surface_raised : (hov ? t.surface_raised.fade(0.45f) : t.surface_raised.fade(0.0f)))
-                 | border(t.stroke(1), c.focused(pid) ? t.focus_ring : (on ? t.border : t.border.fade(0.0f)))
-                 | radius(t.radius_small - 2.0f)
-                 | elevation(on ? 1.0f : 0.0f)
+                 | with_look(sheet_of(t).segment, t)
                  | pointer_cursor
                  | role(a11y::Role::radio) | checked(on) | label(options[i])
                  | id_of(id, i);

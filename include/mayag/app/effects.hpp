@@ -33,6 +33,14 @@ using write_clipboard = jaal::pure_fx<WriteClipboard, "write_clipboard">;
 struct SetFullscreen { bool on = true; };
 using set_fullscreen = jaal::pure_fx<SetFullscreen, "set_fullscreen">;
 
+/// Window-manager requests a client-decorated window needs: start an
+/// interactive MOVE from the current press (a title bar drag), minimise,
+/// toggle maximised. A host that cannot do one ignores it.
+struct WindowAction {
+    enum class Kind : std::uint8_t { move, minimize, toggle_maximize } kind = Kind::move;
+};
+using window_action = jaal::pure_fx<WindowAction, "window_action">;
+
 struct SetCursor { CursorShape shape = CursorShape::arrow; };
 using set_cursor = jaal::pure_fx<SetCursor, "set_cursor">;
 
@@ -81,6 +89,6 @@ struct read_clipboard {
 /// Every window effect, for a program that wants the whole set.
 template <class Msg>
 using window_cmd = jaal::Cmd<Msg, set_title, write_clipboard, set_fullscreen, set_cursor,
-                             focus, upload_image, release_image, read_clipboard>;
+                             focus, upload_image, release_image, read_clipboard, window_action>;
 
 }  // namespace mayag

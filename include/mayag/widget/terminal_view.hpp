@@ -383,6 +383,12 @@ template <ControlContext C>
             // Decorations.
             const Color<Srgb> ulc = a.ul_color != 0 ? rgb_of(a.ul_color) : fa;
             const float run_w = static_cast<float>(c1 - c0) * cw;
+            // A hyperlink run says so under the pointer: an id-less layer
+            // with a pointer cursor. Clicks pass through to the grid (no id);
+            // only the pointer's shape changes, as in every modern terminal.
+            if (a.link != 0)
+                layers.push_back((box() | size(run_w, ch) | absolute(col_x(c0), y)
+                                  | cursor(CursorShape::pointer)).build());
             const bool link_hover = a.link != 0 && a.link == g.hover_link;
             const TermUnderline ul = link_hover ? TermUnderline::single : a.ul_style;
             if (ul != TermUnderline::none) {

@@ -17,6 +17,7 @@
 //         query and returns a PickerIntent (choose / close) for the app
 
 #include "control.hpp"
+#include "sheet.hpp"
 #include "file_icon.hpp"
 #include "fuzzy.hpp"
 #include "key_hint.hpp"
@@ -109,17 +110,17 @@ inline void picker(const C& c, std::string_view id, const TextEditState& query,
     std::vector<Node> rows;
     for (int k = top; k < std::min(n, top + st.max_rows); ++k) {
         const PickerItem& it = items[static_cast<std::size_t>(ranked.order[static_cast<std::size_t>(k)])];
-        const auto pid = part_id(id, static_cast<std::size_t>(k));
-        const bool on = k == sel, hov = c.hovered(pid);
-        rows.push_back((h(node(it.icon_name.empty() ? Node{} : file_icon(t, it.icon_name, 12.0f).build()),
+
+        const bool on = k == sel;
+        rows.push_back((h(box() | size(2, 14) | with_look(sheet_of(t).mark, t),
+                          node(it.icon_name.empty() ? Node{} : file_icon(t, it.icon_name, 12.0f).build()),
                           node(fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.font_size,
                                           t.text_primary, t.accent).build()),
                           text_owned(it.detail) | font(t.font_size * 0.88f) | fg(var::text_disabled) | ellipsis
                               | grow() | min_size(0, 0),
                           node(it.hint.empty() ? Node{} : key_hint(t, it.hint, "", t.font_size * 0.82f).build()))
-                        | gap(t.spaced(9)) | align(Align::center) | pad(0, t.spaced(12)) | height(30) | width(pct(100))
-                        | bg(on ? t.tint(t.accent, 0.20f) : hov ? t.surface_raised : t.overlay.fade(0.0f))
-                        | radius(t.radius_small)
+                        | gap(t.spaced(9)) | align(Align::center) | pad(0, t.spaced(12), 0, t.spaced(6)) | height(30)
+                        | width(pct(100)) | with_look(sheet_of(t).item, t) | group()
                         | pointer_cursor | role(a11y::Role::menu_item) | selected(on) | label(it.label)
                         | id_of(id, static_cast<std::size_t>(k))).build());
     }

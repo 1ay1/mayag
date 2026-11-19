@@ -627,6 +627,21 @@ class window_host {
     void handle(const SetFullscreen& e) {
         if constexpr (requires { window_.set_fullscreen(e.on); }) window_.set_fullscreen(e.on);
     }
+    void handle(const WindowAction& e) {
+        using K = WindowAction::Kind;
+        switch (e.kind) {
+            case K::move:
+                // The press that started it no longer drags inside the app.
+                if constexpr (requires { window_.begin_move(); }) { window_.begin_move(); input_.cancel_press(); }
+                break;
+            case K::minimize:
+                if constexpr (requires { window_.minimize(); }) window_.minimize();
+                break;
+            case K::toggle_maximize:
+                if constexpr (requires { window_.toggle_maximize(); }) window_.toggle_maximize();
+                break;
+        }
+    }
     void handle(const FocusNode& e) { input_.set_focus_visible(e.node_id); dirty_ = true; }
     void handle(const UploadImage& e) {
         if constexpr (requires { window_.upload_image(e.id, std::shared_ptr<const ImageData>{}); }) {
@@ -864,6 +879,7 @@ class window_host {
                     if (!gestures.empty()) dirty_ = true;
                     (void)emit(cx, ev);
                     emit_gestures(cx, gestures);
+                    update_cursor();
                     return;
                 }
                 if (is_press) {
@@ -875,16 +891,10 @@ class window_host {
                     }
                     if (overlays_.captures_input()) return;
                 }
+                if (std::holds_alternative<MouseMove>(ev)) update_cursor();
             }
         }
 
-        if (std::holds_alternative<MouseMove>(ev)) {
-            const CursorShape want = cursor_at(tree_, input_.cursor());
-            if (want != current_cursor_) {
-                current_cursor_ = want;
-                window_.set_cursor(want);
-            }
-        }
 
         // Repaint only when hover/press/focus changed: that is all a view can
         // see of the pointer through Ctx.
@@ -902,6 +912,7 @@ class window_host {
 
         (void)emit(cx, ev);
         emit_gestures(cx, gestures);
+        if (event_position(ev)) update_cursor();
     }
 
     // A raw window event, unpacked so the program's on(const KeyEvent&) etc.
@@ -999,16 +1010,77 @@ class window_host {
     [[nodiscard]] bool has_handled() const noexcept { return !handled_.empty(); }
 
   private:
+    // ── the pointer's shape ──────────────────────────────────────────────
+    //
+    // CSS semantics, with the hit rules clicks use:
+    //
+    //   * the TOPMOST node under the pointer decides (back-to-front, like
+    //     Interaction::identify), and its cursor is inherited from the
+    //     nearest ancestor that set one (`arrow` means "inherit");
+    //   * an unnamed node with no cursor of its own is transparent, exactly
+    //     as it is to clicks -- a decorative layer painted over a button
+    //     must not turn the button's hand back into an arrow;
+    //   * a disabled control shows not_allowed;
+    //   * while a press is held, the PRESSED node keeps its cursor (a split
+    //     divider dragged past its 5px strip stays a resize arrow; a text
+    //     selection dragged over a toolbar stays an I-beam), grab -> grabbing;
+    //   * over an overlay, the overlay decides; behind a modal, it's an arrow;
+    //   * resolved after every pointer event AND every frame, so a view that
+    //     changes under a still pointer is reflected without a mouse move.
+
+    /// Resolve within `n`: true when `n` claims the point; `out` then holds
+    /// the cursor, `arrow` meaning "nobody on the path set one yet".
+    static bool claim_cursor(const Node& n, Vec2 p, CursorShape& out) {
+        if (!n.frame().contains(p)) return false;
+        const Style& s = n.style();
+        for (auto it = n.children().rbegin(); it != n.children().rend(); ++it) {
+            if (claim_cursor(*it, p, out)) {
+                if (out == CursorShape::arrow) out = own_cursor(s);
+                return true;
+            }
+        }
+        if (s.id == 0 && s.cursor == CursorShape::arrow) return false;   // transparent
+        out = own_cursor(s);
+        return true;
+    }
+    [[nodiscard]] static CursorShape own_cursor(const Style& s) noexcept {
+        if (s.a11y_state.disabled && s.id != 0) return CursorShape::not_allowed;
+        return s.cursor;
+    }
     [[nodiscard]] static CursorShape cursor_at(const Node& n, Vec2 p) {
         CursorShape found = CursorShape::arrow;
-        walk_cursor(n, p, found);
+        (void)claim_cursor(n, p, found);
         return found;
     }
-    static void walk_cursor(const Node& n, Vec2 p, CursorShape& found) {
-        if (!n.frame().contains(p)) return;
-        if (n.style().cursor != CursorShape::arrow) found = n.style().cursor;
-        for (const auto& c : n.children()) walk_cursor(c, p, found);
+
+    [[nodiscard]] CursorShape wanted_cursor() const {
+        const Vec2 p = input_.cursor();
+        if (const std::uint64_t held = input_.pressed(); held != 0) {
+            if (const Node* n = node_by_id(held)) {
+                const CursorShape c = own_cursor(n->style());
+                if (c == CursorShape::grab) return CursorShape::grabbing;
+                if (c != CursorShape::arrow && c != CursorShape::pointer) return c;
+            }
+        }
+        if (!overlays_.empty()) {
+            if (const Overlay* o = overlays_.hit(p)) return cursor_at(o->content, p);
+            for (const auto& o : overlays_.items())
+                if (o.dismiss == Dismiss::modal) return CursorShape::arrow;
+        }
+        return cursor_at(tree_, p);
     }
+
+    void update_cursor() {
+        const CursorShape want = wanted_cursor();
+        if (want != current_cursor_) {
+            current_cursor_ = want;
+            window_.set_cursor(want);
+        }
+    }
+  public:
+    /// The pointer shape currently shown (for tests).
+    [[nodiscard]] CursorShape current_cursor() const noexcept { return current_cursor_; }
+  private:
 
     // ── the frame ───────────────────────────────────────────────────────
 
@@ -1198,6 +1270,7 @@ class window_host {
         // A widget mid-motion asked for another frame during the view, or
         // layout changed a scroll region's size (a scrollbar drawn from last
         // frame's numbers is now stale and needs one more pass).
+        update_cursor();   // the view may have changed under a still pointer
         motion_pending_ = animation_was_requested() || tracked_.animating() ||
                           take_scroll_geometry_changed() ||
                           // A `starting(...)` look lasts exactly one frame;

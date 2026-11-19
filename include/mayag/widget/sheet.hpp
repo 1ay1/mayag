@@ -255,6 +255,14 @@ struct Sheet {
     Look track, knob;                      ///< the on/off switch
     Look slider_track, slider_fill, slider_knob;
     Look label;                            ///< button / control text
+    // Chrome a terminal or editor is made of. State lives in the variants:
+    // a widget only says `selected(on)` / `checked(on)` and names the node.
+    Look strip;     ///< a bar of chrome: the tab strip, the status bar
+    Look tab;       ///< one tab (hover, `selected` = active)
+    Look mark;      ///< the active-indicator bar inside a `group` (tab, row)
+    Look segment;   ///< one option of a segmented control (`checked`)
+    Look item;      ///< a row of a list / picker / menu (`selected`)
+    Look pane;      ///< a split pane's frame (`selected` = focused)
 
     [[nodiscard]] static const Sheet& standard();
 };
@@ -327,6 +335,31 @@ inline const Sheet& Sheet::standard() {
             when(state::group(state::pressed), border(var::line_strong, var::accent), elevation(var::depth(3))),
             when(state::group(state::focus_visible), border(var::line_focus, var::focus_ring)),
             transition());
+
+        // ── chrome ──────────────────────────────────────────────────────
+        x.strip = look(bg(var::surface), border(var::line, var::border));
+        x.tab = look(
+            bg(var::surface), border(var::line, var::border), fg(var::text_secondary),
+            hovered(bg(var::tint(var::surface_raised, 0.5f)), fg(var::text_primary)),
+            when(state::selected, bg(var::background), fg(var::text_primary)),
+            transition());
+        x.mark = look(bg(var::accent.fade(0.0f)),
+                      when(state::group(state::selected), bg(var::accent)), transition());
+        x.segment = look(
+            radius(var::radius_sm), bg(var::surface_raised.fade(0.0f)), fg(var::text_secondary),
+            border(var::line, var::border.fade(0.0f)),
+            hovered(bg(var::surface_raised.fade(0.45f)), fg(var::text_primary)),
+            when(state::checked, bg(var::surface_raised), fg(var::text_primary), border_color(var::border),
+                 elevation(var::depth(1))),
+            focus_visible(border_color(var::focus_ring)),
+            transition());
+        x.item = look(
+            radius(var::radius_sm), bg(var::overlay.fade(0.0f)), fg(var::text_secondary),
+            hovered(bg(var::surface_raised), fg(var::text_primary)),
+            when(state::selected, bg(var::tint(var::accent, 0.20f)), fg(var::text_primary)),
+            transition());
+        x.pane = look(border(var::line, var::border.fade(0.0f)),
+                      when(state::selected, border_color(var::accent.fade(0.6f))), transition());
         return x;
     }();
     return s;
@@ -464,6 +497,34 @@ namespace sheets {
         x.slider_fill  = look(bg(var::accent), radius(0.0f), shadow(8.0f, var::accent.fade(0.7f)));
         x.slider_knob  = look(bg(var::accent), radius(0.0f), shadow(12.0f, var::accent.fade(0.8f)),
                               when(state::group(state::pressed), scale(1.25f)), transition());
+
+        // Chrome: hairlines, square, and light only where the eye should go.
+        x.strip = look(bg(var::surface), border(var::line, var::border));
+        x.tab = look(
+            bg(var::surface.fade(0.0f)), border(var::line, var::border.fade(0.0f)), fg(var::text_disabled),
+            hovered(bg(var::accent.fade(0.05f)), fg(var::text_secondary)),
+            when(state::selected, bg(var::background), fg(var::text_primary), border_color(var::border)),
+            transition());
+        x.mark = look(bg(var::accent.fade(0.0f)),
+                      when(state::group(state::selected), bg(var::accent), shadow(6.0f, var::accent.fade(0.55f))),
+                      transition());
+        x.segment = look(
+            radius(0.0f), bg(var::accent.fade(0.0f)), fg(var::text_disabled),
+            border(var::line, var::accent.fade(0.0f)),
+            hovered(bg(var::accent.fade(0.06f)), fg(var::text_primary)),
+            when(state::checked, bg(var::accent.fade(0.13f)), fg(var::accent), border_color(var::accent.fade(0.65f)),
+                 shadow(12.0f, var::accent.fade(0.22f))),
+            focus_visible(border_color(var::focus_ring)),
+            transition());
+        x.item = look(
+            radius(0.0f), bg(var::accent.fade(0.0f)), fg(var::text_secondary),
+            border(var::line, var::accent.fade(0.0f)),
+            hovered(bg(var::accent.fade(0.05f)), fg(var::text_primary)),
+            when(state::selected, bg(var::accent.fade(0.11f)), fg(var::text_primary), border_color(var::accent.fade(0.45f))),
+            transition());
+        x.pane = look(border(var::line, var::border),
+                      when(state::selected, border_color(var::accent.fade(0.7f)), shadow(10.0f, var::accent.fade(0.08f))),
+                      transition());
         return x;
     }();
     return s;

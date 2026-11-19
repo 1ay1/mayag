@@ -65,6 +65,10 @@ class Interaction {
     [[nodiscard]] Vec2 cursor() const noexcept { return cursor_; }
     [[nodiscard]] bool dragging() const noexcept { return pressed_ != 0 && dragged_; }
 
+    /// Forget the press in progress: the window manager took the pointer
+    /// (an interactive move), so no release will arrive for it.
+    void cancel_press() noexcept { pressed_ = 0; dragged_ = false; }
+
     [[nodiscard]] bool is_hovered(std::uint64_t id) const noexcept {
         return id != 0 && hovered_ == id;
     }

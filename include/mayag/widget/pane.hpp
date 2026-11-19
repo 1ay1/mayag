@@ -18,6 +18,7 @@
 //               Clicked on part_id(id, pane_part_close) -> close pane
 
 #include "control.hpp"
+#include "sheet.hpp"
 #include "dot.hpp"
 #include "scroll_view.hpp"   // part_bar
 
@@ -40,16 +41,22 @@ struct PaneInfo {
 template <ControlContext C>
 [[nodiscard]] inline Node pane_frame(const C& c, std::string_view id, const PaneInfo& p, Node content) {
     const Theme& t = c.theme;
+    const auto cid = part_id(id, pane_part_close);
+    const auto tag = [&](std::string_view s, Color<Srgb> col) {
+        return (text_owned(std::string{s}) | font(t.font_size * 0.68f) | bold | tracking(0.8f) | fg(col)
+                | pad(1, 5) | border(t.stroke(1), col.fade(0.55f)) | radius(t.rounded(2))).build();
+    };
     Node strip = p.show_title
-        ? (h(node(dot(p.focused ? t.accent : t.text_disabled, 6).build()),
-             text_owned(p.title) | font(t.font_size * 0.88f) | fg(p.focused ? t.text_primary : t.text_secondary)
-                 | ellipsis | grow() | min_size(0, 0),
-             text_owned(p.broadcast ? "BROADCAST" : "") | font(t.font_size * 0.72f) | bold | tracking(0.6f) | fg(var::danger),
-             text_owned(p.zoomed ? "ZOOMED" : "") | font(t.font_size * 0.72f) | bold | tracking(0.6f) | fg(var::warning),
-             h(text<"\u00D7"> | font(t.font_size) | fg(c.hovered(part_id(id, pane_part_close)) ? t.text_primary : t.text_disabled))
-                 | size(18, 18) | center | pointer_cursor | id_of(id, pane_part_close))
+        ? (h(node(dot(p.focused ? t.accent : t.text_disabled, 5).build()),
+             text_owned(p.title) | font(t.font_size * 0.86f) | (p.focused ? semibold : weight(FontWeight::regular))
+                 | fg(p.focused ? t.text_primary : t.text_secondary) | ellipsis | grow() | min_size(0, 0),
+             node(p.broadcast ? tag("BROADCAST", t.danger) : Node{}),
+             node(p.zoomed ? tag("ZOOM", t.warning) : Node{}),
+             h(text<"\u00D7"> | font(t.font_size) | fg(c.hovered(cid) ? t.text_primary : t.text_disabled))
+                 | size(18, 18) | center | radius(t.rounded(3)) | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
+                 | transition() | pointer_cursor | label("close pane") | id_of(id, pane_part_close))
            | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(8)) | height(24) | width(pct(100))
-           | bg(p.focused ? t.surface_raised : t.surface)).build()
+           | bg(p.focused ? t.surface : t.surface.fade(0.5f)) | border(t.stroke(1), t.border.fade(0.6f))).build()
         : Node{};
     Node footer = p.exited
         ? (h(text_owned(p.exit_code == 0 ? "[process completed]" : "[process exited with code " + std::to_string(p.exit_code) + "]")
@@ -61,7 +68,7 @@ template <ControlContext C>
         : Node{};
     return (v(node(std::move(strip)), v(node(std::move(content))) | grow() | width(pct(100)) | min_size(0, 0), node(std::move(footer)))
             | grow() | width(pct(100)) | height(pct(100)) | min_size(0, 0)
-            | border(p.focused && p.show_title ? 1.0f : 0.0f, t.accent.fade(0.6f)) | clip
+            | with_look(sheet_of(t).pane, t) | selected(p.focused && p.show_title) | clip
             | id_of(id)).build();
 }
 
