@@ -217,6 +217,17 @@ class MacWindow {
             msg<void>(win, sel("setContentView:"), own);
             msg<void>(own, sel("release"));
             msg<void>(win, sel("makeFirstResponder:"), own);
+            // Pointer motion and exit, ALWAYS: a tracking area that follows
+            // the view's bounds. Without it a window that isn't key gets no
+            // mouseMoved (hover dies the moment another app is focused) and
+            // nothing ever says the pointer left -- the last hover sticks.
+            constexpr unsigned long entered_exited = 0x01, moved = 0x02, active_always = 0x80,
+                                    in_visible_rect = 0x200, cursor_update = 0x04;
+            id area = msg<id>(msg_cls<id>(objc_getClass("NSTrackingArea"), sel("alloc")),
+                              sel("initWithRect:options:owner:userInfo:"), mayag_cgrect(0, 0, 0, 0),
+                              entered_exited | moved | active_always | in_visible_rect | cursor_update, own,
+                              static_cast<id>(nullptr));
+            if (area != nullptr) { msg<void>(own, sel("addTrackingArea:"), area); msg<void>(area, sel("release")); }
         }
         if (!cfg.child) install_app_menu(cfg.title);
         id view = msg<id>(win, sel("contentView"));
@@ -494,6 +505,8 @@ class MacWindow {
     [[nodiscard]] id ns_app() const noexcept { return app_; }
     [[nodiscard]] id ns_window() const noexcept { return window_; }
     [[nodiscard]] id ns_view() const noexcept { return view_; }
+    /// macOS convention: ctrl-click is a right click (off by default).
+    void set_ctrl_click_right(bool on) noexcept { ctrl_click_is_right_ = on; }
 
     /// A text field has keyboard focus (`on`), its caret at `caret` (logical
     /// px): the input method's candidate window opens at the caret. When
@@ -666,7 +679,14 @@ class MacWindow {
             default:                       name = "arrowCursor"; break;
         }
         id cursor = msg_cls<id>(objc_getClass("NSCursor"), sel(name));
+        cursor_ = cursor;
+        if (ime_) ime_->cursor = cursor;
         if (cursor != nullptr) msg<void>(cursor, sel("set"));
+    }
+    /// AppKit resets the cursor to the arrow on its own (entering the window,
+    /// a focus change, a cursor rect update): re-assert the app's.
+    void reapply_cursor() const {
+        if (cursor_ != nullptr && !cursor_hidden_) objc::msg<void>(cursor_, objc::sel("set"));
     }
 
     // ── images (image(id) nodes) ────────────────────────────────────────────────
@@ -1077,33 +1097,58 @@ class MacWindow {
         const Vec2 p{static_cast<float>(loc.x), size_.y - static_cast<float>(loc.y)};
 
         switch (type) {
+            case ev_mouse_exited:
+                // The pointer left the window: park it off-surface so hover
+                // clears (the same contract as Wayland's pointer leave).
+                out.push_back(MouseMove{Vec2{-1.0f, -1.0f}, Vec2{}, mods});
+                last_mouse_ = Vec2{-1.0f, -1.0f};
+                break;
+            case ev_mouse_entered:
+                out.push_back(MouseMove{p, Vec2{}, mods});
+                last_mouse_ = p;
+                reapply_cursor();
+                break;
             case ev_mouse_moved:
             case ev_left_dragged:
             case ev_right_dragged:
             case ev_other_dragged:
+                if (p == last_mouse_) break;   // AppKit repeats a still pointer (tracking + window): one event
                 out.push_back(MouseMove{p, p - last_mouse_, mods});
                 last_mouse_ = p;
                 break;
 
             case ev_left_down:
+                // ctrl-click as the Mac's right click, when the app opts in
+                // (set_ctrl_click_right) -- off by default, because terminal
+                // apps and editors bind ctrl+click themselves.
+                if (mods.ctrl && !mods.super && !mods.alt && !mods.shift && ctrl_click_is_right_) {
+                    right_from_ctrl_ = true;
+                    out.push_back(MouseDown{p, MouseButton::right, mods, 1});
+                    break;
+                }
                 out.push_back(MouseDown{p, MouseButton::left, mods,
                                         static_cast<int>(msg<long>(ev, sel("clickCount")))});
                 break;
             case ev_left_up:
+                if (right_from_ctrl_) { right_from_ctrl_ = false; out.push_back(MouseUp{p, MouseButton::right, mods}); break; }
                 out.push_back(MouseUp{p, MouseButton::left, mods});
                 break;
             case ev_right_down:
-                out.push_back(MouseDown{p, MouseButton::right, mods, 1});
+                out.push_back(MouseDown{p, MouseButton::right, mods,
+                                        static_cast<int>(msg<long>(ev, sel("clickCount")))});
                 break;
             case ev_right_up:
                 out.push_back(MouseUp{p, MouseButton::right, mods});
                 break;
             case ev_other_down:
-                out.push_back(MouseDown{p, MouseButton::middle, mods, 1});
+            case ev_other_up: {
+                // buttonNumber: 2 middle, 3 back, 4 forward (the side buttons)
+                const long bn = msg<long>(ev, sel("buttonNumber"));
+                const MouseButton b = bn == 3 ? MouseButton::back : bn == 4 ? MouseButton::forward : MouseButton::middle;
+                if (type == ev_other_down) out.push_back(MouseDown{p, b, mods, static_cast<int>(msg<long>(ev, sel("clickCount")))});
+                else out.push_back(MouseUp{p, b, mods});
                 break;
-            case ev_other_up:
-                out.push_back(MouseUp{p, MouseButton::middle, mods});
-                break;
+            }
 
             case ev_scroll_wheel: {
                 // Trackpads report precise sub-pixel deltas; wheels report
@@ -1224,6 +1269,8 @@ class MacWindow {
     bool  was_key_ = true;      ///< last reported keyboard focus
     bool  maximized_ = false;   ///< toggle_maximize's state, and where it came from
     bool  visible_ = true;      ///< on screen (not minimised / hidden / covered)
+    bool  right_from_ctrl_ = false;      ///< this left press was reported as right (ctrl-click)
+    bool  ctrl_click_is_right_ = false;  ///< off: a terminal's apps see ctrl+click as itself
     CGRect restore_frame_{};
 
     /// What happened to each window since the last dispatch: its close button
@@ -1263,6 +1310,7 @@ class MacWindow {
         std::string marked_text;
         bool want = false;        ///< a text field has focus
         bool option_as_alt = false;
+        id cursor = nullptr;      ///< the app's cursor, for cursorUpdate:
         Rect caret{};             ///< its caret, logical px from the top-left
         float view_h = 0.0f;
     };
@@ -1385,6 +1433,22 @@ class MacWindow {
                 return win ? msg<CGRect>(win, sel("convertRectToScreen:"), in_win) : in_win;
             };
             class_addMethod(c, sel("acceptsFirstResponder"), reinterpret_cast<IMP>(+yes), "c@:");
+            // A click on a window in the background acts at once (a TUI's
+            // button, a tab) instead of only focusing the window.
+            const auto yes1 = +[](id, SEL, id) -> BOOL { return YES; };
+            class_addMethod(c, sel("acceptsFirstMouse:"), reinterpret_cast<IMP>(+yes1), "c@:@");
+            // mayag reads pointer events from the event stream; the tracking
+            // area's callbacks to the view need no handling (and must not walk
+            // the responder chain).
+            for (const char* s : {"mouseMoved:", "mouseEntered:", "mouseExited:"})
+                class_addMethod(c, sel(s), reinterpret_cast<IMP>(+swallow), "v@:@");
+            // AppKit asks the view which cursor to show (entering, refocus):
+            // the app's, not NSView's default arrow.
+            const auto cursor_update = +[](id self, SEL, id) {
+                if (const Ime* m = ime_of(self); m != nullptr && m->cursor != nullptr) msg<void>(m->cursor, sel("set"));
+                else msg<void>(msg_cls<id>(objc_getClass("NSCursor"), sel("arrowCursor")), sel("set"));
+            };
+            class_addMethod(c, sel("cursorUpdate:"), reinterpret_cast<IMP>(+cursor_update), "v@:@");
             class_addMethod(c, sel("keyDown:"), reinterpret_cast<IMP>(+key_down), "v@:@");
             class_addMethod(c, sel("keyUp:"), reinterpret_cast<IMP>(+swallow), "v@:@");
             class_addMethod(c, sel("doCommandBySelector:"), reinterpret_cast<IMP>(+do_command), "v@::");
@@ -1534,6 +1598,7 @@ class MacWindow {
     std::function<void(const RawInput&)> raw_;
     unsigned long long raw_flags_ = 0;    // modifier flags last seen, for raw key-up of modifiers
     bool cursor_hidden_ = false;
+    id cursor_ = nullptr;          ///< the shape the app asked for (re-set after AppKit resets it)
     id custom_cursor_ = nullptr;
 
     void show_cursor() {
