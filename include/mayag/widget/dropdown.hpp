@@ -8,6 +8,7 @@
 //   Clicked on part_id(id, i)         -> select i, close
 //   Left    on part_id(id, part_menu) -> the click-outside dismissal: close
 // The context must also be able to post overlays (mayag::Ctx can).
+// `layer`: the menu's overlay layer -- inside a modal, pass one above it.
 
 #include "control.hpp"
 #include "../scene/overlay.hpp"
@@ -21,7 +22,7 @@ namespace mayag::dsl {
 template <ControlContext C>
 [[nodiscard]] inline auto dropdown(const C& c, std::string_view id,
                                    const std::vector<std::string>& options, int chosen,
-                                   bool open, float width_px = 200.0f) {
+                                   bool open, float width_px = 200.0f, int layer = 0) {
     const Theme& t = c.theme;
     const auto nid = node_id(id);
     const bool hov = c.hovered(nid);
@@ -55,6 +56,7 @@ template <ControlContext C>
             .anchor_id = nid,
             .placement = Placement::below_start,
             .dismiss = Dismiss::on_click_outside,
+            .layer = layer,
         });
     }
     return h(text_owned(current) | font(t.font_size) | fg(var::text_primary) | grow(),

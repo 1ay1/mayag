@@ -1096,7 +1096,7 @@ class WaylandWindow {
     /// atlas uploads in full on its first sync (a fresh device holds a 1x1
     /// placeholder); the bound image is re-uploaded here.
     void adopt_gpu(std::unique_ptr<backend::VulkanDevice> d) {
-        if (d) d->set_low_latency(!cfg_.vsync);
+        if (d) { d->set_low_latency(!cfg_.vsync); d->set_transparent(cfg_.transparent); }
         if (!d || !d->attach_wayland(display_, surface_, logical_, scale_)) {
             if (d) d->destroy();
             if (!gpu_) gpu_ = std::make_unique<backend::VulkanDevice>();

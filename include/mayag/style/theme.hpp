@@ -107,6 +107,12 @@ struct Theme {
     Spring motion_gentle   = {120.0f, 22.0f};
     float  motion_scale    = 1.0f;
 
+    /// The window's own opacity: the background the window is CLEARED to
+    /// is `background` at this alpha (needs AppConfig::transparent). Widgets
+    /// that paint `background` stay opaque -- only the bare window shows
+    /// the desktop through.
+    float  window_opacity  = 1.0f;
+
     /// Every widget's look. Null: the standard sheet. Point it at your own
     /// (usually a static) to restyle every widget at once.
     const Sheet* sheet = nullptr;
@@ -124,6 +130,7 @@ struct Theme {
     float    tab_width   = 200.0f;  ///< a tab's preferred width
     bool     tab_numbers = true;    ///< 1..9 on idle tabs
     bool     tab_close_on_hover = true;  ///< the × shows only on the active / hovered tab
+    float    mark        = 2.0f;    ///< thickness of active indicators (tab bar, row bar)
 
     friend constexpr bool operator==(const Theme&, const Theme&) = default;
 
@@ -360,8 +367,8 @@ namespace detail {
     float Theme::*floats_[] = {
         &Theme::radius_small, &Theme::radius_medium, &Theme::radius_large, &Theme::space_unit,
         &Theme::font_size, &Theme::line_hairline, &Theme::line_strong, &Theme::line_focus,
-        &Theme::depth_scale, &Theme::motion_scale,
-        &Theme::bar_height, &Theme::status_height, &Theme::chrome_type, &Theme::tab_width};
+        &Theme::depth_scale, &Theme::motion_scale, &Theme::window_opacity,
+        &Theme::bar_height, &Theme::status_height, &Theme::chrome_type, &Theme::tab_width, &Theme::mark};
     for (auto m : floats_) r.*m = num::lerp(a.*m, b.*m, t);
     r.motion_ui       = detail::lerp_spring(a.motion_ui, b.motion_ui, t);
     r.motion_emphasis = detail::lerp_spring(a.motion_emphasis, b.motion_emphasis, t);

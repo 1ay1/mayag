@@ -683,6 +683,15 @@ class window_host {
     [[nodiscard]] std::string_view renderer_name() const noexcept { return window_.renderer_name(); }
     [[nodiscard]] bool frames_on() const noexcept { return frames_on_; }
 
+    /// Is `p` on the node an overlay is anchored to (its trigger)?
+    [[nodiscard]] bool on_anchor(const Overlay& o, Vec2 p) const {
+        if (o.anchor_id == 0) return false;
+        const Node* a = tree_.find(o.anchor_id);
+        for (std::size_t k = 0; a == nullptr && k < overlays_.items().size(); ++k)
+            if (&overlays_.items()[k] != &o) a = overlays_.items()[k].content.find(o.anchor_id);
+        return a != nullptr && a->frame().contains(p);
+    }
+
     [[nodiscard]] std::optional<Rect> node_rect(std::uint64_t id) const {
         // Overlays first, topmost layer first: a node in an open menu is what
         // a click at its centre reaches, so that is the rect a test wants.
@@ -836,6 +845,9 @@ class window_host {
             dirty_ = true;
         }
         if (std::holds_alternative<FrameEvent>(ev)) return;   // the host owns the clock now
+        if (std::holds_alternative<MouseDown>(ev) || std::holds_alternative<KeyEvent>(ev) ||
+            std::holds_alternative<ScrollEvent>(ev) || std::holds_alternative<TextEvent>(ev))
+            block_tooltip();
 
         // The close button. A program that doesn't handle it still closes.
         if (std::holds_alternative<CloseRequest>(ev)) {
@@ -878,10 +890,43 @@ class window_host {
 
         // Overlays see pointer input first: a modal swallows what's behind
         // it, and a click outside a menu dismisses the menu.
+        //
+        // POINTER CAPTURE spans layers: while a button is held, every move
+        // and the release go to the layer that took the press -- a scrollbar
+        // dragged across a toast, a slider dragged off a dialog's edge, must
+        // keep dragging.
+        const bool held = input_.pressed() != 0 && press_layer_.has_value();
+        if (held && event_position(ev) && !std::holds_alternative<MouseDown>(ev)) {
+            const Node* layer = &tree_;
+            if (*press_layer_ != 0)
+                for (const auto& o : overlays_.items()) if (o.id == *press_layer_) { layer = &o.content; break; }
+            const auto gestures = input_.handle(ev, *layer, window_.now());
+            if (!gestures.empty()) dirty_ = true;
+            (void)emit(cx, ev);
+            emit_gestures(cx, gestures);
+            update_cursor();
+            if (std::holds_alternative<MouseUp>(ev)) press_layer_.reset();
+            return;
+        }
+        if (std::holds_alternative<MouseDown>(ev)) press_layer_ = 0;   // the main tree, unless an overlay takes it
         if (!overlays_.empty()) {
             if (const auto pos = event_position(ev)) {
                 const bool is_press = std::holds_alternative<MouseDown>(ev);
                 if (const Overlay* over = overlays_.hit(*pos)) {
+                    if (is_press) {
+                        // A press inside a lower overlay (a modal panel) still closes
+                        // the menus stacked above it -- then the press goes through,
+                        // so the click lands on what it was aimed at (one click, not two).
+                        bool closed = false;
+                        for (const auto& o : overlays_.items())
+                            if (o.layer > over->layer && o.dismiss == Dismiss::on_click_outside &&
+                                !o.content.frame().contains(*pos) && !on_anchor(o, *pos)) {
+                                (void)emit(cx, Left{o.id});
+                                closed = true;
+                            }
+                        if (closed) dirty_ = true;
+                        press_layer_ = over->id;
+                    }
                     const auto gestures = input_.handle(ev, over->content, window_.now());
                     if (!gestures.empty()) dirty_ = true;
                     (void)emit(cx, ev);
@@ -890,7 +935,12 @@ class window_host {
                     return;
                 }
                 if (is_press) {
-                    const auto gone = overlays_.dismissed_by(*pos);
+                    auto gone = overlays_.dismissed_by(*pos);
+                    // a press on a menu's own trigger is the trigger's (it toggles), not "outside"
+                    std::erase_if(gone, [&](std::uint64_t oid) {
+                        for (const auto& o : overlays_.items()) if (o.id == oid) return on_anchor(o, *pos);
+                        return false;
+                    });
                     if (!gone.empty()) {
                         for (std::uint64_t id : gone) (void)emit(cx, Left{id});
                         dirty_ = true;
@@ -1013,8 +1063,10 @@ class window_host {
             const bool has = n.cascade() != nullptr &&
                 std::ranges::any_of(n.cascade()->handlers, [&](const auto& h) { return h.on == on; });
             if (!has) { if (!bubbles) return; continue; }
-            // `local` relative to the node whose handler runs.
-            const Vec2 local = g.position - n.frame().origin;
+            // `local` stays relative to the node the gesture HIT (the DOM's
+            // offsetX): a bubbled scrollbar press still knows where on the
+            // bar it landed. `node` names that target too.
+            const Vec2 local = g.local;
             const auto run = [&](const auto& event) {
                 for (const auto& h : n.cascade()->handlers)
                     if (h.on == on) {
@@ -1059,6 +1111,87 @@ class window_host {
     [[nodiscard]] bool has_handled() const noexcept { return !handled_.empty(); }
 
   private:
+    // ── tooltips ─────────────────────────────────────────────────────────
+    //
+    // Desktop behaviour, owned here so no widget needs a timer:
+    //   * shown when the pointer has RESTED on a tooltipped node (or inside
+    //     one) for `tip_delay`;
+    //   * "warm": after one was shown, moving to the next tooltipped
+    //     control shows its tooltip at once (scanning a toolbar), until the
+    //     pointer has been on untipped ground for `tip_cooldown`;
+    //   * hidden by a press, a key or a scroll, and stays hidden until the
+    //     pointer moves to another control (it already did its job);
+    //   * placed below the control (above when there is no room), never
+    //     under the pointer, and transparent to input.
+    static constexpr double tip_delay = 0.55, tip_cooldown = 0.6;
+    /// The layer (overlay id, 0 = the main tree) holding the pointer while a
+    /// button is down; see handle_event.
+    std::optional<std::uint64_t> press_layer_;
+    std::uint64_t tip_anchor_ = 0;
+    double        tip_since_ = 0.0, tip_last_ = -10.0;
+    bool          tip_shown_ = false, tip_blocked_ = false, tip_waiting_ = false;
+
+    /// The nearest node on the path to `id` (inclusive) carrying a tooltip.
+    [[nodiscard]] static const Node* tooltip_owner(const Node& root, std::uint64_t id) {
+        const Node* best = nullptr;
+        const auto walk = [&](const auto& self, const Node& n, const Node* inherited) -> bool {
+            const Node* here = n.style().tooltip.empty() ? inherited : &n;
+            if (n.style().id == id) { best = here; return true; }
+            for (const auto& k : n.children()) if (self(self, k, here)) return true;
+            return false;
+        };
+        (void)walk(walk, root, nullptr);
+        return best;
+    }
+
+    void block_tooltip() {
+        if (tip_shown_) { tip_shown_ = false; tip_last_ = time_; dirty_ = true; }
+        tip_blocked_ = true;
+    }
+
+    void post_tooltip() {
+        using namespace dsl;
+        tip_waiting_ = false;
+        const std::uint64_t hov = input_.pressed() != 0 ? 0 : input_.hovered();
+        const Node* owner = nullptr;
+        if (hov != 0) {
+            owner = tooltip_owner(tree_, hov);
+            if (owner == nullptr)
+                for (const auto& o : overlays_.items())
+                    if ((owner = tooltip_owner(o.content, hov)) != nullptr) break;
+        }
+        const std::uint64_t anchor = owner ? (owner->style().id != 0 ? owner->style().id : hov) : 0;
+        if (anchor != tip_anchor_) {
+            if (tip_shown_) tip_last_ = time_;
+            tip_shown_ = false;
+            tip_blocked_ = false;
+            tip_anchor_ = anchor;
+            tip_since_ = time_;
+        }
+        if (owner == nullptr || tip_blocked_) return;
+        const bool warm = time_ - tip_last_ < tip_cooldown;
+        if (!tip_shown_ && time_ - tip_since_ < (warm ? 0.0 : tip_delay)) { tip_waiting_ = true; return; }
+        tip_shown_ = true;
+        tip_last_ = time_;
+        const Theme& t = theme_;
+        const Style& st = owner->style();
+        Node body = (h(text_owned(st.tooltip) | font(t.font_size * 0.86f) | fg(var::text_primary) | wrap_text
+                           | line_height(1.3f) | shrink() | min_size(0, 0),
+                       when(!st.tooltip_keys.empty(),
+                            node((text_owned(st.tooltip_keys) | font(t.font_size * 0.78f) | monospace
+                                  | fg(var::text_disabled) | pad(1, 5) | border(t.stroke(1), t.border)
+                                  | radius(t.rounded(3))).build())))
+                     | gap(t.spaced(8)) | align(Align::center) | pad(t.spaced(5), t.spaced(9))
+                     | max_size(380.0f, 200.0f)
+                     | bg(var::overlay) | border(t.stroke(1), t.border_strong) | radius(t.radius_small)
+                     | shadow(14.0f, colors::black.fade(0.30f), {0.0f, 5.0f}, -3.0f)
+                     | starting(opacity(0.0f), translate(0.0f, -3.0f)) | transition()
+                     | role(a11y::Role::text)).build();
+        overlays_.add(Overlay{.content = std::move(body), .id = 0x7F00'0000'0000'0001ull, .anchor_id = anchor,
+                              .placement = Placement::below_start, .dismiss = Dismiss::never, .offset = 6.0f,
+                              .layer = 1000, .passthrough = true});
+    }
+
     // ── the pointer's shape ──────────────────────────────────────────────
     //
     // CSS semantics, with the hit rules clicks use:
@@ -1216,6 +1349,7 @@ class window_host {
                 if (tree_.children().empty()) return;   // nothing good to show
             }
         }
+        post_tooltip();
 
         const auto& measurer = bindings_->measurer;
         {
@@ -1252,13 +1386,27 @@ class window_host {
         { ScopedTimer t{frame.layout_ms}; layout::layout_tree(tree_, size_, measurer); }
         tracked_.observe_all(tree_);
 
-        for (auto& o : overlays_.items()) {
+        // Lay overlays out lowest layer first, so an overlay anchored INSIDE
+        // another (a dropdown in a modal panel) finds its anchor already
+        // placed. Anchors are looked up in the main tree, then in every
+        // overlay arranged so far.
+        std::vector<std::size_t> order(overlays_.items().size());
+        for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+            return overlays_.items()[a].layer < overlays_.items()[b].layer;
+        });
+        std::vector<const Node*> placed_roots;
+        for (std::size_t oi : order) {
+            auto& o = overlays_.items()[oi];
             const Node* a = o.anchor_id != 0 ? tree_.find(o.anchor_id) : nullptr;
+            for (std::size_t k = 0; a == nullptr && o.anchor_id != 0 && k < placed_roots.size(); ++k)
+                a = placed_roots[k]->find(o.anchor_id);
             const Rect anchor = o.anchor_id != 0 ? (a ? a->frame() : Rect{}) : Rect{Vec2{}, size_};
             const Vec2 natural = layout::measure(o.content, layout::Constraints{size_.x, size_.y}, measurer);
             const Rect placed = overlay::resolve(o.placement, anchor, natural, size_,
                                                  o.offset, o.at.value_or(input_.cursor()));
             layout::arrange(o.content, placed, measurer);
+            placed_roots.push_back(&o.content);
         }
 
         // Transitions run AFTER layout. Everything they animate is paint-only
@@ -1293,7 +1441,7 @@ class window_host {
             po.measurer     = &measurer;
             po.glyphs       = &bindings_->glyphs;
             po.debug_bounds = cfg_.debug_bounds;
-            po.clear_color  = theme_.background;
+            po.clear_color  = theme_.background.fade(theme_.window_opacity);
             render::paint(tree_, draws_, po);
             // The atlas had to move glyphs mid-paint (it overflowed): uvs
             // recorded before the move are stale. Paint again; the second
@@ -1337,6 +1485,7 @@ class window_host {
             }
         }
         motion_pending_ = animation_was_requested() || tracked_.animating() ||
+                          tip_waiting_ ||
                           take_scroll_geometry_changed() ||
                           // A `starting(...)` look lasts exactly one frame;
                           // the next one is owed or it would stick forever.
@@ -1344,7 +1493,7 @@ class window_host {
 
         frame.instances  = static_cast<std::uint32_t>(draws_.size());
         frame.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
-        { ScopedTimer t{frame.render_ms}; window_.present(draws_, theme_.background); }
+        { ScopedTimer t{frame.render_ms}; window_.present(draws_, theme_.background.fade(theme_.window_opacity)); }
         sync_text_input();
         if (frame_counter_ == 1 && startup::enabled()) {
             std::fprintf(stderr, "mayag: startup first frame: view %.1f cascade %.1f layout %.1f paint %.1f render %.1f ms\n",

@@ -40,6 +40,7 @@ struct TermTab {
     std::uint32_t color = 0;       ///< tab accent (0 none)
     AgentInfo   agent;             ///< a coding agent running in the tab
     std::optional<SshHost> host;   ///< the remote end of an ssh tab
+    std::string detail;            ///< a second line for the tooltip: the cwd, the command
 };
 
 inline constexpr std::size_t term_part_close = part_dec + 4096;
@@ -90,7 +91,7 @@ template <ControlContext C, Responder... Grab>
                       | size(H * 0.55f, H * 0.55f) | center | radius(t.rounded(4))
                       | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
                       | opacity(show_close ? 1.0f : 0.0f) | transition()
-                      | pointer_cursor | label("close tab") | id_of(id, term_part_close + i)).build();
+                      | pointer_cursor | label("close tab") | tooltip("Close tab", "ctrl shift w") | id_of(id, term_part_close + i)).build();
         const std::string label_text = tb.process.empty() || tb.title.find(tb.process) != std::string::npos
                                            ? tb.title : tb.process + " \u2014 " + tb.title;
         Node bar = tb.progress >= 0
@@ -108,8 +109,8 @@ template <ControlContext C, Responder... Grab>
         // tint on every tab, brighter when active.
         Node mark_node;
         if (shape == TabShape::underline || shape == TabShape::overline || shape == TabShape::block) {
-            const float y = shape == TabShape::underline ? H - 2.0f : 0.0f;
-            auto mark = box() | size(1e4f, 2) | absolute(0, y);
+            const float y = shape == TabShape::underline ? H - t.mark : 0.0f;
+            auto mark = box() | size(1e4f, t.mark) | absolute(0, y);
             mark_node = tinted ? (std::move(mark) | bg(on ? stripe : stripe.fade(0.5f))).build()
                                : (std::move(mark) | with_look(sh.mark, t)).build();
         }
@@ -124,6 +125,9 @@ template <ControlContext C, Responder... Grab>
                      | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(6), 0, t.spaced(12))
                      | width(pct(100)) | height(pct(100));
         const float w = (remote ? 1.2f : 1.0f) * t.tab_width;
+        std::string tip = label_text;
+        if (!tb.detail.empty()) tip += "\n" + tb.detail;
+        if (tb.exit_code > 0) tip += "\nexited " + std::to_string(tb.exit_code);
 
         Node tab;
         if (shape == TabShape::pill) {
@@ -134,7 +138,7 @@ template <ControlContext C, Responder... Grab>
                    | bg(on ? t.background : (hov ? t.surface_raised.fade(0.55f) : t.surface.fade(0.0f)))
                    | border(t.stroke(1), on ? (tinted ? stripe.fade(0.7f) : t.border) : t.border.fade(0.0f))
                    | transition() | group() | clip | pointer_cursor
-                   | role(a11y::Role::tab) | selected(on) | label(label_text) | id_of(id, i)).build();
+                   | role(a11y::Role::tab) | selected(on) | label(label_text) | tooltip(tip) | id_of(id, i)).build();
             items.push_back((h(std::move(tab)) | height(H) | pad(0, 2) | align(Align::center)).build());
             continue;
         }
@@ -145,7 +149,7 @@ template <ControlContext C, Responder... Grab>
             const Color<Srgb> ink = on ? t.on_accent : (hov ? t.text_primary : t.text_secondary);
             auto lit = h(std::move(content)) | fg(ink) | width(w) | height(H) | shrink() | min_size(90, H) | bg(body)
                      | transition() | group() | clip | pointer_cursor
-                     | role(a11y::Role::tab) | selected(on) | label(label_text) | id_of(id, i);
+                     | role(a11y::Role::tab) | selected(on) | label(label_text) | tooltip(tip) | id_of(id, i);
             auto wedge = h(text<"\uE0B0"> | font(H * 1.02f) | line_height(1.0f) | fg(body)) | size(H * 0.5f, H) | center
                        | bg(var::surface) | clip;
             items.push_back((h(std::move(lit), std::move(wedge)) | height(H)).build());
@@ -159,23 +163,30 @@ template <ControlContext C, Responder... Grab>
         // sitting on a line.
         Node foot = shape == TabShape::block && on
             ? Node{} : (box() | size(1e4f, 1.0f) | absolute(0, H - 1.0f) | bg(var::border)).build();
-        tab = (z(std::move(content), node(std::move(mark_node)), node(std::move(bar)), node(std::move(foot)))
+        // The wash: the Sheet's tab_wash, lit on the selected tab, falling
+        // away from the indicator's edge (flipped for an underline).
+        Node wash = (shape == TabShape::underline || shape == TabShape::overline || shape == TabShape::block)
+            ? (box() | size(1e4f, H) | absolute(0, 0) | with_look(sh.tab_wash, t)
+               | when(shape == TabShape::underline, rotate(180.0f))).build()
+            : Node{};
+        tab = (z(node(std::move(wash)), std::move(content), node(std::move(mark_node)), node(std::move(bar)), node(std::move(foot)))
                | width(w) | height(H) | shrink() | min_size(90, H)
                | with_look(sh.tab, t)
                | when(wants_attention(tb.agent.state) && !on, bg(t.tint(agent_tone(t, tb.agent.state), 0.08f)))
                | group() | clip | pointer_cursor
                | role(a11y::Role::tab) | selected(on) | label(label_text)
-               | id_of(id, i)).build();
+               | tooltip(tip) | id_of(id, i)).build();
         items.push_back(std::move(tab));
     }
     const auto plus = part_id(id, part_inc), menu = part_id(id, part_menu);
     items.push_back((h(text_owned(nerd ? "\uF067" : "+") | font(nerd ? fs * 0.9f : fs * 1.3f)
                        | fg(c.hovered(plus) ? t.text_primary : t.text_secondary))
                      | size(H, H) | center | bg(c.hovered(plus) ? t.surface_raised : t.surface.fade(0.0f)) | transition()
-                     | pointer_cursor | label("new tab") | id_of(id, part_inc)).build());
+                     | pointer_cursor | label("new tab") | tooltip("New tab", "ctrl shift t") | id_of(id, part_inc)).build());
     items.push_back((h(text_owned(nerd ? "\uF078" : "\u2304") | font(fs * 0.78f)
                        | fg(c.hovered(menu) ? t.text_primary : t.text_disabled))
-                     | size(H * 0.62f, H) | center | pointer_cursor | label("new tab menu") | id_of(id, part_menu)).build());
+                     | size(H * 0.62f, H) | center | pointer_cursor | label("new tab menu") | tooltip("Commands", "ctrl shift p")
+                     | id_of(id, part_menu)).build());
     // Everything after the tabs stands on the strip's foot line.
     const auto footed = [&](Node n) {
         return (z(std::move(n), box() | size(1e4f, 1.0f) | absolute(0, H - 1.0f) | bg(var::border)) | height(H) | clip).build();

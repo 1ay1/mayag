@@ -34,7 +34,11 @@
 #include "../dsl/dsl.hpp"
 #include "../style/theme.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <utility>
 
 namespace mayag {
@@ -263,6 +267,8 @@ struct Sheet {
     Look segment;   ///< one option of a segmented control (`checked`)
     Look item;      ///< a row of a list / picker / menu (`selected`)
     Look pane;      ///< a split pane's frame (`selected` = focused)
+    Look tab_wash;  ///< light falling from the active tab's indicator (inside a `group`)
+    Look icon_button, icon_button_danger;   ///< glyph buttons in toolbars and window chrome
 
     [[nodiscard]] static const Sheet& standard();
 };
@@ -367,6 +373,15 @@ inline const Sheet& Sheet::standard() {
         // draw the lines between them. Focus is the accent rail on the
         // focused pane's title strip (pane_frame), so the frame itself is bare.
         x.pane = look(transition());
+        x.icon_button = look(
+            radius(var::radius_sm), bg(var::surface_raised.fade(0.0f)), fg(var::text_secondary),
+            hovered(bg(var::surface_raised), fg(var::text_primary)),
+            pressed(bg(var::border)),
+            when(state::selected, fg(var::accent)),
+            focus_visible(border(var::line_focus, var::focus_ring)),
+            when(state::disabled, opacity(0.4f)), transition());
+        x.icon_button_danger = extend(x.icon_button, hovered(bg(var::danger), fg(var::on_danger)),
+                                      pressed(bg(var::danger), fg(var::on_danger), opacity(0.85f)));
         return x;
     }();
     return s;
@@ -538,6 +553,166 @@ namespace sheets {
     return s;
 }
 
+}  // namespace sheets
+
+/// Every knob of a widget's LOOK, as data: what `sheets::tuned` builds a
+/// Sheet from. Shape (radius, spacing, line width, depth, motion) stays in
+/// the Theme's Seed; colour in its roles; these say how the roles are
+/// USED -- how strongly selection fills, whether edges are drawn, how much
+/// light there is. Every field 0..1 unless noted, 0 meaning "none".
+struct SheetKnobs {
+    float accent_fill = 0.16f;    ///< selected / checked / active: accent wash strength
+    float accent_edge = 0.55f;    ///< ...and their outline in the accent
+    float glow        = 0.0f;     ///< accent light around active things (0 = none, keep it low)
+    float hover       = 0.5f;     ///< hover wash strength
+    float outline     = 0.6f;     ///< resting control borders
+    float float_shadow = 0.7f;    ///< shadow under menus, dialogs, panels
+    float gradient    = 0.5f;     ///< chrome bars shade from an accent-tinted top
+    float label_weight = 500.0f;  ///< control label weight (300..800)
+    float label_tracking = 0.0f;  ///< control label letter spacing, px (-0.5..2)
+    bool  filled_primary = true;  ///< the primary button is a solid accent block
+    float outline_accent = 0.0f;  ///< resting edges and control text drawn in the accent (1 = the terminal look)
+    friend constexpr bool operator==(const SheetKnobs&, const SheetKnobs&) = default;
+
+    /// Knobs quantised to 1/40: a slider drag builds a bounded number of
+    /// sheets (each is cached for the life of the process, because a theme
+    /// in the middle of a morph may still point at it).
+    [[nodiscard]] std::uint64_t key() const noexcept {
+        const auto q = [](float v, float lo, float hi) {
+            return static_cast<std::uint64_t>(std::lround(std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f) * 40.0f));
+        };
+        std::uint64_t k = 0;
+        for (const auto v : {q(accent_fill, 0, 1), q(accent_edge, 0, 1), q(glow, 0, 1), q(hover, 0, 1), q(outline, 0, 1),
+                             q(float_shadow, 0, 1), q(gradient, 0, 1), q(label_weight, 300, 800), q(label_tracking, -0.5f, 2.0f)})
+            k = k * 41 + v;
+        k = k * 41 + q(outline_accent, 0, 1);
+        return k * 2 + (filled_primary ? 1 : 0);
+    }
+};
+
+namespace sheets {
+
+namespace detail {
+/// The sheet for `k`, built once per (quantised) knob set.
+[[nodiscard]] inline Sheet build_tuned(const SheetKnobs& k);
+}
+
+/// A Sheet built from knobs (see SheetKnobs). Stable address per knob set,
+/// so `Theme::sheet` may point at it.
+[[nodiscard]] inline const Sheet& tuned(const SheetKnobs& k) {
+    static std::mutex mu;
+    static std::unordered_map<std::uint64_t, std::unique_ptr<Sheet>> cache;
+    std::lock_guard lock{mu};
+    auto& slot = cache[k.key()];
+    if (!slot) slot = std::make_unique<Sheet>(detail::build_tuned(k));
+    return *slot;
+}
+
+[[nodiscard]] inline Sheet detail::build_tuned(const SheetKnobs& k) {
+    using namespace dsl;
+    Sheet x = Sheet::standard();
+    const float af = std::clamp(k.accent_fill, 0.0f, 1.0f), ae = std::clamp(k.accent_edge, 0.0f, 1.0f);
+    const float gl = std::clamp(k.glow, 0.0f, 1.0f), hv = std::clamp(k.hover, 0.0f, 1.0f);
+    const float ol = std::clamp(k.outline, 0.0f, 1.0f), fs = std::clamp(k.float_shadow, 0.0f, 1.0f);
+    const float gr = std::clamp(k.gradient, 0.0f, 1.0f);
+    // Light from active things, only when asked for, and soft.
+    const auto glow = [&](float scale) { return shadow(14.0f * scale, var::accent.fade(0.45f * gl), {0.0f, 0.0f}); };
+    const auto float_shadows = [&] {
+        return styles(shadow(36.0f, colors::black.fade(0.38f * fs), {0.0f, 14.0f}, -8.0f),
+                      shadow(2.0f, colors::black.fade(0.22f * fs), {0.0f, 1.0f}));
+    };
+
+    x.label = look(font(var::font_md), weight(k.label_weight), tracking(k.label_tracking));
+
+    // ── buttons ─────────────────────────────────────────────────────────
+    const float oa = std::clamp(k.outline_accent, 0.0f, 1.0f);
+    // Resting edges: neutral, or (the terminal look) the accent itself.
+    const auto edge = oa >= 0.5f ? var::accent.fade(0.30f + 0.70f * ol) : var::border_strong.fade(0.35f + 0.65f * ol);
+    const auto ink = oa >= 0.5f ? var::accent : var::text_primary;
+    x.button = look(
+        pad(var::space(0.75f), var::space(1.5f)), radius(var::radius_sm),
+        bg(oa >= 0.5f ? var::surface_raised.fade(0.0f) : var::surface_raised), border(var::line, edge), fg(ink),
+        hovered(bg(var::tint(var::accent, 1.0f - 0.16f * hv)), border_color(var::accent.fade(0.4f + 0.6f * ae))),
+        pressed(bg(var::accent.fade(0.25f + 0.5f * af)), scale(0.985f)),
+        focus_visible(border(var::line_focus, var::focus_ring)),
+        when(state::disabled, opacity(0.4f)), transition());
+    x.primary = k.filled_primary
+        ? extend(x.button, bg(var::accent), border_color(var::accent), fg(var::on_accent),
+                 hovered(bg(var::accent_hover), border_color(var::accent_hover), glow(1.0f)),
+                 pressed(bg(var::accent_active), border_color(var::accent_active)))
+        : extend(x.button, bg(var::accent.fade(af)), border_color(var::accent.fade(0.4f + 0.6f * ae)), fg(var::accent),
+                 hovered(bg(var::accent.fade(std::min(1.0f, af + 0.12f * hv))), glow(1.0f)));
+    x.danger = extend(x.button, fg(var::danger), border_color(var::danger.fade(0.5f)),
+                      hovered(bg(var::danger), border_color(var::danger), fg(var::on_danger)));
+    x.ghost = extend(x.button, bg(var::surface_raised.fade(0.0f)), border_color(var::border.fade(0.0f)),
+                     fg(var::text_secondary),
+                     hovered(bg(var::surface_raised.fade(0.4f + 0.6f * hv)), border_color(var::border), fg(var::text_primary)));
+
+    // ── surfaces ────────────────────────────────────────────────────────
+    x.card  = look(pad(var::space(2)), gap(var::space(1)), bg(var::surface),
+                   border(var::line, oa >= 0.5f ? var::accent.fade(0.25f + 0.4f * ol) : var::border.fade(0.3f + 0.7f * ol)),
+                   radius(var::radius_md));
+    x.panel = look(pad(var::space(1.5f)), gap(var::space(1)),
+                   linear_gradient(var::tint(var::accent, 0.06f * gr), var::surface),
+                   border(var::line, var::border_strong), radius(var::radius_md), float_shadows());
+    x.glass = extend(x.panel, bg(var::overlay.fade(0.82f)), backdrop_blur(24.0f));
+
+    // ── switch ──────────────────────────────────────────────────────────
+    x.track = look(
+        radius(var::radius_full), bg(var::background), border(var::line, edge),
+        hovered(border_color(var::text_disabled)),
+        when(state::checked, bg(var::accent), border_color(var::accent), glow(0.8f)),
+        focus_visible(border(var::line_focus, var::focus_ring)),
+        when(state::disabled, opacity(0.4f)), transition());
+    x.knob = look(radius(var::radius_full), bg(var::text_secondary),
+                  when(state::group(state::hover), bg(var::text_primary)),
+                  when(state::group(state::checked), bg(var::on_accent)), transition(var::motion_ui));
+
+    // ── slider ──────────────────────────────────────────────────────────
+    x.slider_track = look(bg(var::border), radius(var::radius_full));
+    x.slider_fill  = look(bg(var::accent), radius(var::radius_full), glow(0.6f));
+    x.slider_knob  = look(bg(var::text_primary), radius(var::radius_full), border(var::line_strong, var::background),
+                          when(state::group(state::hover), bg(var::accent_hover)),
+                          when(state::group(state::pressed), bg(var::accent), scale(1.12f)),
+                          when(state::group(state::focus_visible), border(var::line, var::focus_ring)), transition());
+
+    // ── chrome ──────────────────────────────────────────────────────────
+    // gradient 0 = a flat neutral bar (the surface); up to a 10% accent wash at the top
+    x.strip = look(linear_gradient(var::tint(var::accent, 0.10f * gr), var::surface));
+    x.tab = look(
+        bg(var::surface.fade(0.0f)), fg(var::text_secondary),
+        inner_shadow(0.0f, var::border.fade(0.4f + 0.6f * ol), {-1.0f, 0.0f}),
+        hovered(bg(var::surface_raised.fade(0.3f + 0.6f * hv)), fg(var::text_primary)),
+        when(state::selected, bg(var::background), fg(var::text_primary)), transition());
+    x.mark = look(bg(var::accent.fade(0.0f)), when(state::group(state::selected), bg(var::accent), glow(0.7f)),
+                  transition());
+    x.icon_button = look(
+        radius(var::radius_sm), bg(var::surface_raised.fade(0.0f)), fg(var::text_secondary),
+        hovered(bg(var::surface_raised.fade(0.35f + 0.65f * hv)), fg(var::text_primary)),
+        pressed(bg(var::accent.fade(0.15f + 0.4f * af))),
+        when(state::selected, fg(var::accent), bg(var::accent.fade(af * 0.6f))),
+        focus_visible(border(var::line_focus, var::focus_ring)),
+        when(state::disabled, opacity(0.4f)), transition());
+    x.icon_button_danger = extend(x.icon_button, hovered(bg(var::danger), fg(var::on_danger)),
+                                  pressed(bg(var::danger), fg(var::on_danger), opacity(0.85f)));
+    x.tab_wash = look(linear_gradient(var::accent.fade(0.10f + 0.45f * af), var::accent.fade(0.0f)),
+                      opacity(0.0f), when(state::group(state::hover), opacity(0.45f)),
+                      when(state::group(state::selected), opacity(1.0f)), transition());
+    x.segment = look(
+        radius(var::radius_sm), bg(var::accent.fade(0.0f)), fg(var::text_secondary),
+        border(var::line, var::accent.fade(0.0f)),
+        hovered(bg(var::surface_raised.fade(0.5f * hv)), fg(var::text_primary)),
+        when(state::checked, bg(var::accent.fade(af)), fg(var::text_primary), border_color(var::accent.fade(ae)),
+             glow(0.6f)),
+        focus_visible(border_color(var::focus_ring)), transition());
+    x.item = look(
+        radius(var::radius_sm), bg(var::accent.fade(0.0f)), fg(var::text_secondary),
+        hovered(bg(var::surface_raised.fade(0.3f + 0.6f * hv)), fg(var::text_primary)),
+        when(state::selected, bg(var::accent.fade(af)), fg(var::text_primary)), transition());
+    x.pane = look(transition());
+    return x;
+}
+
 /// Refined: the look of a serious tool. Flat; depth comes from TONE (each
 /// surface a small lightness step from the one behind it) and hairlines,
 /// never from glow. The accent marks state -- checked, selected, the
@@ -664,6 +839,13 @@ namespace looks {
         t.surface    = mix(t.surface, t.accent, 0.06f);
     }
     t.sheet = &sheets::glass();
+    return t;
+}
+
+/// Tuned: the standard shapes, every visual knob from `k` (SheetKnobs).
+[[nodiscard]] inline Theme tuned(const Seed& s, const SheetKnobs& k) {
+    Theme t = derive(s);
+    t.sheet = &sheets::tuned(k);
     return t;
 }
 

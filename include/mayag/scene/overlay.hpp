@@ -75,6 +75,11 @@ struct Overlay {
     /// For Placement::cursor: the point to place at instead of the pointer
     /// (a marker, a point on a chart). Window coordinates.
     std::optional<Vec2> at = std::nullopt;
+
+    /// Never takes the pointer: hit testing, hover and clicks go through
+    /// it to what is underneath (a tooltip must not eat the click it is
+    /// describing).
+    bool passthrough = false;
 };
 
 /// The overlay layer for one frame.
@@ -104,7 +109,7 @@ class OverlayList {
     [[nodiscard]] const Overlay* hit(Vec2 p) const noexcept {
         const Overlay* best = nullptr;
         for (const auto& o : items_) {
-            if (o.content.frame().contains(p) && (best == nullptr || o.layer >= best->layer)) {
+            if (!o.passthrough && o.content.frame().contains(p) && (best == nullptr || o.layer >= best->layer)) {
                 best = &o;
             }
         }
@@ -181,6 +186,23 @@ namespace overlay {
     // ---- slide back on screen ----
     pos.x = num::clamp(pos.x, 0.0f, num::max(viewport.x - size.x, 0.0f));
     pos.y = num::clamp(pos.y, 0.0f, num::max(viewport.y - size.y, 0.0f));
+
+    // ---- never cover the anchor ----
+    // A dropdown taller than the room on either side would otherwise slide
+    // up over its own trigger, and the next click on the trigger would land
+    // in the menu. Keep it on the roomier side and shorten it instead (the
+    // content clips; scrolling lists stay usable).
+    const bool vertical = placement == Placement::below_start || placement == Placement::below_end ||
+                          placement == Placement::above_start || placement == Placement::above_end;
+    if (vertical && anchor.size.y > 0.0f) {
+        const float below_room = num::max(viewport.y - (anchor.bottom() + gap), 0.0f);
+        const float above_room = num::max(anchor.top() - gap, 0.0f);
+        const bool overlaps = pos.y < anchor.bottom() && pos.y + size.y > anchor.top();
+        if (overlaps) {
+            if (below_room >= above_room) { pos.y = anchor.bottom() + gap; size.y = num::min(size.y, below_room); }
+            else { size.y = num::min(size.y, above_room); pos.y = anchor.top() - gap - size.y; }
+        }
+    }
 
     return Rect{pos, size};
 }

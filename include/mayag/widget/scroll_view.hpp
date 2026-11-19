@@ -21,6 +21,9 @@
 // `| scroll(state)` node.
 
 #include "control.hpp"
+#include "../app/handlers.hpp"
+
+#include <functional>
 #include "../core/scroll_state.hpp"
 
 #include <string_view>
@@ -81,6 +84,36 @@ template <ControlContext C, Element Content>
     return h(v(std::move(content)) | scroll(state) | grow() | height(pct(100)) | min_size(0, 0) | id_of(id),
              std::move(bar))
          | gap(t.spaced(2)) | width(pct(100)) | grow() | min_size(0, 0);
+}
+
+/// The same view with its whole interaction attached. `bind(op)` returns the
+/// message (usually an Edit) that applies `op` to the app's ScrollState:
+///
+///     scroll_view(c, "rows", m.scroll, rows, [](auto op) {
+///         return Edit<Model>{[op](Model& mm) { op(mm.scroll); }};
+///     })
+///
+/// Wheel and trackpad over the content, click / drag on the bar -- nothing
+/// left for on(Scrolled) or on(Dragged). Gestures on the bar and wheels in
+/// the content bubble here (mayag handlers bubble); a control inside the
+/// content that handles its own press still gets it first.
+using ScrollOp = std::function<void(ScrollState&)>;
+template <ControlContext C, Element Content, class Bind>
+    requires std::invocable<const Bind&, ScrollOp>
+[[nodiscard]] inline Node scroll_view(const C& c, std::string_view id, const ScrollState& state, Content content,
+                                      Bind bind) {
+    const auto bar_id = part_id(id, part_bar);
+    using M = std::invoke_result_t<const Bind&, ScrollOp>;
+    return (node(scroll_view(c, id, state, std::move(content)).build())
+            | on_scroll([bind](const Scrolled& s) { return bind([d = s.delta](ScrollState& st) { st.scroll_by(d); }); })
+            | on_press([bind, bar_id](const Pressed& p) -> std::optional<M> {
+                  if (p.node != bar_id) return std::nullopt;
+                  return bind([y = p.local.y](ScrollState& st) { scrollbar_press(st, y); });
+              })
+            | on_drag([bind, bar_id](const Dragged& d) -> std::optional<M> {
+                  if (d.node != bar_id) return std::nullopt;
+                  return bind([dy = d.delta.y](ScrollState& st) { scrollbar_drag(st, dy); });
+              })).build();
 }
 
 }  // namespace mayag::dsl

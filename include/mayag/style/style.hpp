@@ -507,6 +507,12 @@ struct Style {
     std::string a11y_description;
     a11y::State a11y_state{};
 
+    /// A tooltip: shown by the host after the pointer rests on this node
+    /// (or a descendant without its own), with an optional key chord shown
+    /// beside it. See `| tooltip(...)`.
+    std::string tooltip;
+    std::string tooltip_keys;
+
     /// Pointer shape while hovering this node.
     ///
     /// `arrow` means "inherit": a nested label inside a button should not

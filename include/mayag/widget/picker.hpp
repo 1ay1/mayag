@@ -112,7 +112,7 @@ inline void picker(const C& c, std::string_view id, const TextEditState& query,
         const PickerItem& it = items[static_cast<std::size_t>(ranked.order[static_cast<std::size_t>(k)])];
 
         const bool on = k == sel;
-        rows.push_back((h(box() | size(2, 14) | with_look(sheet_of(t).mark, t),
+        rows.push_back((h(box() | size(t.mark, 14) | with_look(sheet_of(t).mark, t),
                           node(it.icon_name.empty() ? Node{} : file_icon(t, it.icon_name, 12.0f).build()),
                           node(fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.font_size,
                                           t.text_primary, t.accent).build()),

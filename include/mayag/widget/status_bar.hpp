@@ -28,6 +28,7 @@ struct StatusItem {
     /// encoding, a size) is neither -- a hand over text that does nothing
     /// is a lie.
     bool interactive = true;
+    std::string tooltip;   ///< shown on hover (what clicking does, or the full value)
 };
 
 template <ControlContext C>
@@ -47,9 +48,10 @@ template <ControlContext C>
                   | gap(t.spaced(5)) | align(Align::center) | pad(0, t.spaced(7)) | height(pct(100))
                   | bg(live && hov ? t.surface_raised : it.active ? t.surface_raised.fade(0.6f) : t.surface.fade(0.0f))
                   | transition();
-        if (!live) return (std::move(body) | role(a11y::Role::text)).build();
+        if (!live) return (std::move(body) | role(a11y::Role::text) | tooltip(it.tooltip)
+                           | when(!it.tooltip.empty(), id_of(id, part))).build();
         return (std::move(body) | pointer_cursor | role(a11y::Role::button) | label(it.text.empty() ? it.icon : it.text)
-                | id_of(id, part)).build();
+                | tooltip(it.tooltip) | id_of(id, part)).build();
     };
     std::vector<Node> l, r;
     for (std::size_t i = 0; i < left.size(); ++i) l.push_back(seg(left[i], i));

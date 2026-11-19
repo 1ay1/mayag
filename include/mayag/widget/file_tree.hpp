@@ -47,6 +47,7 @@ struct TreeRow {
     bool        here = false;      ///< the focused tab's working directory
     Color<Srgb> here_hue{};        ///< that tab's colour
     std::string action;            ///< hover button label ("+ tab", "edit"), "" none
+    std::string tip;               ///< tooltip (a full path), "" none
 };
 
 inline constexpr float kTreeRowH = 24.0f;
@@ -159,7 +160,7 @@ template <ControlContext C>
      .add(list_scroll.offset).add(list_scroll.viewport).add(rows.size());
     for (const auto& r : rows)
         k.add(r.name).add(r.depth).add(r.dir).add(r.open).add(r.active).add(r.git).add(r.errors)
-         .add(r.tabs).add(r.here).add(r.here_hue).add(r.action);
+         .add(r.tabs).add(r.here).add(r.here_hue).add(r.action).add(r.tip);
     return memo_widget(c, k, [&] { return detail::file_tree_build(c, id, rows, chosen, list_scroll, focused); });
 }
 
@@ -228,7 +229,7 @@ template <ControlContext C>
                          : r.here ? mix(t.surface, r.here_hue, 0.10f)
                          : r.active ? t.surface_raised.fade(0.6f) : row_hov ? t.surface_raised.fade(0.45f) : t.surface.fade(0.0f))
                 | border(t.stroke(1), sel && focused ? t.accent.fade(0.6f) : t.border.fade(0.0f))
-                | transition() | pointer_cursor
+                | transition() | pointer_cursor | tooltip(r.tip)
                 | role(a11y::Role::list_item) | selected(sel) | label(r.name)
                 | id_of(id, static_cast<std::size_t>(i))).build();
     });

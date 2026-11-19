@@ -1799,6 +1799,22 @@ struct LabelMod {
 };
 [[nodiscard]] inline LabelMod label(std::string_view text) { return {text}; }
 
+/// A tooltip for this element: `| tooltip("Split right", "ctrl shift \\")`.
+/// The HOST shows it -- after the pointer rests ~0.5 s, instantly while you
+/// move between tooltipped controls, gone on press, key or scroll -- so no
+/// widget owns a timer or hover state. Descendants inherit it unless they
+/// set their own. Also the element's accessible description.
+struct TooltipMod {
+    MAYAG_MODIFIER(TooltipMod, caps::none, caps::none, caps::none, "tooltip");
+    std::string_view text, keys;
+    void apply(Style& s) const {
+        s.tooltip = std::string{text};
+        s.tooltip_keys = std::string{keys};
+        if (s.a11y_description.empty()) s.a11y_description = std::string{text};
+    }
+};
+[[nodiscard]] inline TooltipMod tooltip(std::string_view text, std::string_view keys = {}) { return {text, keys}; }
+
 struct DescriptionMod {
     MAYAG_MODIFIER(DescriptionMod, caps::none, caps::none, caps::none, "description");
     std::string_view v;

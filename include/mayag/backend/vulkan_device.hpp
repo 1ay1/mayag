@@ -412,6 +412,13 @@ class VulkanDevice {
     void set_low_latency(bool on) noexcept {
         if (on != low_latency_) { low_latency_ = on; if (swapchain_) rebuild_swapchain_ = true; }
     }
+    /// Present with per-pixel alpha (a translucent window): the swapchain
+    /// composites PRE_MULTIPLIED -- exactly how the pipeline blends -- and
+    /// the clear keeps the background's alpha. Call before the swapchain.
+    void set_transparent(bool on) noexcept {
+        if (on != transparent_) { transparent_ = on; if (swapchain_) rebuild_swapchain_ = true; }
+    }
+    [[nodiscard]] bool transparent() const noexcept { return transparent_ && composite_alpha_ != 1; }
     /// True when glyphs blend in encoded space, exactly as CoreGraphics (and
     /// the software reference) draws text: the device can view its target
     /// as UNORM. False: the linear-light coverage approximation.
@@ -2084,7 +2091,16 @@ class VulkanDevice {
                         vk::VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         ci.imageSharingMode = vk::VK_SHARING_MODE_EXCLUSIVE;
         ci.preTransform = vk::VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-        ci.compositeAlpha = vk::VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        // Translucent: premultiplied alpha (what the blend state produces);
+        // fall back to inherit, then opaque, by what the surface supports.
+        composite_alpha_ = vk::VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        if (transparent_) {
+            if (caps.supportedCompositeAlpha & vk::VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR)
+                composite_alpha_ = vk::VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+            else if (caps.supportedCompositeAlpha & vk::VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)
+                composite_alpha_ = vk::VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+        }
+        ci.compositeAlpha = composite_alpha_;
         ci.presentMode = present_mode;
         ci.clipped = 1;
         ci.oldSwapchain = swapchain_;
@@ -2286,8 +2302,10 @@ class VulkanDevice {
         // the Srgb space, so linearise it here.
         const auto lin = clear.template to<Linear>();
         vk::VkClearValue cv{};
-        cv.color.float32[0] = lin.c0; cv.color.float32[1] = lin.c1;
-        cv.color.float32[2] = lin.c2; cv.color.float32[3] = 1.0f;
+        // Premultiplied, so a translucent window's clear blends like its shapes.
+        const float ca = transparent() ? std::clamp(clear.a, 0.0f, 1.0f) : 1.0f;
+        cv.color.float32[0] = lin.c0 * ca; cv.color.float32[1] = lin.c1 * ca;
+        cv.color.float32[2] = lin.c2 * ca; cv.color.float32[3] = ca;
         const float viewport_push[2] = {static_cast<float>(vw), static_cast<float>(vh)};
 
         auto begin = [&](vk::VkRenderPass rp, vk::VkFramebuffer target_fb, vk::VkPipeline pipe) {
@@ -2666,6 +2684,8 @@ class VulkanDevice {
     char device_name_[256] = "vulkan";
     int  present_mode_ = 2;   // VK_PRESENT_MODE_FIFO_KHR until a swapchain exists
     bool low_latency_ = false;   ///< prefer IMMEDIATE (the window's vsync = false)
+    bool transparent_ = false;   ///< per-pixel alpha to the compositor
+    int  composite_alpha_ = 1;   ///< what the swapchain was built with
 
     vk::VkCommandPool cmd_pool_ = nullptr;
     vk::VkCommandBuffer frame_cb_ = nullptr, oneshot_cb_ = nullptr;

@@ -54,7 +54,7 @@ template <ControlContext C>
              node(p.zoomed ? tag("ZOOM", t.warning) : Node{}),
              h(text<"\u00D7"> | font(t.font_size) | fg(c.hovered(cid) ? t.text_primary : t.text_disabled))
                  | size(18, 18) | center | radius(t.rounded(3)) | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
-                 | transition() | pointer_cursor | label("close pane") | id_of(id, pane_part_close))
+                 | transition() | pointer_cursor | label("close pane") | tooltip("Close pane", "ctrl shift w") | id_of(id, pane_part_close))
            | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(8)) | height(std::round(t.bar_height * 0.72f)) | width(pct(100))
            | bg(p.focused ? t.background : t.surface) | inner_shadow(0.0f, t.border.fade(0.7f), {0.0f, -1.0f})
            | when(p.focused, inner_shadow(0.0f, t.accent, {0.0f, 2.0f}))).build()
