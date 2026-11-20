@@ -38,7 +38,7 @@ enum class Icon : std::uint8_t {
     // docks and layout
     panel_left, panel_right, panel_bottom, split_h, split_v, maximize, layout,
     // status
-    circle_alert, circle_x, triangle_alert, info, bell, sparkles, clock, home, arrow_up, arrow_down,
+    circle_alert, circle_x, triangle_alert, info, bell, sparkles, clock, home, arrow_up, arrow_down, power,
     count_
 };
 
@@ -120,6 +120,7 @@ inline const Prog& program(Icon i) {
         /* home */        {P, 3, 2.f, 7.5f, 8.f, 2.f, 14.f, 7.5f, 14.f, 7.5f, P, 3, 3.5f, 6.5f, 3.5f, 14.f, 12.5f, 14.f, 12.5f, 6.5f, END},
         /* arrow_up */    {L, 8.f, 14.f, 8.f, 2.5f, P, 2, 3.5f, 7.f, 8.f, 2.5f, 12.5f, 7.f, END},
         /* arrow_down */  {L, 8.f, 2.f, 8.f, 13.5f, P, 2, 3.5f, 9.f, 8.f, 13.5f, 12.5f, 9.f, END},
+        /* power */       {A, 8.f, 8.75f, 5.5f, 0.86f, 0.78f, L, 8.f, 1.75f, 8.f, 7.5f, END},
     };
     return k[static_cast<int>(i)];
 }
@@ -208,7 +209,7 @@ template <ControlContext C>
         "chevron_down", "chevron_right", "chevron_left", "chevron_up", "close", "plus", "minus", "check", "more", "more_vertical",
         "menu", "settings", "command", "filter", "refresh", "undo", "external", "copy", "trash", "pencil", "eye", "pin", "star",
         "panel_left", "panel_right", "panel_bottom", "split_h", "split_v", "maximize", "layout",
-        "circle_alert", "circle_x", "triangle_alert", "info", "bell", "sparkles", "clock", "home", "arrow_up", "arrow_down"};
+        "circle_alert", "circle_x", "triangle_alert", "info", "bell", "sparkles", "clock", "home", "arrow_up", "arrow_down", "power"};
     const auto k = static_cast<std::size_t>(i);
     return k < std::size(n) ? n[k] : "?";
 }

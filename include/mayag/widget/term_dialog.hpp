@@ -22,6 +22,7 @@
 // toggles the remember box.
 
 #include "control.hpp"
+#include "icons.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -46,6 +47,7 @@ struct DialogAction {
 struct TermDialogSpec {
     std::string tag;               ///< "PASTE", "CLOSE", "QUIT"
     Color<Srgb> tone{};            ///< the tag / frame colour (alpha 0: accent)
+    Icon        icon = Icon::count_;   ///< the badge glyph; count_: picked from the tag
     std::string title;
     std::string body;
     std::string meta;              ///< top-right of the frame ("3 lines · 84 chars")
@@ -60,28 +62,63 @@ struct TermDialogSpec {
     double      time = 0.0;        ///< for the flagged-line pulse
 };
 
+namespace term_dialog_detail {
+/// A scheme colour made fit to be a large surface. Terminal palettes carry
+/// raw primaries (Clu's red is #FF0000) that are right for a glyph and
+/// garish as a button: in Oklch the chroma is capped and the lightness kept
+/// in a band that reads on this background, the hue untouched -- so it is
+/// still the scheme's red, just one a designer would have picked.
+[[nodiscard]] inline Color<Srgb> tame(Color<Srgb> c, Color<Srgb> paper) {
+    auto l = c.to<Oklch>();
+    const bool dark = luminance(paper) < 0.4f;
+    l.c1 = std::min(l.c1, 0.165f);
+    l.c0 = dark ? std::clamp(l.c0, 0.60f, 0.72f) : std::clamp(l.c0, 0.50f, 0.60f);
+    auto out = l.to<Srgb>();
+    out.c0 = std::clamp(out.c0, 0.0f, 1.0f); out.c1 = std::clamp(out.c1, 0.0f, 1.0f); out.c2 = std::clamp(out.c2, 0.0f, 1.0f);
+    out.a = c.a;
+    return out;
+}
+[[nodiscard]] inline Icon icon_for(const TermDialogSpec& s) {
+    if (s.icon != Icon::count_) return s.icon;
+    if (s.tag == "QUIT") return Icon::power;
+    if (s.tag == "CLOSE") return Icon::circle_x;
+    if (s.tag == "PASTE" || s.tag == "CAREFUL") return Icon::triangle_alert;
+    return Icon::info;
+}
+}  // namespace term_dialog_detail
+
 template <ControlContext C>
 [[nodiscard]] inline Node term_dialog(const C& c, std::string_view id, const TermDialogSpec& s) {
+    namespace d = term_dialog_detail;
     const Theme& t = c.theme;
     const float fs = t.font_size * 0.95f;
     const auto paper = t.background, ink = t.text_primary;
-    const auto dim = mix(ink, paper, 0.45f), faint = mix(paper, ink, 0.13f);
-    const auto tone = s.tone.a > 0.0f ? s.tone : t.accent;
+    // Neutral greys from the scheme's own fg/bg: the dialog is quiet, and
+    // colour lands only where it means something (the badge, the action).
+    const auto dim = mix(ink, paper, 0.40f), faint = mix(paper, ink, 0.13f), hair = mix(paper, ink, 0.10f);
+    const auto tone = d::tame(s.tone.a > 0.0f ? s.tone : t.accent, paper);
+    const auto danger = d::tame(t.danger, paper);
     const float r = t.rounded(6);
     const auto mono = [&](std::string str, float size, Color<Srgb> col) {
         return text_owned(std::move(str)) | font(size) | monospace | fg(col);
     };
 
-    // ── the frame's top edge: a tag, the title rule, the meta ────────────
-    auto head = h(h(mono(s.tag, fs * 0.82f, paper) | semibold) | height(22.0f) | pad(0, 8.0f) | center | bg(tone),
-                  box() | height(1.0f) | grow() | bg(mix(paper, tone, 0.45f)),
-                  mono(s.meta, fs * 0.8f, dim))
-              | gap(10.0f) | align(Align::center) | width(pct(100));
+    // ── head: a tinted badge, an eyebrow + title + body, the meta ───────
+    auto badge = h(node(icon_node(d::icon_for(s), 18.0f, tone, 1.5f)))
+               | size(38.0f, 38.0f) | center | radius(t.rounded(10.0f))
+               | bg(tone.fade(0.13f)) | border(1.0f, tone.fade(0.28f));
+    std::vector<Node> text_col;
+    text_col.push_back((h(mono(s.tag, fs * 0.72f, tone) | semibold | tracking(1.2f), box() | grow(),
+                          mono(s.meta, fs * 0.78f, dim))
+                        | align(Align::center) | width(pct(100))).build());
+    text_col.push_back((mono(s.title, fs * 1.18f, ink) | semibold).build());
+    if (!s.body.empty())
+        text_col.push_back((text_owned(s.body) | font(fs * 0.9f) | fg(dim) | wrap_text | line_height(1.45f) | width(pct(100))).build());
+    auto head = h(std::move(badge), v(std::move(text_col)) | gap(5.0f) | grow() | min_size(0, 0))
+              | gap(14.0f) | align(Align::start) | width(pct(100));
 
     std::vector<Node> rows;
     rows.push_back(head.build());
-    rows.push_back((mono(s.title, fs * 1.12f, ink) | semibold).build());
-    if (!s.body.empty()) rows.push_back((text_owned(s.body) | font(fs * 0.9f) | fg(dim) | wrap_text | line_height(1.4f)).build());
 
     // ── the preview: numbered, flagged lines tinted ──────────────────────
     if (!s.preview.empty()) {
@@ -92,30 +129,33 @@ template <ControlContext C>
             const auto& l = s.preview[i];
             std::string num = std::to_string(i + 1);
             num = std::string(static_cast<std::size_t>(std::max(digits - static_cast<int>(num.size()), 0)), ' ') + num;
-            lines.push_back((h(mono(l.flag ? "\u25B6" : " ", fs * 0.7f, t.danger.fade(0.6f + 0.4f * pulse)) | width(10.0f),
-                               mono(num, fs * 0.85f, l.flag ? t.danger : faint.fade(1.0f)),
+            lines.push_back((h(mono(l.flag ? "\u25B6" : " ", fs * 0.7f, danger.fade(0.6f + 0.4f * pulse)) | width(10.0f),
+                               mono(num, fs * 0.85f, l.flag ? danger : mix(paper, ink, 0.3f)),
                                mono(l.text.empty() ? std::string{" "} : l.text, fs * 0.92f, l.flag ? ink : mix(ink, paper, 0.15f))
                                    | grow() | ellipsis | min_size(0, 0),
-                               mono(l.note.empty() ? std::string{} : "\u26A0 " + l.note, fs * 0.8f, t.danger))
+                               mono(l.note.empty() ? std::string{} : "\u26A0 " + l.note, fs * 0.8f, danger))
                              | gap(8.0f) | align(Align::center) | height(std::round(fs * 1.55f)) | pad(0, 8.0f, 0, 4.0f)
-                             | bg(l.flag ? t.danger.fade(0.10f + 0.05f * pulse) : paper.fade(0.0f))).build());
+                             | bg(l.flag ? danger.fade(0.055f + 0.025f * pulse) : paper.fade(0.0f))
+                             | when(l.flag, inner_shadow(0.0f, danger.fade(0.8f), {2.0f, 0.0f}))).build());
         }
         if (s.preview_more > 0)
             lines.push_back((h(mono("\u22EF " + std::to_string(s.preview_more) + " more line" + (s.preview_more == 1 ? "" : "s"),
                                     fs * 0.85f, dim))
                              | height(std::round(fs * 1.5f)) | pad(0, 22.0f)).build());
-        rows.push_back((v(std::move(lines)) | pad(4.0f, 0) | width(pct(100)) | bg(mix(paper, ink, 0.025f))
-                        | border(1.0f, faint) | radius(r) | clip).build());
+        rows.push_back((v(std::move(lines)) | pad(4.0f, 0) | width(pct(100))
+                        | bg(luminance(paper) < 0.4f ? mix(paper, colors::black, 0.18f) : mix(paper, ink, 0.03f))
+                        | border(1.0f, hair) | radius(r) | clip).build());
     }
 
-    // ── the actions, with their keys; the focused one is filled ──────────
+    // ── the actions, in a footer band; the focused one is filled ─────────
     std::vector<Node> foot;
     if (!s.remember.empty()) {
         const auto rid = part_id(id, 100);
         const bool hov = c.hovered(rid);
-        foot.push_back((h(h(mono(s.remember_on ? "\u2713" : "", fs * 0.8f, paper) | semibold)
-                              | size(16.0f, 16.0f) | center | radius(std::min(r, 3.0f))
-                              | bg(s.remember_on ? tone : paper) | border(1.0f, s.remember_on ? tone : hov ? dim : faint),
+        Node mark = s.remember_on ? icon_node(Icon::check, 11.0f, readable_on(tone), 2.0f) : box().build();
+        foot.push_back((h(h(node(std::move(mark)))
+                              | size(15.0f, 15.0f) | center | radius(std::min(r, 4.0f))
+                              | bg(s.remember_on ? tone : paper.fade(0.0f)) | border(1.0f, s.remember_on ? tone : hov ? dim : mix(paper, ink, 0.24f)),
                           mono(s.remember, fs * 0.82f, hov ? ink : dim))
                         | gap(8.0f) | align(Align::center) | pointer_cursor | id_of(id, 100)).build());
     }
@@ -124,23 +164,44 @@ template <ControlContext C>
         const auto& a = s.actions[i];
         const auto pid = part_id(id, i);
         const bool hov = c.hovered(pid), focus = static_cast<int>(i) == s.focused;
-        const auto face = a.tone == DialogAction::Tone::danger ? t.danger : a.tone == DialogAction::Tone::primary ? tone : dim;
-        const bool filled = focus || hov;
-        foot.push_back((h(mono(a.label, fs * 0.92f, filled ? paper : face) | semibold,
-                          mono(a.key, fs * 0.75f, filled ? paper.fade(0.75f) : faint.fade(1.0f)))
-                        | gap(7.0f) | align(Align::center) | height(30.0f) | pad(0, 12.0f) | radius(std::min(r, 5.0f))
-                        | bg(filled ? (hov && !focus ? face.fade(0.85f) : face) : paper.fade(0.0f))
-                        | border(1.0f, filled ? face : mix(paper, face, 0.5f))
+        const bool coloured = a.tone != DialogAction::Tone::normal;
+        const auto face = a.tone == DialogAction::Tone::danger ? danger : tone;
+        // Coloured actions: filled when focused, a tinted ghost otherwise.
+        // Neutral ones: a raised neutral chip when focused, a hairline ghost
+        // otherwise. The key rides along as a small keycap.
+        Color<Srgb> fill, edge, label_col;
+        if (coloured) {
+            fill = focus ? (hov ? mix(face, ink, 0.08f) : face) : face.fade(hov ? 0.22f : 0.12f);
+            edge = focus ? face : face.fade(0.35f);
+            label_col = focus ? readable_on(face) : face;
+        } else {
+            fill = focus ? mix(paper, ink, hov ? 0.16f : 0.12f) : hov ? mix(paper, ink, 0.07f) : paper.fade(0.0f);
+            edge = focus ? mix(paper, ink, 0.28f) : mix(paper, ink, 0.16f);
+            label_col = focus || hov ? ink : mix(ink, paper, 0.2f);
+        }
+        auto keycap = h(mono(a.key, fs * 0.72f, label_col.fade(0.7f))) | height(17.0f) | pad(0, 5.0f) | center
+                    | radius(4.0f) | bg(label_col.fade(0.10f));
+        foot.push_back((h(mono(a.label, fs * 0.92f, label_col) | semibold, std::move(keycap))
+                        | gap(8.0f) | align(Align::center) | height(32.0f) | pad(0, 8.0f, 0, 14.0f) | radius(t.rounded(7.0f))
+                        | bg(fill) | border(1.0f, edge)
+                        | when(focus && coloured, shadow(14.0f, face.fade(0.30f), {0.0f, 4.0f}))
                         | pointer_cursor | role(a11y::Role::button) | label(a.label) | id_of(id, i)).build());
     }
-    rows.push_back((h(std::move(foot)) | gap(8.0f) | align(Align::center) | width(pct(100))).build());
 
     // the entrance: fade, rise 14px, settle from 96%
     const float e = std::clamp(s.appear, 0.0f, 1.0f);
     const float ease = 1.0f - (1.0f - e) * (1.0f - e) * (1.0f - e);
-    return (v(std::move(rows)) | gap(12.0f) | pad(14.0f, 18.0f, 16.0f, 18.0f) | width(s.width)
-            | bg(mix(paper, ink, 0.04f)) | border(1.0f, mix(paper, tone, 0.55f)) | radius(r)
-            | shadow(36.0f, colors::black.fade(0.55f * ease), {0.0f, 14.0f})
+    auto body = v(std::move(rows)) | gap(16.0f) | pad(20.0f, 22.0f, 20.0f, 22.0f) | width(pct(100));
+    // The footer band: a step DOWN on a dark scheme, a whisper of ink on a
+    // light one (darkening a light paper reads as a grey slab that swallows
+    // the neutral button's outline).
+    const bool dark_paper = luminance(paper) < 0.4f;
+    auto footer = h(std::move(foot)) | gap(10.0f) | align(Align::center) | width(pct(100))
+                | pad(12.0f, 14.0f, 12.0f, 22.0f) | bg(dark_paper ? mix(paper, colors::black, 0.14f) : mix(paper, ink, 0.025f))
+                | inner_shadow(0.0f, hair, {0.0f, 1.0f});
+    return (v(std::move(body), std::move(footer)) | width(s.width)
+            | bg(dark_paper ? mix(paper, ink, 0.035f) : paper) | border(1.0f, mix(paper, ink, 0.14f)) | radius(t.rounded(12.0f)) | clip
+            | shadow(48.0f, colors::black.fade(0.6f * ease), {0.0f, 20.0f})
             | opacity(ease) | translate(0.0f, (1.0f - ease) * 14.0f) | scale(0.96f + 0.04f * ease)
             | role(a11y::Role::dialog) | label(s.title)).build();
 }
