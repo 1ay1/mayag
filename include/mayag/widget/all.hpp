@@ -65,6 +65,7 @@
 #include "select.hpp"
 #include "settings_panel.hpp"
 #include "setting_row.hpp"
+#include "file_pane.hpp"
 #include "slider.hpp"
 #include "split.hpp"
 #include "ssh.hpp"
