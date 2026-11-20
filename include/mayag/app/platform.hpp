@@ -81,6 +81,8 @@ concept Window = requires(W w, const W cw, const DrawList& dl, std::string_view 
     #include "../platform/macos_window.hpp"
 #elif (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
     #include "../platform/wayland.hpp"
+#elif defined(_WIN32) && defined(MAYAG_WITH_WIN32)
+    #include "../platform/win32_window.hpp"
 #endif
 
 namespace mayag::platform {
@@ -91,6 +93,8 @@ namespace mayag::platform {
     using Native = MacWindow;
 #elif (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
     using Native = WaylandWindow;
+#elif defined(_WIN32) && defined(MAYAG_WITH_WIN32)
+    using Native = Win32Window;
 #else
     using Native = Headless;
 #endif
@@ -106,6 +110,8 @@ static_assert(Window<Native>,
     return "cocoa";
 #elif (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
     return "wayland";
+#elif defined(_WIN32) && defined(MAYAG_WITH_WIN32)
+    return "win32";
 #else
     return "headless";
 #endif

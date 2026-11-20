@@ -161,6 +161,16 @@ else()
     option(MAYAG_WITH_WAYLAND "Build the Wayland window backend" OFF)
 endif()
 
+# Win32 is the native Windows backend, and like Wayland it costs nothing to
+# enable: it talks to user32/gdi32, which are present on every Windows, and
+# the APIs that are not (per-monitor DPI v2) are resolved with GetProcAddress
+# so one binary still runs on older builds.
+if(WIN32)
+    option(MAYAG_WITH_WIN32 "Build the Windows window backend" ON)
+else()
+    option(MAYAG_WITH_WIN32 "Build the Windows window backend" OFF)
+endif()
+
 # `-march=native` bakes the BUILD host's microarchitecture into the binary and
 # SIGILLs on any older chip. Fine for local dev, never for a shipped artifact,
 # so it is opt-in rather than a Release default.
@@ -197,7 +207,7 @@ add_subdirectory(third_party/jaal EXCLUDE_FROM_ALL)
 target_link_libraries(mayag INTERFACE jaal::jaal)
 
 # ── backend feature macros ───────────────────────────────────────────────
-foreach(backend VULKAN METAL D3D12 WEBGPU OPENGL COCOA WAYLAND)
+foreach(backend VULKAN METAL D3D12 WEBGPU OPENGL COCOA WAYLAND WIN32)
     if(MAYAG_WITH_${backend})
         target_compile_definitions(mayag INTERFACE MAYAG_WITH_${backend})
     endif()
@@ -228,6 +238,20 @@ if(MAYAG_WITH_WAYLAND)
     endif()
     find_package(Threads REQUIRED)
     target_link_libraries(mayag INTERFACE ${CMAKE_DL_LIBS} Threads::Threads)
+endif()
+
+# The Win32 backend needs the window manager (user32), the blitter (gdi32)
+# and the input method (imm32). All three ship with Windows itself, so there
+# is nothing to find_package and no redistributable.
+if(MAYAG_WITH_WIN32)
+    if(NOT WIN32)
+        message(FATAL_ERROR "mayag: MAYAG_WITH_WIN32 requires Windows.")
+    endif()
+    target_link_libraries(mayag INTERFACE user32 gdi32 imm32)
+    # Keep <windows.h> from defining `min`/`max` and the legacy `near`/`far`
+    # memory-model keywords, which collide with ordinary C++ identifiers.
+    target_compile_definitions(mayag INTERFACE WIN32_LEAN_AND_MEAN NOMINMAX
+                                               _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 endif()
 
 # ── warnings ─────────────────────────────────────────────────────────────
@@ -915,6 +939,9 @@ if(MAYAG_WITH_COCOA)
 endif()
 if(MAYAG_WITH_WAYLAND)
     set(MAYAG_WINDOWING "wayland + headless")
+endif()
+if(MAYAG_WITH_WIN32)
+    set(MAYAG_WINDOWING "win32 + headless")
 endif()
 
 message(STATUS "")

@@ -202,9 +202,17 @@ class window_host {
     template <class Cx>
     void attach(Cx& cx) {
         if constexpr (requires { window_.fd(); }) {
-            const int fd = external_loop_ ? -1 : window_.fd();
-            if (fd >= 0) {
-                auto reg = cx.watch(fd, jaal::interest::read, kWindow);
+            // `fd()` is the reactor's handle type, not necessarily an int:
+            // an fd on Wayland, a HANDLE on Windows. Compare against the
+            // platform's "nothing here" value rather than assuming >= 0.
+            using H = typename Cx::reactor::handle;
+            const H h = external_loop_ ? H{} : static_cast<H>(window_.fd());
+            const bool valid = [&] {
+                if constexpr (std::is_pointer_v<H>) return h != nullptr;
+                else return h >= 0;
+            }();
+            if (valid) {
+                auto reg = cx.watch(h, jaal::interest::read, kWindow);
                 if (!reg) { cx.stop(70); return; }
                 reg_.emplace(std::move(*reg));
             }
