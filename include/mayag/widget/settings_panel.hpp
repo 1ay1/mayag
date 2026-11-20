@@ -134,9 +134,13 @@ struct SettingsPanelProps {
 
 // ── geometry (fixed, so selection can be scrolled into view exactly) ──────
 
-inline constexpr float kSetRowH = 52.0f, kSetHeadH = 36.0f, kSetCloseH = 2.0f, kSetGap = 14.0f, kSetCardPad = 0.0f,
-                       kSetTop = 12.0f;
-inline constexpr float kSetSidebarW = 180.0f, kSetCtlW = 248.0f, kSetValueW = 58.0f;
+// Rows are one height (so the selection scrolls into view exactly, with no
+// measuring): a title over a hint of up to TWO lines -- one line cut every
+// longer explanation off mid-word, and those were the ones worth reading.
+// Each section is a card; kSetCardPad is its inner top/bottom padding.
+inline constexpr float kSetRowH = 68.0f, kSetHeadH = 34.0f, kSetCloseH = 2.0f, kSetGap = 18.0f, kSetCardPad = 4.0f,
+                       kSetTop = 12.0f, kSetPageH = 62.0f;
+inline constexpr float kSetSidebarW = 204.0f, kSetCtlW = 248.0f, kSetValueW = 58.0f;
 inline constexpr float kSetKnobW = kSetCtlW - kSetValueW - 10.0f, kSetSelectW = kSetCtlW;
 inline constexpr std::size_t kSetMenuPart = 0x7FFF0000u;
 
@@ -211,15 +215,15 @@ inline constexpr std::size_t kSetMenuPart = 0x7FFF0000u;
 /// Top of row `index` inside the scrolling content.
 [[nodiscard]] inline float settings_row_y(const std::vector<SettingSpec>& specs, const std::vector<std::size_t>& vis,
                                           std::size_t index) {
-    float y = 4.0f + 40.0f + kSetGap;   // the content pad, the page title, the gap after it
+    float y = 4.0f + kSetPageH + kSetGap;   // the content pad, the page title + subtitle, the gap after it
     std::size_t k = 0;
     while (k < vis.size()) {
         const std::string& sec = specs[vis[k]].section;
-        y += kSetHeadH;
+        y += kSetHeadH + kSetCardPad;
         std::size_t r = 0;
         for (; k < vis.size() && specs[vis[k]].section == sec; ++k, ++r)
             if (vis[k] == index) return y + kSetRowH * static_cast<float>(r);
-        y += kSetRowH * static_cast<float>(r) + kSetCloseH + kSetGap;
+        y += kSetRowH * static_cast<float>(r) + kSetCardPad + kSetGap;
     }
     return y;
 }
@@ -236,7 +240,8 @@ inline void settings_reveal(SettingsPanelState& st, const std::vector<SettingSpe
     }();
     const float top = first_in_section ? y - kSetHeadH - kSetCardPad : y - 8.0f;   // keep the section title in view
     if (top < st.scroll.offset.y) st.scroll.offset.y = std::max(0.0f, top);
-    else if (y + kSetRowH + 8.0f > st.scroll.offset.y + view) st.scroll.offset.y = y + kSetRowH + 8.0f - view;
+    else if (y + kSetRowH + kSetCardPad + 8.0f > st.scroll.offset.y + view)
+        st.scroll.offset.y = y + kSetRowH + kSetCardPad + 8.0f - view;
 }
 
 [[nodiscard]] inline float setting_stepped(const SettingSpec& s, int delta) {
@@ -502,9 +507,10 @@ template <ControlContext C, class On>
                          | (on_ ? weight(FontWeight::medium) : weight(FontWeight::regular))).build());
         if (mods) parts.push_back((h(text_owned(std::to_string(mods)) | font(fs * 0.72f) | fg(t.accent))
                                    | height(16.0f) | pad(0, 5.0f) | center | radius(t.rounded(8.0f)) | bg(t.accent.fade(0.14f))).build());
-        nav.push_back((h_list(std::move(parts), 10.0f) | align(Align::center) | height(30.0f) | pad(0, 10.0f) | radius(t.rounded(6.0f))
+        nav.push_back((h_list(std::move(parts), 10.0f) | align(Align::center) | height(32.0f) | pad(0, 10.0f) | radius(t.rounded(7.0f))
                        | bg(on_ ? mix(t.background, t.text_primary, 0.08f) : hov ? mix(t.background, t.text_primary, 0.04f)
                                 : t.background.fade(0.0f))
+                       | when(on_, inner_shadow(0.0f, t.accent, {2.0f, 0.0f}))
                        | pointer_cursor | role(a11y::Role::tab) | selected(on_) | label(page) | id_of(base + ".nav", i)
                        | on_click([on, sp, i] {
                              return on(SettingsOp{[sp, i](SettingsPanelState& s) {
@@ -558,10 +564,31 @@ template <ControlContext C, class On>
 
     // ── body ───────────────────────────────────────────────────────────────────────
     std::vector<Node> blocks;
-    // the page's title (or, searching, what was found)
-    blocks.push_back((h(text_owned(searching ? std::to_string(vis.size()) + (vis.size() == 1 ? " setting" : " settings")
-                                             : cap(selected_page)) | font(fs * 1.5f) | semibold | fg(t.text_primary))
-                      | height(40.0f) | align(Align::center) | pad(0, 12.0f)).build());
+    // The page's title over what is on it (its groups, "Font · Colors ·
+    // Window"): a map of the page before the first row. Searching: what
+    // was found, and for what.
+    std::string subtitle;
+    if (searching) subtitle = st.query.empty() ? std::string{"type to filter every page"} : "matching \u201C" + st.query + "\u201D on every page";
+    else {
+        std::size_t groups = 0, changed = 0;
+        std::string names;
+        for (std::size_t q = 0; q < vis.size(); ++q) {
+            changed += specs[vis[q]].modified ? 1 : 0;
+            if (q == 0 || specs[vis[q]].section != specs[vis[q - 1]].section) {
+                names += (names.empty() ? "" : "  \u00B7  ") + cap(specs[vis[q]].section);
+                ++groups;
+            }
+        }
+        // one group: naming it would only repeat the title
+        subtitle = groups > 1 ? names : std::to_string(vis.size()) + (vis.size() == 1 ? " setting" : " settings");
+        if (changed > 0) subtitle += "  \u00B7  " + std::to_string(changed) + " changed";
+    }
+    const std::string page_title = !searching ? cap(selected_page)
+                                 : vis.empty() ? std::string{"No results"}
+                                 : std::to_string(vis.size()) + (vis.size() == 1 ? " setting" : " settings");
+    blocks.push_back((v(text_owned(page_title) | font(fs * 1.55f) | semibold | fg(t.text_primary),
+                        text_owned(subtitle) | font(fs * 0.85f) | fg(muted) | ellipsis | width(pct(100)))
+                      | gap(4.0f) | justify(Justify::end) | height(kSetPageH) | pad(0, 4.0f, 6.0f, 4.0f) | width(pct(100))).build());
     std::size_t k = 0;
     while (k < vis.size()) {
         const SettingSpec& first = specs[vis[k]];
@@ -673,30 +700,39 @@ template <ControlContext C, class On>
             auto title = h(text_owned(setting_title(s)) | font(fs) | fg(t.text_primary) | (s.modified ? weight(FontWeight::medium) : weight(FontWeight::regular)),
                            node(std::move(mark)))
                        | gap(4.0f) | align(Align::center) | height(20.0f);
-            rows.push_back((h(v(std::move(title), text_owned(s.hint) | font(fs * 0.84f) | fg(muted) | ellipsis | width(pct(100)))
-                                  | gap(2.0f) | grow() | min_size(0, 0),
+            // Rows sit inside the section's card: the selected one a raised
+            // wash with an accent edge, the rest split by inset hairlines.
+            rows.push_back((h(v(std::move(title), text_owned(s.hint) | font(fs * 0.84f) | fg(muted) | clamp_lines(2) | width(pct(100)))
+                                  | gap(3.0f) | grow() | min_size(0, 0),
                               node(std::move(ctl)))
-                            | gap(18.0f) | align(Align::center) | height(kSetRowH) | width(pct(100))
-                            | pad(0, 12.0f) | radius(sel || hov ? t.rounded(6.0f) : 0.0f)
-                            // the page, not a card: the selected row a soft wash with an accent edge
-                            | bg(sel ? mix(t.background, t.text_primary, 0.045f) : hov ? mix(t.background, t.text_primary, 0.025f) : t.background.fade(0.0f))
+                            | gap(24.0f) | align(Align::center) | height(kSetRowH) | width(pct(100))
+                            | pad(0, 14.0f) | radius(t.rounded(7.0f))
+                            | bg(sel ? mix(t.background, t.text_primary, 0.065f) : hov ? mix(t.background, t.text_primary, 0.035f) : t.background.fade(0.0f))
                             | when(sel, inner_shadow(0.0f, t.accent, {2.0f, 0.0f}))
-                            | when(!sel, inner_shadow(0.0f, first_row || hov ? line.fade(0.0f) : line.fade(0.6f), {0.0f, 1.0f}))
+                            | when(!sel, inner_shadow(0.0f, first_row || hov ? line.fade(0.0f) : line.fade(0.7f), {0.0f, 1.0f}))
                             | id_of(base, i)
                             | on_click([on, sp, i] { return on(SettingsOp{[sp, i](SettingsPanelState& x) { settings_ops::select(x, *sp, i); }}); }))
                                .build());
         }
-        // a group heading within the page (quiet: the page title is the loud one)
-        auto head = h(text_owned(cap(first.section)) | font(fs * 0.8f) | semibold | tracking(0.6f) | fg(muted))
-                  | align(Align::end) | height(kSetHeadH) | pad(0, 12.0f, 8.0f, 12.0f);
-        blocks.push_back((v(std::move(head), v(std::move(rows)) | width(pct(100)))
-                          | width(pct(100))).build());
+        // A group heading above its card: small caps, quiet -- the page
+        // title is the loud one. The card itself is a shade above the page
+        // with a hairline edge, its rows inset so the selection's rounded
+        // wash sits concentric inside the card's corners.
+        std::string head_text = first.section;
+        for (char& ch : head_text) ch = ch == '_' ? ' ' : static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        auto head = h(text_owned(std::move(head_text)) | font(fs * 0.72f) | semibold | tracking(1.1f) | fg(muted))
+                  | align(Align::end) | height(kSetHeadH) | pad(0, 6.0f, 9.0f, 6.0f);
+        auto card = v(std::move(rows)) | width(pct(100)) | pad(kSetCardPad)
+                  | radius(t.rounded(11.0f)) | bg(mix(t.background, t.text_primary, 0.022f))
+                  | border(t.stroke(1), mix(t.background, t.text_primary, 0.075f));
+        blocks.push_back((v(std::move(head), std::move(card)) | width(pct(100))).build());
     }
     if (vis.empty())
-        blocks.push_back((v(text_owned("No settings match \u201C" + st.query + "\u201D") | font(fs) | fg(t.text_secondary),
-                            text_owned("Press esc to clear the search") | font(fs * 0.85f) | fg(muted))
-                          | gap(6.0f) | align(Align::center) | width(pct(100)) | pad(48.0f, 0)).build());
-    auto content = v(std::move(blocks)) | gap(kSetGap) | pad(4.0f, 24.0f, 28.0f, 24.0f) | width(pct(100));
+        blocks.push_back((v(node(icon_node(Icon::search, 28.0f, muted.fade(0.6f))),
+                            text_owned("No settings match \u201C" + st.query + "\u201D") | font(fs * 1.05f) | fg(t.text_secondary),
+                            text_owned("Try fewer words, or press esc to clear the search") | font(fs * 0.85f) | fg(muted))
+                          | gap(8.0f) | align(Align::center) | width(pct(100)) | pad(56.0f, 0)).build());
+    auto content = v(std::move(blocks)) | gap(kSetGap) | pad(4.0f, 28.0f, 32.0f, 28.0f) | width(pct(100));
     Node body = scroll_view(c, base + ".rows", st.scroll, std::move(content),
                             [on](ScrollOp op) { return on(SettingsOp{[op](SettingsPanelState& s) { op(s.scroll); }}); });
 
