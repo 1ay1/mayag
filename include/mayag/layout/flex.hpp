@@ -505,6 +505,19 @@ inline void arrange_children(Node& node, const Rect& content, const TextMeasurer
             const Length cross_explicit = (ax == Axis::horizontal) ? kl.height : kl.width;
             const bool cross_is_auto = cross_explicit.is_auto();
 
+            // Height for width: a row child measured at one width and flexed
+            // to another (grow / shrink) has the height of the OLD width.
+            // For wrapping text that is wrong by whole lines -- a hint
+            // measured on one line at the row's width, then wrapped to two in
+            // the narrower slot it got, spilled out of its row. Re-measure
+            // at the width it really has, as CSS does.
+            if (ax == Axis::horizontal && cross_is_auto && !(L.align == Align::stretch)
+                && num::abs(it.main - main_of(it.base, ax)) > 0.5f) {
+                Constraints wc = cc;
+                wc.max_width = it.main;
+                kid_cross = measure(kid, wc, tm).y;
+            }
+
             if (L.align == Align::stretch && cross_is_auto) {
                 kid_cross = num::max(line_avail_cross - kid_margin_cross, 0.0f);
             }

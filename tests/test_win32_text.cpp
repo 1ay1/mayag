@@ -89,11 +89,12 @@ Result compare(typo::FontConfig cfg) {
         renderer.draw_text(dl, c.s, Rect{{8, top}, {static_cast<float>(W - 16), static_cast<float>(LH)}}, st);
 
         // The same shaping and pens mayag used (draw_text: baseline = top +
-        // ascent, pen quantised to 1/N px), handed to Direct2D.
+        // ascent + half the leading, pen quantised to 1/N px), handed to
+        // Direct2D.
         typo::ShapeParams sp; sp.size_px = c.px;
         const auto run = stack->shape(c.s, sp);
         const auto fm = stack->metrics(c.px, TextStyle{}.family);
-        const float baseline = std::round(top + fm.ascent);
+        const float baseline = std::round(top + typo::text_first_baseline(fm, st.size * st.line_height));
         const int phases = typo::FontStack::subpixel_phases_for(c.px);
         std::vector<UINT16> ids; std::vector<FLOAT> adv; std::vector<DWRITE_GLYPH_OFFSET> off;
         float pen = 8.0f, start = -1.0f;

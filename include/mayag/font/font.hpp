@@ -65,6 +65,16 @@ struct FaceMetrics {
     float underline_thickness = 0.0f;
 };
 
+/// Where the first baseline sits below the top of a text box `line_h` tall:
+/// the font's ascent plus HALF the leading (the line height beyond
+/// ascent + descent) -- CSS's half-leading model. With all the leading put
+/// below instead (baseline at top + ascent) every label in a chip, tab or
+/// button rode high: at the default 1.4 line height, measured 1-2 px above
+/// centre in every box it was centred in.
+[[nodiscard]] inline float text_first_baseline(const FaceMetrics& fm, float line_h) noexcept {
+    return fm.ascent + (line_h - (fm.ascent + fm.descent)) * 0.5f;
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // Face
 // ════════════════════════════════════════════════════════════════════════
@@ -2338,7 +2348,8 @@ class StackMeasurer final : public layout::TextMeasurer {
     }
 
     [[nodiscard]] float ascent(const TextStyle& st) const override {
-        return stack_->metrics(st.size, st.family).ascent;
+        const FaceMetrics fm = stack_->metrics(st.size, st.family);
+        return text_first_baseline(fm, st.line_height > 0.0f ? st.size * st.line_height : fm.line_height);
     }
 
     [[nodiscard]] Vec2 measure(std::string_view s, const TextStyle& st,
@@ -2557,7 +2568,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
                 ? st.max_lines : lines.size();
         const bool clamped = line_count < lines.size();
 
-        float baseline_y = box.top() + fm.ascent;
+        float baseline_y = box.top() + text_first_baseline(fm, line_h);
 
         for (std::size_t li = 0; li < line_count; ++li) {
             const auto& line = lines[li];
