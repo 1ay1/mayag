@@ -65,24 +65,35 @@ struct Api {
     HRESULT(WINAPI* create_device)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL*, UINT, UINT,
                                    ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**) = nullptr;
     HRESULT(WINAPI* create_factory2)(UINT, REFIID, void**) = nullptr;
-    pD3DCompile compile = nullptr;
-    HRESULT(WINAPI* create_blob)(SIZE_T, ID3DBlob**) = nullptr;
     bool ok = false;
 
     static const Api& get() {
         static const Api a = [] {
             Api r;
             const auto sys = [](const wchar_t* n) { return ::LoadLibraryExW(n, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32); };
-            const HMODULE d3d = sys(L"d3d11.dll"), dxgi = sys(L"dxgi.dll"), comp = sys(L"d3dcompiler_47.dll");
-            if (!d3d || !dxgi || !comp) return r;
+            const HMODULE d3d = sys(L"d3d11.dll"), dxgi = sys(L"dxgi.dll");
+            if (!d3d || !dxgi) return r;
             r.create_device = reinterpret_cast<decltype(r.create_device)>(reinterpret_cast<void*>(::GetProcAddress(d3d, "D3D11CreateDevice")));
             r.create_factory2 = reinterpret_cast<decltype(r.create_factory2)>(reinterpret_cast<void*>(::GetProcAddress(dxgi, "CreateDXGIFactory2")));
-            r.compile = reinterpret_cast<pD3DCompile>(reinterpret_cast<void*>(::GetProcAddress(comp, "D3DCompile")));
-            r.create_blob = reinterpret_cast<decltype(r.create_blob)>(reinterpret_cast<void*>(::GetProcAddress(comp, "D3DCreateBlob")));
-            r.ok = r.create_device && r.create_factory2 && r.compile && r.create_blob;
+            r.ok = r.create_device && r.create_factory2;
             return r;
         }();
         return a;
+    }
+};
+
+/// The HLSL compiler: only on a shader-cache miss (first run, or after an
+/// update changed the shaders), so a normal launch never maps its 4 MB.
+struct Compiler {
+    pD3DCompile compile = nullptr;
+    static const Compiler& get() {
+        static const Compiler c = [] {
+            Compiler r;
+            if (const HMODULE m = ::LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+                r.compile = reinterpret_cast<pD3DCompile>(reinterpret_cast<void*>(::GetProcAddress(m, "D3DCompile")));
+            return r;
+        }();
+        return c;
     }
 };
 
@@ -116,10 +127,11 @@ class D3D11Device {
         if (dev_ != nullptr) return true;
         const d3d11_detail::Api& api = d3d11_detail::Api::get();
         if (!api.ok) return false;
-
+        startup::mark("  d3d11 dlls loaded");
         IDXGIFactory2* f2 = nullptr;
         if (FAILED(api.create_factory2(0, __uuidof(IDXGIFactory2), reinterpret_cast<void**>(&f2)))) return false;
         factory_ = f2;
+        startup::mark("  d3d11 dxgi factory");
         // The adapter that drives the panel: on a hybrid laptop the iGPU, so
         // nothing has to be copied across PCIe to scan out, and the discrete
         // GPU can stay asleep. MAYAG_GPU=discrete asks for the other one.
@@ -135,6 +147,7 @@ class D3D11Device {
             }
         }
         const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+        startup::mark("  d3d11 adapter chosen");
         HRESULT hr = api.create_device(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr,
                                        D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 2, D3D11_SDK_VERSION, &dev_, nullptr, &ctx_);
         if (adapter) {
@@ -339,11 +352,13 @@ class D3D11Device {
 
     // ── setup ───────────────────────────────────────────────────────────
 
-    [[nodiscard]] bool compile(std::string_view src, const char* target, const D3D_SHADER_MACRO* defs, ID3DBlob** out) {
+    using Bytecode = std::vector<std::uint8_t>;
+    [[nodiscard]] bool compile(std::string_view src, const char* target, const D3D_SHADER_MACRO* defs, Bytecode& out) {
         // d3dcompiler takes ~200 ms for the pixel shader -- more than device
         // creation. The bytecode depends only on the source, the target and
         // the defines, so it is cached under %LOCALAPPDATA%\mayag keyed by a
         // hash of all three; a stale or corrupt cache entry just recompiles.
+        // On a hit d3dcompiler_47.dll (4 MB) is never even loaded.
         std::uint64_t h = 1469598103934665603ull;
         const auto mix = [&](std::string_view s) { for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; } };
         mix(src); mix(target);
@@ -357,26 +372,32 @@ class D3D11Device {
             std::swprintf(path, MAX_PATH, L"%ls\\d3d11-%016llx.dxbc", dir, static_cast<unsigned long long>(h));
             cacheable = true;
         }
-        const auto& api = d3d11_detail::Api::get();
         if (cacheable) {
             const HANDLE f = ::CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
             if (f != INVALID_HANDLE_VALUE) {
                 LARGE_INTEGER sz{};
-                bool ok = ::GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (16 << 20) &&
-                          SUCCEEDED(api.create_blob(static_cast<SIZE_T>(sz.QuadPart), out));
+                bool ok = ::GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (16 << 20);
                 DWORD got = 0;
-                ok = ok && ::ReadFile(f, (*out)->GetBufferPointer(), static_cast<DWORD>(sz.QuadPart), &got, nullptr) &&
-                     got == sz.QuadPart;
+                if (ok) out.resize(static_cast<std::size_t>(sz.QuadPart));
+                ok = ok && ::ReadFile(f, out.data(), static_cast<DWORD>(sz.QuadPart), &got, nullptr) && got == sz.QuadPart;
                 ::CloseHandle(f);
                 if (ok) return true;
-                d3d11_detail::release(*out);
+                out.clear();
             }
         }
+        const auto& comp = d3d11_detail::Compiler::get();
+        if (comp.compile == nullptr) return false;
+        ID3DBlob* blob = nullptr;
         ID3DBlob* err = nullptr;
-        const HRESULT hr = api.compile(src.data(), src.size(), "mayag", defs, nullptr, "main", target,
-                                       D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, out, &err);
+        const HRESULT hr = comp.compile(src.data(), src.size(), "mayag", defs, nullptr, "main", target,
+                                        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &blob, &err);
         if (FAILED(hr) && err) std::fprintf(stderr, "mayag d3d11: %s\n", static_cast<const char*>(err->GetBufferPointer()));
         d3d11_detail::release(err);
+        if (SUCCEEDED(hr)) {
+            const auto* p = static_cast<const std::uint8_t*>(blob->GetBufferPointer());
+            out.assign(p, p + blob->GetBufferSize());
+        }
+        d3d11_detail::release(blob);
         if (SUCCEEDED(hr) && cacheable) {
             // Write-then-rename, so a concurrent reader never sees half a file.
             wchar_t tmp[MAX_PATH];
@@ -384,7 +405,7 @@ class D3D11Device {
             const HANDLE f = ::CreateFileW(tmp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
             if (f != INVALID_HANDLE_VALUE) {
                 DWORD put = 0;
-                const bool ok = ::WriteFile(f, (*out)->GetBufferPointer(), static_cast<DWORD>((*out)->GetBufferSize()), &put, nullptr);
+                const bool ok = ::WriteFile(f, out.data(), static_cast<DWORD>(out.size()), &put, nullptr);
                 ::CloseHandle(f);
                 if (!ok || !::MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING)) ::DeleteFileW(tmp);
             }
@@ -393,17 +414,15 @@ class D3D11Device {
     }
 
     [[nodiscard]] bool create_pipeline() {
-        ID3DBlob *vsb = nullptr, *psb = nullptr, *ptb = nullptr;
+        Bytecode vsb, psb, ptb;
         const D3D_SHADER_MACRO text_pass[] = {{"SPIRV_CROSS_CONSTANT_ID_0", "true"}, {nullptr, nullptr}};
-        if (!compile(render::generated::hlsl_vertex, "vs_5_0", nullptr, &vsb) ||
-            !compile(render::generated::hlsl_fragment, "ps_5_0", nullptr, &psb) ||
-            !compile(render::generated::hlsl_fragment, "ps_5_0", text_pass, &ptb)) {
-            d3d11_detail::release(vsb); d3d11_detail::release(psb); d3d11_detail::release(ptb);
+        if (!compile(render::generated::hlsl_vertex, "vs_5_0", nullptr, vsb) ||
+            !compile(render::generated::hlsl_fragment, "ps_5_0", nullptr, psb) ||
+            !compile(render::generated::hlsl_fragment, "ps_5_0", text_pass, ptb))
             return false;
-        }
-        bool ok = SUCCEEDED(dev_->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &vs_)) &&
-                  SUCCEEDED(dev_->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &ps_)) &&
-                  SUCCEEDED(dev_->CreatePixelShader(ptb->GetBufferPointer(), ptb->GetBufferSize(), nullptr, &ps_text_));
+        bool ok = SUCCEEDED(dev_->CreateVertexShader(vsb.data(), vsb.size(), nullptr, &vs_)) &&
+                  SUCCEEDED(dev_->CreatePixelShader(psb.data(), psb.size(), nullptr, &ps_)) &&
+                  SUCCEEDED(dev_->CreatePixelShader(ptb.data(), ptb.size(), nullptr, &ps_text_));
         // One per-instance stream = the Instance struct, as Vulkan binds it.
         // SPIRV-Cross names vertex inputs TEXCOORD<location>.
         const D3D11_INPUT_ELEMENT_DESC el[8] = {
@@ -416,8 +435,7 @@ class D3D11Device {
             {"TEXCOORD", 6, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Instance, params), D3D11_INPUT_PER_INSTANCE_DATA, 1},
             {"TEXCOORD", 7, DXGI_FORMAT_R32G32B32A32_UINT, 0, offsetof(Instance, kind), D3D11_INPUT_PER_INSTANCE_DATA, 1},
         };
-        ok = ok && SUCCEEDED(dev_->CreateInputLayout(el, 8, vsb->GetBufferPointer(), vsb->GetBufferSize(), &layout_));
-        d3d11_detail::release(vsb); d3d11_detail::release(psb); d3d11_detail::release(ptb);
+        ok = ok && SUCCEEDED(dev_->CreateInputLayout(el, 8, vsb.data(), vsb.size(), &layout_));
         if (!ok) return false;
 
         // Premultiplied "over", the same equation as Vulkan's pipeline.
@@ -463,6 +481,7 @@ class D3D11Device {
         flags_ = sd.Flags;
         IDXGISwapChain1* sc = nullptr;
         if (FAILED(factory_->CreateSwapChainForHwnd(dev_, hwnd_, &sd, nullptr, nullptr, &sc))) return false;
+        startup::mark("  d3d11 CreateSwapChainForHwnd");
         swapchain_ = sc;
         // Alt+Enter is the app's business (it has its own fullscreen).
         (void)factory_->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);

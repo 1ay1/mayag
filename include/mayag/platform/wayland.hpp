@@ -617,11 +617,7 @@ class WaylandWindow {
             int budget = 3000;
             if (const char* e = ::getenv("MAYAG_GPU_WAIT_MS"); e != nullptr && *e != '\0') budget = std::max(0, std::atoi(e));
             if (const char* async = ::getenv("MAYAG_GPU_ASYNC"); async != nullptr && std::string_view{async} == "0") budget = 1 << 30;
-            if (budget > 0 && !prep.ready()) {
-                const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget);
-                while (!prep.ready() && std::chrono::steady_clock::now() < until)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
+            if (budget > 0 && !prep.ready()) (void)prep.wait_for_at_root(std::chrono::milliseconds(budget));
             if (prep.ready()) adopt_gpu(prep.get_at_root());
             else gpu_pending_ = true;
         }

@@ -27,6 +27,7 @@
 #include <bit>
 #include <cctype>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -415,6 +416,69 @@ inline constexpr std::uint32_t kCacheVersion = 3;          // 2: + shapes, 3: mo
     return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
 }
 
+/// One file under a font root, from a directory walk.
+struct WalkEntry { std::filesystem::path path; bool dir; };
+
+/// Every directory under `root` (with its mtime, the cache key) and,
+/// optionally, every file. std::filesystem on Windows stats each entry
+/// separately -- 75 ms for C:\Windows\Fonts' ~650 files, the single
+/// biggest cost of a warm launch -- while FindFirstFileExW with
+/// FindExInfoBasic + LARGE_FETCH returns names, attributes and times in
+/// batches: one pass, no extra syscalls.
+inline void walk_fonts(const std::filesystem::path& root, std::vector<std::pair<std::string, std::int64_t>>& dirs,
+                       std::vector<WalkEntry>* files) {
+#if defined(_WIN32)
+    std::vector<std::wstring> stack{root.wstring()};
+    bool first = true;
+    while (!stack.empty()) {
+        const std::wstring dir = std::move(stack.back());
+        stack.pop_back();
+        WIN32_FILE_ATTRIBUTE_DATA self{};
+        if (::GetFileAttributesExW(dir.c_str(), GetFileExInfoStandard, &self) == FALSE) {
+            if (first) return;
+            continue;
+        }
+        first = false;
+        // FILETIME ticks (100 ns since 1601) as ns. Only a change key: it
+        // need not match std::filesystem's epoch, just stay stable (the
+        // first launch after this change rebuilds the cache once).
+        const auto ft = [](FILETIME t) {
+            const std::uint64_t ticks = (static_cast<std::uint64_t>(t.dwHighDateTime) << 32) | t.dwLowDateTime;
+            return static_cast<std::int64_t>(ticks * 100u);
+        };
+        dirs.emplace_back(std::filesystem::path{dir}.string(), ft(self.ftLastWriteTime));
+        WIN32_FIND_DATAW fd{};
+        const HANDLE h = ::FindFirstFileExW((dir + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch,
+                                            nullptr, FIND_FIRST_EX_LARGE_FETCH);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        std::vector<std::wstring> subdirs;
+        do {
+            const std::wstring_view n{fd.cFileName};
+            if (n == L"." || n == L"..") continue;
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) subdirs.push_back(dir + L"\\" + fd.cFileName);
+            } else if (files != nullptr) {
+                files->push_back({std::filesystem::path{dir + L"\\" + fd.cFileName}, false});
+            }
+        } while (::FindNextFileW(h, &fd) != FALSE);
+        ::FindClose(h);
+        // depth-first in name order, as recursive_directory_iterator
+        for (auto it = subdirs.rbegin(); it != subdirs.rend(); ++it) stack.push_back(std::move(*it));
+    }
+#else
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return;
+    dirs.emplace_back(root.string(), mtime_ns(root));
+    for (fs::recursive_directory_iterator it{root, fs::directory_options::skip_permission_denied, ec}, end;
+         it != end; it.increment(ec)) {
+        if (ec) { ec.clear(); continue; }
+        if (it->is_directory(ec)) dirs.emplace_back(it->path().string(), mtime_ns(it->path()));
+        else if (files != nullptr && it->is_regular_file(ec)) files->push_back({it->path(), false});
+    }
+#endif
+}
+
 [[nodiscard]] inline std::string cache_path() {
     if (const char* off = std::getenv("MAYAG_FONT_CACHE"); off != nullptr && std::string_view{off} == "0") return {};
     std::filesystem::path base;
@@ -656,38 +720,19 @@ class Database {
 
   private:
     void scan() {
-        namespace fs = std::filesystem;
-        std::error_code ec;
-
         // Every directory under the font roots, with its mtime. Adding or
         // removing a font changes its directory's mtime, so this list is the
-        // cache key (fontconfig's trick).
+        // cache key (fontconfig's trick). The file list comes from the same
+        // walk, for a cache miss.
         std::vector<std::pair<std::string, std::int64_t>> dirs;
-        for (const auto& root : detail::font_directories()) {
-            if (!fs::is_directory(root, ec)) continue;
-            dirs.emplace_back(root.string(), detail::mtime_ns(root));
-            for (fs::recursive_directory_iterator it{root, fs::directory_options::skip_permission_denied, ec},
-                 end; it != end; it.increment(ec)) {
-                if (ec) { ec.clear(); continue; }
-                if (it->is_directory(ec)) dirs.emplace_back(it->path().string(), detail::mtime_ns(it->path()));
-            }
-        }
+        std::vector<detail::WalkEntry> files;
+        for (const auto& root : detail::font_directories()) detail::walk_fonts(root, dirs, &files);
         const std::string cache = detail::cache_path();
         if (!cache.empty() && detail::load_cache(cache, dirs, entries_)) return;
 
-        for (const auto& root : detail::font_directories()) {
-            if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) continue;
-
-            for (fs::recursive_directory_iterator it{root, fs::directory_options::skip_permission_denied, ec},
-                 end; it != end; it.increment(ec)) {
-                if (ec) { ec.clear(); continue; }
-                if (!it->is_regular_file(ec)) continue;
-                if (!detail::is_font_file(it->path())) continue;
-
-                for (auto& e : detail::describe(it->path())) {
-                    entries_.push_back(std::move(e));
-                }
-            }
+        for (const auto& f : files) {
+            if (!detail::is_font_file(f.path)) continue;
+            for (auto& e : detail::describe(f.path)) entries_.push_back(std::move(e));
         }
         if (!cache.empty()) detail::save_cache(cache, dirs, entries_);
     }
@@ -1110,6 +1155,21 @@ namespace detail {
     return stack;
 }
 
+/// An app's own font-stack builder, for FontLoad. A plain function pointer:
+/// it addresses code, not data, so nothing the sending thread owns travels
+/// with it -- hence the sendable opt-in below.
+class FontBuilder {
+  public:
+    explicit FontBuilder(std::shared_ptr<FontStack> (*f)()) : f_{f} {}
+    [[nodiscard]] std::shared_ptr<FontStack> fn() const { return f_(); }
+  private:
+    std::shared_ptr<FontStack> (*f_)();
+};
+
+}  // namespace mayag::typo::system
+template <> inline constexpr bool jaal::sendable_opt_in<mayag::typo::system::FontBuilder> = true;
+namespace mayag::typo::system {
+
 /// The default stack, built on a background thread.
 ///
 /// Font discovery and the window/GPU bring-up don't depend on each other, so
@@ -1127,22 +1187,38 @@ class FontLoad {
             return Result{std::make_unique<Stack>(default_stack(c))};
         }, cfg);
     }
+    /// Build with the app's own function instead of default_stack.
+    explicit FontLoad(Stack (*build)()) : build_{build}, pool_{1} {
+        job_ = pool_.submit([](std::stop_token, FontBuilder b) {
+            return Result{std::make_unique<Stack>(b.fn())};
+        }, FontBuilder{build});
+    }
     FontLoad(const FontLoad&) = delete;
     FontLoad& operator=(const FontLoad&) = delete;
 
-    /// The stack: the worker's if it's done, otherwise built here (the
-    /// worker's copy is then dropped). Never blocks on the worker, so it needs
-    /// no lock capability; in practice the scan finishes long before the GPU.
+    /// The stack: the worker's if it's done. Otherwise the default scan is
+    /// redone here (the worker's copy is then dropped); a custom builder is
+    /// waited for instead, since it may set app state as it goes and must
+    /// run exactly once.
     [[nodiscard]] Stack get() {
+        if (build_ != nullptr) {
+            // Block, never sleep-poll: Windows rounds a short sleep up to its
+            // 15.6 ms timer tick, which cost a launch 30 ms here. get() runs
+            // at the startup thread's root (run(), before any loop or lock).
+            if (auto r = job_.get_at_root(); r.stack) return std::move(*r.stack);
+            return nullptr;
+        }
         if (auto r = job_.try_take(); r && r->stack) return std::move(*r->stack);
         return default_stack(cfg_);
     }
 
   private:
     FontConfig cfg_;
+    Stack (*build_)() = nullptr;
     jaal::kernel::pool pool_;
     jaal::kernel::job_result<Result> job_;
 };
+
 
 
 [[nodiscard]] inline std::shared_ptr<FontStack> monospace_stack(FontConfig cfg = {}) {

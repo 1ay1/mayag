@@ -141,6 +141,12 @@ struct AppConfig {
 
     /// The font engine. Null: discovered from the system at startup.
     std::shared_ptr<typo::FontStack> fonts = nullptr;
+    /// Or: a function that BUILDS the app's font engine. run() calls it on a
+    /// worker while the window opens and the GPU comes up, so an app with
+    /// its own font setup (hand: ~100 ms of faces and families) pays for it
+    /// in parallel instead of before the window exists. Used when `fonts`
+    /// is null. A plain function, so it can cross to the worker.
+    std::shared_ptr<typo::FontStack> (*font_loader)() = nullptr;
 
     bool debug_bounds = false;
 
@@ -1481,6 +1487,7 @@ class window_host {
         size_ = window_.size();
         dpi_  = window_.dpi_scale();
 
+        if (frame_counter_ == 0) startup::mark("first draw begins");
         cfg_.fonts->begin_frame(frame_counter_++);
         FrameTiming frame{};
         frame.coalesced_moves = std::exchange(coalesced_moves_, 0);
@@ -1660,6 +1667,7 @@ class window_host {
         { ScopedTimer t{frame.render_ms};
           // what the main window's GPU is about to upload, so every child window gets it too
           const Rect cov = cfg_.fonts->atlas().dirty_region(), col = cfg_.fonts->atlas().color_dirty_region();
+          if (frame_counter_ == 1) startup::mark("first frame: painted, presenting");
           window_.present(draws_, theme_.background.fade(theme_.window_opacity));
           note_main_uploads(cov, col); }
         // child windows follow the model on the same frame

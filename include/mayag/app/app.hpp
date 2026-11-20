@@ -429,6 +429,18 @@ int run_headless(AppConfig cfg, Driver&& drive) {
     else { drive(app); return 0; }
 }
 
+/// Start the GPU's window-independent bring-up now, on a worker, so it
+/// overlaps everything an app does before it opens its window (config,
+/// fonts, the shell). Call it first thing in main(); run() adopts the
+/// result. A no-op where the window brings its GPU up itself.
+namespace detail {
+template <class W>
+void gpu_prestart_on() {
+    if constexpr (requires { W::gpu_prestart(); }) W::gpu_prestart();
+}
+}  // namespace detail
+inline void gpu_prestart() { detail::gpu_prestart_on<platform::Native>(); }
+
 namespace detail {
 inline void log_renderer(std::string_view name) {
     std::fprintf(stderr, "mayag: renderer %.*s\n", static_cast<int>(name.size()), name.data());
@@ -464,7 +476,10 @@ int run(AppConfig cfg) {
     // Fonts and the window/GPU don't depend on each other: start the font
     // scan on a worker, open the window here, then collect it.
     std::optional<typo::system::FontLoad> fonts;
-    if (cfg.fonts == nullptr) fonts.emplace();
+    if (cfg.fonts == nullptr) {
+        if (cfg.font_loader != nullptr) fonts.emplace(cfg.font_loader);
+        else fonts.emplace();
+    }
     auto opened = platform::Native::open(detail::window_config(cfg));
     if (!opened) {
         std::fprintf(stderr, "mayag: could not open a window\n");
@@ -519,6 +534,7 @@ int run_on(W& window, AppConfig cfg) {
     jaal::run_options opt;
     opt.kernel = detail::kernel_options(cfg);
     window_host<P, W> host{window, std::move(cfg)};
+    startup::mark("host constructed");
     if (log) detail::log_renderer(host.renderer_name());
     const int code = jaal::run<P>(host, std::move(opt));
     detail::log_photon(window);

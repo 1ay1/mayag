@@ -32,8 +32,19 @@ class Win32Gpu {
     Win32Gpu& operator=(const Win32Gpu&) = delete;
     ~Win32Gpu() { destroy(); }
 
-    void set_low_latency(bool on) noexcept { low_latency_ = on; }
-    void set_transparent(bool on) noexcept { transparent_ = on; }
+    void set_low_latency(bool on) noexcept {
+        low_latency_ = on;
+        if (d3d_) d3d_->set_low_latency(on);   // read at present time: fine after prepare
+#ifdef MAYAG_WITH_VULKAN
+        if (vk_) vk_->set_low_latency(on);      // read when the swapchain is made
+#endif
+    }
+    void set_transparent(bool on) noexcept {
+        transparent_ = on;
+#ifdef MAYAG_WITH_VULKAN
+        if (vk_) vk_->set_transparent(on);
+#endif
+    }
 
     /// Bring a GPU up on `hwnd` in one go (prepare + attach_surface).
     [[nodiscard]] bool attach(HWND hwnd, Vec2 logical, float dpi) {

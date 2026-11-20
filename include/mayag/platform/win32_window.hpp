@@ -273,7 +273,9 @@ class Win32Window {
         w.refresh_timing();
         startup::mark("win32: dwm chrome + timing");
         w.bind_callbacks();
+        startup::mark("win32: callbacks bound");
         ::ShowWindow(hwnd, SW_SHOW);   // still cloaked: revealed by frame one
+        startup::mark("win32: ShowWindow (cloaked)");
         return w;
     }
 
@@ -747,7 +749,10 @@ class Win32Window {
         /// Instance, device and swapchain are brought up on a jaal worker
         /// (see start_gpu); adopt_gpu() takes the result between frames.
         std::optional<jaal::kernel::pool> gpu_pool;
+        std::unique_ptr<jaal::kernel::pool> gpu_pool_owned;   ///< the prestart's pool, when adopted
         jaal::kernel::job_result<std::unique_ptr<backend::Win32Gpu>> gpu_prep;
+        struct Settings { bool low_latency, transparent; };
+        std::optional<Settings> gpu_settings;   ///< set when the device was prestarted
 #endif
 
         // ── the OS modal loop (drag-resize, window move) ─────────────
@@ -804,7 +809,7 @@ class Win32Window {
         if (state_ && state_->gpu_prep.valid()) {
             if (auto d = state_->gpu_prep.get_at_root()) d->destroy();
         }
-        if (state_) state_->gpu_pool.reset();
+        if (state_) { state_->gpu_pool.reset(); state_->gpu_pool_owned.reset(); }
         // Before the HWND goes away: the swapchain holds a VkSurfaceKHR that
         // references it, and destroying the window first is undefined.
         if (state_ && state_->gpu) {
@@ -838,6 +843,14 @@ class Win32Window {
         const char* forced = ::getenv("MAYAG_BACKEND");
         if (forced != nullptr && std::string_view{forced} == "software") return;
         State* st = state_.get();
+        // Already preparing since the process started (gpu_prestart): adopt
+        // that job instead of beginning again.
+        if (auto& pre = prestart(); pre.job.valid()) {
+            st->gpu_pool_owned = std::move(pre.pool);
+            st->gpu_prep = std::move(pre.job);
+            st->gpu_settings = State::Settings{!cfg.vsync, cfg.transparent};
+            return;
+        }
         auto d = std::make_unique<backend::Win32Gpu>();
         d->set_low_latency(!cfg.vsync);
         d->set_transparent(cfg.transparent);
@@ -851,6 +864,40 @@ class Win32Window {
                 return dev;
             },
             std::move(d));
+    }
+
+  public:
+    /// Start bringing the GPU up NOW, before anything else: device and
+    /// pipeline need no window and no app state, and on a warm machine they
+    /// are the longest single thing between launch and the first frame
+    /// (D3D11 ~100 ms). An app calls this first thing in main(); the window
+    /// it opens later adopts the prepared device. Harmless if no window ever
+    /// opens (headless runs just never adopt it).
+    static void gpu_prestart() {
+        const char* forced = ::getenv("MAYAG_BACKEND");
+        if (forced != nullptr && std::string_view{forced} == "software") return;
+        auto& pre = prestart();
+        if (pre.job.valid()) return;
+        pre.pool = std::make_unique<jaal::kernel::pool>(1);
+        pre.job = pre.pool->submit(
+            [](std::stop_token, std::unique_ptr<backend::Win32Gpu> dev) {
+                if (!dev->prepare()) {
+                    dev->destroy();
+                    dev.reset();
+                }
+                return dev;
+            },
+            std::make_unique<backend::Win32Gpu>());
+    }
+
+  private:
+    struct Prestart {
+        std::unique_ptr<jaal::kernel::pool> pool;
+        jaal::kernel::job_result<std::unique_ptr<backend::Win32Gpu>> job;
+    };
+    static Prestart& prestart() {
+        static Prestart p;
+        return p;
     }
 
     /// How long the first present may wait for the GPU, in ms: the GPU draws
@@ -877,13 +924,20 @@ class Win32Window {
         State* st = state_.get();
         if (!st->gpu_prep.valid()) return;
         const int budget = st->shown ? 0 : gpu_wait_budget_ms();
+        if (!st->shown) startup::mark(st->gpu_prep.ready() ? "first present: gpu already prepared" : "first present: waiting for gpu");
         if (budget > 0 && !st->gpu_prep.ready()) {
-            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget);
-            while (!st->gpu_prep.ready() && std::chrono::steady_clock::now() < until) ::Sleep(1);
+            // A real wait, woken the instant the device is ready: Sleep(1)
+            // polling rounds every sleep up to the 15.6 ms timer tick.
+            (void)st->gpu_prep.wait_for_at_root(std::chrono::milliseconds(budget));
         }
         if (!st->gpu_prep.ready()) return;
         auto d = st->gpu_prep.get_at_root();
         st->gpu_pool.reset();
+        st->gpu_pool_owned.reset();
+        if (d && st->gpu_settings) {   // a prestarted device learns the window's wishes now
+            d->set_low_latency(st->gpu_settings->low_latency);
+            d->set_transparent(st->gpu_settings->transparent);
+        }
         if (d && !d->attach_surface(st->hwnd, st->size, st->dpi)) d.reset();
         if (!d) {
             startup::mark("gpu unavailable (cpu)");
