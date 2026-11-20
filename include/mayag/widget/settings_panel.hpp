@@ -559,8 +559,21 @@ template <ControlContext C, class On>
                         | border(t.stroke(1), modified ? line : line.fade(0.0f))
                         | when(modified > 0, pointer_cursor) | tooltip(modified ? std::to_string(modified) + " changed from the defaults" : std::string{})
                         | id_of(base + ".reset_all")
-                        | on_click([on] { return on(SettingsOp{[](SettingsPanelState& s) { s.out.push_back({E::Op::reset_all, 0, 0.0f, 0}); }}); }))
-                | gap(12.0f) | align(Align::center) | width(pct(100)) | height(56.0f) | pad(0, 24.0f);
+                        | on_click([on] { return on(SettingsOp{[](SettingsPanelState& s) { s.out.push_back({E::Op::reset_all, 0, 0.0f, 0}); }}); }),
+                    // Close: the same as esc / q, for the pointer. A quiet square
+                    // that only becomes a button under the cursor, the way
+                    // every native window's close does.
+                    [&] {
+                        const bool ch = c.hovered(node_id(base + ".close"));
+                        return (h(node(icon_node(Icon::close, 14.0f, ch ? t.text_primary : muted)))
+                                | size(30.0f, 30.0f) | center | radius(t.rounded(6.0f))
+                                | bg(ch ? mix(t.background, t.text_primary, 0.10f) : t.background.fade(0.0f))
+                                | pointer_cursor | tooltip("Close (esc)") | role(a11y::Role::button) | label("Close settings")
+                                | id_of(base + ".close")
+                                | on_click([on] { return on(SettingsOp{[](SettingsPanelState& s) { s.close = true; }}); }))
+                            .build();
+                    }())
+                | gap(10.0f) | align(Align::center) | width(pct(100)) | height(56.0f) | pad(0, 16.0f, 0, 24.0f);
 
     // ── body ───────────────────────────────────────────────────────────────────────
     std::vector<Node> blocks;
