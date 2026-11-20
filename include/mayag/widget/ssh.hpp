@@ -45,6 +45,12 @@ struct SshHost {
     std::vector<std::string> forwards;   ///< "L5432:db:5432", "D1080" (ssh_forward.hpp)
     std::string command;           ///< run on connect
     bool        editable = false;  ///< every field is the app's to change (not from ~/.ssh/config)
+    std::string folder;            ///< "Work/EU"
+    std::uint8_t inherited = 0;    ///< 1 user, 2 jump, 4 key, 8 port: shown values that came from the folder
+    /// Per forward, live: what is on its local port right now.
+    enum class Tunnel : std::uint8_t { idle, up, down, conflict, remote };
+    std::vector<Tunnel>      tunnel;
+    std::vector<std::string> tunnel_note;   ///< "ssh (pid 4412)", "in use by postgres"
 };
 
 [[nodiscard]] inline Color<Srgb> env_tone(const Theme& t, SshHost::Env e) {
