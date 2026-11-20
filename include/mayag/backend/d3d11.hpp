@@ -104,15 +104,18 @@ class D3D11Device {
     }
     void set_transparent(bool) noexcept {}   // DirectComposition transparency: not yet
 
-    /// Device + swapchain on `hwnd`. Safe to call from a worker thread: DXGI
-    /// swapchains are not tied to the window's thread (only Present's message
-    /// pumping is, and ResizeBuffers is called from the UI thread).
+    /// Device + swapchain on `hwnd`, in one go.
     [[nodiscard]] bool attach(HWND hwnd, Vec2 logical, float dpi) {
+        return prepare() && attach_swapchain(hwnd, logical, dpi);
+    }
+
+    /// Everything that needs no window: factory, adapter, device, pipeline.
+    /// This is ~all of the bring-up cost, so a window starts it BEFORE it
+    /// creates its HWND and the two overlap. Any thread.
+    [[nodiscard]] bool prepare() {
+        if (dev_ != nullptr) return true;
         const d3d11_detail::Api& api = d3d11_detail::Api::get();
-        if (!api.ok || hwnd == nullptr) return false;
-        hwnd_ = hwnd;
-        logical_ = logical;
-        dpi_ = dpi;
+        if (!api.ok) return false;
 
         IDXGIFactory2* f2 = nullptr;
         if (FAILED(api.create_factory2(0, __uuidof(IDXGIFactory2), reinterpret_cast<void**>(&f2)))) return false;
@@ -157,6 +160,17 @@ class D3D11Device {
 
         if (!create_pipeline()) return false;
         startup::mark("  d3d11 pipeline");
+        return true;
+    }
+
+    /// The swapchain on `hwnd` (a few ms). Any thread: DXGI swapchains are not
+    /// tied to the window's thread for creation; ResizeBuffers and Present
+    /// are called from the UI thread.
+    [[nodiscard]] bool attach_swapchain(HWND hwnd, Vec2 logical, float dpi) {
+        if (dev_ == nullptr || hwnd == nullptr) return false;
+        hwnd_ = hwnd;
+        logical_ = logical;
+        dpi_ = dpi;
         if (!create_swapchain()) return false;
         startup::mark("  d3d11 swapchain");
         valid_ = true;

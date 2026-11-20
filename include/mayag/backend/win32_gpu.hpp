@@ -35,9 +35,16 @@ class Win32Gpu {
     void set_low_latency(bool on) noexcept { low_latency_ = on; }
     void set_transparent(bool on) noexcept { transparent_ = on; }
 
-    /// Bring a GPU up on `hwnd`. Order: MAYAG_BACKEND if set, else D3D11 then
-    /// Vulkan. Safe on a worker thread (both APIs allow it for this step).
+    /// Bring a GPU up on `hwnd` in one go (prepare + attach_surface).
     [[nodiscard]] bool attach(HWND hwnd, Vec2 logical, float dpi) {
+        return prepare() && attach_surface(hwnd, logical, dpi);
+    }
+
+    /// The window-independent part -- device and pipeline, ~all of the cost.
+    /// Started before the HWND exists, so it overlaps window creation. Order:
+    /// MAYAG_BACKEND if set, else D3D11 then Vulkan. Any thread.
+    [[nodiscard]] bool prepare() {
+        if (api_ != Api::none) return true;
         const char* want = std::getenv("MAYAG_BACKEND");
         const bool vulkan_first = want != nullptr && std::string_view{want} == "vulkan";
         for (int pass = 0; pass < 2; ++pass) {
@@ -45,7 +52,7 @@ class Win32Gpu {
             if (!try_vulkan) {
                 auto d = std::make_unique<D3D11Device>();
                 d->set_low_latency(low_latency_);
-                if (d->attach(hwnd, logical, dpi)) { d3d_ = std::move(d); api_ = Api::d3d11; return true; }
+                if (d->prepare()) { d3d_ = std::move(d); api_ = Api::d3d11; return true; }
                 d->destroy();
             }
 #ifdef MAYAG_WITH_VULKAN
@@ -53,14 +60,23 @@ class Win32Gpu {
                 auto d = std::make_unique<VulkanDevice>();
                 d->set_low_latency(low_latency_);
                 d->set_transparent(transparent_);
-                if (d->attach_win32(::GetModuleHandleW(nullptr), hwnd, logical, dpi)) {
-                    vk_ = std::move(d); api_ = Api::vulkan; return true;
-                }
+                if (d->prepare()) { vk_ = std::move(d); api_ = Api::vulkan; return true; }
                 d->destroy();
             }
 #endif
         }
         return false;
+    }
+
+    /// The swapchain on the window (a few ms). Any thread.
+    [[nodiscard]] bool attach_surface(HWND hwnd, Vec2 logical, float dpi) {
+        bool ok = false;
+        if (api_ == Api::d3d11) ok = d3d_->attach_swapchain(hwnd, logical, dpi);
+#ifdef MAYAG_WITH_VULKAN
+        else if (api_ == Api::vulkan) ok = vk_->attach_win32(::GetModuleHandleW(nullptr), hwnd, logical, dpi);
+#endif
+        if (!ok) destroy();
+        return ok;
     }
 
     void destroy() {

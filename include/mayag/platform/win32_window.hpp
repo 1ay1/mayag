@@ -196,6 +196,14 @@ class Win32Window {
         w.state_->vsync = cfg.vsync;
         w.state_->load_settings();
 
+        // GPU first, from frame one. Device + pipeline need no window and are
+        // ~all of the bring-up cost (D3D11: ~110 ms device, ~5 ms pipeline
+        // with the shader cache warm), so they start NOW on a worker and
+        // overlap the class registration, CreateWindowExW and DWM setup
+        // below; the first present attaches the swapchain and draws on the
+        // GPU. There is no CPU-rendered first frame to hand over from.
+        if (!force_gdi) w.start_gpu(cfg);
+
         const HINSTANCE inst = ::GetModuleHandleW(nullptr);
         static const ATOM cls = [inst] {
             WNDCLASSEXW wc{};
@@ -231,11 +239,17 @@ class Win32Window {
                static_cast<LONG>(cfg.size.y * w.state_->dpi)};
         if (cfg.decorated) adjust_rect(&r, style, dpi);
 
-        // The window keeps its GDI redirection surface: the first frames go
-        // out through it (the CPU path) while Vulkan is still coming up, and
-        // a Vulkan swapchain presents over it without trouble once ready.
-        // WS_EX_NOREDIRECTIONBITMAP would forbid that CPU-first start.
-        const DWORD ex = 0;
+        // A flip-model swapchain owns the pixels, so the window needs no GDI
+        // redirection surface: without it DWM composes the swapchain
+        // directly (no full-window copy, no stale-content smear on resize).
+        // The surface can only be chosen at creation, so it is kept only
+        // where the CPU path may still have to present: no GPU expected at
+        // all, or a GPU allowed to miss the first frame (MAYAG_GPU_WAIT_MS=0,
+        // or Vulkan, whose cold bring-up can take seconds).
+        const bool gpu_expected = w.state_->gpu_prep.valid();
+        const bool may_fall_back = !gpu_expected || w.gpu_wait_budget_ms() == 0 || w.vulkan_requested();
+        w.state_->no_redirection = gpu_expected && !may_fall_back;
+        const DWORD ex = w.state_->no_redirection ? WS_EX_NOREDIRECTIONBITMAP : 0;
         const HWND hwnd = ::CreateWindowExW(ex, L"mayag.window", win32_detail::widen(cfg.title).c_str(), style,
                                             CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
                                             nullptr, nullptr, inst, w.state_.get());
@@ -259,14 +273,7 @@ class Win32Window {
         w.refresh_timing();
         startup::mark("win32: dwm chrome + timing");
         w.bind_callbacks();
-        // Vulkan bring-up on a worker. vkCreateInstance alone loads every
-        // installed driver -- measured 0.3 s warm and 2 s cold on an Optimus
-        // laptop, where it also wakes the discrete GPU -- so nothing waits for
-        // it: frames go out on the CPU until it is ready, and the window
-        // switches to the GPU on the first frame after. MAYAG_GPU_ASYNC=0
-        // waits instead, for measuring the GPU path from frame one.
-        if (!force_gdi) w.start_gpu(cfg);
-        ::ShowWindow(hwnd, SW_SHOW);
+        ::ShowWindow(hwnd, SW_SHOW);   // still cloaked: revealed by frame one
         return w;
     }
 
@@ -368,10 +375,40 @@ class Win32Window {
             return;
         }
 #endif
+        if (state_->no_redirection && state_->gpu_failed) recreate_for_gdi();
         present_software(dl, clear, w, h);
         reveal();
     }
 
+  private:
+    /// The GPU was expected (so the window was made without a GDI redirection
+    /// surface) and failed. GDI cannot present to such a window and the flag
+    /// cannot be changed after creation, so a fresh HWND replaces it -- same
+    /// State, same placement, same title. Rare by construction: it needs
+    /// d3d11.dll present and yet no usable device.
+    void recreate_for_gdi() {
+        State* st = state_.get();
+        st->no_redirection = false;
+        WINDOWPLACEMENT wp{};
+        wp.length = sizeof wp;
+        ::GetWindowPlacement(st->hwnd, &wp);
+        const DWORD style = static_cast<DWORD>(::GetWindowLongW(st->hwnd, GWL_STYLE));
+        const HWND old = st->hwnd;
+        ::SetWindowLongPtrW(old, GWLP_USERDATA, 0);
+        const HWND hwnd = ::CreateWindowExW(0, L"mayag.window", win32_detail::widen(st->title).c_str(), style & ~WS_VISIBLE,
+                                            CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr,
+                                            ::GetModuleHandleW(nullptr), st);
+        if (hwnd == nullptr) return;
+        st->hwnd = hwnd;
+        ::SetWindowPlacement(hwnd, &wp);
+        const BOOL dark = TRUE;
+        dwm_set(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof dark);
+        ::DestroyWindow(old);
+        sync_size();
+        st->open = true;
+    }
+
+  public:
   private:
     /// The CPU fallback: rasterise, then blit the damaged band through GDI.
     void present_software(const DrawList& dl, Color<Srgb> clear, int w, int h) {
@@ -679,6 +716,8 @@ class Win32Window {
         bool tracking_mouse = false;
         bool text_input = false;
         bool resized = false;   ///< a WM_SIZE/DPI change needs a swapchain rebuild
+        bool no_redirection = false;   ///< created WS_EX_NOREDIRECTIONBITMAP: GDI cannot present
+        bool gpu_failed = false;       ///< the GPU was expected and did not come up
         bool fullscreen = false;
         LONG saved_style = 0;
         WINDOWPLACEMENT saved_placement{};
@@ -792,70 +831,72 @@ class Win32Window {
 #endif
     }
 
-    /// Bring Vulkan up entirely off the UI thread: instance, device AND the
-    /// swapchain on the HWND (vkCreateWin32SurfaceKHR and swapchain creation
-    /// are thread-agnostic; only message handling is bound to the window's
-    /// thread). The window is fully usable on the CPU path meanwhile, and
-    /// adopt_gpu() switches over between two frames.
+    /// Start the GPU's window-independent bring-up (device + pipeline) on a
+    /// worker, before the HWND exists. adopt_gpu() attaches the swapchain to
+    /// the window when the first frame is presented.
     void start_gpu([[maybe_unused]] const WindowConfig& cfg) {
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         const char* forced = ::getenv("MAYAG_BACKEND");
         if (forced != nullptr && std::string_view{forced} == "software") return;
         State* st = state_.get();
         auto d = std::make_unique<backend::Win32Gpu>();
         d->set_low_latency(!cfg.vsync);
         d->set_transparent(cfg.transparent);
-        const Vec2 size = st->size;
-        const float dpi = st->dpi;
-        // The job must be captureless with Sendable arguments, and a raw
-        // pointer is not Sendable -- correctly so in general. An HWND is a
-        // kernel handle VALUE, valid from any thread for exactly these calls
-        // (surface and swapchain creation), so it crosses as an integer.
-        const auto hwnd = reinterpret_cast<std::uintptr_t>(st->hwnd);
         st->gpu_pool.emplace(1);
         st->gpu_prep = st->gpu_pool->submit(
-            [](std::stop_token, std::unique_ptr<backend::Win32Gpu> dev, std::uintptr_t h, float w, float hh,
-               float scale) {
-                if (!dev->attach(reinterpret_cast<HWND>(h), Vec2{w, hh}, scale)) {
+            [](std::stop_token, std::unique_ptr<backend::Win32Gpu> dev) {
+                if (!dev->prepare()) {
                     dev->destroy();
                     dev.reset();
                 }
                 return dev;
             },
-            std::move(d), hwnd, size.x, size.y, dpi);
-        const char* async = ::getenv("MAYAG_GPU_ASYNC");
-        if (async != nullptr && std::string_view{async} == "0") adopt_gpu(/*wait=*/true);
-#endif
+            std::move(d));
     }
 
-    /// Take over the GPU once its bring-up finished. Called before every
-    /// present; costs one future poll until then. Failure is not an error:
-    /// no vulkan-1.dll, no device, a software adapter under RDP, or
-    /// MAYAG_BACKEND=software all stay on the GDI path, which renders the
-    /// same pixels more slowly.
-    void adopt_gpu([[maybe_unused]] bool wait = false) {
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
+    /// How long the first present may wait for the GPU, in ms. Default 1000:
+    /// D3D11 is ready in ~110 ms warm and ~370 ms cold, so this only bites
+    /// when something is badly wrong, and then the CPU path draws instead.
+    /// MAYAG_GPU_WAIT_MS=0 restores CPU-first (draw now, switch later).
+    [[nodiscard]] static int gpu_wait_budget_ms() {
+        if (const char* e = ::getenv("MAYAG_GPU_WAIT_MS"); e != nullptr && *e != '\0') return std::max(0, std::atoi(e));
+        return 1000;
+    }
+    [[nodiscard]] static bool vulkan_requested() {
+        const char* e = ::getenv("MAYAG_BACKEND");
+        return e != nullptr && std::string_view{e} == "vulkan";
+    }
+
+    /// Take the prepared GPU and put it on the window. The first present
+    /// waits (up to gpu_wait_budget_ms; Vulkan never waits, its cold start
+    /// is seconds) so frame one is already a GPU frame; later presents only
+    /// poll. Failure is not an error: no device, a software adapter under
+    /// RDP, or MAYAG_BACKEND=software all draw on the CPU path.
+    void adopt_gpu() {
         State* st = state_.get();
         if (!st->gpu_prep.valid()) return;
-        if (!wait && !st->gpu_prep.ready()) return;
+        const int budget = (st->shown || vulkan_requested()) ? 0 : gpu_wait_budget_ms();
+        if (budget > 0 && !st->gpu_prep.ready()) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget);
+            while (!st->gpu_prep.ready() && std::chrono::steady_clock::now() < until) ::Sleep(1);
+        }
+        if (!st->gpu_prep.ready()) return;
         auto d = st->gpu_prep.get_at_root();
         st->gpu_pool.reset();
+        if (d && !d->attach_surface(st->hwnd, st->size, st->dpi)) d.reset();
         if (!d) {
             startup::mark("gpu unavailable (cpu)");
+            st->gpu_failed = true;
             return;
         }
         st->gpu = std::move(d);
         st->gpu_active = true;
-        // The window may have been resized while the swapchain was built.
-        st->gpu->resize(st->size, st->dpi);
         // Anything uploaded before the GPU existed has to be replayed.
         for (const auto& [id, img] : st->images.all())
             (void)st->gpu->upload_texture(id, img->rgba.data(), img->width, img->height);
         st->had_frame = false;
         release_dib();
         st->fb = backend::Framebuffer{1, 1};
-        startup::mark("gpu ready (switched from cpu)");
-#endif
+        startup::mark(st->shown ? "gpu ready (switched from cpu)" : "gpu ready (first frame)");
     }
 
     // ── DWM: native Windows 11 chrome ────────────────────────────────────
