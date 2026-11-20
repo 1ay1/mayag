@@ -384,7 +384,13 @@ template <ControlContext C>
             }
             const bool hidden = (a.flags & term_attr::hidden) != 0;
             if (visible && !hidden) {
+                // line_height(0): the font's natural line box (ascent +
+                // descent + gap), centred in the cell below -- the baseline
+                // Windows Terminal and every native terminal use. The 1.4
+                // default made the box taller than the cell, with all the
+                // extra leading under the glyphs, so text rode 2 px high.
                 auto t = text_owned(text) | font(o.font_size) | family(o.family) | fg(fa) | no_ligatures | clip_text
+                       | line_height(0.0f)
                        | (((a.flags & term_attr::bold) != 0) ? bold : weight(FontWeight::regular));
                 Node n = t.build();
                 if ((a.flags & term_attr::italic) != 0) n.style().text.italic = true;
@@ -464,6 +470,7 @@ template <ControlContext C>
             rect(x, y, w, ch, cc);
             if (!moving && under != nullptr && !under->text.empty() && under->text != " ")
                 layers.push_back((h(text_owned(under->text) | font(o.font_size) | family(o.family) | fg(rgb_of(th.cursor_text, ca)) | no_ligatures
+                                    | line_height(0.0f)
                                     | (((under->flags & term_attr::bold) != 0) ? bold : weight(FontWeight::regular)))
                                   | size(w + cw, ch) | align(Align::center) | absolute(x, y)).build());
         }
