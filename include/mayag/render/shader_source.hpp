@@ -276,8 +276,13 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
     }
 
     // Pixel footprint from screen-space derivatives — what makes the
-    // antialiasing correct under any transform or zoom.
-    float px = max(length(fwidth(v.local)), 1e-6);
+    // antialiasing correct under any transform or zoom. The LARGER axis,
+    // not length(): fwidth is (1, 1) at 1:1, whose length is sqrt(2), which
+    // softened every edge to 1.41 px and left seams between abutting panels
+    // (measured 42/255 on Vulkan, whose template had the same line; the
+    // kernel/CPU use exactly 1).
+    float2 fw = fwidth(v.local);
+    float px = max(max(fw.x, fw.y), 1e-6);
 
     float cov;
     if (v.kind == KIND_ROUNDED_BOX || v.kind == KIND_TEXTURE) {
@@ -300,6 +305,12 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
             cov = mg_shadow(d, max(v.params.x, 0.01));
         }
     } else if (v.kind == KIND_GLYPH) {
+        // A coverage bitmap carries its own antialiasing: the 1 px skirt the
+        // quad is padded by lies outside it and must stay empty (kernel.hpp
+        // glyph_coverage). Relying on the atlas gutter only held while the
+        // skirt landed exactly on the gutter texel.
+        if ((v.flags & FLAG_GLYPH_SDF) == 0u &&
+            (v.norm.x < 0.0 || v.norm.x > 1.0 || v.norm.y < 0.0 || v.norm.y > 1.0)) discard_fragment();
         float raw = atlas.sample(smp, v.uv).r;
         // A bitmap entry IS coverage; an SDF entry becomes exact box
         // coverage from the field and its gradient one display pixel away

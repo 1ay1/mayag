@@ -439,6 +439,52 @@ def compile_spirv(glslc, stage, code):
     return struct.unpack("<%dI" % (len(data) // 4), data)
 
 
+# ── HLSL (Direct3D 11) ──────────────────────────────────────────────────
+# Not a third hand-written dialect: the Vulkan GLSL is compiled to SPIR-V
+# WITHOUT optimisation (so resource names survive) and SPIRV-Cross emits HLSL
+# from it. The Windows backend compiles that with d3dcompiler_47 at runtime.
+# Two fix-ups make it D3D-shaped:
+#   - Vulkan set 1 (the per-batch user texture) collides with set 0 in HLSL's
+#     single register space; it moves to t3/s3.
+#   - The text pass is the same shader with SPIRV_CROSS_CONSTANT_ID_0 = true,
+#     exactly as Vulkan specialises MG_TEXT_PASS.
+def hlsl_from_glsl(glslc, spirv_cross, stage, code):
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "k." + stage)
+        with open(src, "w", encoding="utf-8", newline="\n") as f:
+            f.write(code)
+        spv = src + ".spv"
+        out = src + ".hlsl"
+        subprocess.check_call([glslc, "-fshader-stage=" + stage, src, "-o", spv])
+        subprocess.check_call([spirv_cross, spv, "--hlsl", "--shader-model", "50", "--output", out])
+        with open(out, encoding="utf-8") as f:
+            text = f.read()
+    if stage == "frag":
+        text = re.sub(r"(Texture2D<float4> u_texture\s*:\s*register\()t0\)", r"\1t3)", text)
+        text = re.sub(r"(SamplerState _u_texture_sampler\s*:\s*register\()s0\)", r"\1s3)", text)
+        if "register(t3)" not in text:
+            raise SystemExit("gen_shaders: could not remap u_texture to t3 in the HLSL")
+    else:
+        # Vulkan clip space has +y DOWN, D3D's has +y UP: flip on the way out
+        # of the vertex shader, once, so the fragment program sees the same
+        # pixel grid (SV_Position is top-left origin in D3D, as in Vulkan).
+        marker = "stage_output.gl_Position = gl_Position;"
+        if marker not in text:
+            raise SystemExit("gen_shaders: vertex output not found in the HLSL")
+        text = text.replace(marker, "stage_output.gl_Position = float4(gl_Position.x, -gl_Position.y, gl_Position.zw);")
+    return text
+
+
+def find_spirv_cross(glslc):
+    import shutil
+    here = os.path.dirname(os.path.abspath(glslc)) if os.path.isabs(glslc) else ""
+    for cand in ([os.path.join(here, "spirv-cross.exe"), os.path.join(here, "spirv-cross")] if here else []) + ["spirv-cross"]:
+        p = shutil.which(cand) if not os.path.isabs(cand) else (cand if os.path.exists(cand) else None)
+        if p:
+            return p
+    return None
+
+
 def emit_array(name, words):
     out = ["inline constexpr std::uint32_t %s[] = {" % name]
     for i in range(0, len(words), 8):
@@ -472,6 +518,23 @@ def main():
     vw = compile_spirv(glslc, "vert", vert)
     fw = compile_spirv(glslc, "frag", frag)
 
+    # HLSL for the Direct3D 11 backend, when SPIRV-Cross is available. When it
+    # is not, the previously generated HLSL is kept (read back from the
+    # existing header), so a build machine without it changes nothing.
+    spirv_cross = find_spirv_cross(glslc)
+    if spirv_cross:
+        hv = hlsl_from_glsl(glslc, spirv_cross, "vert", vert)
+        hf = hlsl_from_glsl(glslc, spirv_cross, "frag", frag)
+    else:
+        prev = open(out_path, encoding="utf-8").read() if os.path.exists(out_path) else ""
+        def old(name):
+            m = re.search(r"inline constexpr std::string_view %s =\n(.*?);\n" % name, prev, re.S)
+            if not m:
+                return ""
+            return "".join(re.findall(r'R"SHADER\((.*?)\)SHADER"', m.group(1), re.S))[1:-1]
+        hv, hf = old("hlsl_vertex"), old("hlsl_fragment")
+        print("gen_shaders: spirv-cross not found; keeping the existing HLSL")
+
     header = f"""#pragma once
 // GENERATED FILE — DO NOT EDIT.
 //
@@ -491,6 +554,11 @@ namespace mayag::render::generated {{
 {cxx_raw('glsl_vertex', vert)}
 
 {cxx_raw('glsl_fragment', frag)}
+
+// Direct3D 11 (shader model 5.0), cross-compiled from the SPIR-V above.
+{cxx_raw('hlsl_vertex', hv)}
+
+{cxx_raw('hlsl_fragment', hf)}
 
 }}  // namespace mayag::render::generated
 

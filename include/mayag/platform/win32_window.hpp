@@ -43,18 +43,11 @@
 #include "../render/draw_list.hpp"
 #include "types.hpp"
 
-// Vulkan is the default renderer on Windows, exactly as it is on Linux: it
-// self-loads at runtime (vulkan-1.dll ships with every modern driver) and
-// falls back to the GDI/software path when there is no device -- a headless
-// VM, an RDP session, MAYAG_BACKEND=software. Compiled in when
-// MAYAG_WITH_VULKAN is defined (the default on Windows).
-#ifdef MAYAG_WITH_VULKAN
-// vulkan.hpp is the hand-transcribed ABI (namespace vk); vulkan_device.hpp is
-// the device logic built on it and does NOT include it itself, so the order
-// here matters.
-#  include "../backend/vulkan.hpp"
-#  include "../backend/vulkan_device.hpp"
-#endif
+// The GPU renderer is Direct3D 11 + DXGI flip model by default (the native
+// Windows path), Vulkan when MAYAG_BACKEND=vulkan; see backend/win32_gpu.hpp.
+// Both load at runtime, and the GDI/software path takes over when neither
+// comes up -- a headless VM, an RDP session, MAYAG_BACKEND=software.
+#include "../backend/win32_gpu.hpp"
 
 #include "../core/win32.hpp"   // windows.h, with its keyword macros removed
 #include <windowsx.h>   // GET_X_LPARAM
@@ -351,7 +344,7 @@ class Win32Window {
         const int h = static_cast<int>(state_->size.y * state_->dpi);
         if (w <= 0 || h <= 0) return;
 
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         // GPU path: the Vulkan swapchain owns the HWND's buffers, so there is
         // no DIB, no CPU encode and no damage bookkeeping here -- the driver
         // presents directly. This is the default; it is only inactive when the
@@ -499,7 +492,7 @@ class Win32Window {
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() {
         if (!state_) return {};
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         // A present-mode Vulkan device has no readback path -- the swapchain
         // images belong to the compositor, and render_offscreen() needs a
         // device brought up with init_offscreen(). Re-rasterising the last
@@ -593,7 +586,7 @@ class Win32Window {
     }
     void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
         if (!state_) return;
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         if (state_->gpu_active && state_->gpu && img)
             (void)state_->gpu->upload_texture(id, img->rgba.data(), img->width, img->height);
 #endif
@@ -601,7 +594,7 @@ class Win32Window {
     }
     void release_image(std::uint32_t id) {
         if (!state_) return;
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         if (state_->gpu_active && state_->gpu) state_->gpu->release_texture(id);
 #endif
         state_->images.release(id);
@@ -612,10 +605,10 @@ class Win32Window {
     /// reads the atlas through the coverage sampler and needs no upload.
     template <typename AtlasT>
     void set_atlas_source([[maybe_unused]] AtlasT* atlas) noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         if (!state_) return;
         if (atlas == nullptr) { state_->atlas_sync = nullptr; return; }
-        state_->atlas_sync = [atlas](backend::VulkanDevice& d) { d.sync_atlas(*atlas); };
+        state_->atlas_sync = [atlas](backend::Win32Gpu& d) { d.sync_atlas(*atlas); };
 #endif
     }
 
@@ -628,20 +621,20 @@ class Win32Window {
     /// The GPU that won ("Intel(R) Arc(TM) Pro Graphics"), or null on the
     /// CPU path.
     [[nodiscard]] const char* device_name() const noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         if (state_ && state_->gpu_active && state_->gpu) return state_->gpu->device_name();
 #endif
         return nullptr;
     }
 
     [[nodiscard]] std::string_view renderer_name() const noexcept {
-#ifdef MAYAG_WITH_VULKAN
-        if (state_ && state_->gpu_active) return "vulkan";
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
+        if (state_ && state_->gpu_active && state_->gpu) return state_->gpu->api_name();
 #endif
         return "software";
     }
     [[nodiscard]] bool gpu_active() const noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         return state_ != nullptr && state_->gpu_active;
 #else
         return false;
@@ -658,7 +651,7 @@ class Win32Window {
     }
 
     [[nodiscard]] std::uint64_t frames_skipped() const noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         return state_ ? state_->frames_skipped : 0;
 #else
         return 0;
@@ -699,13 +692,13 @@ class Win32Window {
         void* dib_bits = nullptr;   ///< the section's pixels: encoded into directly
         int dib_w = 0, dib_h = 0;
 
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         // ── the GPU path ────────────────────────────────────────────
-        std::unique_ptr<backend::VulkanDevice> gpu;
+        std::unique_ptr<backend::Win32Gpu> gpu;
         bool gpu_active = false;
         /// Type-erased because the Atlas type is a template parameter of the
         /// FontStack, which this header must not depend on.
-        std::function<void(backend::VulkanDevice&)> atlas_sync;
+        std::function<void(backend::Win32Gpu&)> atlas_sync;
         // The last list presented, so an identical frame can be skipped
         // instead of waking the GPU for pixels that already match.
         DrawList last_list;
@@ -715,7 +708,7 @@ class Win32Window {
         /// Instance, device and swapchain are brought up on a jaal worker
         /// (see start_gpu); adopt_gpu() takes the result between frames.
         std::optional<jaal::kernel::pool> gpu_pool;
-        jaal::kernel::job_result<std::unique_ptr<backend::VulkanDevice>> gpu_prep;
+        jaal::kernel::job_result<std::unique_ptr<backend::Win32Gpu>> gpu_prep;
 #endif
 
         // ── the OS modal loop (drag-resize, window move) ─────────────
@@ -767,7 +760,7 @@ class Win32Window {
     }
     void destroy() {
         release_dib();
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         // A prep still running owns a device; let it finish and drop it.
         if (state_ && state_->gpu_prep.valid()) {
             if (auto d = state_->gpu_prep.get_at_root()) d->destroy();
@@ -791,7 +784,7 @@ class Win32Window {
     /// rebuilds the swapchain; the CPU path reallocates lazily in present().
     void renderer_resized() {
         if (state_) state_->resized = false;
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         if (state_ && state_->gpu_active && state_->gpu) {
             state_->gpu->resize(state_->size, state_->dpi);
             state_->had_frame = false;   // the old contents are gone
@@ -805,11 +798,11 @@ class Win32Window {
     /// thread). The window is fully usable on the CPU path meanwhile, and
     /// adopt_gpu() switches over between two frames.
     void start_gpu([[maybe_unused]] const WindowConfig& cfg) {
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         const char* forced = ::getenv("MAYAG_BACKEND");
         if (forced != nullptr && std::string_view{forced} == "software") return;
         State* st = state_.get();
-        auto d = std::make_unique<backend::VulkanDevice>();
+        auto d = std::make_unique<backend::Win32Gpu>();
         d->set_low_latency(!cfg.vsync);
         d->set_transparent(cfg.transparent);
         const Vec2 size = st->size;
@@ -821,9 +814,9 @@ class Win32Window {
         const auto hwnd = reinterpret_cast<std::uintptr_t>(st->hwnd);
         st->gpu_pool.emplace(1);
         st->gpu_prep = st->gpu_pool->submit(
-            [](std::stop_token, std::unique_ptr<backend::VulkanDevice> dev, std::uintptr_t h, float w, float hh,
+            [](std::stop_token, std::unique_ptr<backend::Win32Gpu> dev, std::uintptr_t h, float w, float hh,
                float scale) {
-                if (!dev->attach_win32(::GetModuleHandleW(nullptr), reinterpret_cast<HWND>(h), Vec2{w, hh}, scale)) {
+                if (!dev->attach(reinterpret_cast<HWND>(h), Vec2{w, hh}, scale)) {
                     dev->destroy();
                     dev.reset();
                 }
@@ -841,14 +834,14 @@ class Win32Window {
     /// MAYAG_BACKEND=software all stay on the GDI path, which renders the
     /// same pixels more slowly.
     void adopt_gpu([[maybe_unused]] bool wait = false) {
-#ifdef MAYAG_WITH_VULKAN
+#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         State* st = state_.get();
         if (!st->gpu_prep.valid()) return;
         if (!wait && !st->gpu_prep.ready()) return;
         auto d = st->gpu_prep.get_at_root();
         st->gpu_pool.reset();
         if (!d) {
-            startup::mark("vulkan unavailable (cpu)");
+            startup::mark("gpu unavailable (cpu)");
             return;
         }
         st->gpu = std::move(d);
@@ -861,7 +854,7 @@ class Win32Window {
         st->had_frame = false;
         release_dib();
         st->fb = backend::Framebuffer{1, 1};
-        startup::mark("vulkan ready (switched from cpu)");
+        startup::mark("gpu ready (switched from cpu)");
 #endif
     }
 

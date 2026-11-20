@@ -24,12 +24,15 @@ int main() {
     const int N = 60;
     for (int i = 0; i < N; ++i) {
         ::SetWindowPos(hwnd, nullptr, 100, 100, 700 + (i % 2) * 300 + i, 500 + (i % 3) * 50, SWP_NOZORDER | SWP_NOACTIVATE);
+        const auto a0 = clk::now();
         (void)w->dispatch();    // marks the swapchain for rebuild
         const auto a = clk::now();
         dl.clear();
         dl.fill_rect(Rect{{10.f + i, 10}, {200, 100}}, Color<Srgb>{0.3f, 0.4f, 0.8f, 1.0f});
         w->present(dl, bg);     // the rebuild + first frame at the new size
         const double ms = std::chrono::duration<double, std::milli>(clk::now() - a).count();
+        if (i < 3) std::printf("  step %d: dispatch %.2f ms, present %.2f ms\n", i,
+                               std::chrono::duration<double, std::milli>(a - a0).count(), ms);
         sum += ms;
         if (ms > worst) worst = ms;
     }
