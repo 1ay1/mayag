@@ -470,7 +470,10 @@ struct Table { std::uint32_t tag; std::vector<std::uint8_t> data; };
     put16(os2, 400);           // usWeightClass
     put16(os2, 5);             // usWidthClass
     put16(os2, 0);             // fsType
-    for (int i = 0; i < 10; ++i) puti16(os2, 0);   // subscript/superscript/strikeout/family class
+    // ySub{X,Y}Size, ySub{X,Y}Offset, ySuper{X,Y}Size, ySuper{X,Y}Offset,
+    // yStrikeout{Size,Position}, sFamilyClass: ELEVEN int16s. Ten shifted
+    // every later field by two bytes (usWinDescent read as 0).
+    for (int i = 0; i < 11; ++i) puti16(os2, 0);
     for (int i = 0; i < 10; ++i) os2.push_back(0); // panose
     put32(os2, 0); put32(os2, 0); put32(os2, 0); put32(os2, 0);   // unicode ranges
     put32(os2, 0x6D617961);    // achVendID 'maya'

@@ -155,6 +155,31 @@ int main() {
     check(r.mean < 0.25, "mayag's Windows text matches Direct2D on average (< 0.25/255)");
     check(r.worst <= 6, "and pixel by pixel (worst <= 6/255)");
     check(typo::FontConfig{}.native_raster, "the native look is the default on Windows");
+
+    // Vertical metrics as DirectWrite reports them. The comparison above
+    // takes its baseline from mayag's own metrics, so it cannot see this:
+    // mayag used hhea where Windows uses usWin*, which put Consolas'
+    // baseline 2.3 px high and every terminal line against the top of its row.
+    std::printf("\nvertical metrics vs IDWriteFontFace::GetMetrics\n");
+    const auto& db = typo::system::Database::instance();
+    for (std::string_view fam : {"Consolas", "Cascadia Mono", "Cascadia Code", "Courier New", "Segoe UI",
+                                 "Arial", "Lilex", "JetBrains Mono"}) {
+        const auto* e = db.first_available(std::vector<std::string_view>{fam});
+        if (e == nullptr || e->family != fam) continue;
+        auto face = typo::Face::from_file(e->path, e->face_index);
+        IDWriteFontFace* dw = face ? face->dwrite_face() : nullptr;
+        if (dw == nullptr) continue;
+        DWRITE_FONT_METRICS m{};
+        dw->GetMetrics(&m);
+        const float px = 13.0f, s = px / static_cast<float>(m.designUnitsPerEm);
+        const auto mine = face->metrics(px);
+        const float da = std::abs(mine.ascent - m.ascent * s), dd = std::abs(mine.descent - m.descent * s),
+                    dg = std::abs(mine.line_gap - static_cast<float>(m.lineGap) * s);
+        std::printf("  %-14.*s ascent %.2f/%.2f descent %.2f/%.2f gap %.2f/%.2f\n", static_cast<int>(fam.size()),
+                    fam.data(), mine.ascent, m.ascent * s, mine.descent, m.descent * s, mine.line_gap,
+                    static_cast<float>(m.lineGap) * s);
+        check(da < 0.01f && dd < 0.01f && dg < 0.01f, std::string{fam} + ": ascent, descent and gap match DirectWrite");
+    }
 #else
     std::printf("  (not Windows -- skipped)\n");
 #endif

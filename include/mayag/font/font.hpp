@@ -241,7 +241,24 @@ class Face {
             m.ascent   =  static_cast<float>(os2.typo_ascender)  * s;
             m.descent  = -static_cast<float>(os2.typo_descender) * s;
             m.line_gap =  static_cast<float>(os2.typo_line_gap)  * s;
-        } else if (hhea.ascender != 0) {
+        }
+#if defined(_WIN32)
+        // Windows (DirectWrite, GDI, every native app) does NOT use hhea:
+        // without USE_TYPO_METRICS the line is usWinAscent + usWinDescent,
+        // and the gap is whatever hhea's line adds beyond that (usually 0).
+        // Taking hhea here put Consolas' baseline 2.3 px higher than any
+        // Windows app, with its 2.2 px hhea gap all under the text, so every
+        // line hugged the top of its row. Matches IDWriteFontFace::GetMetrics
+        // (test_win32_text: every installed face).
+        else if (os2.present && os2.win_ascent + os2.win_descent > 0) {
+            m.ascent  = static_cast<float>(os2.win_ascent)  * s;
+            m.descent = static_cast<float>(os2.win_descent) * s;
+            const float hhea_line = static_cast<float>(hhea.ascender - hhea.descender + hhea.line_gap);
+            const float win_line = static_cast<float>(os2.win_ascent + os2.win_descent);
+            m.line_gap = num::max(hhea_line - win_line, 0.0f) * s;
+        }
+#endif
+        else if (hhea.ascender != 0) {
             m.ascent   =  static_cast<float>(hhea.ascender)  * s;
             m.descent  = -static_cast<float>(hhea.descender) * s;
             m.line_gap =  static_cast<float>(hhea.line_gap)  * s;
