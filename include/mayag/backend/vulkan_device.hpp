@@ -180,7 +180,10 @@ class VulkanDevice {
         if (!valid_ || offscreen_) return;
         dpi_ = dpi;
         viewport_ = logical;
-        api_->DeviceWaitIdle(device_);
+        // No DeviceWaitIdle here: the rebuild is deferred to the next
+        // submit(), and rebuild_swapchain() waits for the GPU itself. Waiting
+        // here too stalled the GPU twice per resize step, and during a live
+        // drag-resize Windows delivers a step per mouse move.
         rebuild_swapchain_ = true;
     }
 
@@ -1271,6 +1274,7 @@ class VulkanDevice {
         MG_LOAD(EnumeratePhysicalDevices, "vkEnumeratePhysicalDevices");
         MG_LOAD(GetPhysicalDeviceQueueFamilyProperties, "vkGetPhysicalDeviceQueueFamilyProperties");
         MG_LOAD(GetPhysicalDeviceMemoryProperties, "vkGetPhysicalDeviceMemoryProperties");
+        MG_LOAD(GetPhysicalDeviceProperties, "vkGetPhysicalDeviceProperties");
         // Needed before device creation to decide whether zero-copy import
         // can be requested at all.
         MG_LOAD(EnumerateDeviceExtensionProperties, "vkEnumerateDeviceExtensionProperties");
@@ -1480,10 +1484,34 @@ class VulkanDevice {
         std::vector<vk::VkPhysicalDevice> devices(count);
         api_->EnumeratePhysicalDevices(instance_, &count, devices.data());
 
-        // Prefer a discrete GPU; accept any device with a graphics (and, if a
-        // surface is given, present-capable) queue. llvmpipe is a valid
-        // fallback — a software Vulkan device still beats mayag's own CPU path
-        // for large frames and keeps the "GPU by default" promise honest.
+        // Rank the devices, then take the best one with a usable queue.
+        //
+        // A 2D UI is bound by latency and power, not shader throughput, so
+        // the INTEGRATED GPU wins by default: on a hybrid laptop the panel is
+        // wired to it, a discrete GPU would have to be woken (hundreds of ms,
+        // watts of idle draw) and every frame copied across PCIe to scan out.
+        // MAYAG_GPU=discrete|integrated|<name substring> overrides. A CPU
+        // device (llvmpipe/WARP-style) is the last resort, still ahead of
+        // mayag's own rasteriser for large frames.
+        const char* want = std::getenv("MAYAG_GPU");
+        const std::string_view pref = want != nullptr ? std::string_view{want} : std::string_view{};
+        const auto score = [&](vk::VkPhysicalDevice dev) {
+            if (api_->GetPhysicalDeviceProperties == nullptr) return 0;
+            vk::VkPhysicalDevicePropertiesPrefix p{};
+            api_->GetPhysicalDeviceProperties(dev, &p);
+            if (!pref.empty() && pref != "discrete" && pref != "integrated" &&
+                std::string_view{p.deviceName}.find(pref) != std::string_view::npos)
+                return 100;
+            const bool integrated = p.deviceType == vk::VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+            const bool discrete = p.deviceType == vk::VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+            if (pref == "discrete") return discrete ? 50 : integrated ? 40 : 10;
+            if (integrated) return 50;
+            if (discrete) return 40;
+            return p.deviceType == vk::VK_PHYSICAL_DEVICE_TYPE_CPU ? 5 : 10;
+        };
+        std::stable_sort(devices.begin(), devices.end(),
+                         [&](auto a, auto b) { return score(a) > score(b); });
+
         for (auto dev : devices) {
             std::uint32_t qcount = 0;
             api_->GetPhysicalDeviceQueueFamilyProperties(dev, &qcount, nullptr);
@@ -1499,6 +1527,11 @@ class VulkanDevice {
                 phys_ = dev;
                 queue_family_ = i;
                 api_->GetPhysicalDeviceMemoryProperties(dev, &mem_props_);
+                if (api_->GetPhysicalDeviceProperties != nullptr) {
+                    vk::VkPhysicalDevicePropertiesPrefix p{};
+                    api_->GetPhysicalDeviceProperties(dev, &p);
+                    std::snprintf(device_name_, sizeof device_name_, "%s", p.deviceName);
+                }
                 return true;
             }
         }
@@ -2200,7 +2233,15 @@ class VulkanDevice {
         }
         vk::VkSwapchainKHR new_swap = nullptr;
         if (api_->CreateSwapchainKHR(device_, &ci, nullptr, &new_swap) != vk::VK_SUCCESS) return false;
-        if (swapchain_) destroy_swapchain_objects();
+        if (swapchain_) {
+            destroy_swapchain_objects();
+            // Passing it as oldSwapchain only RETIRES it; it must still be
+            // destroyed, or every resize leaks a swapchain and all of its
+            // images -- a live drag-resize leaked hundreds of full-window
+            // images. Safe here: rebuild_swapchain() waited for the device
+            // to go idle, so nothing still references the retired images.
+            api_->DestroySwapchainKHR(device_, swapchain_, nullptr);
+        }
         swapchain_ = new_swap;
 
         std::uint32_t count = 0;
@@ -2254,9 +2295,19 @@ class VulkanDevice {
     }
 
     void rebuild_swapchain() {
+        static const bool trace = std::getenv("MAYAG_SWAP_TRACE") != nullptr;
+        using clk = std::chrono::steady_clock;
+        const auto t0 = clk::now();
         api_->DeviceWaitIdle(device_);
+        const auto t1 = clk::now();
         if (!create_swapchain()) return;
+        const auto t2 = clk::now();
         make_framebuffers();
+        const auto t3 = clk::now();
+        if (trace) {
+            const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+            std::fprintf(stderr, "swap rebuild: idle %.2f  create %.2f  fbs %.2f ms\n", ms(t0, t1), ms(t1, t2), ms(t2, t3));
+        }
     }
 
     void destroy_swapchain_objects() {

@@ -252,6 +252,18 @@ struct VkDeviceCreateInfo {
 };
 struct VkMemoryType { Flags propertyFlags; std::uint32_t heapIndex; };
 struct VkMemoryHeap { DeviceSize size; Flags flags; };
+/// The leading fields of VkPhysicalDeviceProperties, padded to the full size
+/// (limits + sparse properties follow; mayag reads none of them).
+struct VkPhysicalDevicePropertiesPrefix {
+    std::uint32_t apiVersion, driverVersion, vendorID, deviceID;
+    int deviceType;   ///< 1 integrated, 2 discrete, 3 virtual, 4 cpu
+    char deviceName[256];
+    std::uint8_t pipelineCacheUUID[16];
+    std::uint8_t rest[1024];   // VkPhysicalDeviceLimits + sparse props (~520 B)
+};
+inline constexpr int VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU = 1;
+inline constexpr int VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU = 2;
+inline constexpr int VK_PHYSICAL_DEVICE_TYPE_CPU = 4;
 struct VkPhysicalDeviceMemoryProperties {
     std::uint32_t memoryTypeCount; VkMemoryType memoryTypes[32];
     std::uint32_t memoryHeapCount; VkMemoryHeap memoryHeaps[16];
@@ -631,6 +643,7 @@ struct Api {
     VkResult (*EnumeratePhysicalDevices)(VkInstance, std::uint32_t*, VkPhysicalDevice*) = nullptr;
     void (*GetPhysicalDeviceQueueFamilyProperties)(VkPhysicalDevice, std::uint32_t*, VkQueueFamilyProperties*) = nullptr;
     void (*GetPhysicalDeviceMemoryProperties)(VkPhysicalDevice, VkPhysicalDeviceMemoryProperties*) = nullptr;
+    void (*GetPhysicalDeviceProperties)(VkPhysicalDevice, VkPhysicalDevicePropertiesPrefix*) = nullptr;
     VkResult (*CreateDevice)(VkPhysicalDevice, const VkDeviceCreateInfo*, const void*, VkDevice*) = nullptr;
     void (*DestroyDevice)(VkDevice, const void*) = nullptr;
     void (*GetDeviceQueue)(VkDevice, std::uint32_t, std::uint32_t, VkQueue*) = nullptr;
