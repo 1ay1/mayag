@@ -694,10 +694,13 @@ class Software {
 
             case ShapeKind::glyph: {
                 if (sampler == nullptr) return 0.0f;
-                const float u = num::lerp(inst.uv.x, inst.uv.z,
-                                          num::saturate((p.x - (center.x - half.x)) / (half.x * 2.0f)));
-                const float v = num::lerp(inst.uv.y, inst.uv.w,
-                                          num::saturate((p.y - (center.y - half.y)) / (half.y * 2.0f)));
+                // Normalised position in the glyph rect, NOT clamped: the
+                // kernel needs to see the antialiasing skirt as outside
+                // (norm < 0 or > 1), exactly as the GPU's interpolated v_norm.
+                const float nx = (p.x - (center.x - half.x)) / (half.x * 2.0f);
+                const float ny = (p.y - (center.y - half.y)) / (half.y * 2.0f);
+                const float u = num::lerp(inst.uv.x, inst.uv.z, num::saturate(nx));
+                const float v = num::lerp(inst.uv.y, inst.uv.w, num::saturate(ny));
                 // The atlas slot rides in the INSTANCE, not the batch, so
                 // glyphs and shapes share one batch. See DrawList::glyph.
                 (void)texture;
@@ -715,8 +718,11 @@ class Software {
                 };
                 kernel::Fragment f{};
                 f.uv = kernel::vec2{u, v};
+                f.norm = kernel::vec2{nx, ny};
                 f.flags = inst.flags;
                 f.params = inst.params;
+                f.color = inst.color;   // DirectWrite correction depends on it
+                f.axis = inst.axis;     // .x = grayscale enhanced contrast
                 const float cov = kernel::glyph_coverage(f, env);
 
                 // ── text coverage ─────────────────────────────────────

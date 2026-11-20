@@ -82,6 +82,8 @@ inline constexpr std::uint16_t cg_hinted  = 1 << 8;
 [[nodiscard]] constexpr std::uint16_t encode_smoothing(int level) noexcept {
     return static_cast<std::uint16_t>((level & 0x7) << 9);
 }
+/// Coverage came from the OS rasteriser (Windows: DirectWrite), not mayag's.
+inline constexpr std::uint16_t native = 1 << 12;
 }  // namespace glyph_flags
 
 }  // namespace mayag::typo
@@ -126,6 +128,9 @@ struct CachedGlyph {
     /// FontStack's separate RGBA colour atlas, not this coverage atlas, and
     /// `uv` indexes that atlas instead.
     bool  is_color = false;
+    /// True when the coverage came from the OS rasteriser (DirectWrite):
+    /// it is composited with the OS's own alpha correction.
+    bool  is_native = false;
 
     /// Last frame this glyph was drawn — drives LRU eviction.
     std::uint64_t last_used = 0;
@@ -324,13 +329,15 @@ class Atlas {
     /// eviction could not free enough room — the caller should grow or split.
     const CachedGlyph* insert(const GlyphKey& key, const Bitmap& bmp,
                               Vec2 bearing, float advance,
-                              float raster_scale, float spread, bool is_sdf) {
+                              float raster_scale, float spread, bool is_sdf,
+                              bool is_native = false) {
         CachedGlyph g;
         g.bearing      = bearing;
         g.advance      = advance;
         g.raster_scale = raster_scale;
         g.spread       = spread;
         g.is_sdf       = is_sdf;
+        g.is_native    = is_native;
         g.last_used    = frame_;
         g.valid        = true;
 

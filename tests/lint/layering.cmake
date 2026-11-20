@@ -57,6 +57,7 @@ set(jaal_ok
     app/app.hpp app/effects.hpp app/host.hpp app/simulate.hpp app/sources.hpp   # the host: mayag <-> jaal
     platform/macos_loop.hpp                                                    # Cocoa's run loop drives jaal's kernel
     platform/wayland.hpp                                                       # GPU bring-up on a jaal worker
+    platform/win32_window.hpp                                                  # GPU bring-up on a jaal worker; the reactor's message-queue sentinel
     backend/thread_pool.hpp                                                    # the render fork-join is jaal's pool
     backend/vulkan_device.hpp                                                  # a device handle opted into jaal::sendable
     font/system.hpp                                                            # the font scan runs on a jaal worker

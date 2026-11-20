@@ -439,6 +439,24 @@ class DrawList {
         push(i, 0);
     }
 
+    /// A glyph whose coverage came from the OS rasteriser (DirectWrite):
+    /// composited with the OS's own grayscale alpha correction
+    /// (kernel::dwrite_text_alpha) so it matches native text exactly.
+    /// `gamma_ratios` and `contrast` are the user's DirectWrite parameters.
+    void glyph_native(const Rect& dst, const Rect& atlas_uv, Color<Srgb> c, Vec4 gamma_ratios, float contrast) {
+        Instance i{};
+        i.kind  = static_cast<std::uint32_t>(ShapeKind::glyph);
+        i.rect  = {dst.origin.x, dst.origin.y, dst.size.x, dst.size.y};
+        i.uv    = {atlas_uv.left(), atlas_uv.top(), atlas_uv.right(), atlas_uv.bottom()};
+        i.color = premultiplied(c);
+        i.color2 = backdrop_for(dst);
+        i.texture_slot = atlas_slot;
+        i.params = gamma_ratios;
+        i.axis = {contrast, 0.0f, 0.0f, 0.0f};
+        i.flags |= kernel::FLAG_GLYPH_DWRITE;
+        push(i, 0);
+    }
+
     void textured(const Rect& dst, const Rect& src_uv, std::uint32_t texture,
                   Color<Srgb> tint = colors::white) {
         Instance i{};

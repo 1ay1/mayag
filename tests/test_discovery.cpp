@@ -234,11 +234,20 @@ void test_color_emoji_renders() {
     check(g != nullptr && g->valid && g->is_color, "the emoji is cached as a colour glyph");
     if (g == nullptr || !g->is_color) return;
 
-    // Its atlas texel must be actual colour, not greyscale.
-    const Vec4 c = stack->atlas().sample_color(
-        g->uv.left() + g->uv.width() * 0.5f, g->uv.top() + g->uv.height() * 0.5f);
-    const bool coloured = std::abs(c.x - c.y) > 0.1f || std::abs(c.y - c.z) > 0.1f;
-    check(coloured && c.w > 0.5f, "the atlas holds real colour pixels, not coverage");
+    // Its atlas must hold actual colour, not greyscale. Sampled across the
+    // glyph rather than at its exact centre: Segoe UI Emoji's grinning face
+    // has an open white mouth there (#F9EEF5), a legitimately near-grey
+    // texel that says nothing about whether colour reached the atlas.
+    int coloured_texels = 0, opaque_texels = 0;
+    for (int yy = 0; yy < 8; ++yy)
+        for (int xx = 0; xx < 8; ++xx) {
+            const Vec4 c = stack->atlas().sample_color(g->uv.left() + g->uv.width() * (xx + 0.5f) / 8.0f,
+                                                       g->uv.top() + g->uv.height() * (yy + 0.5f) / 8.0f);
+            if (c.w > 0.5f) ++opaque_texels;
+            if (c.w > 0.5f && (std::abs(c.x - c.y) > 0.1f || std::abs(c.y - c.z) > 0.1f)) ++coloured_texels;
+        }
+    check(opaque_texels > 0 && coloured_texels * 4 >= opaque_texels,
+          "the atlas holds real colour pixels, not coverage");
 
     // Render a string with an emoji and confirm coloured pixels reach the frame.
     auto ui = dsl::v(dsl::text_owned("A \xF0\x9F\x98\x80 B") | dsl::font(48)

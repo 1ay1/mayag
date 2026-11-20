@@ -353,7 +353,15 @@ void main() {
     // antialiasing correct under arbitrary transform and zoom. It is the one
     // quantity the CPU computes differently (it knows its own scale), which is
     // why it is an INPUT to the kernel rather than something the kernel derives.
-    f.px     = max(length(fwidth(v_local)), 1e-6);
+    //
+    // The LARGER axis of fwidth, not its length: fwidth(v_local) is (1, 1) for
+    // an untransformed quad, whose length is sqrt(2). Using the length
+    // antialiased every edge over 1.41 px where the CPU (f.px = 1) uses 1,
+    // so every axis-aligned GPU edge was soft and two abutting rects bled
+    // into each other -- a visible 42/255 seam between a dark and a light
+    // panel. max() is exact at 1:1 and still tracks scale under transforms.
+    vec2 fw  = fwidth(v_local);
+    f.px     = max(max(fw.x, fw.y), 1e-6);
     f.kind   = v_meta.x;
     f.flags  = v_meta.y;
 

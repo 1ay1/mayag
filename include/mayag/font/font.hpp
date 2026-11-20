@@ -19,6 +19,7 @@
 #include "cg_autohint.hpp"
 #include "color_bitmap.hpp"
 #include "colr.hpp"
+#include "dwrite_raster.hpp"   // Windows: native glyph coverage
 #include "mapped_file.hpp"
 #include "opentype.hpp"
 #include "ot_shapers.hpp"
@@ -94,8 +95,31 @@ class Face {
             if (err != nullptr) *err = ot::Error::too_small;
             return nullptr;
         }
+        face->source_path_ = path;
+        face->source_index_ = face_index;
         return face->init(face->mapped_.data(), face_index, err) ? face : nullptr;
     }
+
+#if defined(_WIN32)
+    ~Face() {
+        if (dw_face_ != nullptr) dw_face_->Release();
+    }
+
+    /// This face as DirectWrite sees it, for native rasterisation (see
+    /// dwrite_raster.hpp). Null when the face did not come from a file
+    /// DirectWrite can open, when it is variable (instances away from the
+    /// default would need DWRITE_FONT_AXIS_VALUEs; such faces keep mayag's
+    /// own raster), or when DirectWrite is unavailable. Opened once.
+    [[nodiscard]] IDWriteFontFace* dwrite_face() const {
+        if (source_path_.empty() || is_variable()) return nullptr;
+        std::lock_guard lock{mutex_};
+        if (!dw_tried_) {
+            dw_tried_ = true;
+            dw_face_ = dwrite::open_face(source_path_, source_index_);
+        }
+        return dw_face_;
+    }
+#endif
 
   private:
     bool init(std::span<const std::uint8_t> bytes, std::uint32_t face_index, ot::Error* err) {
@@ -674,6 +698,12 @@ class Face {
 
     std::vector<std::uint8_t> data_;     ///< owned bytes (from_memory)
     MappedFile                mapped_;   ///< or a mapping (from_file)
+    std::string               source_path_;        ///< the file, when from_file
+    std::uint32_t             source_index_ = 0;   ///< its index in a collection
+#if defined(_WIN32)
+    mutable IDWriteFontFace*  dw_face_ = nullptr;  ///< native rasteriser's view (guarded by mutex_)
+    mutable bool              dw_tried_ = false;
+#endif
     ot::FontFile              file_;
     GlyphSource               glyphs_;
     KernTable                 kerning_;
@@ -783,12 +813,19 @@ enum class RenderMode : std::uint8_t {
 /// Whether glyphs default to the macOS look: CoreGraphics font smoothing
 /// (the stem weight macOS text has), its curve flattening, glyph merging for
 /// connected scripts and upright italic fallback, pixel-matched to CoreText.
-/// On by default on EVERY platform, so text renders the same on Linux and
-/// Windows as on a Mac. Define MAYAG_COREGRAPHICS_TEXT=0 for the
-/// FreeType/DirectWrite look (exact outlines, no thickening), or pick per
-/// stack with FontConfig::coregraphics() / portable().
+///
+/// On by default on macOS and Linux. On Windows the default is the NATIVE
+/// look instead (TextLook::native(): DirectWrite's own glyph coverage, see
+/// dwrite_raster.hpp), because that is what every other Windows app draws
+/// and so what a Windows user's eye is calibrated to; macOS-weight stems
+/// read heavy and blurry there. Define MAYAG_COREGRAPHICS_TEXT=1 to force
+/// the macOS look on Windows too, or =0 for the FreeType look elsewhere.
 #if !defined(MAYAG_COREGRAPHICS_TEXT)
-#  define MAYAG_COREGRAPHICS_TEXT 1   // the macOS look everywhere; 0 opts out
+#  if defined(_WIN32)
+#    define MAYAG_COREGRAPHICS_TEXT 0
+#  else
+#    define MAYAG_COREGRAPHICS_TEXT 1   // the macOS look; 0 opts out
+#  endif
 #endif
 inline constexpr bool coregraphics_text_default = MAYAG_COREGRAPHICS_TEXT != 0;
 
@@ -802,12 +839,28 @@ struct TextLook {
     bool  cg_autohint;        ///< vertical autohint at small ppem
     bool  oblique_fallback;   ///< shear fallback faces inside italic runs
     bool  merge_glyphs;       ///< dlng-driven glyph merging (CoreText)
+    bool  native_raster = false;   ///< glyph coverage from the OS rasteriser (Windows: DirectWrite)
     [[nodiscard]] static constexpr TextLook coregraphics() noexcept {
-        return {static_cast<float>(cg_autohint::kSmoothingMax), true, true, false, true};
+        return {static_cast<float>(cg_autohint::kSmoothingMax), true, true, false, true, false};
     }
-    [[nodiscard]] static constexpr TextLook portable() noexcept { return {0.0f, false, true, true, false}; }
+    [[nodiscard]] static constexpr TextLook portable() noexcept { return {0.0f, false, true, true, false, false}; }
+    /// The platform's own text: DirectWrite coverage on Windows (natural
+    /// symmetric, the font's hinting, the user's contrast setting), with the
+    /// portable look as the fallback wherever the native rasteriser cannot
+    /// serve a glyph (and on other platforms).
+    [[nodiscard]] static constexpr TextLook native() noexcept {
+        TextLook l = portable();
+#if defined(_WIN32)
+        l.native_raster = true;
+#endif
+        return l;
+    }
     [[nodiscard]] static constexpr TextLook platform() noexcept {
+#if defined(_WIN32)
+        return coregraphics_text_default ? coregraphics() : native();
+#else
         return coregraphics_text_default ? coregraphics() : portable();
+#endif
     }
 };
 
@@ -820,10 +873,13 @@ struct FontConfig {
     /// hinting, i.e. FreeType's default "light" mode: x-height and cap
     /// height on whole pixels at small sizes, no horizontal distortion.
     [[nodiscard]] static constexpr FontConfig portable() noexcept { return with_look(TextLook::portable()); }
+    /// The operating system's own text look (Windows: DirectWrite).
+    [[nodiscard]] static constexpr FontConfig native() noexcept { return with_look(TextLook::native()); }
     [[nodiscard]] static constexpr FontConfig with_look(TextLook l) noexcept {
         FontConfig c;
         c.smoothing = l.smoothing; c.cg_flattening = l.cg_flattening; c.cg_autohint = l.cg_autohint;
         c.oblique_fallback = l.oblique_fallback; c.merge_glyphs = l.merge_glyphs;
+        c.native_raster = l.native_raster;
         return c;
     }
 
@@ -884,6 +940,11 @@ struct FontConfig {
     /// (EnumerateOverlappingGlyphs). FreeType and DirectWrite composite each
     /// glyph on its own, so the portable look does too.
     bool       merge_glyphs = TextLook::platform().merge_glyphs;
+    /// Rasterise outline glyphs with the OS's own rasteriser where it can
+    /// (Windows: DirectWrite). Shaping, metrics and layout stay mayag's; only
+    /// each glyph's coverage changes. Faces the OS cannot open, variable
+    /// faces, and synthetic bold/italic fall back to mayag's rasteriser.
+    bool       native_raster = TextLook::platform().native_raster;
     /// Glyphs untouched for this many frames become eviction candidates.
     std::uint64_t glyph_ttl_frames = 600;
 };
@@ -1626,7 +1687,32 @@ class FontStack : public Shaper {
         }
         if (hint) key.flags |= glyph_flags::cg_hinted;
 
+#if defined(_WIN32)
+        // The native rasteriser: DirectWrite's own coverage for an ordinary
+        // outline glyph of a file-backed static face. Everything else --
+        // SDF tiers, colour glyphs, synthetic bold/italic, variable faces,
+        // in-memory faces -- keeps mayag's rasteriser below.
+        IDWriteFontFace* native_face = nullptr;
+        if (config_.native_raster && !use_sdf && !synth_italic && !synth_bold && !face.is_color() &&
+            !face.has_colr(gid)) {
+            native_face = face.dwrite_face();
+            if (native_face != nullptr) key.flags |= glyph_flags::native;
+        }
+#endif
+
         if (const CachedGlyph* hit = atlas_.find(key)) return hit;
+
+#if defined(_WIN32)
+        if (native_face != nullptr) {
+            const float phase = static_cast<float>(x_phase) / static_cast<float>(subpixel_phases_for(size_px));
+            const float quantised = size_of_bucket(key.size_bucket);
+            if (auto g = dwrite::rasterize(native_face, gid, quantised, phase))
+                return atlas_.insert(key, g->bitmap, g->offset, face.advance(gid, size_px), face.scale_for(quantised),
+                                     0.0f, false, /*is_native=*/true);
+            key.flags &= static_cast<std::uint16_t>(~glyph_flags::native);   // fall through to our own raster
+            if (const CachedGlyph* hit = atlas_.find(key)) return hit;
+        }
+#endif
 
         Outline o = face.outline(gid);
         if (synth_italic) {
@@ -2723,6 +2809,15 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             const float grow = grow_px * per_px;
             dst.origin.y -= grow_px;
             dl.glyph(dst, g.uv, st.color, true, edge, grow);
+        } else if (g.is_native) {
+#if defined(_WIN32)
+            static const dwrite::TextParams tp = dwrite::text_params();
+            dl.glyph_native(dst, g.uv, st.color,
+                            Vec4{tp.gamma_ratios[0], tp.gamma_ratios[1], tp.gamma_ratios[2], tp.gamma_ratios[3]},
+                            tp.grayscale_contrast);
+#else
+            dl.glyph(dst, g.uv, st.color, false);
+#endif
         } else {
             dl.glyph(dst, g.uv, st.color, false);
         }

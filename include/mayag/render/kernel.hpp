@@ -129,6 +129,10 @@ inline constexpr u32 FLAG_STROKE    = 16u;
 inline constexpr u32 FLAG_INSET     = 32u;
 inline constexpr u32 FLAG_DASHED    = 64u;
 inline constexpr u32 FLAG_GLYPH_SDF = 128u;
+/// This glyph's coverage came from DirectWrite and is corrected the way
+/// DirectWrite's own grayscale blend corrects it (dwrite_text_alpha):
+/// params = the four gamma ratios, axis.x = grayscale enhanced contrast.
+inline constexpr u32 FLAG_GLYPH_DWRITE = 256u;
 
 // ── instance reach ──────────────────────────────────────────────────────────
 // How far past its rect an instance can paint, in px: a 1 px antialiasing
@@ -536,6 +540,33 @@ struct Env {
     return mix_oklch(f.color, f.color2, t);
 }
 
+/// DirectWrite's grayscale text alpha, exactly as Microsoft implements it
+/// for GPU text (Windows Terminal, dwrite_helpers.hlsl: DWrite_EnhanceContrast
+/// + DWrite_ApplyAlphaCorrection, with the light-on-dark contrast
+/// adjustment). The result is then blended "over" in sRGB-ENCODED space,
+/// which is what encoded_text_source / blend_text already do, so a native
+/// glyph composites identically to Direct2D's own text: measured against
+/// D2D on 6612 edge pixels, 0.9/255 RMS, worst 2/255.
+///
+///   cov    raw DirectWrite coverage (IDWriteGlyphRunAnalysis, grayscale)
+///   color  the text colour, linear premultiplied (as every instance)
+///   g      gamma ratios for the user's gamma (dwrite::text_params)
+///   k      the user's grayscale enhanced contrast
+[[nodiscard]] inline f32 dwrite_text_alpha(f32 cov, vec4 color, vec4 g, f32 k) noexcept {
+    if (cov <= 0.0f || cov >= 1.0f) return cov;
+    const f32 a = color.w > 1e-4f ? color.w : 1.0f;
+    // DirectWrite works on the ENCODED text colour (D2D colours are sRGB).
+    const f32 fr = linear_to_srgb(mg::clamp(color.x / a, 0.0f, 1.0f));
+    const f32 fgn = linear_to_srgb(mg::clamp(color.y / a, 0.0f, 1.0f));
+    const f32 fb = linear_to_srgb(mg::clamp(color.z / a, 0.0f, 1.0f));
+    // Light text gets the contrast boost; it fades out as text gets darker.
+    const f32 light = 0.30f * fr + 0.59f * fgn + 0.11f * fb;
+    const f32 kk = k * mg::clamp(4.0f * (0.75f - light), 0.0f, 1.0f);
+    const f32 c = cov * (kk + 1.0f) / (cov * kk + 1.0f);
+    const f32 i = 0.25f * fr + 0.5f * fgn + 0.25f * fb;
+    return mg::clamp(c + c * (1.0f - c) * ((g.x * i + g.y) * c + (g.z * i + g.w)), 0.0f, 1.0f);
+}
+
 /// Coverage of one glyph fragment, before any blending decision.
 [[nodiscard]] inline f32 glyph_coverage(const Fragment& f, const Env& env) noexcept {
     // A bitmap entry IS coverage. A distance-field entry becomes exact box
@@ -548,6 +579,15 @@ struct Env {
         const f32 ry = env.atlas_r(env.ctx, vec2{f.uv.x, f.uv.y + f.params.w});
         return sdf_glyph_coverage(raw, rx, ry, f.params);
     }
+    // A coverage bitmap already contains its antialiasing; the instance's
+    // 1 px skirt (quad_pad) lies OUTSIDE it and must be empty. On the GPU
+    // the skirt's uv extrapolates into the atlas's empty gutter, so it was;
+    // on the CPU the uv was clamped to the bitmap edge, so every glyph's
+    // outermost columns and rows were painted a second time one pixel
+    // further out -- text was a pixel too wide on each side, and read heavy
+    // and smeared. Deciding it here makes both paths agree by construction.
+    if (f.norm.x < 0.0f || f.norm.x > 1.0f || f.norm.y < 0.0f || f.norm.y > 1.0f) return 0.0f;
+    if ((f.flags & FLAG_GLYPH_DWRITE) != 0u) return dwrite_text_alpha(raw, f.color, f.params, f.axis.x);
     return raw;
 }
 

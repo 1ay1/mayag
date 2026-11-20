@@ -609,10 +609,23 @@ if(MAYAG_BUILD_TESTS)
     add_test(NAME mayag_concurrency_tests COMMAND mayag_concurrency_tests)
 
     # Zero-copy buffer import: the substrate a compositor is built on.
+    # dmabuf fds are a Linux/BSD concept; the test drives them with open()
+    # and fcntl(), so it only exists where they do.
+    if(NOT WIN32)
     add_executable(mayag_buffer_import_tests tests/test_buffer_import.cpp)
     target_link_libraries(mayag_buffer_import_tests PRIVATE mayag)
     target_compile_options(mayag_buffer_import_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_buffer_import_tests COMMAND mayag_buffer_import_tests)
+    endif()
+
+    # Windows text against the OS's own: mayag's native look must render
+    # what Direct2D renders, per pixel, for the same glyph positions.
+    if(WIN32)
+    add_executable(mayag_win32_text_tests tests/test_win32_text.cpp)
+    target_link_libraries(mayag_win32_text_tests PRIVATE mayag d2d1 windowscodecs ole32)
+    target_compile_options(mayag_win32_text_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_win32_text_tests COMMAND mayag_win32_text_tests)
+    endif()
 
     # Outputs and hardware plane assignment: the compositor-side display path.
     add_executable(mayag_output_tests tests/test_output.cpp)

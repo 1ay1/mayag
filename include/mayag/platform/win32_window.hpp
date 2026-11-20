@@ -56,23 +56,12 @@
 #  include "../backend/vulkan_device.hpp"
 #endif
 
-#ifndef WIN32_LEAN_AND_MEAN
-#  define WIN32_LEAN_AND_MEAN 1
-#endif
-#ifndef NOMINMAX
-#  define NOMINMAX 1
-#endif
-// NOGDI must NOT be set here: this backend blits through GDI
-// (SetDIBitsToDevice/BITMAPINFO). hand defines it for its own translation
-// units, so undo it for the duration of this header's Win32 includes.
-#ifdef NOGDI
-#  undef NOGDI
-#endif
-#include <windows.h>
+#include "../core/win32.hpp"   // windows.h, with its keyword macros removed
 #include <windowsx.h>   // GET_X_LPARAM
 #include <uxtheme.h>    // MARGINS
 #include <dwmapi.h>     // types only: every dwmapi function is loaded at runtime
 
+#include <jaal/kernel/pool.hpp>                     // GPU bring-up on a worker
 #include <jaal/platform/windows/wait_reactor.hpp>   // the message-queue sentinel
 #include "../core/startup.hpp"
 
@@ -82,7 +71,6 @@
 #include <cstring>
 #include <deque>
 #include <functional>
-#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -724,11 +712,10 @@ class Win32Window {
         Color<Srgb> last_clear{};
         bool had_frame = false;
         std::uint64_t frames_skipped = 0;
-        /// Instance + device are brought up on a worker while the window is
-        /// created: they need no surface and take ~30 ms (measured), most of
-        /// it in the driver's CreateDevice. The swapchain then attaches on the
-        /// UI thread once the HWND exists.
-        std::future<std::unique_ptr<backend::VulkanDevice>> gpu_prep;
+        /// Instance, device and swapchain are brought up on a jaal worker
+        /// (see start_gpu); adopt_gpu() takes the result between frames.
+        std::optional<jaal::kernel::pool> gpu_pool;
+        jaal::kernel::job_result<std::unique_ptr<backend::VulkanDevice>> gpu_prep;
 #endif
 
         // ── the OS modal loop (drag-resize, window move) ─────────────
@@ -783,8 +770,9 @@ class Win32Window {
 #ifdef MAYAG_WITH_VULKAN
         // A prep still running owns a device; let it finish and drop it.
         if (state_ && state_->gpu_prep.valid()) {
-            if (auto d = state_->gpu_prep.get()) d->destroy();
+            if (auto d = state_->gpu_prep.get_at_root()) d->destroy();
         }
+        if (state_) state_->gpu_pool.reset();
         // Before the HWND goes away: the swapchain holds a VkSurfaceKHR that
         // references it, and destroying the window first is undefined.
         if (state_ && state_->gpu) {
@@ -824,16 +812,24 @@ class Win32Window {
         auto d = std::make_unique<backend::VulkanDevice>();
         d->set_low_latency(!cfg.vsync);
         d->set_transparent(cfg.transparent);
-        const HWND hwnd = st->hwnd;
         const Vec2 size = st->size;
         const float dpi = st->dpi;
-        st->gpu_prep = std::async(std::launch::async, [dev = std::move(d), hwnd, size, dpi]() mutable {
-            if (!dev->attach_win32(::GetModuleHandleW(nullptr), hwnd, size, dpi)) {
-                dev->destroy();
-                dev.reset();
-            }
-            return std::move(dev);
-        });
+        // The job must be captureless with Sendable arguments, and a raw
+        // pointer is not Sendable -- correctly so in general. An HWND is a
+        // kernel handle VALUE, valid from any thread for exactly these calls
+        // (surface and swapchain creation), so it crosses as an integer.
+        const auto hwnd = reinterpret_cast<std::uintptr_t>(st->hwnd);
+        st->gpu_pool.emplace(1);
+        st->gpu_prep = st->gpu_pool->submit(
+            [](std::stop_token, std::unique_ptr<backend::VulkanDevice> dev, std::uintptr_t h, float w, float hh,
+               float scale) {
+                if (!dev->attach_win32(::GetModuleHandleW(nullptr), reinterpret_cast<HWND>(h), Vec2{w, hh}, scale)) {
+                    dev->destroy();
+                    dev.reset();
+                }
+                return dev;
+            },
+            std::move(d), hwnd, size.x, size.y, dpi);
         const char* async = ::getenv("MAYAG_GPU_ASYNC");
         if (async != nullptr && std::string_view{async} == "0") adopt_gpu(/*wait=*/true);
 #endif
@@ -848,8 +844,9 @@ class Win32Window {
 #ifdef MAYAG_WITH_VULKAN
         State* st = state_.get();
         if (!st->gpu_prep.valid()) return;
-        if (!wait && st->gpu_prep.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
-        auto d = st->gpu_prep.get();
+        if (!wait && !st->gpu_prep.ready()) return;
+        auto d = st->gpu_prep.get_at_root();
+        st->gpu_pool.reset();
         if (!d) {
             startup::mark("vulkan unavailable (cpu)");
             return;

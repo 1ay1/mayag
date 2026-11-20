@@ -1463,9 +1463,13 @@ void test_union_coverage() {
 // (which matches CoreText) to well under a percent.
 void test_sdf_matches_bitmap() {
     section("SDF vs coverage at large sizes");
-    typo::FontConfig bm; bm.mode = typo::RenderMode::bitmap;
+    // Both stacks use mayag's OWN outline raster: this checks that the field
+    // reconstructs the coverage raster, so on Windows the native
+    // (DirectWrite, hinted) path is switched off for the comparison.
+    typo::FontConfig bm; bm.mode = typo::RenderMode::bitmap; bm.native_raster = false;
+    typo::FontConfig hy; hy.native_raster = false;
     auto sb = typo::system::default_stack(bm);
-    auto sh = typo::system::default_stack();
+    auto sh = typo::system::default_stack(hy);
     if (!sb || sb->face_count() == 0) return;
     const auto render = [](std::shared_ptr<typo::FontStack> st) {
         RenderOptions ro; ro.background = rgb8(0xFA, 0xFA, 0xFA); ro.fonts = st;
@@ -1768,8 +1772,11 @@ void test_variations() {
               "advance width varies with weight (HVAR applied)");
 
     // End-to-end: TextStyle::weight must drive the axis through the whole
-    // layout pipeline, so measuring the same string at thin vs black yields a
-    // wider line at black — no discrete face swap, one variable file.
+    // layout pipeline. Measured by width where the font's advances follow
+    // weight (Adwaita), and by INK where they do not: Bahnschrift -- the
+    // variable face Windows ships -- keeps every weight on the same advances
+    // by design (HVAR varies them with wdth only), so a width check there
+    // proves nothing about the axis.
     {
         typo::FontStack stack;
         stack.add(vf);
@@ -1779,8 +1786,16 @@ void test_variations() {
         const float w_thin  = meas.advance("Hamburgefons", thin);
         const float w_black = meas.advance("Hamburgefons", black);
         check(w_thin > 0.0f, "variable text measures at thin weight");
-        check(w_black > w_thin,
-              "heavier TextStyle::weight measures wider through StackMeasurer");
+        const bool width_tracks_weight = num::abs(adv_hi - adv_lo) > 0.01f;
+        if (width_tracks_weight)
+            check(w_black > w_thin, "heavier TextStyle::weight measures wider through StackMeasurer");
+        // The axis itself must move with the style, whatever the font does
+        // with its advances: read it back after shaping each weight.
+        const auto axis_after = [&](const TextStyle& s) {
+            (void)meas.advance("H", s);
+            return vf->variation(typo::var::tag_wght);
+        };
+        check(axis_after(black) > axis_after(thin), "TextStyle::weight drives the wght axis");
 
         // Content-addressed id: the same weight twice yields the same face id,
         // so glyph atlases hit across frames instead of re-rasterising.
@@ -1802,16 +1817,28 @@ void test_variations() {
         const float d_thin  = meas.advance("Hamburgefons", thin_s.text);
         const float d_mid   = meas.advance("Hamburgefons", mid_s.text);
         const float d_black = meas.advance("Hamburgefons", black_s.text);
-        check(d_black > d_thin, "DSL weight(number) drives the wght axis");
-        check(d_mid > d_thin && d_mid < d_black, "DSL numeric weight interpolates");
+        if (width_tracks_weight) {
+            check(d_black > d_thin, "DSL weight(number) drives the wght axis");
+            check(d_mid > d_thin && d_mid < d_black, "DSL numeric weight interpolates");
+        } else {
+            const auto ax = [&](const TextStyle& s) { (void)meas.advance("H", s); return vf->variation(typo::var::tag_wght); };
+            const float a_thin = ax(thin_s.text), a_mid = ax(mid_s.text), a_black = ax(black_s.text);
+            check(a_black > a_thin, "DSL weight(number) drives the wght axis");
+            check(a_mid >= a_thin && a_mid <= a_black, "DSL numeric weight interpolates");
+        }
 
         // A font_axis override on wght must win over the FontWeight enum.
         Style ov;
         ov.text.weight = FontWeight::thin;
         font_axis("wght", 900.0f).apply(ov);
         ov.text.size = 100.0f;
-        check(meas.advance("Hamburgefons", ov.text) > d_thin,
-              "font_axis(\"wght\") overrides the FontWeight enum");
+        if (width_tracks_weight) {
+            check(meas.advance("Hamburgefons", ov.text) > d_thin,
+                  "font_axis(\"wght\") overrides the FontWeight enum");
+        } else {
+            (void)meas.advance("H", ov.text);
+            check(vf->variation(typo::var::tag_wght) >= hi - 0.5f, "font_axis(\"wght\") overrides the FontWeight enum");
+        }
     }
 
     vf->reset_variations();

@@ -280,7 +280,7 @@ namespace detail {
     namespace fs = std::filesystem;
     std::vector<fs::path> dirs;
 
-    const char* home = std::getenv("HOME");
+    [[maybe_unused]] const char* home = std::getenv("HOME");
 
 #if defined(__APPLE__)
     if (home != nullptr) dirs.emplace_back(std::string{home} + "/Library/Fonts");
