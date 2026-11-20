@@ -70,12 +70,19 @@
 #endif
 #include <windows.h>
 #include <windowsx.h>   // GET_X_LPARAM
+#include <uxtheme.h>    // MARGINS
+#include <dwmapi.h>     // types only: every dwmapi function is loaded at runtime
+
+#include <jaal/platform/windows/wait_reactor.hpp>   // the message-queue sentinel
+#include "../core/startup.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -193,7 +200,10 @@ class Win32Window {
     }
     ~Win32Window() { destroy(); }
 
-    [[nodiscard]] static std::optional<Win32Window> open(const WindowConfig& cfg) {
+    [[nodiscard]] static std::optional<Win32Window> open(const WindowConfig& cfg) { return open_impl(cfg, false); }
+
+  private:
+    [[nodiscard]] static std::optional<Win32Window> open_impl(const WindowConfig& cfg, bool force_gdi) {
         win32_detail::enable_dpi_awareness();
 
         Win32Window w;
@@ -201,47 +211,85 @@ class Win32Window {
         w.state_->title = cfg.title;
         w.state_->clear = cfg.background;
         w.state_->decorated = cfg.decorated;
+        w.state_->resizable = cfg.resizable;
+        w.state_->vsync = cfg.vsync;
+        w.state_->load_settings();
 
         const HINSTANCE inst = ::GetModuleHandleW(nullptr);
         static const ATOM cls = [inst] {
             WNDCLASSEXW wc{};
             wc.cbSize = sizeof wc;
-            // OWNDC: we blit from one thread and never share the DC.
-            // No background brush: painting it would flash before our blit.
-            wc.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC | CS_DBLCLKS;
+            // No CS_HREDRAW/CS_VREDRAW: they invalidate the whole client on
+            // every resize step, which on a GPU swapchain is pure flicker.
+            // No CS_OWNDC: the GPU path never touches a DC, and the GDI
+            // fallback takes one per present.
+            wc.style = CS_DBLCLKS;
             wc.lpfnWndProc = &Win32Window::proc;
             wc.hInstance = inst;
-            wc.hCursor = nullptr;   // set_cursor owns the cursor
-            wc.hbrBackground = nullptr;
+            wc.hCursor = nullptr;        // set_cursor owns the cursor
+            wc.hbrBackground = nullptr;  // never erase: we paint every pixel
+            wc.hIcon = ::LoadIconW(inst, MAKEINTRESOURCEW(1));   // the exe's icon, if any
             wc.lpszClassName = L"mayag.window";
             return ::RegisterClassExW(&wc);
         }();
         if (cls == 0) return std::nullopt;
+        startup::mark("win32: class registered");
 
         // Convert the requested LOGICAL size to physical pixels for the
         // monitor we are about to appear on, then ask for a client area of
         // exactly that size.
         const UINT dpi = dpi_for_new_window();
         w.state_->dpi = static_cast<float>(dpi) / 96.0f;
-        const DWORD style = cfg.decorated ? (cfg.resizable ? WS_OVERLAPPEDWINDOW
-                                                           : (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX))
-                                          : WS_POPUP;
+        // Undecorated is still WS_OVERLAPPEDWINDOW: the caption is removed in
+        // WM_NCCALCSIZE instead of by WS_POPUP, which keeps every native
+        // behaviour -- Aero Snap and the snap-layout flyout, the resize
+        // border, the minimise/maximise animations, and the DWM shadow.
+        DWORD style = WS_OVERLAPPEDWINDOW;
+        if (!cfg.resizable) style &= ~static_cast<DWORD>(WS_THICKFRAME | WS_MAXIMIZEBOX);
         RECT r{0, 0, static_cast<LONG>(cfg.size.x * w.state_->dpi),
                static_cast<LONG>(cfg.size.y * w.state_->dpi)};
-        adjust_rect(&r, style, dpi);
+        if (cfg.decorated) adjust_rect(&r, style, dpi);
 
-        const HWND hwnd = ::CreateWindowExW(0, L"mayag.window", win32_detail::widen(cfg.title).c_str(), style,
+        // The window keeps its GDI redirection surface: the first frames go
+        // out through it (the CPU path) while Vulkan is still coming up, and
+        // a Vulkan swapchain presents over it without trouble once ready.
+        // WS_EX_NOREDIRECTIONBITMAP would forbid that CPU-first start.
+        const DWORD ex = 0;
+        const HWND hwnd = ::CreateWindowExW(ex, L"mayag.window", win32_detail::widen(cfg.title).c_str(), style,
                                             CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
                                             nullptr, nullptr, inst, w.state_.get());
         if (hwnd == nullptr) return std::nullopt;
+        startup::mark("win32: CreateWindowExW");
         w.state_->hwnd = hwnd;
+        w.state_->monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+
+        // Hidden from DWM until the first frame is presented (reveal()), so
+        // the user never sees an empty or half-initialised window.
+        const BOOL cloak = TRUE;
+        dwm_set(hwnd, 13 /*DWMWA_CLOAK*/, &cloak, sizeof cloak);
+        w.state_->cloaked = true;
+        w.apply_chrome(cfg);
+        if (!cfg.decorated) {
+            // Make WM_NCCALCSIZE take effect now that it can see the state.
+            ::SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                           SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
         w.sync_size();
-        w.start_watcher();
-        w.boot_gpu(cfg);
+        w.refresh_timing();
+        startup::mark("win32: dwm chrome + timing");
+        w.bind_callbacks();
+        // Vulkan bring-up on a worker. vkCreateInstance alone loads every
+        // installed driver -- measured 0.3 s warm and 2 s cold on an Optimus
+        // laptop, where it also wakes the discrete GPU -- so nothing waits for
+        // it: frames go out on the CPU until it is ready, and the window
+        // switches to the GPU on the first frame after. MAYAG_GPU_ASYNC=0
+        // waits instead, for measuring the GPU path from frame one.
+        if (!force_gdi) w.start_gpu(cfg);
         ::ShowWindow(hwnd, SW_SHOW);
-        ::UpdateWindow(hwnd);
         return w;
     }
+
+  public:
 
     void close() {
         if (state_ && state_->hwnd != nullptr) ::DestroyWindow(state_->hwnd);
@@ -252,38 +300,42 @@ class Win32Window {
     [[nodiscard]] Vec2 size() const noexcept { return state_ ? state_->size : Vec2{}; }
     [[nodiscard]] float dpi_scale() const noexcept { return state_ ? state_->dpi : 1.0f; }
 
-    /// A waitable HANDLE that jaal's reactor sleeps on, so an idle terminal
-    /// costs no CPU instead of being woken on a fixed poll period.
-    ///
-    /// Win32 exposes no file descriptor for "the message queue", so one is
-    /// manufactured: a watcher thread blocks in MsgWaitForMultipleObjectsEx
-    /// (the documented "wait until this thread has input" primitive) and
-    /// signals `input_event` when the queue goes non-empty. jaal waits on
-    /// that event exactly as it waits on Wayland's display fd, and dispatch()
-    /// resets and re-arms it. The thread costs ~8 KB of stack and is asleep
-    /// in the kernel whenever nothing is happening.
-    [[nodiscard]] void* fd() const noexcept { return state_ ? state_->input_event : nullptr; }
+    /// What jaal's reactor sleeps on: this thread's window-message queue
+    /// itself. The reactor recognises the sentinel and waits with
+    /// MsgWaitForMultipleObjectsEx, so a keystroke wakes the loop in one
+    /// kernel transition -- no helper thread, no event relay, and the
+    /// thread is always in a message-aware wait, so Windows never ghosts
+    /// the window as "Not Responding".
+    [[nodiscard]] void* fd() const noexcept {
+        return state_ ? jaal::platform::wait_reactor::message_queue() : nullptr;
+    }
+
+    /// Draw from inside an OS modal loop. Windows traps the thread in
+    /// DefWindowProc for the whole of a drag-resize or a window move; the
+    /// host installs this so the WndProc can render each step of the drag.
+    void set_live_draw(std::function<void()> f) {
+        // MAYAG_LIVE_RESIZE=0 restores the stock Windows behaviour (content
+        // frozen until the drag ends), for comparison and for debugging.
+        if (const char* e = ::getenv("MAYAG_LIVE_RESIZE"); e != nullptr && std::string_view{e} == "0") return;
+        if (state_) state_->live_draw = std::move(f);
+    }
 
     /// Drain the thread's message queue into mayag events. Never blocks: jaal
     /// owns the waiting, so this is PeekMessage, not GetMessage.
     [[nodiscard]] std::vector<Event> dispatch() {
         std::vector<Event> out;
         if (!state_) return out;
-        // The reactor woke us because the queue's event fired; clear it before
-        // draining so a message that arrives DURING the drain re-signals and
-        // we are called again, rather than sleeping on a non-empty queue.
-        if (state_->input_event != nullptr) ::ResetEvent(state_->input_event);
-        MSG msg;
-        while (::PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE) != FALSE) {
-            if (msg.message == WM_QUIT) { state_->open = false; break; }
-            ::TranslateMessage(&msg);   // WM_KEYDOWN -> WM_CHAR for text
-            ::DispatchMessageW(&msg);
+        if (!state_->in_modal) {
+            MSG msg;
+            while (::PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE) != FALSE) {
+                if (msg.message == WM_QUIT) { state_->open = false; break; }
+                ::TranslateMessage(&msg);   // WM_KEYDOWN -> WM_CHAR for text
+                ::DispatchMessageW(&msg);
+            }
         }
-        // Re-arm the watcher now that the queue is drained.
-        if (state_->rearm != nullptr) ::SetEvent(state_->rearm);
         // A size or DPI change invalidates the swapchain. Done here, on the
         // UI thread and outside the WndProc, so the rebuild never happens
-        // re-entrantly inside a Windows modal resize loop.
+        // re-entrantly in the middle of a message.
         if (state_->resized) {
             state_->resized = false;
             renderer_resized();
@@ -297,7 +349,16 @@ class Win32Window {
     }
 
     void present(const DrawList& dl, Color<Srgb> clear) {
-        if (!state_ || state_->hwnd == nullptr) return;
+        if (!state_ || state_->hwnd == nullptr || state_->minimized) return;
+        adopt_gpu();
+        if (state_->monitor_changed && !state_->in_modal) {
+            state_->monitor_changed = false;
+            const HMONITOR m = ::MonitorFromWindow(state_->hwnd, MONITOR_DEFAULTTONEAREST);
+            if (m != state_->monitor) {
+                state_->monitor = m;
+                refresh_timing();
+            }
+        }
         const int w = static_cast<int>(state_->size.x * state_->dpi);
         const int h = static_cast<int>(state_->size.y * state_->dpi);
         if (w <= 0 || h <= 0) return;
@@ -322,77 +383,74 @@ class Win32Window {
             state_->last_clear = clear;
             state_->had_frame = true;
             ++state_->frames;
+            reveal();
             return;
         }
 #endif
         present_software(dl, clear, w, h);
+        reveal();
     }
 
   private:
     /// The CPU fallback: rasterise, then blit the damaged band through GDI.
     void present_software(const DrawList& dl, Color<Srgb> clear, int w, int h) {
-        if (state_->fb.width() != w || state_->fb.height() != h) state_->fb = backend::Framebuffer{w, h};
+        State* st = state_.get();
+        if (st->fb.width() != w || st->fb.height() != h) st->fb = backend::Framebuffer{w, h};
 
-        backend::Tiled::render(dl, state_->fb, state_->sampler, &backend::shared_pool(), clear);
+        backend::Tiled::render(dl, st->fb, st->sampler, &backend::shared_pool(), clear);
 
-        // Encode and blit only what CHANGED. The rasteriser already proves
-        // which 64px tiles are untouched (93% of them while typing), so a
-        // full-frame encode + full-window blit would throw that away and
-        // make an idle terminal cost a megabyte of memcpy per frame.
-        const std::size_t bytes = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u;
-        const bool resized = state_->blit.size() != bytes;
-        if (resized) state_->blit.assign(bytes, 0);
-        backend::Tiled::encode_damaged(state_->fb, state_->blit, &backend::shared_pool());
-
-        // The damaged rows, as a single band. GDI's per-call overhead means
-        // one blit of the bounding band beats one blit per tile.
-        int y0 = 0, y1 = h;
-        if (!resized) {
-            const auto& mem = state_->fb.tile_memory();
-            if (mem.valid && !mem.dirty.empty()) {
-                int top = mem.tiles_y, bot = -1;
-                for (int ty = 0; ty < mem.tiles_y; ++ty)
-                    for (int tx = 0; tx < mem.tiles_x; ++tx)
-                        if (mem.dirty[static_cast<std::size_t>(ty) * mem.tiles_x + tx]) {
-                            if (ty < top) top = ty;
-                            if (ty > bot) bot = ty;
-                            break;
-                        }
-                if (bot < 0) {   // nothing changed: the window already shows it
-                    ++state_->frames;
-                    return;
-                }
-                y0 = top * backend::tile_size;
-                y1 = std::min(h, (bot + 1) * backend::tile_size);
+        // The fastest CPU-to-screen path GDI has: a DIB SECTION in BGRA (its
+        // native order), selected into a memory DC once and kept. The tiles
+        // the rasteriser changed are encoded straight into the section's
+        // bits, and only their band is BitBlt'd -- a plain copy, no format
+        // conversion. SetDIBitsToDevice from a client buffer measured
+        // 18.5 ms a frame at 1280x800 with channel masks; that path converts
+        // every pixel and copies the buffer into GDI first.
+        const bool full = ensure_dib(w, h);
+        const auto [y0, y1] = backend::Tiled::encode_damaged_bgra(
+            st->fb, static_cast<std::uint8_t*>(st->dib_bits), static_cast<std::size_t>(w) * 4u, full,
+            &backend::shared_pool());
+        if (y1 > y0) {
+            if (const HDC dc = ::GetDC(st->hwnd); dc != nullptr) {
+                ::BitBlt(dc, 0, y0, w, y1 - y0, st->dib_dc, 0, y0, SRCCOPY);
+                ::ReleaseDC(st->hwnd, dc);
             }
         }
+        ++st->frames;
+    }
 
-        // Describe the buffer as it ALREADY is, instead of shuffling bytes to
-        // suit GDI. A V4 header carries explicit channel masks, so RGBA8 is
-        // consumed directly -- no swap pass, and the scratch buffer stays in
-        // the exact layout encode_damaged() expects to patch next frame.
-        BITMAPV4HEADER bi{};
-        bi.bV4Size = sizeof bi;
-        bi.bV4Width = w;
-        bi.bV4Height = -h;   // negative: top-down, like our buffer
-        bi.bV4Planes = 1;
-        bi.bV4BitCount = 32;
-        bi.bV4V4Compression = BI_BITFIELDS;
-        bi.bV4RedMask = 0x000000FFu;
-        bi.bV4GreenMask = 0x0000FF00u;
-        bi.bV4BlueMask = 0x00FF0000u;
-        bi.bV4AlphaMask = 0xFF000000u;
+    /// (Re)create the BGRA DIB section and its memory DC at w x h. True when
+    /// it is new, so the caller encodes every tile, not just the damage.
+    bool ensure_dib(int w, int h) {
+        State* st = state_.get();
+        if (st->dib != nullptr && st->dib_w == w && st->dib_h == h) return false;
+        release_dib();
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;   // top-down, like the framebuffer
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        st->dib_dc = ::CreateCompatibleDC(nullptr);
+        st->dib = ::CreateDIBSection(st->dib_dc, &bi, DIB_RGB_COLORS, &st->dib_bits, nullptr, 0);
+        st->dib_old = ::SelectObject(st->dib_dc, st->dib);
+        st->dib_w = w;
+        st->dib_h = h;
+        return true;
+    }
 
-        const HDC dc = ::GetDC(state_->hwnd);
-        if (dc != nullptr) {
-            // Source and destination rows both start at y0; the DIB is
-            // top-down so the source origin is counted from its first row.
-            ::SetDIBitsToDevice(dc, 0, y0, static_cast<DWORD>(w), static_cast<DWORD>(y1 - y0), 0, 0,
-                                static_cast<UINT>(y0), static_cast<UINT>(h), state_->blit.data(),
-                                reinterpret_cast<const BITMAPINFO*>(&bi), DIB_RGB_COLORS);
-            ::ReleaseDC(state_->hwnd, dc);
-        }
-        ++state_->frames;
+    void release_dib() {
+        State* st = state_.get();
+        if (st == nullptr || st->dib_dc == nullptr) return;
+        if (st->dib_old != nullptr) ::SelectObject(st->dib_dc, st->dib_old);
+        if (st->dib != nullptr) ::DeleteObject(st->dib);
+        ::DeleteDC(st->dib_dc);
+        st->dib = nullptr;
+        st->dib_dc = nullptr;
+        st->dib_old = nullptr;
+        st->dib_bits = nullptr;
+        st->dib_w = st->dib_h = 0;
     }
 
   public:
@@ -405,8 +463,7 @@ class Win32Window {
     }
 
     [[nodiscard]] double double_click_interval() const noexcept {
-        const UINT ms = ::GetDoubleClickTime();
-        return ms > 0 ? static_cast<double>(ms) / 1000.0 : 0.5;
+        return state_ ? state_->dbl_click : 0.5;
     }
 
     void set_title(std::string_view t) {
@@ -580,6 +637,15 @@ class Win32Window {
     }
     [[nodiscard]] std::uint64_t frames_presented() const noexcept { return state_ ? state_->frames : 0; }
 
+    /// The GPU that won ("Intel(R) Arc(TM) Pro Graphics"), or null on the
+    /// CPU path.
+    [[nodiscard]] const char* device_name() const noexcept {
+#ifdef MAYAG_WITH_VULKAN
+        if (state_ && state_->gpu_active && state_->gpu) return state_->gpu->device_name();
+#endif
+        return nullptr;
+    }
+
     [[nodiscard]] std::string_view renderer_name() const noexcept {
 #ifdef MAYAG_WITH_VULKAN
         if (state_ && state_->gpu_active) return "vulkan";
@@ -591,6 +657,23 @@ class Win32Window {
         return state_ != nullptr && state_->gpu_active;
 #else
         return false;
+#endif
+    }
+
+    /// The display's real refresh period and a recent vblank, from DWM and
+    /// the monitor's mode. The host lays its frame slots on this grid, so a
+    /// 144 Hz panel is driven at 144 Hz and the late-latch draw lands just
+    /// before the actual vblank instead of a guessed 60 Hz one.
+    [[nodiscard]] std::optional<DisplayTiming> display_timing() const noexcept {
+        if (!state_ || state_->timing.seq == 0) return std::nullopt;
+        return state_->timing;
+    }
+
+    [[nodiscard]] std::uint64_t frames_skipped() const noexcept {
+#ifdef MAYAG_WITH_VULKAN
+        return state_ ? state_->frames_skipped : 0;
+#else
+        return 0;
 #endif
     }
 
@@ -621,7 +704,12 @@ class Win32Window {
         std::uint32_t high_surrogate = 0;
         std::uint64_t frames = 0;
         Vec2 last_pos{};
-        std::vector<std::uint8_t> blit;   ///< BGRA scratch, kept across frames
+        // ── the GDI fallback's present target ────────────────────────
+        HDC dib_dc = nullptr;       ///< memory DC the section stays selected into
+        HBITMAP dib = nullptr;      ///< top-down BGRA DIB section
+        HGDIOBJ dib_old = nullptr;  ///< what dib_dc held before
+        void* dib_bits = nullptr;   ///< the section's pixels: encoded into directly
+        int dib_w = 0, dib_h = 0;
 
 #ifdef MAYAG_WITH_VULKAN
         // ── the GPU path ────────────────────────────────────────────
@@ -636,14 +724,44 @@ class Win32Window {
         Color<Srgb> last_clear{};
         bool had_frame = false;
         std::uint64_t frames_skipped = 0;
+        /// Instance + device are brought up on a worker while the window is
+        /// created: they need no surface and take ~30 ms (measured), most of
+        /// it in the driver's CreateDevice. The swapchain then attaches on the
+        /// UI thread once the HWND exists.
+        std::future<std::unique_ptr<backend::VulkanDevice>> gpu_prep;
 #endif
 
-        // ── the "queue is non-empty" event, and the thread that sets it ──
-        HANDLE input_event = nullptr;   ///< manual reset: jaal waits on this
-        HANDLE rearm = nullptr;         ///< auto reset: dispatch() drained it
-        HANDLE quit = nullptr;          ///< manual reset: shut the watcher down
-        HANDLE watcher = nullptr;
-        DWORD ui_thread = 0;
+        // ── the OS modal loop (drag-resize, window move) ─────────────
+        std::function<void()> live_draw;   ///< the host's "draw now"
+        std::function<void()> on_resize;   ///< rebuild the swapchain, from the WndProc
+        bool in_modal = false;              ///< between WM_ENTER/EXITSIZEMOVE
+        UINT_PTR modal_timer = 0;           ///< keeps animation alive while moving
+        bool minimized = false;             ///< no surface to draw into
+        bool monitor_changed = false;       ///< re-read the refresh rate
+
+        // ── presentation state ───────────────────────────────────────
+        bool cloaked = false;               ///< hidden by DWM until frame one
+        bool shown = false;                 ///< frame one has been presented
+        bool vsync = true;
+        bool resizable = true;
+
+        // ── the display clock (DwmGetCompositionTimingInfo) ──────────
+        DisplayTiming timing{};
+        HMONITOR monitor = nullptr;
+
+        // ── input ────────────────────────────────────────────────────
+        UINT wheel_lines = 3;   ///< SPI_GETWHEELSCROLLLINES (cached)
+        UINT wheel_chars = 3;   ///< SPI_GETWHEELSCROLLCHARS (cached)
+        double dbl_click = 0.5; ///< GetDoubleClickTime, seconds (cached)
+
+        void load_settings() {
+            UINT v = 3;
+            if (::SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &v, 0) != FALSE) wheel_lines = v;
+            v = 3;
+            if (::SystemParametersInfoW(0x006C /*SPI_GETWHEELSCROLLCHARS*/, 0, &v, 0) != FALSE) wheel_chars = v;
+            const UINT ms = ::GetDoubleClickTime();
+            dbl_click = ms > 0 ? static_cast<double>(ms) / 1000.0 : 0.5;
+        }
     };
     std::unique_ptr<State> state_;
 
@@ -651,10 +769,22 @@ class Win32Window {
         state_ = std::move(o.state_);
         if (state_ && state_->hwnd != nullptr)
             ::SetWindowLongPtrW(state_->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state_.get()));
+        bind_callbacks();
+    }
+
+    /// Callbacks the WndProc invokes capture `this`, which changes when the
+    /// window object is moved; re-bind after every move.
+    void bind_callbacks() {
+        if (!state_) return;
+        state_->on_resize = [this] { renderer_resized(); };
     }
     void destroy() {
-        stop_watcher();
+        release_dib();
 #ifdef MAYAG_WITH_VULKAN
+        // A prep still running owns a device; let it finish and drop it.
+        if (state_ && state_->gpu_prep.valid()) {
+            if (auto d = state_->gpu_prep.get()) d->destroy();
+        }
         // Before the HWND goes away: the swapchain holds a VkSurfaceKHR that
         // references it, and destroying the window first is undefined.
         if (state_ && state_->gpu) {
@@ -672,6 +802,7 @@ class Win32Window {
     /// Tell the renderer the drawable changed size. On the GPU path this
     /// rebuilds the swapchain; the CPU path reallocates lazily in present().
     void renderer_resized() {
+        if (state_) state_->resized = false;
 #ifdef MAYAG_WITH_VULKAN
         if (state_ && state_->gpu_active && state_->gpu) {
             state_->gpu->resize(state_->size, state_->dpi);
@@ -680,102 +811,183 @@ class Win32Window {
 #endif
     }
 
-    /// Manufacture the "this thread has input" readiness object jaal needs.
-    ///
-    /// The watcher never touches the queue -- only the UI thread may call
-    /// PeekMessage -- it just reports that something is THERE. The handshake
-    /// is deliberately strict to avoid both a spin and a lost wakeup:
-    ///
-    ///   watcher: wait for input  ->  SetEvent(input_event)  ->  wait(rearm)
-    ///   jaal:    wait(input_event) -> dispatch() -> ResetEvent, SetEvent(rearm)
-    ///
-    /// Between signalling and being re-armed the watcher is blocked, so it
-    /// cannot spin on a queue that the UI thread has not drained yet.
-    void start_watcher() {
-        if (!state_) return;
+    /// Bring Vulkan up entirely off the UI thread: instance, device AND the
+    /// swapchain on the HWND (vkCreateWin32SurfaceKHR and swapchain creation
+    /// are thread-agnostic; only message handling is bound to the window's
+    /// thread). The window is fully usable on the CPU path meanwhile, and
+    /// adopt_gpu() switches over between two frames.
+    void start_gpu([[maybe_unused]] const WindowConfig& cfg) {
+#ifdef MAYAG_WITH_VULKAN
+        const char* forced = ::getenv("MAYAG_BACKEND");
+        if (forced != nullptr && std::string_view{forced} == "software") return;
         State* st = state_.get();
-        st->ui_thread = ::GetCurrentThreadId();
-        st->input_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);   // manual
-        st->rearm = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);        // auto
-        st->quit = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);          // manual
-        if (st->input_event == nullptr || st->rearm == nullptr || st->quit == nullptr) return;
-
-        st->watcher = ::CreateThread(
-            nullptr, 16 * 1024,
-            [](LPVOID p) -> DWORD {
-                auto* s = static_cast<State*>(p);
-                for (;;) {
-                    if (::WaitForSingleObject(s->quit, 0) == WAIT_OBJECT_0) return 0;
-                    // QS_ALLINPUT | QS_ALLPOSTMESSAGE: anything that would make
-                    // PeekMessage return. MWMO_INPUTAVAILABLE reports a message
-                    // that is ALREADY queued, which closes the race where one
-                    // arrives between our drain and this wait.
-                    const DWORD r = ::MsgWaitForMultipleObjectsEx(
-                        1, &s->quit, INFINITE, QS_ALLINPUT | QS_ALLPOSTMESSAGE, MWMO_INPUTAVAILABLE);
-                    if (r == WAIT_OBJECT_0) return 0;              // quit
-                    if (r == WAIT_FAILED) return 1;
-                    ::SetEvent(s->input_event);                    // tell jaal
-                    // Block until the UI thread has drained, so this loop
-                    // cannot spin while the queue stays non-empty.
-                    const HANDLE both[2] = {s->quit, s->rearm};
-                    if (::WaitForMultipleObjects(2, both, FALSE, INFINITE) == WAIT_OBJECT_0) return 0;
-                }
-            },
-            st, 0, nullptr);
+        auto d = std::make_unique<backend::VulkanDevice>();
+        d->set_low_latency(!cfg.vsync);
+        d->set_transparent(cfg.transparent);
+        const HWND hwnd = st->hwnd;
+        const Vec2 size = st->size;
+        const float dpi = st->dpi;
+        st->gpu_prep = std::async(std::launch::async, [dev = std::move(d), hwnd, size, dpi]() mutable {
+            if (!dev->attach_win32(::GetModuleHandleW(nullptr), hwnd, size, dpi)) {
+                dev->destroy();
+                dev.reset();
+            }
+            return std::move(dev);
+        });
+        const char* async = ::getenv("MAYAG_GPU_ASYNC");
+        if (async != nullptr && std::string_view{async} == "0") adopt_gpu(/*wait=*/true);
+#endif
     }
 
-    void stop_watcher() {
-        if (!state_) return;
-        State* st = state_.get();
-        if (st->quit != nullptr) ::SetEvent(st->quit);
-        if (st->rearm != nullptr) ::SetEvent(st->rearm);   // unblock a waiting watcher
-        if (st->watcher != nullptr) {
-            // The watcher only ever waits on our own events, so it exits
-            // promptly; the bound wait is belt and braces against a hang.
-            if (::WaitForSingleObject(st->watcher, 1000) == WAIT_TIMEOUT)
-                ::TerminateThread(st->watcher, 0);
-            ::CloseHandle(st->watcher);
-            st->watcher = nullptr;
-        }
-        for (HANDLE* h : {&st->input_event, &st->rearm, &st->quit})
-            if (*h != nullptr) { ::CloseHandle(*h); *h = nullptr; }
-    }
-
-    /// Bring up Vulkan on the HWND, or leave the CPU path in charge.
-    ///
-    /// Failure is not an error: no vulkan-1.dll, no device, a software
-    /// adapter under RDP, or MAYAG_BACKEND=software all land on the GDI
-    /// path, which renders the same pixels more slowly. The choice is silent
-    /// by design; the runtime logs the winner once.
-    void boot_gpu([[maybe_unused]] const WindowConfig& cfg) {
+    /// Take over the GPU once its bring-up finished. Called before every
+    /// present; costs one future poll until then. Failure is not an error:
+    /// no vulkan-1.dll, no device, a software adapter under RDP, or
+    /// MAYAG_BACKEND=software all stay on the GDI path, which renders the
+    /// same pixels more slowly.
+    void adopt_gpu([[maybe_unused]] bool wait = false) {
 #ifdef MAYAG_WITH_VULKAN
         State* st = state_.get();
-        const char* forced = ::getenv("MAYAG_BACKEND");
-        const bool allow = forced == nullptr || std::string_view{forced} != "software";
-        if (allow) {
-            auto d = std::make_unique<backend::VulkanDevice>();
-            d->set_low_latency(!cfg.vsync);
-            d->set_transparent(cfg.transparent);
-            // The HINSTANCE is accepted but not required by the WSI call; the
-            // HWND is what identifies the surface.
-            if (d->attach_win32(::GetModuleHandleW(nullptr), st->hwnd, st->size, st->dpi)) {
-                st->gpu = std::move(d);
-                st->gpu_active = true;
-                // Anything uploaded before the GPU existed has to be replayed.
-                for (const auto& [id, img] : st->images.all())
-                    (void)st->gpu->upload_texture(id, img->rgba.data(), img->width, img->height);
-                // The DIB scratch is dead weight now; give it back.
-                st->blit.clear();
-                st->blit.shrink_to_fit();
-                st->fb = backend::Framebuffer{1, 1};
-                startup::mark("vulkan ready");
-                return;
-            }
-            d->destroy();
+        if (!st->gpu_prep.valid()) return;
+        if (!wait && st->gpu_prep.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        auto d = st->gpu_prep.get();
+        if (!d) {
+            startup::mark("vulkan unavailable (cpu)");
+            return;
         }
-        if (!st->gpu) st->gpu = std::make_unique<backend::VulkanDevice>();
-        startup::mark("vulkan unavailable (cpu)");
+        st->gpu = std::move(d);
+        st->gpu_active = true;
+        // The window may have been resized while the swapchain was built.
+        st->gpu->resize(st->size, st->dpi);
+        // Anything uploaded before the GPU existed has to be replayed.
+        for (const auto& [id, img] : st->images.all())
+            (void)st->gpu->upload_texture(id, img->rgba.data(), img->width, img->height);
+        st->had_frame = false;
+        release_dib();
+        st->fb = backend::Framebuffer{1, 1};
+        startup::mark("vulkan ready (switched from cpu)");
 #endif
+    }
+
+    // ── DWM: native Windows 11 chrome ────────────────────────────────────
+    //
+    // dwmapi is loaded at runtime: everything here is cosmetic and must
+    // degrade to a no-op on a build of Windows that lacks an attribute (the
+    // call simply fails), and linking it would make dwmapi.dll a hard
+    // dependency for the headless tests too.
+    struct Dwm {
+        HRESULT(WINAPI* set_attr)(HWND, DWORD, LPCVOID, DWORD) = nullptr;
+        HRESULT(WINAPI* extend)(HWND, const void*) = nullptr;
+        HRESULT(WINAPI* timing)(HWND, DWM_TIMING_INFO*) = nullptr;
+        HRESULT(WINAPI* flush)() = nullptr;
+    };
+    [[nodiscard]] static const Dwm& dwm() {
+        static const Dwm d = [] {
+            Dwm r{};
+            if (const HMODULE m = ::LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+                r.set_attr = reinterpret_cast<decltype(r.set_attr)>(reinterpret_cast<void*>(::GetProcAddress(m, "DwmSetWindowAttribute")));
+                r.extend = reinterpret_cast<decltype(r.extend)>(reinterpret_cast<void*>(::GetProcAddress(m, "DwmExtendFrameIntoClientArea")));
+                r.timing = reinterpret_cast<decltype(r.timing)>(reinterpret_cast<void*>(::GetProcAddress(m, "DwmGetCompositionTimingInfo")));
+                r.flush = reinterpret_cast<decltype(r.flush)>(reinterpret_cast<void*>(::GetProcAddress(m, "DwmFlush")));
+            }
+            return r;
+        }();
+        return d;
+    }
+    static void dwm_set(HWND h, DWORD attr, const void* v, DWORD n) {
+        if (dwm().set_attr != nullptr) (void)dwm().set_attr(h, attr, v, n);
+    }
+
+    /// Dark title bar matching the background, Mica on Windows 11, rounded
+    /// corners, and a caption coloured to the app so the frame reads as part
+    /// of it. Each attribute fails harmlessly where unsupported.
+    void apply_chrome(const WindowConfig& cfg) {
+        const HWND h = state_->hwnd;
+        // Perceived luminance decides light vs dark chrome.
+        const auto lin = cfg.background;
+        const float lum = 0.2126f * lin.c0 + 0.7152f * lin.c1 + 0.0722f * lin.c2;
+        const BOOL dark = lum < 0.5f ? TRUE : FALSE;
+        dwm_set(h, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof dark);
+        const int round = 2 /*DWMWCP_ROUND*/;
+        dwm_set(h, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &round, sizeof round);
+        // Caption and border take the app's own background (COLORREF 0x00BBGGRR).
+        const auto to8 = [](float c) { return static_cast<DWORD>(std::clamp(c, 0.0f, 1.0f) * 255.0f + 0.5f); };
+        const DWORD bg = to8(lin.c0) | (to8(lin.c1) << 8) | (to8(lin.c2) << 16);
+        dwm_set(h, 35 /*DWMWA_CAPTION_COLOR*/, &bg, sizeof bg);
+        dwm_set(h, 34 /*DWMWA_BORDER_COLOR*/, &bg, sizeof bg);
+        if (cfg.transparent) {
+            // Mica behind a translucent client: extend the frame over the
+            // whole client area, then ask for the system backdrop.
+            const MARGINS m{-1, -1, -1, -1};
+            if (dwm().extend != nullptr) (void)dwm().extend(h, &m);
+            const int mica = 2 /*DWMSBT_MAINWINDOW*/;
+            dwm_set(h, 38 /*DWMWA_SYSTEMBACKDROP_TYPE*/, &mica, sizeof mica);
+        }
+        if (!cfg.decorated) {
+            // Frameless but still a real window: keep the DWM shadow by
+            // extending a 1px frame, so it looks native and snaps natively.
+            const MARGINS m{0, 0, 1, 0};
+            if (dwm().extend != nullptr) (void)dwm().extend(h, &m);
+        }
+    }
+
+    /// The real refresh rate and a recent vblank, from DWM. The host paces
+    /// frames against this, so a 144 Hz or 240 Hz monitor gets 144 or 240
+    /// frames, not the 60 Hz default grid. Re-read when the window moves to
+    /// another monitor.
+    void refresh_timing() {
+        State* st = state_.get();
+        // The RATE comes from the window's own monitor mode: authoritative,
+        // per-monitor (DWM's composition rate is the primary's), and cheap.
+        std::chrono::nanoseconds period{0};
+        MONITORINFOEXW mi{};
+        mi.cbSize = sizeof mi;
+        if (::GetMonitorInfoW(st->monitor, &mi) != FALSE) {
+            DEVMODEW dm{};
+            dm.dmSize = sizeof dm;
+            if (::EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) != FALSE &&
+                dm.dmDisplayFrequency > 1)
+                period = std::chrono::nanoseconds(1'000'000'000LL / dm.dmDisplayFrequency);
+        }
+        if (period.count() == 0) return;
+
+        // The PHASE (a recent vblank) from DWM, when it will say.
+        auto vblank = std::chrono::steady_clock::now();
+        if (dwm().timing != nullptr) {
+            DWM_TIMING_INFO info{};
+            info.cbSize = sizeof info;
+            if (SUCCEEDED(dwm().timing(nullptr, &info)) && info.qpcVBlank != 0) {
+                LARGE_INTEGER f, now_q;
+                ::QueryPerformanceFrequency(&f);
+                ::QueryPerformanceCounter(&now_q);
+                const auto now_tp = std::chrono::steady_clock::now();
+                const auto now_u = static_cast<std::uint64_t>(now_q.QuadPart);
+                if (now_u >= info.qpcVBlank) {
+                    // QPC and steady_clock share a time base on Windows (both
+                    // are QPC), so the vblank converts by offset alone.
+                    const auto ago = std::chrono::nanoseconds(static_cast<std::int64_t>(
+                        static_cast<long double>(now_u - info.qpcVBlank) * 1.0e9L /
+                        static_cast<long double>(f.QuadPart)));
+                    if (ago < std::chrono::seconds(1)) vblank = now_tp - ago;
+                }
+            }
+        }
+        st->timing.vblank = vblank;
+        st->timing.period = period;
+        ++st->timing.seq;
+    }
+
+    /// Reveal the window the moment its first real frame is on screen: no
+    /// white flash, no half-drawn first frame, no flicker of the default
+    /// background while the swapchain spins up.
+    void reveal() {
+        State* st = state_.get();
+        if (st->shown) return;
+        st->shown = true;
+        if (st->cloaked) {
+            const BOOL off = FALSE;
+            dwm_set(st->hwnd, 13 /*DWMWA_CLOAK*/, &off, sizeof off);
+            st->cloaked = false;
+        }
     }
 
     void sync_size() {
@@ -785,6 +997,18 @@ class Win32Window {
         const float inv = state_->dpi > 0.0f ? 1.0f / state_->dpi : 1.0f;
         state_->size = Vec2{static_cast<float>(rc.right - rc.left) * inv,
                             static_cast<float>(rc.bottom - rc.top) * inv};
+    }
+
+    /// A system metric at the window's own DPI (GetSystemMetricsForDpi),
+    /// so frame bands are the right width on a HiDPI monitor.
+    [[nodiscard]] static int get_metric(int idx, const State* st) {
+        using Fn = int(WINAPI*)(int, UINT);
+        static const Fn f = [] {
+            const HMODULE u = ::GetModuleHandleW(L"user32.dll");
+            return u ? reinterpret_cast<Fn>(reinterpret_cast<void*>(::GetProcAddress(u, "GetSystemMetricsForDpi"))) : nullptr;
+        }();
+        const UINT dpi = static_cast<UINT>(st->dpi * 96.0f + 0.5f);
+        return f != nullptr ? f(idx, dpi) : ::GetSystemMetrics(idx);
     }
 
     [[nodiscard]] static UINT dpi_for_new_window() {
@@ -863,15 +1087,128 @@ class Win32Window {
                 st->hwnd = nullptr;
                 return 0;
 
+            // ── the modal loop ────────────────────────────────────────────────
+            // A drag-resize or move runs Windows' own message loop inside
+            // DefWindowProc; our loop is frozen until the mouse is released.
+            // So during it, every size step renders from right here, and a
+            // timer keeps animations (a blinking cursor, a spring) alive
+            // while the window is merely being held or moved.
+            case WM_ENTERSIZEMOVE:
+                st->in_modal = true;
+                if (st->live_draw) {
+                    const UINT ms = static_cast<UINT>(
+                        std::max<std::int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                      st->timing.period.count() > 0 ? st->timing.period
+                                                                                    : std::chrono::nanoseconds{16'666'667})
+                                                      .count()));
+                    st->modal_timer = ::SetTimer(hwnd, 0x6D61 /*'ma'*/, ms, nullptr);
+                }
+                return 0;
+            case WM_EXITSIZEMOVE:
+                st->in_modal = false;
+                if (st->modal_timer != 0) { ::KillTimer(hwnd, st->modal_timer); st->modal_timer = 0; }
+                // The window may have been dragged onto another monitor.
+                st->monitor_changed = true;
+                return 0;
+            case WM_TIMER:
+                if (wp == 0x6D61 && st->in_modal && st->live_draw) {
+                    st->live_draw();
+                    return 0;
+                }
+                break;
+
             case WM_SIZE: {
+                if (wp == SIZE_MINIMIZED) {
+                    // A zero-sized client: there is nothing to draw into, and
+                    // a swapchain of 0x0 is invalid. Keep the old size, so the
+                    // restore lands where it left off, and stay quiet.
+                    st->minimized = true;
+                    return 0;
+                }
+                st->minimized = false;
                 RECT rc{};
                 ::GetClientRect(hwnd, &rc);
-                st->size = Vec2{static_cast<float>(rc.right - rc.left) * inv,
-                                static_cast<float>(rc.bottom - rc.top) * inv};
+                const Vec2 sz{static_cast<float>(rc.right - rc.left) * inv,
+                              static_cast<float>(rc.bottom - rc.top) * inv};
+                if (sz == st->size && !st->in_modal) return 0;
+                st->size = sz;
                 st->resized = true;   // dispatch() rebuilds the swapchain
                 push(ResizeEvent{st->size, st->dpi});
+                if (st->in_modal && st->live_draw) {
+                    // Inside the drag: dispatch() is not running, so rebuild
+                    // and draw now. This is what makes resize live instead of
+                    // a frozen frame that snaps on release.
+                    if (st->on_resize) st->on_resize();
+                    st->live_draw();
+                }
                 return 0;
             }
+
+            case WM_GETMINMAXINFO: {
+                // A floor on the size, so a drag can never produce a
+                // degenerate (e.g. 1px) client that layouts cannot handle.
+                auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
+                mmi->ptMinTrackSize.x = static_cast<LONG>(200.0f * st->dpi);
+                mmi->ptMinTrackSize.y = static_cast<LONG>(120.0f * st->dpi);
+                return 0;
+            }
+
+            case WM_DISPLAYCHANGE:
+            case WM_MOVE:
+                // A new mode or a new monitor: the refresh rate may differ.
+                st->monitor_changed = true;
+                break;
+
+            // ── frameless, but still a native window ───────────────────────────
+            case WM_NCCALCSIZE:
+                if (!st->decorated && wp == TRUE) {
+                    // Claim the whole window as client area, which removes
+                    // the caption while keeping WS_THICKFRAME: Aero Snap,
+                    // snap layouts, resize borders and the DWM shadow stay.
+                    // When maximised, Windows positions the window past the
+                    // monitor edge by the frame width; inset by it so no
+                    // content is lost off-screen.
+                    if (::IsZoomed(hwnd)) {
+                        auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
+                        const int fx = get_metric(SM_CXSIZEFRAME, st) + get_metric(SM_CXPADDEDBORDER, st);
+                        const int fy = get_metric(SM_CYSIZEFRAME, st) + get_metric(SM_CXPADDEDBORDER, st);
+                        p->rgrc[0].left += fx;
+                        p->rgrc[0].right -= fx;
+                        p->rgrc[0].top += fy;
+                        p->rgrc[0].bottom -= fy;
+                    }
+                    return 0;
+                }
+                break;
+
+            case WM_NCHITTEST:
+                if (!st->decorated && st->resizable && !::IsZoomed(hwnd)) {
+                    // Without a frame, resize handles have to be reported by
+                    // hand: a band at each edge and corner. Everything else
+                    // is client; the app moves the window itself (begin_move).
+                    POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                    ::ScreenToClient(hwnd, &p);
+                    RECT rc{};
+                    ::GetClientRect(hwnd, &rc);
+                    const int b = get_metric(SM_CXSIZEFRAME, st) + get_metric(SM_CXPADDEDBORDER, st);
+                    const bool l = p.x < b, r = p.x >= rc.right - b, t = p.y < b, bo = p.y >= rc.bottom - b;
+                    if (t && l) return HTTOPLEFT;
+                    if (t && r) return HTTOPRIGHT;
+                    if (bo && l) return HTBOTTOMLEFT;
+                    if (bo && r) return HTBOTTOMRIGHT;
+                    if (t) return HTTOP;
+                    if (bo) return HTBOTTOM;
+                    if (l) return HTLEFT;
+                    if (r) return HTRIGHT;
+                    return HTCLIENT;
+                }
+                break;
+
+            case WM_NCACTIVATE:
+                // Without a caption DefWindowProc would repaint the (absent)
+                // non-client area on activation, flashing a stock frame.
+                if (!st->decorated) return TRUE;
+                break;
 
             case WM_DPICHANGED: {
                 // The suggested rect keeps the window the same PHYSICAL size
@@ -887,21 +1224,27 @@ class Win32Window {
                 st->size = Vec2{static_cast<float>(rc.right - rc.left) * i2,
                                 static_cast<float>(rc.bottom - rc.top) * i2};
                 st->resized = true;
+                st->monitor_changed = true;
                 push(ResizeEvent{st->size, st->dpi});
                 return 0;
             }
 
             case WM_PAINT: {
-                // Satisfy Windows so the region is not reported dirty forever,
-                // but do NOT synthesise an event here. mayag redraws from its
-                // own loop, and a ResizeEvent per paint would be a feedback
-                // loop: paint -> event -> model touched -> present -> paint,
-                // which pins a core at ~30% on a completely idle terminal.
-                // Our present() blits the whole client area every frame, so
-                // there is never a partially-stale region to repair.
+                // Validate, so the region is not reported dirty forever. No
+                // event: a ResizeEvent per paint was a feedback loop (paint,
+                // event, present, paint) pinning a core on an idle window.
+                // Exception: the modal loop, where nobody else will draw.
                 PAINTSTRUCT ps;
-                ::BeginPaint(hwnd, &ps);
+                const HDC pdc = ::BeginPaint(hwnd, &ps);
+                // CPU path: re-show the last frame for the uncovered region.
+                // DWM keeps the content of a composited window, so this runs
+                // rarely -- but when it does, it must not show garbage.
+                if (st->dib_dc != nullptr && pdc != nullptr)
+                    ::BitBlt(pdc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left,
+                             ps.rcPaint.bottom - ps.rcPaint.top, st->dib_dc, ps.rcPaint.left, ps.rcPaint.top,
+                             SRCCOPY);
                 ::EndPaint(hwnd, &ps);
+                if (st->in_modal && st->live_draw) st->live_draw();
                 return 0;
             }
 
@@ -973,18 +1316,30 @@ class Win32Window {
                 // message, so they must be mapped back into the client area.
                 POINT sp{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
                 ::ScreenToClient(hwnd, &sp);
+                // Fractional on purpose: a precision touchpad reports deltas
+                // far smaller than WHEEL_DELTA, and rounding them to whole
+                // notches is what makes cheap Windows apps scroll in jerks.
                 const float ticks = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wp)) / WHEEL_DELTA;
-                // Three lines per notch, in logical pixels, matching what the
-                // user configured for the system.
-                UINT lines = 3;
-                ::SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
-                const float px = ticks * static_cast<float>(lines) * 16.0f;
-                const Vec2 d = msg == WM_MOUSEWHEEL ? Vec2{0.0f, px} : Vec2{-px, 0.0f};
+                const bool vertical = msg == WM_MOUSEWHEEL;
+                // The user's lines-per-notch, read once and refreshed on
+                // WM_SETTINGCHANGE rather than asked of the kernel per event.
+                const UINT lines = vertical ? st->wheel_lines : st->wheel_chars;
+                float px;
+                if (lines == WHEEL_PAGESCROLL) {
+                    px = ticks * (vertical ? st->size.y : st->size.x) * 0.9f;   // "one screen" per notch
+                } else {
+                    px = ticks * static_cast<float>(lines) * 16.0f;
+                }
+                const Vec2 d = vertical ? Vec2{0.0f, px} : Vec2{-px, 0.0f};
                 push(ScrollEvent{d,
                                  Vec2{static_cast<float>(sp.x) * inv, static_cast<float>(sp.y) * inv},
                                  win32_detail::mods_now(), false});
                 return 0;
             }
+
+            case WM_SETTINGCHANGE:
+                st->load_settings();
+                break;
 
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN: {

@@ -315,6 +315,48 @@ class Tiled {
         else for (std::size_t k = 0; k < todo.size(); ++k) encode_tile(k);
     }
 
+    /// encode_damaged, but BGRA, into caller-owned memory with an explicit
+    /// row stride: a GDI DIB section's bits, so the encode lands in the very
+    /// buffer the window blits from. `full` forces every tile (a new or
+    /// resized target). Returns the damaged rows [y0, y1); y0 == y1 when
+    /// nothing changed.
+    static std::pair<int, int> encode_damaged_bgra(const Framebuffer& fb, std::uint8_t* out, std::size_t stride,
+                                                   bool full, ThreadPool* pool) {
+        const auto& mem = fb.tile_memory();
+        const int W = fb.width(), H = fb.height();
+        const bool known = mem.valid && mem.dirty.size() == static_cast<std::size_t>(mem.tiles_x) * mem.tiles_y;
+        if (full || !known) {
+            const auto row = [&](std::size_t y) {
+                Framebuffer::encode_span_bgra(&fb.at(0, static_cast<int>(y)), out + y * stride,
+                                              static_cast<std::size_t>(W));
+            };
+            if (pool != nullptr && H > 64) pool->parallel_for(static_cast<std::size_t>(H), row);
+            else for (int y = 0; y < H; ++y) row(static_cast<std::size_t>(y));
+            return {0, H};
+        }
+        std::vector<std::uint32_t> todo;
+        int top = mem.tiles_y, bot = -1;
+        for (std::uint32_t i = 0; i < mem.dirty.size(); ++i)
+            if (mem.dirty[i]) {
+                todo.push_back(i);
+                const int ty = static_cast<int>(i) / mem.tiles_x;
+                top = num::min(top, ty);
+                bot = num::max(bot, ty);
+            }
+        if (todo.empty()) return {0, 0};
+        const auto encode_tile = [&](std::size_t k) {
+            const int tx = static_cast<int>(todo[k]) % mem.tiles_x, ty = static_cast<int>(todo[k]) / mem.tiles_x;
+            const int x0 = tx * tile_size, y0 = ty * tile_size;
+            const int w = num::min(tile_size, W - x0), y1 = num::min(y0 + tile_size, H);
+            for (int y = y0; y < y1; ++y)
+                Framebuffer::encode_span_bgra(&fb.at(x0, y), out + static_cast<std::size_t>(y) * stride + x0 * 4u,
+                                              static_cast<std::size_t>(w));
+        };
+        if (pool != nullptr && todo.size() > 4) pool->parallel_for(todo.size(), encode_tile);
+        else for (std::size_t k = 0; k < todo.size(); ++k) encode_tile(k);
+        return {top * tile_size, num::min(H, (bot + 1) * tile_size)};
+    }
+
     /// Whether the last render() changed any pixel (false: the frame is the
     /// one already on screen -- a host may skip presenting it).
     [[nodiscard]] static bool any_damage(const Framebuffer& fb) noexcept {

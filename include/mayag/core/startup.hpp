@@ -11,6 +11,17 @@
 #if defined(__linux__)
 #  include <time.h>
 #  include <unistd.h>
+#elif defined(_WIN32)
+// NOT <windows.h>: this header is included almost everywhere, and windows.h
+// defines IN, OUT, near, far... which collide with ordinary identifiers (the
+// font engine's LineBreak::IN). The three kernel32 calls are declared by
+// hand, with the same linkage, calling convention and layout as the SDK.
+extern "C" {
+struct _FILETIME;
+__declspec(dllimport) int __stdcall GetProcessTimes(void*, _FILETIME*, _FILETIME*, _FILETIME*, _FILETIME*);
+__declspec(dllimport) void __stdcall GetSystemTimePreciseAsFileTime(_FILETIME*);
+__declspec(dllimport) void* __stdcall GetCurrentProcess(void);
+}
 #endif
 
 namespace mayag::startup {
@@ -39,6 +50,21 @@ namespace detail {
     timespec ts{};
     ::clock_gettime(CLOCK_BOOTTIME, &ts);
     return static_cast<double>(ts.tv_sec) * 1000.0 + static_cast<double>(ts.tv_nsec) / 1e6 - start_ms;
+#elif defined(_WIN32)
+    // From the process's creation time, like /proc on Linux, so the loader,
+    // DLL init and static constructors are on the timeline too. FILETIME is
+    // two 32-bit halves; read it as such through the opaque declaration.
+    struct ft { unsigned long lo, hi; };
+    const auto q = [](const ft& f) { return (static_cast<unsigned long long>(f.hi) << 32) | f.lo; };
+    static const unsigned long long created = [&] {
+        ft c{}, e{}, k{}, u{};
+        GetProcessTimes(GetCurrentProcess(), reinterpret_cast<_FILETIME*>(&c), reinterpret_cast<_FILETIME*>(&e),
+                        reinterpret_cast<_FILETIME*>(&k), reinterpret_cast<_FILETIME*>(&u));
+        return q(c);
+    }();
+    ft now{};
+    GetSystemTimePreciseAsFileTime(reinterpret_cast<_FILETIME*>(&now));
+    return static_cast<double>(q(now) - created) / 10'000.0;
 #else
     static const auto t0 = std::chrono::steady_clock::now();
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();

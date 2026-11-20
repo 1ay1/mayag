@@ -240,6 +240,31 @@ class Framebuffer {
         }
     }
 
+    /// The same conversion in B,G,R,A byte order: what GDI DIB sections and
+    /// DXGI/Win32 surfaces store natively, so a Windows window can encode
+    /// straight into the memory it blits from, with no swizzle pass after.
+    static void encode_span_bgra(const Vec4* src, std::uint8_t* dst, std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            const Vec4& p = src[i];
+            const float a = num::saturate(p.w);
+            if (a >= 1.0f) {
+                dst[0] = detail::srgb_encode(p.z);
+                dst[1] = detail::srgb_encode(p.y);
+                dst[2] = detail::srgb_encode(p.x);
+                dst[3] = 255;
+            } else if (a <= 0.0f) {
+                dst[0] = dst[1] = dst[2] = dst[3] = 0;
+            } else {
+                const float inv = 1.0f / a;
+                dst[0] = detail::srgb_encode(p.z * inv);
+                dst[1] = detail::srgb_encode(p.y * inv);
+                dst[2] = detail::srgb_encode(p.x * inv);
+                dst[3] = static_cast<std::uint8_t>(a * 255.0f + 0.5f);
+            }
+            dst += 4;
+        }
+    }
+
   private:
     int width_, height_;
     std::vector<Vec4> pixels_;

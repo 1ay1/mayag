@@ -220,6 +220,19 @@ class window_host {
         poll_window_ = !reg_.has_value() && !external_loop_;
         cx_ = [&cx](const window_events& e) { return cx.emit(e); };
         stop_ = [&cx](int code) { cx.stop(code); };
+        // A window whose OS can trap the thread in a modal loop (Win32 during
+        // a drag-resize or move: DispatchMessage does not return until the
+        // mouse is released) gets a way to draw from in there. Without it the
+        // content freezes, then snaps, for the whole drag. The callback pumps
+        // the window's events into the program and draws immediately, outside
+        // the frame pacing: the user is watching this frame land.
+        if constexpr (requires { window_.set_live_draw(std::function<void()>{}); }) {
+            window_.set_live_draw([this, &cx] {
+                if (!cx_ || !live_kernel_) return;
+                pump(cx);
+                live_kernel_();
+            });
+        }
         // Anything the window queued while opening (a configure, a resize).
         pump(cx);
     }
@@ -254,6 +267,19 @@ class window_host {
 
     template <class K>
     void present(K& k) {
+        // Remember how to draw this kernel's model, for a window that has to
+        // draw from inside an OS modal loop (see attach()). Bound once: the
+        // kernel outlives the host's attachment.
+        if (!live_kernel_) {
+            live_kernel_ = [this, &k] {
+                flush_handled(k);
+                const auto now = now_();
+                last_draw_ = now;
+                drawn_slot_ = slot_of(now);
+                draw_owed_ = false;
+                draw(k.model(), [&](std::exception_ptr e) { k.view_faulted(std::move(e)); });
+            };
+        }
         const bool poll_only = std::exchange(poll_only_, false);
 
         // A window with no fd (Cocoa) is read here on a short poll. When the
@@ -1678,6 +1704,7 @@ class window_host {
     time_point   next_poll_{};
     std::function<std::size_t(const window_events&)> cx_;
     std::function<void(int)> stop_;
+    std::function<void()> live_kernel_;   // draw now, from an OS modal loop
 
     std::optional<detail::StackBindings> bindings_;
     Node                tree_{};
