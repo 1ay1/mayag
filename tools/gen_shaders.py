@@ -46,7 +46,10 @@ OUT = os.path.join(ROOT, "include", "mayag", "render", "shader_generated.hpp")
 
 # ── extracting the kernel body ──────────────────────────────────────────
 def read_kernel():
-    with open(KERNEL) as f:
+    # Always UTF-8: the kernel uses box-drawing section markers that the
+    # extractor matches on, and Windows would otherwise decode this file in
+    # the locale codepage (cp1252) and never find them.
+    with open(KERNEL, encoding="utf-8") as f:
         return f.read()
 
 
@@ -401,7 +404,8 @@ def emit_glsl():
 
 # ── SPIR-V ──────────────────────────────────────────────────────────────
 def compile_spirv(glslc, stage, code):
-    with tempfile.NamedTemporaryFile("w", suffix="." + stage, delete=False) as f:
+    with tempfile.NamedTemporaryFile("w", suffix="." + stage, delete=False,
+                                     encoding="utf-8", newline="\n") as f:
         f.write(code)
         path = f.name
     spv = path + ".spv"
@@ -410,9 +414,15 @@ def compile_spirv(glslc, stage, code):
             [glslc, "-O", "-fshader-stage=" + stage, path, "-o", spv],
             stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError:
-        sys.stderr.write("\n--- generated %s shader ---\n" % stage)
+        # Never let the diagnostic dump itself die on a locale codepage that
+        # cannot encode the kernel's box-drawing comments (Windows cp1252).
+        def _emit(s):
+            enc = sys.stderr.encoding or "utf-8"
+            sys.stderr.write(s.encode(enc, "replace").decode(enc, "replace"))
+
+        _emit("\n--- generated %s shader ---\n" % stage)
         for n, line in enumerate(code.splitlines(), 1):
-            sys.stderr.write("%4d| %s\n" % (n, line))
+            _emit("%4d| %s\n" % (n, line))
         raise
     data = open(spv, "rb").read()
     os.unlink(path)
@@ -484,7 +494,7 @@ namespace mayag::render::spirv {{
 
 }}  // namespace mayag::render::spirv
 """
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(header)
     print("wrote %s: vert %d words, frag %d words" % (out_path, len(vw), len(fw)))
 
