@@ -68,6 +68,8 @@
 #include "slider.hpp"
 #include "split.hpp"
 #include "ssh.hpp"
+#include "ssh_forward.hpp"
+#include "ssh_manager.hpp"
 #include "status_bar.hpp"
 #include "stepper.hpp"
 #include "tab_bar.hpp"

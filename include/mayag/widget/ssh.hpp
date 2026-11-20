@@ -42,6 +42,9 @@ struct SshHost {
     int         uses = 0;          ///< connections made (frecency)
     std::int64_t last_used = 0;    ///< unix seconds of the last one; 0 = never
     std::string source;            ///< "" ssh config, "known_hosts", "history" (typed once, remembered)
+    std::vector<std::string> forwards;   ///< "L5432:db:5432", "D1080" (ssh_forward.hpp)
+    std::string command;           ///< run on connect
+    bool        editable = false;  ///< every field is the app's to change (not from ~/.ssh/config)
 };
 
 [[nodiscard]] inline Color<Srgb> env_tone(const Theme& t, SshHost::Env e) {
@@ -273,6 +276,7 @@ inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& quer
                         node(key_hint(t, "\u2303S", "pin", fs * 0.78f).build()),
                         node(key_hint(t, "\u2303Y", "copy cmd", fs * 0.78f).build()),
                         node(key_hint(t, "\u2303E", "edit config", fs * 0.78f).build()),
+                        node(key_hint(t, "\u2303\u21E7H", "manage hosts", fs * 0.78f).build()),
                         spacer(),
                         mono(p.source, fs * 0.72f, faint) | ellipsis)
                         | gap(t.spaced(12)) | align(Align::center) | pad(t.spaced(6), t.spaced(14)) | width(pct(100))
