@@ -4,19 +4,25 @@
 // Satisfies the same `Window` concept as Cocoa, Wayland and Headless. The
 // six things mayag asks of an OS, in Win32 terms:
 //
-//   1. a drawable surface  → a CreateWindowExW HWND, blitted with StretchDIBits
+//   1. a drawable surface  → a CreateWindowExW HWND
 //   2. events              → the thread message queue, translated to mayag::Event
 //   3. size and DPI        → WM_SIZE + per-monitor-v2 WM_DPICHANGED
-//   4. present             → Tiled software raster into a DIB, then one blit
+//   4. present             → a Vulkan swapchain on the HWND, or GDI if no GPU
 //   5. a clock             → QueryPerformanceCounter
 //   6. clipboard + cursor  → the Win32 clipboard and LoadCursorW
 //
 // Design notes worth knowing before changing anything here:
 //
-// * The software rasteriser is the renderer. mayag's Vulkan backend can take
-//   over later, but a correct CPU path first means the port is testable and
-//   has no driver dependency; the blit is one StretchDIBits of a pre-multiplied
-//   BGRA DIB, which is the fastest portable path to the screen on Windows.
+// * Vulkan is the default renderer, via VK_KHR_win32_surface rendering
+//   straight into the HWND. The CPU path is the fallback, not the plan: it
+//   keeps the window working on a machine with no usable device, and it is
+//   what --png and the headless tests already use. Which one won is logged
+//   once by the runtime; gpu_active() reports it.
+//
+// * The software path blits with SetDIBitsToDevice from a buffer kept across
+//   frames, encoding and blitting only the tiles the rasteriser changed. A
+//   full-frame encode would discard the tiled renderer's damage tracking
+//   (93% of tiles are untouched while typing) and allocate 9 MB a frame.
 //
 // * Win32 delivers input through a callback, not a queue you can drain. So the
 //   WndProc pushes mayag::Events onto a per-window deque that dispatch()
@@ -37,6 +43,19 @@
 #include "../render/draw_list.hpp"
 #include "types.hpp"
 
+// Vulkan is the default renderer on Windows, exactly as it is on Linux: it
+// self-loads at runtime (vulkan-1.dll ships with every modern driver) and
+// falls back to the GDI/software path when there is no device -- a headless
+// VM, an RDP session, MAYAG_BACKEND=software. Compiled in when
+// MAYAG_WITH_VULKAN is defined (the default on Windows).
+#ifdef MAYAG_WITH_VULKAN
+// vulkan.hpp is the hand-transcribed ABI (namespace vk); vulkan_device.hpp is
+// the device logic built on it and does NOT include it itself, so the order
+// here matters.
+#  include "../backend/vulkan.hpp"
+#  include "../backend/vulkan_device.hpp"
+#endif
+
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN 1
 #endif
@@ -56,6 +75,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -217,6 +237,7 @@ class Win32Window {
         w.state_->hwnd = hwnd;
         w.sync_size();
         w.start_watcher();
+        w.boot_gpu(cfg);
         ::ShowWindow(hwnd, SW_SHOW);
         ::UpdateWindow(hwnd);
         return w;
@@ -260,6 +281,13 @@ class Win32Window {
         }
         // Re-arm the watcher now that the queue is drained.
         if (state_->rearm != nullptr) ::SetEvent(state_->rearm);
+        // A size or DPI change invalidates the swapchain. Done here, on the
+        // UI thread and outside the WndProc, so the rebuild never happens
+        // re-entrantly inside a Windows modal resize loop.
+        if (state_->resized) {
+            state_->resized = false;
+            renderer_resized();
+        }
         out.reserve(state_->queue.size());
         while (!state_->queue.empty()) {
             out.push_back(std::move(state_->queue.front()));
@@ -273,6 +301,36 @@ class Win32Window {
         const int w = static_cast<int>(state_->size.x * state_->dpi);
         const int h = static_cast<int>(state_->size.y * state_->dpi);
         if (w <= 0 || h <= 0) return;
+
+#ifdef MAYAG_WITH_VULKAN
+        // GPU path: the Vulkan swapchain owns the HWND's buffers, so there is
+        // no DIB, no CPU encode and no damage bookkeeping here -- the driver
+        // presents directly. This is the default; it is only inactive when the
+        // GPU could not be brought up, in which case control falls through.
+        if (state_->gpu_active && state_->gpu) {
+            if (state_->atlas_sync) state_->atlas_sync(*state_->gpu);
+            // Same pixels as what's on screen: don't wake the GPU for a hover
+            // or a model change that didn't change the picture. Texture and
+            // atlas uploads count as changes.
+            if (state_->had_frame && clear == state_->last_clear &&
+                dl.same_as(state_->last_list) && !state_->gpu->needs_present()) {
+                ++state_->frames_skipped;
+                return;
+            }
+            state_->gpu->submit(dl, clear);
+            state_->last_list.assign_from(dl);
+            state_->last_clear = clear;
+            state_->had_frame = true;
+            ++state_->frames;
+            return;
+        }
+#endif
+        present_software(dl, clear, w, h);
+    }
+
+  private:
+    /// The CPU fallback: rasterise, then blit the damaged band through GDI.
+    void present_software(const DrawList& dl, Color<Srgb> clear, int w, int h) {
         if (state_->fb.width() != w || state_->fb.height() != h) state_->fb = backend::Framebuffer{w, h};
 
         backend::Tiled::render(dl, state_->fb, state_->sampler, &backend::shared_pool(), clear);
@@ -337,6 +395,8 @@ class Win32Window {
         ++state_->frames;
     }
 
+  public:
+
     [[nodiscard]] double now() const noexcept {
         LARGE_INTEGER f, c;
         ::QueryPerformanceFrequency(&f);
@@ -393,7 +453,26 @@ class Win32Window {
     }
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() {
-        return state_ ? state_->fb.to_rgba8() : std::vector<std::uint8_t>{};
+        if (!state_) return {};
+#ifdef MAYAG_WITH_VULKAN
+        // A present-mode Vulkan device has no readback path -- the swapchain
+        // images belong to the compositor, and render_offscreen() needs a
+        // device brought up with init_offscreen(). Re-rasterising the last
+        // list on the CPU gives the same picture (the GPU/software
+        // equivalence test is what guarantees that), which is all
+        // read_pixels' callers -- screenshots, tests -- actually want.
+        if (state_->gpu_active) {
+            const int w = static_cast<int>(state_->size.x * state_->dpi);
+            const int h = static_cast<int>(state_->size.y * state_->dpi);
+            if (w > 0 && h > 0) {
+                if (state_->fb.width() != w || state_->fb.height() != h)
+                    state_->fb = backend::Framebuffer{w, h};
+                backend::Tiled::render(state_->last_list, state_->fb, state_->sampler,
+                                       &backend::shared_pool(), state_->last_clear);
+            }
+        }
+#endif
+        return state_->fb.to_rgba8();
     }
 
     // ── window management (optional capabilities the host probes for) ────
@@ -468,24 +547,52 @@ class Win32Window {
         state_->sampler = &state_->images;
     }
     void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
-        if (state_) state_->images.upload(id, std::move(img));
+        if (!state_) return;
+#ifdef MAYAG_WITH_VULKAN
+        if (state_->gpu_active && state_->gpu && img)
+            (void)state_->gpu->upload_texture(id, img->rgba.data(), img->width, img->height);
+#endif
+        state_->images.upload(id, std::move(img));
     }
     void release_image(std::uint32_t id) {
-        if (state_) state_->images.release(id);
+        if (!state_) return;
+#ifdef MAYAG_WITH_VULKAN
+        if (state_->gpu_active && state_->gpu) state_->gpu->release_texture(id);
+#endif
+        state_->images.release(id);
     }
-    /// The CPU rasteriser reads the atlas through the coverage sampler, so
-    /// there is no texture to upload; present for interface parity.
+
+    /// Remember how to push dirty glyph rects to the GPU. Type-erased because
+    /// the Atlas type is a template parameter of the FontStack; the CPU path
+    /// reads the atlas through the coverage sampler and needs no upload.
     template <typename AtlasT>
-    void set_atlas_source(AtlasT*) noexcept {}
+    void set_atlas_source([[maybe_unused]] AtlasT* atlas) noexcept {
+#ifdef MAYAG_WITH_VULKAN
+        if (!state_) return;
+        if (atlas == nullptr) { state_->atlas_sync = nullptr; return; }
+        state_->atlas_sync = [atlas](backend::VulkanDevice& d) { d.sync_atlas(*atlas); };
+#endif
+    }
 
     [[nodiscard]] Vec2 pixel_size() const noexcept {
-        return state_ ? Vec2{static_cast<float>(state_->fb.width()), static_cast<float>(state_->fb.height())}
-                      : Vec2{};
+        if (!state_) return {};
+        return Vec2{state_->size.x * state_->dpi, state_->size.y * state_->dpi};
     }
     [[nodiscard]] std::uint64_t frames_presented() const noexcept { return state_ ? state_->frames : 0; }
 
-    [[nodiscard]] static constexpr std::string_view renderer_name() noexcept { return "software"; }
-    [[nodiscard]] static constexpr bool gpu_active() noexcept { return false; }
+    [[nodiscard]] std::string_view renderer_name() const noexcept {
+#ifdef MAYAG_WITH_VULKAN
+        if (state_ && state_->gpu_active) return "vulkan";
+#endif
+        return "software";
+    }
+    [[nodiscard]] bool gpu_active() const noexcept {
+#ifdef MAYAG_WITH_VULKAN
+        return state_ != nullptr && state_->gpu_active;
+#else
+        return false;
+#endif
+    }
 
   private:
     Win32Window() = default;
@@ -507,6 +614,7 @@ class Win32Window {
         CursorShape cursor = CursorShape::arrow;
         bool tracking_mouse = false;
         bool text_input = false;
+        bool resized = false;   ///< a WM_SIZE/DPI change needs a swapchain rebuild
         bool fullscreen = false;
         LONG saved_style = 0;
         WINDOWPLACEMENT saved_placement{};
@@ -514,6 +622,21 @@ class Win32Window {
         std::uint64_t frames = 0;
         Vec2 last_pos{};
         std::vector<std::uint8_t> blit;   ///< BGRA scratch, kept across frames
+
+#ifdef MAYAG_WITH_VULKAN
+        // ── the GPU path ────────────────────────────────────────────
+        std::unique_ptr<backend::VulkanDevice> gpu;
+        bool gpu_active = false;
+        /// Type-erased because the Atlas type is a template parameter of the
+        /// FontStack, which this header must not depend on.
+        std::function<void(backend::VulkanDevice&)> atlas_sync;
+        // The last list presented, so an identical frame can be skipped
+        // instead of waking the GPU for pixels that already match.
+        DrawList last_list;
+        Color<Srgb> last_clear{};
+        bool had_frame = false;
+        std::uint64_t frames_skipped = 0;
+#endif
 
         // ── the "queue is non-empty" event, and the thread that sets it ──
         HANDLE input_event = nullptr;   ///< manual reset: jaal waits on this
@@ -531,11 +654,30 @@ class Win32Window {
     }
     void destroy() {
         stop_watcher();
+#ifdef MAYAG_WITH_VULKAN
+        // Before the HWND goes away: the swapchain holds a VkSurfaceKHR that
+        // references it, and destroying the window first is undefined.
+        if (state_ && state_->gpu) {
+            state_->gpu->destroy();
+            state_->gpu_active = false;
+        }
+#endif
         if (state_ && state_->hwnd != nullptr) {
             ::SetWindowLongPtrW(state_->hwnd, GWLP_USERDATA, 0);
             ::DestroyWindow(state_->hwnd);
             state_->hwnd = nullptr;
         }
+    }
+
+    /// Tell the renderer the drawable changed size. On the GPU path this
+    /// rebuilds the swapchain; the CPU path reallocates lazily in present().
+    void renderer_resized() {
+#ifdef MAYAG_WITH_VULKAN
+        if (state_ && state_->gpu_active && state_->gpu) {
+            state_->gpu->resize(state_->size, state_->dpi);
+            state_->had_frame = false;   // the old contents are gone
+        }
+#endif
     }
 
     /// Manufacture the "this thread has input" readiness object jaal needs.
@@ -597,6 +739,43 @@ class Win32Window {
         }
         for (HANDLE* h : {&st->input_event, &st->rearm, &st->quit})
             if (*h != nullptr) { ::CloseHandle(*h); *h = nullptr; }
+    }
+
+    /// Bring up Vulkan on the HWND, or leave the CPU path in charge.
+    ///
+    /// Failure is not an error: no vulkan-1.dll, no device, a software
+    /// adapter under RDP, or MAYAG_BACKEND=software all land on the GDI
+    /// path, which renders the same pixels more slowly. The choice is silent
+    /// by design; the runtime logs the winner once.
+    void boot_gpu([[maybe_unused]] const WindowConfig& cfg) {
+#ifdef MAYAG_WITH_VULKAN
+        State* st = state_.get();
+        const char* forced = ::getenv("MAYAG_BACKEND");
+        const bool allow = forced == nullptr || std::string_view{forced} != "software";
+        if (allow) {
+            auto d = std::make_unique<backend::VulkanDevice>();
+            d->set_low_latency(!cfg.vsync);
+            d->set_transparent(cfg.transparent);
+            // The HINSTANCE is accepted but not required by the WSI call; the
+            // HWND is what identifies the surface.
+            if (d->attach_win32(::GetModuleHandleW(nullptr), st->hwnd, st->size, st->dpi)) {
+                st->gpu = std::move(d);
+                st->gpu_active = true;
+                // Anything uploaded before the GPU existed has to be replayed.
+                for (const auto& [id, img] : st->images.all())
+                    (void)st->gpu->upload_texture(id, img->rgba.data(), img->width, img->height);
+                // The DIB scratch is dead weight now; give it back.
+                st->blit.clear();
+                st->blit.shrink_to_fit();
+                st->fb = backend::Framebuffer{1, 1};
+                startup::mark("vulkan ready");
+                return;
+            }
+            d->destroy();
+        }
+        if (!st->gpu) st->gpu = std::make_unique<backend::VulkanDevice>();
+        startup::mark("vulkan unavailable (cpu)");
+#endif
     }
 
     void sync_size() {
@@ -689,6 +868,7 @@ class Win32Window {
                 ::GetClientRect(hwnd, &rc);
                 st->size = Vec2{static_cast<float>(rc.right - rc.left) * inv,
                                 static_cast<float>(rc.bottom - rc.top) * inv};
+                st->resized = true;   // dispatch() rebuilds the swapchain
                 push(ResizeEvent{st->size, st->dpi});
                 return 0;
             }
@@ -706,6 +886,7 @@ class Win32Window {
                 const float i2 = st->dpi > 0.0f ? 1.0f / st->dpi : 1.0f;
                 st->size = Vec2{static_cast<float>(rc.right - rc.left) * i2,
                                 static_cast<float>(rc.bottom - rc.top) * i2};
+                st->resized = true;
                 push(ResizeEvent{st->size, st->dpi});
                 return 0;
             }

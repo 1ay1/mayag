@@ -817,9 +817,17 @@ class VulkanBackend final : public Device {
         // Vulkan can only drive a surface it has a WSI extension for. Returning
         // nullptr (rather than asserting) is how a backend declines politely
         // and lets the next candidate try.
-        if (s.display == nullptr || s.surface == nullptr) return nullptr;
+        if (s.surface == nullptr) return nullptr;
         auto self = std::make_unique<VulkanBackend>();
+#if defined(_WIN32)
+        // Win32: `display` is the HINSTANCE and may legitimately be null --
+        // vkCreateWin32SurfaceKHR only needs the HWND -- so unlike Wayland it
+        // is not required to be present.
+        if (!self->dev_.attach_win32(s.display, s.surface, logical, dpi)) return nullptr;
+#else
+        if (s.display == nullptr) return nullptr;
         if (!self->dev_.attach_wayland(s.display, s.surface, logical, dpi)) return nullptr;
+#endif
         return self;
     }
 

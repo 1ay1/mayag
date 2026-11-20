@@ -19,6 +19,7 @@
 //   sync_atlas(atlas)         upload dirty glyph rects
 //   render_offscreen(...)     render to a Framebuffer (for tests)
 
+#include "vulkan.hpp"   // namespace vk: the hand-transcribed ABI this is built on
 #include "../render/draw_list.hpp"
 #include "../render/frame_plan.hpp"
 #include "../core/startup.hpp"
@@ -122,6 +123,35 @@ class VulkanDevice {
         if (api_->CreateWaylandSurfaceKHR(instance_, &sci, nullptr, &surface_) != vk::VK_SUCCESS) {
             return false;
         }
+        return finish_attach(logical, dpi);
+    }
+
+#if defined(_WIN32)
+    /// Device + swapchain on a live HWND. Calls prepare() first if nobody did.
+    ///
+    /// The only platform-specific step is making the VkSurfaceKHR; everything
+    /// after it (present support, swapchain, pipeline, framebuffers) is shared
+    /// with the Wayland path via finish_attach().
+    [[nodiscard]] bool attach_win32(void* hinstance, void* hwnd,
+                                    Vec2 logical, float dpi) {
+        if (!prepare()) return false;
+        if (api_->CreateWin32SurfaceKHR == nullptr) return false;
+
+        vk::VkWin32SurfaceCreateInfoKHR sci{};
+        sci.sType = vk::VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+        sci.hinstance = hinstance;
+        sci.hwnd = hwnd;
+        if (api_->CreateWin32SurfaceKHR(instance_, &sci, nullptr, &surface_) != vk::VK_SUCCESS) {
+            return false;
+        }
+        return finish_attach(logical, dpi);
+    }
+#endif
+
+  private:
+    /// The surface-agnostic half of attaching: everything from "we have a
+    /// VkSurfaceKHR" to "we can render frames".
+    [[nodiscard]] bool finish_attach(Vec2 logical, float dpi) {
         // The device was picked without a surface; make sure its queue can
         // present to this one.
         vk::Bool32 present = 0;
@@ -141,6 +171,8 @@ class VulkanDevice {
         valid_ = true;
         return true;
     }
+
+  public:
 
     [[nodiscard]] bool valid() const noexcept { return valid_; }
 
@@ -1252,6 +1284,9 @@ class VulkanDevice {
         MG_LOAD(GetPhysicalDeviceSurfaceFormatsKHR, "vkGetPhysicalDeviceSurfaceFormatsKHR");
         MG_LOAD(GetPhysicalDeviceSurfacePresentModesKHR, "vkGetPhysicalDeviceSurfacePresentModesKHR");
         MG_LOAD(CreateWaylandSurfaceKHR, "vkCreateWaylandSurfaceKHR");
+#if defined(_WIN32)
+        MG_LOAD(CreateWin32SurfaceKHR, "vkCreateWin32SurfaceKHR");
+#endif
         #undef MG_LOAD
     }
 
