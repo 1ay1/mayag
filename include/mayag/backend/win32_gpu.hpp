@@ -45,6 +45,10 @@ class Win32Gpu {
     /// MAYAG_BACKEND if set, else D3D11 then Vulkan. Any thread.
     [[nodiscard]] bool prepare() {
         if (api_ != Api::none) return true;
+        // Test hook: pretend no GPU API can come up, to exercise the window's
+        // fallback (a no-redirection window recreated for GDI) on a machine
+        // that has a perfectly good GPU.
+        if (std::getenv("MAYAG_GPU_FAIL") != nullptr) return false;
         const char* want = std::getenv("MAYAG_BACKEND");
         const bool vulkan_first = want != nullptr && std::string_view{want} == "vulkan";
         for (int pass = 0; pass < 2; ++pass) {

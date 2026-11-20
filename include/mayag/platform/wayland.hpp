@@ -73,6 +73,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <cstring>
 #include <functional>
 #include <array>
@@ -605,17 +606,27 @@ class WaylandWindow {
         // shm surfaces below are created and the CPU path takes over. The
         // choice is silent by design; the runtime logs the winner once.
         if (allow_gpu) {
-            // MAYAG_GPU_ASYNC=0 waits for the GPU before the first frame.
-            // Otherwise, if the driver isn't ready yet, the first frames go
-            // out on the CPU path (~10 ms) and the window switches to the
-            // GPU on the first frame after it is.
-            const char* async = ::getenv("MAYAG_GPU_ASYNC");
-            const bool wait = async != nullptr && std::string_view{async} == "0";
-            if (wait || prep.ready()) adopt_gpu(prep.get_at_root());
+            // GPU first, from frame one: the device was prepared on a worker
+            // while the compositor handshake ran, and the first frame waits
+            // for it (up to MAYAG_GPU_WAIT_MS, default 3000 -- a cold Vulkan
+            // start on a hybrid laptop can take seconds, and a frame on the
+            // wrong renderer followed by a switch is worse than waiting).
+            // Only if it misses the budget do the first frames go out on the
+            // CPU and the window switch when it is ready. MAYAG_GPU_WAIT_MS=0
+            // restores CPU-first.
+            int budget = 3000;
+            if (const char* e = ::getenv("MAYAG_GPU_WAIT_MS"); e != nullptr && *e != '\0') budget = std::max(0, std::atoi(e));
+            if (const char* async = ::getenv("MAYAG_GPU_ASYNC"); async != nullptr && std::string_view{async} == "0") budget = 1 << 30;
+            if (budget > 0 && !prep.ready()) {
+                const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget);
+                while (!prep.ready() && std::chrono::steady_clock::now() < until)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (prep.ready()) adopt_gpu(prep.get_at_root());
             else gpu_pending_ = true;
         }
         if (!gpu_) gpu_ = std::make_unique<backend::VulkanDevice>();
-        startup::mark(gpu_pending_ ? "vulkan pending (cpu first)" : "vulkan ready");
+        startup::mark(gpu_pending_ ? "vulkan pending (missed the wait budget: cpu first)" : "vulkan ready (first frame)");
 #endif
 
         // The shm buffers (a float framebuffer plus three encoded copies,

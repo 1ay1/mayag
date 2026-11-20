@@ -242,12 +242,12 @@ class Win32Window {
         // A flip-model swapchain owns the pixels, so the window needs no GDI
         // redirection surface: without it DWM composes the swapchain
         // directly (no full-window copy, no stale-content smear on resize).
-        // The surface can only be chosen at creation, so it is kept only
-        // where the CPU path may still have to present: no GPU expected at
-        // all, or a GPU allowed to miss the first frame (MAYAG_GPU_WAIT_MS=0,
-        // or Vulkan, whose cold bring-up can take seconds).
+        // The surface can only be chosen at creation, so it is kept only when
+        // CPU-first was asked for (MAYAG_GPU_WAIT_MS=0) or no GPU is expected;
+        // a GPU that fails or misses its budget gets the window recreated
+        // for GDI (recreate_for_gdi), which is rare by construction.
         const bool gpu_expected = w.state_->gpu_prep.valid();
-        const bool may_fall_back = !gpu_expected || w.gpu_wait_budget_ms() == 0 || w.vulkan_requested();
+        const bool may_fall_back = !gpu_expected || w.gpu_wait_budget_ms() == 0;
         w.state_->no_redirection = gpu_expected && !may_fall_back;
         const DWORD ex = w.state_->no_redirection ? WS_EX_NOREDIRECTIONBITMAP : 0;
         const HWND hwnd = ::CreateWindowExW(ex, L"mayag.window", win32_detail::widen(cfg.title).c_str(), style,
@@ -375,7 +375,7 @@ class Win32Window {
             return;
         }
 #endif
-        if (state_->no_redirection && state_->gpu_failed) recreate_for_gdi();
+        if (state_->no_redirection && (state_->gpu_failed || !state_->gpu_active)) recreate_for_gdi();
         present_software(dl, clear, w, h);
         reveal();
     }
@@ -853,13 +853,15 @@ class Win32Window {
             std::move(d));
     }
 
-    /// How long the first present may wait for the GPU, in ms. Default 1000:
-    /// D3D11 is ready in ~110 ms warm and ~370 ms cold, so this only bites
-    /// when something is badly wrong, and then the CPU path draws instead.
-    /// MAYAG_GPU_WAIT_MS=0 restores CPU-first (draw now, switch later).
+    /// How long the first present may wait for the GPU, in ms: the GPU draws
+    /// frame one on every API, and only a GPU that misses this budget lets the
+    /// CPU draw first. Default 1000 for D3D11 (ready in ~110 ms warm, ~370 ms
+    /// cold) and 3000 for Vulkan (0.3 s warm, ~2.1 s cold on a hybrid laptop,
+    /// where its loader starts every driver). MAYAG_GPU_WAIT_MS overrides;
+    /// 0 restores CPU-first (draw now, switch later).
     [[nodiscard]] static int gpu_wait_budget_ms() {
         if (const char* e = ::getenv("MAYAG_GPU_WAIT_MS"); e != nullptr && *e != '\0') return std::max(0, std::atoi(e));
-        return 1000;
+        return vulkan_requested() ? 3000 : 1000;
     }
     [[nodiscard]] static bool vulkan_requested() {
         const char* e = ::getenv("MAYAG_BACKEND");
@@ -867,14 +869,14 @@ class Win32Window {
     }
 
     /// Take the prepared GPU and put it on the window. The first present
-    /// waits (up to gpu_wait_budget_ms; Vulkan never waits, its cold start
-    /// is seconds) so frame one is already a GPU frame; later presents only
-    /// poll. Failure is not an error: no device, a software adapter under
-    /// RDP, or MAYAG_BACKEND=software all draw on the CPU path.
+    /// waits (up to gpu_wait_budget_ms) so frame one is already a GPU frame;
+    /// later presents only poll. Failure is not an error: no device, a
+    /// software adapter under RDP, or MAYAG_BACKEND=software all draw on the
+    /// CPU path.
     void adopt_gpu() {
         State* st = state_.get();
         if (!st->gpu_prep.valid()) return;
-        const int budget = (st->shown || vulkan_requested()) ? 0 : gpu_wait_budget_ms();
+        const int budget = st->shown ? 0 : gpu_wait_budget_ms();
         if (budget > 0 && !st->gpu_prep.ready()) {
             const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget);
             while (!st->gpu_prep.ready() && std::chrono::steady_clock::now() < until) ::Sleep(1);
