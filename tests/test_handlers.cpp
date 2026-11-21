@@ -77,6 +77,18 @@ int main() {
         rt.window().push(MouseUp{br.origin + Vec2{60, 10}, MouseButton::left, {}});
         rt.tick();
         ok(std::abs(rt.model().bright - 6.0f) < 0.2f, "on_slide(set_from_x(...)) maps press+drag onto the field's range");
+        {
+            // a program whose Msg is a tree (agentty / hand): `struct Msg : variant<Group, ...>`,
+            // `Group = variant<Leaf, ...>` -- a handler's leaf lands in its group
+            struct A {}; struct B { int n; }; struct C {};
+            using Group = std::variant<A, B>;
+            struct Tree : std::variant<Group, C> { using std::variant<Group, C>::variant; };
+            const auto lifted = to_program_msg<Tree>(mayag::detail::handlers::wrap(B{7}));
+            ok(lifted && std::holds_alternative<Group>(*lifted) && std::get<B>(std::get<Group>(*lifted)).n == 7,
+               "a handler's leaf message lifts into a nested, derived Msg");
+            ok(to_program_msg<Tree>(mayag::detail::handlers::wrap(C{})).has_value(), "a top-level leaf too");
+            ok(!to_program_msg<Tree>(mayag::detail::handlers::wrap(1.5)).has_value(), "a type outside the tree is refused");
+        }
         return fails;
     });
 }

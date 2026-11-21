@@ -23,6 +23,8 @@
 #include "../dsl/dsl.hpp"
 #include "gestures.hpp"
 
+#include <jaal/core/stdshape.hpp>
+
 #include <algorithm>
 #include <concepts>
 #include <functional>
@@ -217,26 +219,51 @@ template <class Model, class T>
 }
 
 
+namespace detail::handlers {
+
+/// The std::variant a message type is, or derives from (agentty-style
+/// `struct Msg : std::variant<...>`); void when it is neither.
+template <class T> struct msg_variant { using type = void; };
+template <class... Ts> struct msg_variant<std::variant<Ts...>> { using type = std::variant<Ts...>; };
+template <class T>
+    requires(!std::is_void_v<jaal::detail::stdshape::variant_base_t<T>> &&
+             !std::is_same_v<jaal::detail::stdshape::variant_base_t<T>, T>)
+struct msg_variant<T> { using type = jaal::detail::stdshape::variant_base_t<T>; };
+
+/// Build an M holding the handler's value, searching M's alternatives and,
+/// below them, nested message groups (`Msg = variant<TabMsg, ...>`,
+/// `TabMsg = variant<NewTab, ...>`) -- the tree jaal routes.
+template <class M>
+bool lift_into(const HandlerResult& r, std::optional<M>& out) {
+    if (r.type == &type_tag<M>) { out.emplace(*static_cast<const M*>(r.msg.get())); return true; }
+    using V = typename msg_variant<M>::type;
+    if constexpr (std::is_void_v<V>) {
+        return false;
+    } else {
+        return [&]<std::size_t... I>(std::index_sequence<I...>) {
+            return ([&] {
+                using A = std::variant_alternative_t<I, V>;
+                std::optional<A> a;
+                if (!lift_into<A>(r, a)) return false;
+                out.emplace(std::in_place_index<I>, std::move(*a));   // M is V, or inherits V's constructors
+                return true;
+            }() || ...);
+        }(std::make_index_sequence<std::variant_size_v<V>>{});
+    }
+}
+
+}  // namespace detail::handlers
+
 /// Turn a handler's message into the program's Msg, or nothing when the
-/// type is not one of Msg's alternatives (a programming error the host
-/// reports once).
+/// type is nowhere in Msg's tree (a programming error the host reports once).
+/// Msg may be a std::variant, a class derived from one, and its alternatives
+/// may themselves be message groups.
 template <class Msg>
 [[nodiscard]] std::optional<Msg> to_program_msg(const HandlerResult& r) {
     if (r.msg == nullptr) return std::nullopt;
-    if (r.type == &type_tag<Msg>) return *static_cast<const Msg*>(r.msg.get());
-    if constexpr (requires { std::variant_size_v<Msg>; }) {
-        return [&]<std::size_t... I>(std::index_sequence<I...>) {
-            std::optional<Msg> out;
-            (void)((r.type == &type_tag<std::variant_alternative_t<I, Msg>>
-                        ? (out.emplace(std::in_place_index<I>,
-                                       *static_cast<const std::variant_alternative_t<I, Msg>*>(r.msg.get())),
-                           true)
-                        : false) || ...);
-            return out;
-        }(std::make_index_sequence<std::variant_size_v<Msg>>{});
-    } else {
-        return std::nullopt;
-    }
+    std::optional<Msg> out;
+    (void)detail::handlers::lift_into<Msg>(r, out);
+    return out;
 }
 
 }  // namespace mayag
