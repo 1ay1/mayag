@@ -61,7 +61,8 @@ set(jaal_ok
     backend/thread_pool.hpp                                                    # the render fork-join is jaal's pool
     backend/vulkan_device.hpp                                                  # a device handle opted into jaal::sendable
     font/system.hpp                                                            # the font scan runs on a jaal worker
-    font/ot_layout.hpp)                                                        # lock-free lazy tables (jaal::once)
+    font/ot_layout.hpp                                                         # lock-free lazy tables (jaal::once)
+    core/sync.hpp)                                                             # Cell / Frozen: jaal's thread-safety types, for every layer
 
 set(hits "")
 file(GLOB dirs LIST_DIRECTORIES true ${ROOT}/include/mayag/*)

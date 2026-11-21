@@ -136,6 +136,47 @@ namespace detail {
 
 /// Lay out, paint, and rasterise a UI into an RGBA8 buffer.
 /// Accepts either a DSL expression or an already-built `Node`.
+namespace detail {
+/// A FontStack for one render_to_pixels call: borrowed from a process-wide
+/// pool of forks of the default stack, and returned when the call ends.
+class StackLoan {
+  public:
+    StackLoan() = default;
+    StackLoan(const StackLoan&) = delete;
+    StackLoan& operator=(const StackLoan&) = delete;
+    ~StackLoan() {
+        if (s_) pool().with([](Spare& v, Shared s) { v.push_back(std::move(s)); }, Shared{std::move(s_)});
+    }
+    [[nodiscard]] std::shared_ptr<typo::FontStack> borrow() {
+        auto spare = pool().with([](Spare& v) -> std::optional<Shared> {
+            if (v.empty()) return std::nullopt;
+            Shared s = std::move(v.back());
+            v.pop_back();
+            return s;
+        });
+        s_ = spare ? std::move(spare->stack) : origin().stack->fork();
+        return s_;
+    }
+
+  public:
+    /// One owner moves a stack in and out of the pool; nobody else holds it
+    /// meanwhile (the loan is the only reference while borrowed).
+    struct Shared { std::shared_ptr<typo::FontStack> stack; };   // Sendable: see below
+    using Spare = std::vector<Shared>;
+    static Cell<Spare>& pool() { static Cell<Spare> p; return p; }
+    /// Fonts are discovered once per process; every loan is a fork of this.
+    static const Shared& origin() { static const Shared o{typo::system::default_stack()}; return o; }
+    std::shared_ptr<typo::FontStack> s_;
+};
+}  // namespace detail
+}  // namespace mayag
+// A pooled stack has ONE user: the pool, or the one StackLoan that took it
+// out (shared_ptr only because FontStack's owners are shared_ptr). Moving it
+// in and out of the pool shares nothing, and each user draws under its own
+// DrawLease -- so the handle may be sent between threads.
+template <> inline constexpr bool jaal::sendable_opt_in<mayag::detail::StackLoan::Shared> = true;
+namespace mayag {
+
 template <typename Ui>
 [[nodiscard]] std::vector<std::uint8_t> render_to_pixels(const Ui& ui, Vec2 viewport,
                                                          const RenderOptions& opts = {}) {
@@ -147,11 +188,12 @@ template <typename Ui>
     // Discover the system fonts when the caller supplied none, so a bare
     // `render_to_pixels(ui, size)` call renders real text. The result is
     // cached across calls: enumerating fonts once per process, not per frame.
+    // Concurrent calls each draw through a stack of their own: a pool of
+    // forks of one discovered stack (forks share faces, own their atlases),
+    // borrowed for the call and returned after.
     std::shared_ptr<typo::FontStack> stack = opts.fonts;
-    if (stack == nullptr) {
-        static const std::shared_ptr<typo::FontStack> shared = typo::system::default_stack();
-        stack = shared;
-    }
+    detail::StackLoan loan;
+    if (stack == nullptr) stack = loan.borrow();
     detail::StackBindings bound{*stack};
 
     const layout::TextMeasurer& measurer =

@@ -67,10 +67,11 @@ namespace detail {
 /// The three font adapters layout and the painter read through. Held by
 /// value so the pointers handed out stay valid for the host's lifetime.
 struct StackBindings {
-    typo::StackMeasurer      measurer;
-    typo::StackGlyphRenderer glyphs;
-    typo::StackSampler       sampler;
-    explicit StackBindings(typo::FontStack& s) : measurer{s}, glyphs{s}, sampler{s} {}
+    typo::FontStack::DrawLease lease;   ///< this renderer draws through the stack (one at a time)
+    typo::StackMeasurer        measurer;
+    typo::StackGlyphRenderer   glyphs;
+    typo::StackSampler         sampler;
+    explicit StackBindings(typo::FontStack& s) : lease{s}, measurer{s}, glyphs{s}, sampler{s} {}
 };
 }  // namespace detail
 

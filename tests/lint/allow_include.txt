@@ -38,13 +38,10 @@ core/scroll_state.hpp: thread_local const_cast
 # "const_cast" and "thread_local"; nothing here uses either.
 editor/syntax.hpp: const_cast thread_local
 
-# A Face is shared by the measurer, the painter and the atlas, which reach
-# it through layout::TextMeasurer / render::GlyphRenderer -- interfaces with
-# no capability parameter, so jaal::guarded cannot be named there. The mutex
-# guards the variation coords and the bounded outline cache; it is a leaf
-# (nothing is called under it). The atomic is the process-wide face-id
-# counter, a relaxed fetch_add.
-font/font.hpp: atomic mutex
+# Windows only (#if defined(_WIN32), not built on Linux): the DirectWrite face
+# handle opened lazily under a mutex. Everything else in font.hpp is jaal's:
+# faces are frozen jaal::shared instances, caches are jaal::cell leaf locks.
+font/font.hpp: mutex
 
 # mmap/MapViewOfFile take a non-const pointer for a read-only mapping.
 font/mapped_file.hpp: const_cast

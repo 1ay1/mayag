@@ -32,8 +32,13 @@
 #include "../render/painter.hpp"
 #include "../backend/software.hpp"
 
+#include "../core/sync.hpp"
+
 #include <atomic>
 #include <algorithm>
+#include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <array>
 #include <cstring>
 #include <fstream>
@@ -90,8 +95,9 @@ class Face {
                                                            std::uint32_t face_index = 0,
                                                            ot::Error* err = nullptr) {
         auto face = std::shared_ptr<Face>(new Face);
-        face->data_ = std::move(data);
-        return face->init(face->data_, face_index, err) ? face : nullptr;
+        face->source_index_ = face_index;
+        face->bytes_ = std::make_shared<const Bytes>(std::move(data));
+        return face->init(face->bytes_->span(), face_index, err) ? face : nullptr;
     }
 
     /// Load from a file, mapped: pages fault in only where the parser and
@@ -100,14 +106,31 @@ class Face {
                                                          std::uint32_t face_index = 0,
                                                          ot::Error* err = nullptr) {
         auto face = std::shared_ptr<Face>(new Face);
-        face->mapped_ = MappedFile{path};
-        if (face->mapped_.empty()) {
+        MappedFile mapped{path};
+        if (mapped.empty()) {
             if (err != nullptr) *err = ot::Error::too_small;
             return nullptr;
         }
+        face->bytes_ = std::make_shared<const Bytes>(std::move(mapped));
         face->source_path_ = path;
         face->source_index_ = face_index;
-        return face->init(face->mapped_.data(), face_index, err) ? face : nullptr;
+        return face->init(face->bytes_->span(), face_index, err) ? face : nullptr;
+    }
+
+    /// `base` at another point of its design space (USER units per axis, e.g.
+    /// {{tag_wght, 700}}; axes not listed keep base's value). The new face
+    /// shares base's bytes and is complete when constructed: build it with
+    /// `Frozen<Face>::make(base, vals)` and it is frozen from birth, so
+    /// any number of threads may use it. This is how a FontStack draws one
+    /// variable face at several weights at once -- an instance per position,
+    /// never one face moved back and forth.
+    Face(const Face& base, std::span<const std::pair<std::uint32_t, float>> vals)
+        : bytes_(base.bytes_), source_path_(base.source_path_), source_index_(base.source_index_) {
+        [[maybe_unused]] const bool ok = init(bytes_->span(), base.source_index_, nullptr);
+        assert(ok && "a parsed face re-parses");
+        base_id_ = base.base_id_;
+        user_ = base.user_;
+        if (!axes_.empty()) apply_user_coords(vals);
     }
 
 #if defined(_WIN32)
@@ -122,7 +145,7 @@ class Face {
     /// own raster), or when DirectWrite is unavailable. Opened once.
     [[nodiscard]] IDWriteFontFace* dwrite_face() const {
         if (source_path_.empty() || is_variable()) return nullptr;
-        std::lock_guard lock{mutex_};
+        std::lock_guard lock{dw_mutex_};
         if (!dw_tried_) {
             dw_tried_ = true;
             dw_face_ = dwrite::open_face(source_path_, source_index_);
@@ -305,19 +328,22 @@ class Face {
     /// cache is dropped whenever the instance moves.
     [[nodiscard]] float advance_units(std::uint16_t gid) const noexcept {
         const float base = static_cast<float>(file_.advance(gid));
-        if (!hvar_.ok) return base;
-        std::lock_guard lock{mutex_};
-        if (adv_cache_.empty()) adv_cache_.assign(file_.num_glyphs(), std::numeric_limits<float>::quiet_NaN());
-        if (gid >= adv_cache_.size()) return base;
-        float& slot = adv_cache_[gid];
-        if (slot != slot) slot = base + var::hvar_advance_delta(hvar_, gid, coords_);   // NaN = not yet
-        return slot;
+        if (!hvar_.ok || gid >= file_.num_glyphs()) return base;
+        const float hit = caches_->advance.read([](const std::vector<float>& c, std::uint16_t g) {
+            return g < c.size() ? c[g] : std::numeric_limits<float>::quiet_NaN();
+        }, gid);
+        if (hit == hit) return hit;   // NaN = not yet
+        const float v = base + var::hvar_advance_delta(hvar_, gid, coords_);   // pure; outside the lock
+        caches_->advance.with([](std::vector<float>& c, std::uint16_t g, float x, std::size_t n) {
+            if (c.empty()) c.assign(n, std::numeric_limits<float>::quiet_NaN());
+            c[g] = x;
+        }, gid, v, std::size_t{file_.num_glyphs()});
+        return v;
     }
 
     /// Kerning between two glyphs in pixels, at the face's current
     /// variation instance (weight, optical size, ...).
     [[nodiscard]] float kern(std::uint16_t left, std::uint16_t right, float size_px) const noexcept {
-        std::lock_guard lock{mutex_};
         return kerning_.lookup(left, right, coords_) * scale_for(size_px);
     }
 
@@ -358,11 +384,10 @@ class Face {
     /// which is what keeps cursive joins from darkening.
     enum class MergeMode : std::uint8_t { none, all, table };
     [[nodiscard]] MergeMode merge_mode() const {
-        std::lock_guard lock{mutex_};
-        if (merge_mode_valid_) return merge_mode_;
-        merge_mode_valid_ = true;
-        merge_mode_ = compute_merge_mode();
-        return merge_mode_;
+        if (auto m = caches_->merge_mode.read([](const std::optional<MergeMode>& v) { return v; })) return *m;
+        const MergeMode m = compute_merge_mode();   // pure: a racing thread computes the same
+        caches_->merge_mode.with([](std::optional<MergeMode>& v, MergeMode x) { v = x; }, m);
+        return m;
     }
     /// MERG: whether the pair (prev, next) in LOGICAL order must be merged.
     [[nodiscard]] bool merg_pair(std::uint16_t prev, std::uint16_t next, bool rtl) const {
@@ -404,10 +429,7 @@ class Face {
     /// face lacks either glyph (CoreGraphics then does not hint).
     struct CgHintMetrics { float xh = 0, cap = 0, asc = 0; };
     [[nodiscard]] std::optional<CgHintMetrics> cg_hint_metrics() const {
-        {
-            std::lock_guard lock{mutex_};
-            if (cg_metrics_valid_) return cg_metrics_;
-        }
+        if (auto c = caches_->cg_metrics.read([](const std::optional<std::optional<CgHintMetrics>>& v) { return v; })) return *c;
         std::optional<CgHintMetrics> m;
         const std::uint16_t go = glyph_for('o'), gx = glyph_for('X');
         if (go != 0 && gx != 0) {
@@ -422,20 +444,19 @@ class Face {
             };
             m = CgHintMetrics{top(go), top(gx), static_cast<float>(file_.head().y_max)};
         }
-        std::lock_guard lock{mutex_};
-        cg_metrics_ = m;
-        cg_metrics_valid_ = true;
+        caches_->cg_metrics.with([](std::optional<std::optional<CgHintMetrics>>& v, std::optional<CgHintMetrics> x) { v = x; }, m);
         return m;
     }
     [[nodiscard]] Outline outline(std::uint16_t gid) const {
-        std::lock_guard lock{mutex_};
-        auto it = outline_cache_.find(gid);
-        if (it != outline_cache_.end()) return it->second;
-
-        Outline o = glyphs_.load(gid);
+        if (auto hit = caches_->outline.read([](const auto& c, std::uint16_t g) -> std::optional<Outline> {
+                if (auto it = c.find(g); it != c.end()) return it->second;
+                return std::nullopt;
+            }, gid))
+            return std::move(*hit);
+        Outline o = glyphs_.load(gid);   // outside the lock: loading can be slow, and is pure
         // Bound the cache: a CJK face has 20k glyphs and caching every
         // outline forever would dwarf the atlas it feeds.
-        if (outline_cache_.size() < 2048) outline_cache_.emplace(gid, o);
+        caches_->outline.with([](auto& c, std::uint16_t g, Outline x) { if (c.size() < 2048) c.emplace(g, std::move(x)); }, gid, o);
         return o;
     }
 
@@ -565,6 +586,11 @@ class Face {
         return std::numeric_limits<float>::quiet_NaN();
     }
 
+    // ── moving a face you own ───────────────────────────────────────────
+    // Non-const, so only a face's single owner calls these -- before it is
+    // shared. Inside a FontStack faces are shared, and a run at another
+    // position gets an INSTANCE (FontStack::instance_for), never a move.
+
     /// Move several axes at once (USER units, e.g. {{tag_wght, 700}}). Axes
     /// not listed keep their current value; unknown tags are ignored.
     void set_variations(std::span<const std::pair<std::uint32_t, float>> vals) {
@@ -687,18 +713,18 @@ class Face {
         }
         var::Coords next = var::normalize_all(axes_, avar_, user);
 
-        std::lock_guard lock{mutex_};
+        // Non-const: only the face's single owner gets here (before sharing
+        // it, or building an instance), so nothing reads concurrently.
+        user_ = std::move(next_user);
         if (next == coords_) return;   // no-op move: geometry unchanged
         coords_ = std::move(next);
-        user_   = std::move(next_user);
         glyphs_.set_coords(&coords_);
-        outline_cache_.clear();
-        cg_metrics_valid_ = false;
-        // Derive the id from the position, not a running counter, so returning
-        // to a weight we've drawn before reuses its atlas entries instead of
-        // re-rasterising every glyph again.
+        caches_->outline.with([](auto& c) { c.clear(); });
+        caches_->cg_metrics.with([](auto& c) { c.reset(); });
+        // Derive the id from the position, not a running counter, so the same
+        // weight drawn again reuses its atlas entries instead of re-rasterising.
         id_ = variation_id(base_id_, coords_);
-        adv_cache_.clear();
+        caches_->advance.with([](std::vector<float>& c) { c.clear(); });
     }
 
     // Stable id for a base face at a given normalised position. FNV-1a over
@@ -719,16 +745,26 @@ class Face {
     }
 
     [[nodiscard]] static std::uint32_t next_id() {
-        static std::atomic<std::uint32_t> counter{1};
-        return counter.fetch_add(1, std::memory_order_relaxed);
+        static Cell<std::uint32_t> counter{std::in_place, 1u};
+        return counter.with([](std::uint32_t& n) { return n++; });
     }
 
-    std::vector<std::uint8_t> data_;     ///< owned bytes (from_memory)
-    MappedFile                mapped_;   ///< or a mapping (from_file)
+    /// The font's bytes, owned or mapped, shared by every instance of it.
+    struct Bytes {
+        std::vector<std::uint8_t> owned;
+        MappedFile                mapped;
+        explicit Bytes(std::vector<std::uint8_t> v) : owned(std::move(v)) {}
+        explicit Bytes(MappedFile m) : mapped(std::move(m)) {}
+        [[nodiscard]] std::span<const std::uint8_t> span() const noexcept {
+            return owned.empty() ? mapped.data() : std::span<const std::uint8_t>{owned};
+        }
+    };
+    std::shared_ptr<const Bytes> bytes_;   ///< every span in file_ and the sources points in here
     std::string               source_path_;        ///< the file, when from_file
     std::uint32_t             source_index_ = 0;   ///< its index in a collection
 #if defined(_WIN32)
-    mutable IDWriteFontFace*  dw_face_ = nullptr;  ///< native rasteriser's view (guarded by mutex_)
+    mutable std::mutex        dw_mutex_;           ///< Windows only (not built on Linux): guards dw_*
+    mutable IDWriteFontFace*  dw_face_ = nullptr;  ///< native rasteriser's view (guarded by dw_mutex_)
     mutable bool              dw_tried_ = false;
 #endif
     ot::FontFile              file_;
@@ -755,13 +791,19 @@ class Face {
     colr::ColrTable               colr_;      // vector colour glyphs (optional)
     colr::Palette                 cpal_;      // colour palette for COLR
 
-    mutable std::mutex                                 mutex_;
-    mutable std::unordered_map<std::uint16_t, Outline> outline_cache_;
-    mutable std::vector<float>                         adv_cache_;   // per gid, NaN = unknown
-    mutable std::optional<CgHintMetrics>               cg_metrics_;
-    mutable bool                                       cg_metrics_valid_ = false;
-    mutable MergeMode                                  merge_mode_ = MergeMode::none;
-    mutable bool                                       merge_mode_valid_ = false;
+    // Caches filled lazily by const methods, from any thread. Each is a
+    // mayag::Cell: a leaf lock whose body can reach nothing else, so it can
+    // neither race nor deadlock. Every entry is a pure function of the face,
+    // so whichever thread fills one, every reader sees the same value.
+    // They live in one heap block the face owns, so the face itself can move
+    // (into a jaal::shared, between threads) while its locks stay put.
+    struct Caches {
+        Cell<std::unordered_map<std::uint16_t, Outline>>  outline;
+        Cell<std::vector<float>>                          advance;      // per gid, NaN = unknown
+        Cell<std::optional<std::optional<CgHintMetrics>>> cg_metrics;   // outer: computed yet?
+        Cell<std::optional<MergeMode>>                    merge_mode;
+    };
+    std::unique_ptr<Caches> caches_ = std::make_unique<Caches>();
 
     [[nodiscard]] MergeMode compute_merge_mode() const {
         if (file_.has_table(ot::tag("MERG"))) return MergeMode::table;
@@ -818,6 +860,25 @@ class Face {
         return MergeMode::none;
     }
 };
+
+}  // namespace mayag::typo
+
+// A Face may be frozen and shared by threads (Frozen<Face>), and an
+// instance may be built on one thread and handed to another:
+//   * every field is set while one owner builds it (from_file / from_memory,
+//     or the instance constructor) and never changes once it is shared --
+//     the mutators (set_variation*) are non-const, and FontStack only ever
+//     hands out const access to shared faces;
+//   * what const methods DO fill lazily (outlines, advances, hint metrics,
+//     the merge mode) sits in Cell leaf locks, each entry a pure
+//     function of the face, so concurrent fills agree;
+//   * the bytes are a shared_ptr<const> to immutable data (owned or mapped).
+// The Windows-only DirectWrite handle (dwrite_face) keeps its own raw mutex,
+// inside #if defined(_WIN32) -- not compiled on Linux.
+template <> inline constexpr bool jaal::frozen_opt_in<mayag::typo::Face>   = true;
+template <> inline constexpr bool jaal::sendable_opt_in<mayag::typo::Face> = true;
+
+namespace mayag::typo {
 
 // ════════════════════════════════════════════════════════════════════════
 // Rendering mode
@@ -987,10 +1048,82 @@ struct FontConfig {
 /// emoji from the colour font, and they all land in one atlas and one draw
 /// call. That is the behaviour users expect and the thing naive font stacks
 /// get wrong by picking one face for the whole run.
+namespace detail {
+/// A compiled shaping plan, as FontStack's cache holds it. Its ShapePlan
+/// points into the face's layout tables and its shaper's static tables, and
+/// owns an opaque shared_ptr<void> of per-plan data -- shapes jaal can't see
+/// into, so the claim that it is frozen is made below, once, with why.
+struct FrozenPlan { std::shared_ptr<const ot::ShapePlan> plan; };
+}  // namespace detail
+
+}  // namespace mayag::typo
+
+// A FrozenPlan may be shared by threads and moved between them:
+//   * the plan is built whole by ot::compile_plan and never written again
+//     (shared_ptr<const>); every reader takes const access only;
+//   * what it points at -- the face's GSUB/GPOS/morx tables, the shaper's
+//     static tables -- is immutable and outlives every plan (the face's bytes
+//     are owned by the FontStack's faces; shaper tables are static);
+//   * its private shaper data is built with the plan and only read after.
+template <> inline constexpr bool jaal::frozen_opt_in<mayag::typo::detail::FrozenPlan>   = true;
+template <> inline constexpr bool jaal::sendable_opt_in<mayag::typo::detail::FrozenPlan> = true;
+
+namespace mayag::typo {
+
 class FontStack : public Shaper {
   public:
     explicit FontStack(FontConfig cfg = {})
         : config_{cfg}, atlas_{cfg.atlas_size} {}
+
+    // ── threads ─────────────────────────────────────────────────────────
+    //
+    // Two halves, two rules:
+    //
+    //   * SHAPING AND MEASURING (shape, shaped, metrics, resolve, ...) may run
+    //     on any number of threads at once. Faces are immutable once added
+    //     (a variable face at another weight is its own frozen instance), and
+    //     every lazily filled cache is a Cell (a leaf lock).
+    //   * DRAWING (begin_frame, glyph, merged_run: the atlas) has ONE user at a
+    //     time. The atlas hands out pointers into itself and moves glyphs
+    //     between frames, so it cannot be shared. A renderer takes a
+    //     DrawLease for as long as it draws; a second lease while one is held
+    //     aborts AT ONCE with the reason -- it never corrupts quietly. Two
+    //     renderers on two threads each fork() a stack: the forks share every
+    //     face (cheap) and own their atlases.
+
+    /// The right to draw through this stack (see above). Held by a renderer.
+    class DrawLease {
+      public:
+        explicit DrawLease(const FontStack& s) : s_(&s) {
+            const bool free = s.drawing_.with([](bool& busy) { return !std::exchange(busy, true); });
+            if (!free) {
+                std::fputs("mayag: a FontStack is being drawn by two renderers at once. Its atlas has one "
+                           "user at a time; give the second renderer its own: stack.fork().\n", stderr);
+                std::abort();
+            }
+        }
+        ~DrawLease() { if (s_ != nullptr) s_->drawing_.with([](bool& busy) { busy = false; }); }
+        DrawLease(DrawLease&& o) noexcept : s_(std::exchange(o.s_, nullptr)) {}
+        DrawLease(const DrawLease&) = delete;
+        DrawLease& operator=(const DrawLease&) = delete;
+        DrawLease& operator=(DrawLease&&) = delete;
+
+      private:
+        const FontStack* s_;
+    };
+
+    /// A stack with the same faces, families and fallbacks, and an atlas and
+    /// caches of its own: for a second renderer on another thread.
+    [[nodiscard]] std::shared_ptr<FontStack> fork() const {
+        auto f = std::make_shared<FontStack>(config_);
+        f->faces_ = faces_;
+        f->limits_ = limits_;
+        f->preferred_ = preferred_;
+        f->siblings_ = siblings_;
+        f->exclusive_ = exclusive_;
+        f->family_face_ = family_face_;
+        return f;
+    }
 
     /// Append a face. The first added is primary; later ones are fallbacks.
     void add(std::shared_ptr<Face> face) {
@@ -1059,7 +1192,7 @@ class FontStack : public Shaper {
     }
     /// Bumped whenever which glyphs a style resolves to may have changed
     /// (a face added, a role reassigned): text measured before is stale.
-    [[nodiscard]] std::uint64_t generation() const noexcept { return generation_.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::uint64_t generation() const noexcept { return generation_.read([](const std::uint64_t& g) { return g; }); }
     /// The face playing `role`, if one was assigned.
     [[nodiscard]] const Face* family_face(FontFamily role) const noexcept {
         const std::size_t i = family_face_[index_of(role)];
@@ -1134,6 +1267,82 @@ class FontStack : public Shaper {
     [[nodiscard]] const Face* primary() const noexcept {
         return faces_.empty() ? nullptr : faces_.front().get();
     }
+    /// The axis values a run asks of a variable face: the wght axis plus any
+    /// extra overrides (opsz, wdth, custom) and, when `italic` is requested,
+    /// the font's own slant -- slnt (degrees, its min = most slanted) or ital
+    /// (0..1, use 1). Empty for a static face.
+    struct AxisValues {
+        std::array<std::pair<std::uint32_t, float>, ShapeParams::max_axes + 4> vals{};
+        std::size_t n = 0;
+        [[nodiscard]] std::span<const std::pair<std::uint32_t, float>> span() const noexcept { return {vals.data(), n}; }
+    };
+    [[nodiscard]] static AxisValues axis_values(const Face* face, float weight,
+                                                std::span<const ShapeParams::Axis> axes, bool italic) {
+        AxisValues out;
+        if (face == nullptr || !face->is_variable()) return out;
+        auto& vals = out.vals;
+        std::size_t& n = out.n;
+        vals[n++] = {var::tag_wght, face->wght_for(weight)};
+        face->weight_axes_for(weight, [&](std::uint32_t tag, float v) {
+            if (n < vals.size()) vals[n++] = {tag, v};
+        });
+
+        // Real oblique from the font when italic is asked for and the face has
+        // a slant/italic axis (true masters beat any synthetic shear).
+        if (italic) {
+            for (const auto& ax : face->axes()) {
+                if (ax.tag == var::tag_slnt && n < vals.size()) {
+                    vals[n++] = {var::tag_slnt, ax.min};   // most-slanted extreme
+                    break;
+                }
+                if (ax.tag == var::tag_ital && n < vals.size()) {
+                    vals[n++] = {var::tag_ital, ax.max};   // fully italic
+                    break;
+                }
+            }
+        }
+
+        for (const auto& a : axes) {
+            if (n >= vals.size()) break;
+            // CoreText's automatic optical sizing skips variable faces that
+            // live in a collection: SF India and CJK Symbols Fallback draw at
+            // their default opsz at every size (CTFontCopyVariation reports no
+            // opsz; SF Devanagari's advances match opsz 28 at 12 pt), while
+            // standalone SF Arabic/Hebrew/Armenian follow the size.
+            if (a.tag == var::tag_opsz && face->file().in_collection()) continue;
+            bool merged = false;
+            for (std::size_t j = 0; j < n; ++j)
+                if (vals[j].first == a.tag) { vals[j].second = a.value; merged = true; break; }
+            if (!merged) vals[n++] = {a.tag, a.value};
+        }
+        return out;
+    }
+
+    /// Face i at the position a run asks for. A static face is itself. A
+    /// variable face is an INSTANCE: built once per position, frozen, shared
+    /// by every thread that draws at that position, and kept for the stack's
+    /// life (a UI uses a handful of weights). Nothing is ever moved under
+    /// another thread's feet, so two runtimes drawing at weights 300 and 800
+    /// through one stack each get exactly their own glyphs.
+    [[nodiscard]] Frozen<Face> instance_for(std::size_t i, float weight, std::span<const ShapeParams::Axis> axes,
+                                                 bool italic) const {
+        const std::shared_ptr<Face>& base = faces_[i];
+        const AxisValues want = axis_values(base.get(), weight, axes, italic);
+        InstanceKey key{i, {}};
+        for (std::size_t k = 0; k < want.n; ++k) key.vals.emplace_back(want.vals[k].first, want.vals[k].second);
+        if (auto hit = instances_.read([](const InstanceMap& m, const InstanceKey& k) -> std::optional<Frozen<Face>> {
+                if (auto it = m.find(k); it != m.end()) return it->second;
+                return std::nullopt;
+            }, key))
+            return *hit;
+        // Built outside the lock (it parses the font's tables); a racing
+        // thread may build the same instance too, and the first one in wins.
+        auto made = Frozen<Face>::make(*base, want.span());
+        return instances_.with([](InstanceMap& m, InstanceKey k, Frozen<Face> f) {
+            return m.try_emplace(std::move(k), std::move(f)).first->second;
+        }, std::move(key), std::move(made));
+    }
+
     [[nodiscard]] const Face* face_at(std::size_t i) const noexcept {
         return i < faces_.size() ? faces_[i].get() : nullptr;
     }
@@ -1149,9 +1358,10 @@ class FontStack : public Shaper {
         atlas_.set_frame(frame);
         if (frame % 120 == 0) atlas_.collect(config_.glyph_ttl_frames);
         atlas_.maintain();   // move glyphs only here, before anything paints
-        std::lock_guard lock{shape_mutex_};
-        shape_frame_ = frame;
-        if (frame % 120 == 0) evict_shapes(frame);
+        shapes_.with([](ShapeCache& c, std::uint64_t f, std::uint64_t ttl) {
+            c.frame = f;
+            if (f % 120 == 0) c.evict(f, ttl);
+        }, frame, std::uint64_t{config_.glyph_ttl_frames});
     }
 
     /// Which face can render `codepoint`, and its glyph id.
@@ -1192,20 +1402,21 @@ class FontStack : public Shaper {
 
     // ── shaping ─────────────────────────────────────────────────────────────────
 
-    using ShapedRun = std::shared_ptr<const ShapeResult>;
+    using ShapedRun = Frozen<ShapeResult>;   ///< frozen: any thread may read it
 
     /// Shape through the cache. Layout and paint shape the same strings every
     /// frame, so a hit skips cmap, advance, kerning and ligature work. The
     /// result is immutable and shared, so a hit doesn't copy glyphs.
     [[nodiscard]] ShapedRun shaped(std::string_view text, const ShapeParams& params) const {
         const std::uint64_t h = shape_hash(text, params);
-        {
-            std::lock_guard lock{shape_mutex_};
-            if (auto it = shapes_.find(ShapeProbe{h, text, &params}); it != shapes_.end()) {
-                it->second.last_used = shape_frame_;
-                return it->second.run;
-            }
-        }
+        if (auto hit = shapes_.with([](ShapeCache& c, std::uint64_t hh, std::string t, ShapeParams p) -> std::optional<ShapedRun> {
+                if (auto it = c.map.find(ShapeProbe{hh, t, &p}); it != c.map.end()) {
+                    it->second.last_used = c.frame;
+                    return it->second.run;
+                }
+                return std::nullopt;
+            }, h, std::string{text}, params))
+            return *hit;
         auto fresh = shape_uncached(text, params);
         // The unwrapped extent, computed once here instead of per measure.
         {
@@ -1218,10 +1429,11 @@ class FontStack : public Shaper {
             fresh.widest_line = num::max(widest, cur);
             fresh.line_count = lines;
         }
-        auto run = std::make_shared<const ShapeResult>(std::move(fresh));
-        std::lock_guard lock{shape_mutex_};
-        if (shapes_.size() >= kMaxShapes) evict_shapes(shape_frame_ + 1);
-        shapes_.try_emplace(ShapeKey{h, std::string{text}, params}, ShapeEntry{run, shape_frame_});
+        auto run = ShapedRun::make(std::move(fresh));
+        shapes_.with([](ShapeCache& c, ShapeKey k, ShapedRun r, std::uint64_t ttl) {
+            if (c.map.size() >= kMaxShapes) c.evict(c.frame + 1, ttl);
+            c.map.try_emplace(std::move(k), ShapeEntry{std::move(r), c.frame});
+        }, ShapeKey{h, std::string{text}, params}, run, std::uint64_t{config_.glyph_ttl_frames});
         return run;
     }
 
@@ -1232,13 +1444,11 @@ class FontStack : public Shaper {
     }
 
     void clear_shape_cache() {
-        generation_.fetch_add(1, std::memory_order_relaxed);
-        std::lock_guard lock{shape_mutex_};
-        shapes_.clear();
+        generation_.with([](std::uint64_t& g) { ++g; });
+        shapes_.with([](ShapeCache& c) { c.map.clear(); });
     }
     [[nodiscard]] std::size_t shape_cache_size() const {
-        std::lock_guard lock{shape_mutex_};
-        return shapes_.size();
+        return shapes_.read([](const ShapeCache& c) { return c.map.size(); });
     }
 
     [[nodiscard]] ShapeResult shape_uncached(std::string_view text,
@@ -1392,8 +1602,8 @@ class FontStack : public Shaper {
                 if (params.axes[a].tag == ot::tag("opsz")) pt = params.axes[a].value;
             face_idx = face_for_size(face_idx, pt);
         }
-        Face& face = *faces_[face_idx];
-        pin_variations(&face, params.weight, {params.axes.data(), params.axis_count}, params.italic);
+        const Frozen<Face> inst = instance_for(face_idx, params.weight, {params.axes.data(), params.axis_count}, params.italic);
+        const Face& face = *inst;   // this run's instance: immutable, shared, no other thread moves it
 
         const ot::Layout& layout = face.layout();
         const ot::FontFile& file = face.file();
@@ -1496,19 +1706,22 @@ class FontStack : public Shaper {
         key = key * 31u + static_cast<std::uint64_t>(dir);
         for (std::uint32_t l : languages) key = key * 1000003u + l;
         for (const auto& f : feats) key = key * 1000003u + (std::uint64_t{f.tag} << 8 | f.value);
-        {
-            std::lock_guard lock{plan_mutex_};
-            if (auto it = plans_.find(key); it != plans_.end()) return it->second;
-        }
+        if (auto hit = plans_.read([](const PlanMap& m, std::uint64_t k) -> std::optional<PlanRef> {
+                if (auto it = m.find(k); it != m.end()) return it->second;
+                return std::nullopt;
+            }, key))
+            return hit->plan;
         auto plan = std::make_shared<const ot::ShapePlan>(
             ot::compile_plan(layout, script, dir, languages, feats, ff, has_kern, face.file().has_table(ot::tag("kerx")),
                              face.file().table(ot::tag("morx"))));
-        std::lock_guard lock{plan_mutex_};
-        if (plans_.size() > 512) plans_.clear();
-        return plans_.emplace(key, std::move(plan)).first->second;
+        return plans_.with([](PlanMap& m, std::uint64_t k, PlanRef p) {
+            if (m.size() > 512) m.clear();
+            return m.emplace(k, std::move(p)).first->second;
+        }, key, PlanRef{std::move(plan)}).plan;
     }
-    mutable std::mutex plan_mutex_;
-    mutable std::unordered_map<std::uint64_t, std::shared_ptr<const ot::ShapePlan>> plans_;
+    using PlanRef = detail::FrozenPlan;
+    using PlanMap = std::unordered_map<std::uint64_t, PlanRef>;
+    mutable Cell<PlanMap> plans_;
 
   public:
 
@@ -1603,7 +1816,7 @@ class FontStack : public Shaper {
             mix(static_cast<std::uint64_t>(dy + 4096));
         }
         GlyphKey key;
-        key.face_id = faces_[face_index]->id();
+        key.face_id = instance_for(face_index, weight, axes, italic)->id();   // the run's instance, not the base
         key.glyph_id = static_cast<std::uint16_t>(h);
         key.size_bucket = static_cast<std::uint32_t>(h >> 16);
         key.flags = static_cast<std::uint16_t>(0x8000u | ((h >> 48) & 0x7fffu));
@@ -1644,8 +1857,8 @@ class FontStack : public Shaper {
                                            bool italic = false, int x_phase = 0,
                                            int smoothing = 4) {
         if (face_index >= faces_.size()) return nullptr;
-        const Face& face = *faces_[face_index];
-        pin_variations(faces_[face_index].get(), weight, axes, italic);
+        const Frozen<Face> inst = instance_for(face_index, weight, axes, italic);
+        const Face& face = *inst;
 
         const bool use_sdf = should_use_sdf(size_px);
         // Phases only mean something for outline coverage: an SDF is resampled
@@ -1677,7 +1890,7 @@ class FontStack : public Shaper {
             : size_bucket_of(size_px);
         // Synthesise italic by shearing when the font can't slant itself
         // (static faces, or variable faces with no slnt/ital axis). Variable
-        // faces WITH a slant axis already did it for real in pin_variations,
+        // faces WITH a slant axis already did it for real in their instance (instance_for),
         // so we must not shear those on top. Fallback faces (SF Arabic, PingFang
         // under an italic SF run) stay upright on macOS, as CoreText draws
         // them; browsers and Pango shear them, which is the portable default.
@@ -1890,53 +2103,6 @@ class FontStack : public Shaper {
         return atlas_.insert(key, r.bitmap, r.offset, advance, scale, 0.0f, false);
     }
 
-    // Pin a variable face to a run's axis position before we shape or
-    // rasterise with it: the wght axis plus any extra overrides (opsz, wdth,
-    // custom) and, when `italic` is requested, the font's own slant — slnt
-    // (degrees, use its min = most slanted) or ital (0..1, use 1). A no-op for
-    // static faces. Face guards its own variation state and set_variations
-    // early-outs when nothing moves, so this is cheap per run and safe.
-    static void pin_variations(Face* face, float weight,
-                               std::span<const ShapeParams::Axis> axes,
-                               bool italic = false) {
-        if (face == nullptr || !face->is_variable()) return;
-        std::array<std::pair<std::uint32_t, float>, ShapeParams::max_axes + 4> vals;
-        std::size_t n = 0;
-        vals[n++] = {var::tag_wght, face->wght_for(weight)};
-        face->weight_axes_for(weight, [&](std::uint32_t tag, float v) {
-            if (n < vals.size()) vals[n++] = {tag, v};
-        });
-
-        // Real oblique from the font when italic is asked for and the face has
-        // a slant/italic axis (true masters beat any synthetic shear).
-        if (italic) {
-            for (const auto& ax : face->axes()) {
-                if (ax.tag == var::tag_slnt && n < vals.size()) {
-                    vals[n++] = {var::tag_slnt, ax.min};   // most-slanted extreme
-                    break;
-                }
-                if (ax.tag == var::tag_ital && n < vals.size()) {
-                    vals[n++] = {var::tag_ital, ax.max};   // fully italic
-                    break;
-                }
-            }
-        }
-
-        for (const auto& a : axes) {
-            if (n >= vals.size()) break;
-            // CoreText's automatic optical sizing skips variable faces that
-            // live in a collection: SF India and CJK Symbols Fallback draw at
-            // their default opsz at every size (CTFontCopyVariation reports no
-            // opsz; SF Devanagari's advances match opsz 28 at 12 pt), while
-            // standalone SF Arabic/Hebrew/Armenian follow the size.
-            if (a.tag == var::tag_opsz && face->file().in_collection()) continue;
-            bool merged = false;
-            for (std::size_t j = 0; j < n; ++j)
-                if (vals[j].first == a.tag) { vals[j].second = a.value; merged = true; break; }
-            if (!merged) vals[n++] = {a.tag, a.value};
-        }
-        face->set_variations({vals.data(), n});
-    }
 
     /// The `trak` tracking for one glyph of `face` at these params. Tracking
     /// is chosen by POINT size, i.e. the logical size, which the shaper only
@@ -2013,6 +2179,21 @@ class FontStack : public Shaper {
     FontConfig                          config_;
     Atlas                               atlas_;
     std::vector<std::shared_ptr<Face>>  faces_;
+    /// Variable-face instances by (face, axis values): see instance_for.
+    struct InstanceKey {
+        std::size_t                                  face = 0;
+        std::vector<std::pair<std::uint32_t, float>> vals;
+        bool operator==(const InstanceKey&) const = default;
+    };
+    struct InstanceHash {
+        std::size_t operator()(const InstanceKey& k) const noexcept {
+            std::size_t h = k.face * 0x9E3779B97F4A7C15ull;
+            for (const auto& [t, v] : k.vals) h = (h ^ (std::size_t{t} * 31u + std::hash<float>{}(v))) * 0x100000001B3ull;
+            return h;
+        }
+    };
+    using InstanceMap = std::unordered_map<InstanceKey, Frozen<Face>, InstanceHash>;
+    mutable Cell<InstanceMap> instances_;
     std::vector<std::vector<std::array<char32_t, 2>>> limits_;   ///< per face; empty = unlimited
     struct Preferred { char32_t lo, hi; std::size_t face; };
     std::vector<Preferred> preferred_;   ///< sorted by lo
@@ -2081,15 +2262,18 @@ class FontStack : public Shaper {
         for (const std::uint32_t l : p.languages) if (l) mix(l);
         return h;
     }
-    // Drop runs not used since `before - ttl` (the whole cache when full).
-    void evict_shapes(std::uint64_t now) const {
-        const std::uint64_t ttl = shapes_.size() >= kMaxShapes ? 0 : config_.glyph_ttl_frames;
-        std::erase_if(shapes_, [&](const auto& kv) { return kv.second.last_used + ttl < now; });
-    }
     static constexpr std::size_t kMaxShapes = 1u << 15;
-    mutable std::mutex shape_mutex_;
-    mutable std::unordered_map<ShapeKey, ShapeEntry, ShapeHash, ShapeEq> shapes_;
-    std::uint64_t shape_frame_ = 0;
+    /// Shaped runs by (text, params), with the frame each was last used in.
+    struct ShapeCache {
+        std::unordered_map<ShapeKey, ShapeEntry, ShapeHash, ShapeEq> map;
+        std::uint64_t frame = 0;
+        // Drop runs not used since `now - ttl` (the whole cache when full).
+        void evict(std::uint64_t now, std::uint64_t ttl) {
+            if (map.size() >= kMaxShapes) ttl = 0;
+            std::erase_if(map, [&](const auto& kv) { return kv.second.last_used + ttl < now; });
+        }
+    };
+    mutable Cell<ShapeCache> shapes_;
 
     struct Sibling { std::size_t of, at; std::uint16_t weight; bool italic; float min_pt = 0.0f; };
     std::vector<Sibling> siblings_;
@@ -2100,7 +2284,8 @@ class FontStack : public Shaper {
 
     /// Faces assigned to a family role, and which face plays each role.
     std::vector<std::size_t> exclusive_;
-    std::atomic<std::uint64_t> generation_{0};
+    mutable Cell<std::uint64_t> generation_;   ///< bumped when faces or their order change
+    mutable Cell<bool>          drawing_;      ///< a DrawLease is held
     std::array<std::size_t, font_family_count> family_face_ = [] {
         std::array<std::size_t, font_family_count> a{};
         a.fill(static_cast<std::size_t>(-1));

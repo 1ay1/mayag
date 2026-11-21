@@ -1790,12 +1790,16 @@ void test_variations() {
         if (width_tracks_weight)
             check(w_black > w_thin, "heavier TextStyle::weight measures wider through StackMeasurer");
         // The axis itself must move with the style, whatever the font does
-        // with its advances: read it back after shaping each weight.
-        const auto axis_after = [&](const TextStyle& s) {
-            (void)meas.advance("H", s);
-            return vf->variation(typo::var::tag_wght);
+        // with its advances: shaping draws from an INSTANCE at the style's
+        // position (the shared face never moves, so threads can't race on
+        // it); read the axis off the instance each weight resolves to.
+        const auto axis_at = [&](FontWeight w) {
+            return stack.instance_for(0, static_cast<float>(w), {}, false)->variation(typo::var::tag_wght);
         };
-        check(axis_after(black) > axis_after(thin), "TextStyle::weight drives the wght axis");
+        const float before = vf->variation(typo::var::tag_wght);
+        check(axis_at(FontWeight::black) > axis_at(FontWeight::thin), "TextStyle::weight drives the wght axis");
+        (void)meas.advance("Hamburgefons", black);
+        check(vf->variation(typo::var::tag_wght) == before, "shaping never moves the shared face (no thread can race on it)");
 
         // Content-addressed id: the same weight twice yields the same face id,
         // so glyph atlases hit across frames instead of re-rasterising.
@@ -1897,7 +1901,7 @@ void test_coretext_parity() {
     TextStyle deva;
     deva.size = 16.0f;
     const auto dr = stack->shaped("\u0926\u0941\u0928\u093F\u092F\u093E", typo::detail::shape_params_of(deva));
-    if (dr && dr->glyphs.size() == 7 && stack->face_at(dr->glyphs[0].face_index)->file().postscript_name() == ".SFDevanagari-Regular") {
+    if (dr->glyphs.size() == 7 && stack->face_at(dr->glyphs[0].face_index)->file().postscript_name() == ".SFDevanagari-Regular") {
         near(dr->glyphs[0].advance + dr->glyphs[1].offset.x, 8.992f, 0.002f, "Devanagari mark stays on its anchor under trak tracking");
         near(dr->width, 35.904f, 0.002f, "tracked Devanagari line width matches CoreText");
     }

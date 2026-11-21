@@ -19,6 +19,7 @@
 
 #include "../core/color.hpp"
 #include "../core/geometry.hpp"
+#include "../core/sync.hpp"   // Vec2 / Rect / Color are Sendable and Frozen
 #include "../core/event.hpp"
 #include "gestures.hpp"
 #include "handlers.hpp"
@@ -252,12 +253,8 @@ inline constexpr bool jaal::sendable_opt_in<mayag::Edit<Model>> = true;
 // mayag's geometry and colour are plain values (floats, no pointers), so a
 // Msg may carry them across threads. jaal can't see inside a class with
 // constructors, hence the opt-ins.
-template <> inline constexpr bool jaal::sendable_opt_in<mayag::Vec2> = true;
-template <> inline constexpr bool jaal::frozen_opt_in<mayag::Vec2>   = true;
-template <> inline constexpr bool jaal::sendable_opt_in<mayag::Rect> = true;
-template <> inline constexpr bool jaal::frozen_opt_in<mayag::Rect>   = true;
-template <class S> inline constexpr bool jaal::sendable_opt_in<mayag::Color<S>> = true;
-template <class S> inline constexpr bool jaal::frozen_opt_in<mayag::Color<S>>   = true;
+// (Vec2, Rect and Color are declared Sendable and Frozen in core/sync.hpp,
+// beside the types, so every layer that shares them sees the claim.)
 
 /// Declare that a type of YOURS may travel between threads in a Msg or a
 /// task argument (it owns everything it holds), at global scope:

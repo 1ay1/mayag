@@ -687,17 +687,35 @@ if(MAYAG_BUILD_TESTS)
                          -P ${_MAYAG_BANLIST})
     endif()
 
-    # The same test under ThreadSanitizer. Not part of the default suite --
-    # TSan is ~10x slower and needs a compatible toolchain -- but it is the
-    # only thing that finds a race which does not happen to fire today.
-    # Build and run explicitly:  ninja mayag_concurrency_tsan && ./mayag_concurrency_tsan
+    # The threaded tests again under ThreadSanitizer: the only thing that finds
+    # a race which does not happen to fire today. On by default on Linux
+    # (MAYAG_TSAN_TESTS=OFF to skip); each is its own ctest entry, labelled
+    # `tsan`, failing on any report.
+    option(MAYAG_TSAN_TESTS "Build and run the threaded tests under ThreadSanitizer" ${CMAKE_HOST_UNIX})
     if(NOT MSVC AND NOT APPLE)
         add_executable(mayag_concurrency_tsan EXCLUDE_FROM_ALL
                        tests/test_concurrency.cpp)
         target_link_libraries(mayag_concurrency_tsan PRIVATE mayag)
         target_compile_options(mayag_concurrency_tsan PRIVATE -fsanitize=thread -O1 -g)
         target_link_options(mayag_concurrency_tsan PRIVATE -fsanitize=thread)
+        add_executable(mayag_font_threads_tsan EXCLUDE_FROM_ALL tests/test_font_threads.cpp)
+        target_link_libraries(mayag_font_threads_tsan PRIVATE mayag)
+        target_compile_options(mayag_font_threads_tsan PRIVATE -fsanitize=thread -O1 -g)
+        target_link_options(mayag_font_threads_tsan PRIVATE -fsanitize=thread)
+        if(MAYAG_TSAN_TESTS)
+            foreach(t mayag_concurrency_tsan mayag_font_threads_tsan)
+                set_target_properties(${t} PROPERTIES EXCLUDE_FROM_ALL OFF)
+                add_test(NAME ${t} COMMAND ${t})
+                set_tests_properties(${t} PROPERTIES LABELS "tsan"
+                    ENVIRONMENT "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:exitcode=66")
+            endforeach()
+        endif()
     endif()
+    # One FontStack shared by threads, variable fonts at different weights:
+    # every caller gets exactly its own answer.
+    add_executable(mayag_font_threads_tests tests/test_font_threads.cpp)
+    target_link_libraries(mayag_font_threads_tests PRIVATE mayag)
+    add_test(NAME mayag_font_threads_tests COMMAND mayag_font_threads_tests)
 
     # Virtualised cost must be flat in the row count, not just look right.
     add_executable(mayag_scaling_tests tests/test_scaling.cpp)
