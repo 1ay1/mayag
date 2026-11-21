@@ -23,8 +23,6 @@
 #include "../dsl/dsl.hpp"
 #include "gestures.hpp"
 
-#include <jaal/core/stdshape.hpp>
-
 #include <algorithm>
 #include <concepts>
 #include <functional>
@@ -222,13 +220,19 @@ template <class Model, class T>
 namespace detail::handlers {
 
 /// The std::variant a message type is, or derives from (agentty-style
-/// `struct Msg : std::variant<...>`); void when it is neither.
+/// `struct Msg : std::variant<...> { using variant::variant; }`); void when
+/// it is neither. Plain C++: overload resolution finds the variant base, so
+/// this header stays runtime-free (no jaal; widgets include it).
+template <class... A>
+std::variant<A...> variant_base_probe(const std::variant<A...>&);
 template <class T> struct msg_variant { using type = void; };
-template <class... Ts> struct msg_variant<std::variant<Ts...>> { using type = std::variant<Ts...>; };
 template <class T>
-    requires(!std::is_void_v<jaal::detail::stdshape::variant_base_t<T>> &&
-             !std::is_same_v<jaal::detail::stdshape::variant_base_t<T>, T>)
-struct msg_variant<T> { using type = jaal::detail::stdshape::variant_base_t<T>; };
+    requires requires { handlers::variant_base_probe(std::declval<const T&>()); }
+struct msg_variant<T> {
+    using base = decltype(handlers::variant_base_probe(std::declval<const T&>()));
+    // only when T adds no state of its own, so treating T as its base is exact
+    using type = std::conditional_t<sizeof(T) == sizeof(base), base, void>;
+};
 
 /// Build an M holding the handler's value, searching M's alternatives and,
 /// below them, nested message groups (`Msg = variant<TabMsg, ...>`,

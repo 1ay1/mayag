@@ -186,6 +186,17 @@ using Unlocked = jaal::unlocked;
 template <class T>
 using CoOwned = jaal::co_owned<T>;
 
+/// May a T move to another thread? (it holds nothing the sender can still
+/// reach). Every message, task argument and stream argument must be.
+template <class T>
+concept Sendable = jaal::Sendable<T>;
+/// May threads share ONE T for reading? (`Shared<T>`)
+template <class T>
+concept Shareable = jaal::Shareable<T>;
+/// May threads share ONE T and call it concurrently? (`CoOwned<T>`)
+template <class T>
+concept Sync = jaal::Sync<T>;
+
 /// Data reachable only under its lock, in a lock order the compiler
 /// checks: `Guarded<Cache>` (a leaf lock), or `Guarded<Cache, Rank<20,
 /// "cache">>` to nest it under higher-ranked locks.
@@ -258,6 +269,12 @@ template <class S> inline constexpr bool jaal::frozen_opt_in<mayag::Color<S>>   
 /// a copy (`Shared<T>`):  MAYAG_FROZEN(my::Glyphs);
 #define MAYAG_FROZEN(...) \
     template <> inline constexpr bool jaal::frozen_opt_in<__VA_ARGS__> = true
+/// Declare that every member function of a type of yours is safe to call from
+/// several threads at once, so threads may share ONE of it (`CoOwned<T>`):
+///     MAYAG_SYNC(my::Wakeup);   // signal() is one syscall; only its owner waits
+/// The strongest claim of the three: say beside it why it holds.
+#define MAYAG_SYNC(...) \
+    template <> inline constexpr bool jaal::sync_opt_in<__VA_ARGS__> = true
 
 template <>
 struct std::hash<mayag::fx::on_frame::key_type> {
