@@ -528,7 +528,8 @@ def main():
     else:
         prev = open(out_path, encoding="utf-8").read() if os.path.exists(out_path) else ""
         def old(name):
-            m = re.search(r"inline constexpr std::string_view %s =\n(.*?);\n" % name, prev, re.S)
+            # up to the raw string's own end: HLSL lines end in ';' too
+            m = re.search(r'inline constexpr std::string_view %s =\n(.*?\)SHADER");\n' % name, prev, re.S)
             if not m:
                 return ""
             return "".join(re.findall(r'R"SHADER\((.*?)\)SHADER"', m.group(1), re.S))[1:-1]
