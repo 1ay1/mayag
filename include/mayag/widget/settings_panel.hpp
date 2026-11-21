@@ -701,7 +701,7 @@ template <ControlContext C, class On>
             // row turns it into ↺, which resets -- next to what it resets,
             // not in a column of its own pushing the controls off the edge.
             const bool xh = c.hovered(xid);
-            Node mark = s.modified
+            Node dot = s.modified
                 ? (h(node(sel || hov ? icon_node(Icon::undo, 12.0f, xh ? t.text_primary : t.accent)
                                      : (box() | size(6.0f, 6.0f) | radius(t.rounded(3.0f)) | bg(t.accent)).build()))
                    | size(20.0f, 20.0f) | center | radius(t.rounded(5.0f))
@@ -711,7 +711,7 @@ template <ControlContext C, class On>
                 : (box() | size(20.0f, 20.0f)).build();
 
             auto title = h(text_owned(setting_title(s)) | font(fs) | fg(t.text_primary) | (s.modified ? weight(FontWeight::medium) : weight(FontWeight::regular)),
-                           node(std::move(mark)))
+                           node(std::move(dot)))
                        | gap(4.0f) | align(Align::center) | height(20.0f);
             // Rows sit inside the section's card: the selected one a raised
             // wash with an accent edge, the rest split by inset hairlines.

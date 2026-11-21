@@ -95,7 +95,7 @@ template <ControlContext C>
     const auto paper = t.background, ink = t.text_primary;
     // Neutral greys from the scheme's own fg/bg: the dialog is quiet, and
     // colour lands only where it means something (the badge, the action).
-    const auto dim = mix(ink, paper, 0.40f), faint = mix(paper, ink, 0.13f), hair = mix(paper, ink, 0.10f);
+    const auto dim = mix(ink, paper, 0.40f), hair = mix(paper, ink, 0.10f);
     const auto tone = d::tame(s.tone.a > 0.0f ? s.tone : t.accent, paper);
     const auto danger = d::tame(t.danger, paper);
     const float r = t.rounded(6);
