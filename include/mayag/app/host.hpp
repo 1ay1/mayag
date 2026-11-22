@@ -316,7 +316,17 @@ class window_host {
         const auto now = now_();
         time_ = std::chrono::duration<double>(now - start_).count();
         sync_display();
+        // Input that the program acted on, while something animates: its
+        // answer usually moves in the frame tick (a smooth scroll, a fade, a
+        // drag that scrolls), so waiting for the vblank-grid tick held every
+        // such input 0-1 refresh (measured: scroll and the settings fade
+        // landed at +5 / +10 ms). With a replacing swapchain a tick NOW costs
+        // no latency, so the tick comes now, with the real elapsed dt.
+        if (emitted_ != emitted_at_tick_ && input_since_render_ && animating() && !external_loop_ &&
+            window_replaces_queued() && (slot_of(now) != drawn_slot_ || draws_in_slot_ < kFreshPerSlot))
+            next_frame_ = std::min(next_frame_, now);
         if (const auto dt = take_frame()) {
+            emitted_at_tick_ = emitted_;
             if (tracked_.animating()) { tracked_.step_all(*dt); dirty_ = true; }
             if (motion_.animating() || morphing_) { motion_dt_ += *dt; morph_dt_ += *dt; dirty_ = true; }
             if (frames_on_ && frame_make_) {
@@ -1669,15 +1679,26 @@ class window_host {
             po.glyphs       = &bindings_->glyphs;
             po.debug_bounds = cfg_.debug_bounds;
             po.clear_color  = theme_.background.fade(theme_.window_opacity);
+            // Reused memo subtrees replay last frame's instances (PaintCache):
+            // a typed character repaints its row, not the screen.
+            const auto atlas_epoch = [&] { return cfg_.fonts ? cfg_.fonts->atlas().layout_epoch() : 0; };
+            if (memo_on_ && !cfg_.debug_bounds) {
+                paint_cache_.begin_frame(frame_counter_, atlas_epoch());
+                po.cache = &paint_cache_;
+            }
             render::paint(tree_, draws_, po);
             // The atlas had to move glyphs mid-paint (it overflowed): uvs
-            // recorded before the move are stale. Paint again; the second
-            // pass finds every glyph resident at its new place.
+            // recorded before the move are stale. Paint again, without the
+            // cache (its recordings are stale too); the second pass finds
+            // every glyph resident at its new place.
             if (cfg_.fonts && cfg_.fonts->atlas_moved()) {
                 draws_.clear();
+                po.cache = nullptr;
+                paint_cache_.begin_frame(frame_counter_, ~0ull);   // forget them
                 render::paint(tree_, draws_, po);
                 (void)cfg_.fonts->atlas_moved();
             }
+            paint_cache_.end_frame();
             memos_.end_frame();
             if (!overlays_.empty()) {
                 auto sorted = overlays_.items();
@@ -1831,6 +1852,14 @@ class window_host {
         const FrameTiming m = latency_.mean(framestats_frames_);
         std::uint64_t skipped = 0;
         if constexpr (requires { window_.frames_skipped(); }) skipped = window_.frames_skipped();
+        const auto ms = std::exchange(memos_.stats, {});
+        const auto ps = std::exchange(paint_cache_.stats, {});
+        std::fprintf(stderr, "mayag: paint cache hits %llu  misses %llu\n", static_cast<unsigned long long>(ps.hits),
+                     static_cast<unsigned long long>(ps.misses));
+        std::fprintf(stderr, "mayag: memo hits %llu  misses: new %llu, taken %llu, unready %llu, hover %llu\n",
+                     static_cast<unsigned long long>(ms.hits), static_cast<unsigned long long>(ms.miss_new),
+                     static_cast<unsigned long long>(ms.miss_taken), static_cast<unsigned long long>(ms.miss_unready),
+                     static_cast<unsigned long long>(ms.miss_interaction));
         std::fprintf(stderr, "mayag: %zu frames  view %.3f  cascade %.3f  layout %.3f  paint %.3f  render %.3f  = %.3f ms  (%u instances, %u draws, %llu identical skipped)\n",
                      framestats_frames_, m.view_ms, m.cascade_ms, m.layout_ms, m.paint_ms, m.render_ms, m.cpu_ms(),
                      m.instances, m.draw_calls, static_cast<unsigned long long>(skipped));
@@ -1840,12 +1869,14 @@ class window_host {
     int                 coalesced_moves_ = 0;
     LatencyStats        latency_{};
     MemoCache           memos_{};
+    render::PaintCache  paint_cache_{};
     // MAYAG_MEMO=0 turns memo() off (to check it changes nothing).
     bool memo_on_ = [] { const char* e = std::getenv("MAYAG_MEMO"); return e == nullptr || *e != '0'; }();
     std::uint64_t       interaction_reads_ = 0;
     BusyLoopDetector    busy_{};
     bool                busy_warned_ = false;
     bool                input_since_render_ = false;
+    std::size_t         emitted_at_tick_ = 0;   // emitted_ at the last frame tick
     std::size_t         last_issue_count_ = static_cast<std::size_t>(-1);
 };
 

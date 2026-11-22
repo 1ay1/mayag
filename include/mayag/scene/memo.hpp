@@ -144,13 +144,14 @@ class MemoCache {
     /// subtrees whose build() read them.
     [[nodiscard]] std::optional<Node> take(std::uint64_t key, std::uint64_t interaction) {
         auto it = entries_.find(key);
-        if (it == entries_.end()) return std::nullopt;
+        if (it == entries_.end()) { ++stats.miss_new; return std::nullopt; }
         Entry& e = it->second;
-        if (e.taken) return std::nullopt;   // the same key twice in a frame
+        if (e.taken) { ++stats.miss_taken; return std::nullopt; }   // the same key twice in a frame
         e.taken = true;
         e.frame = frame_;
-        if (!e.has_laid_out || !e.has_cascaded) return std::nullopt;
-        if (e.reads_interaction && e.interaction != interaction) return std::nullopt;
+        if (!e.has_laid_out || !e.has_cascaded) { ++stats.miss_unready; return std::nullopt; }
+        if (e.reads_interaction && e.interaction != interaction) { ++stats.miss_interaction; return std::nullopt; }
+        ++stats.hits;
         e.has_laid_out = false;
         Node n = std::move(e.laid_out);
         n.set_memo_key(key);
@@ -181,6 +182,9 @@ class MemoCache {
     }
 
     void forget(std::uint64_t key) { entries_.erase(key); }
+
+    /// Why memo() hit or missed, since the last reset (MAYAG_FRAMESTATS).
+    struct Stats { std::uint64_t hits = 0, miss_new = 0, miss_taken = 0, miss_unready = 0, miss_interaction = 0; } stats;
 
     // ── churn: memo sites whose key changes every frame ─────────────────────────
     //

@@ -305,10 +305,40 @@ template <ControlContext C>
     };
 
     const int nrows = std::min(g.rows, static_cast<int>(g.lines.size()));
+    // ── rows, each one memoised subtree ──
+    // A typed character changes one row: the other rows come back from last
+    // frame already cascaded and laid out, and paint reuses them too. The key
+    // is everything a row draws from -- its cells, its mark, the selection /
+    // search spans on it, the hovered link, the theme and the metrics, and
+    // its y (a smooth-scroll glide moves every row: they rebuild, as they
+    // must). Built at the origin and placed by `absolute`.
+    const std::uint64_t frame_key = [&] {
+        MemoKey k;
+        k.add(cw).add(ch).add(ox).add(oy).add(o.font_size).add(o.marks).add(o.padding)
+         .add(static_cast<int>(o.family)).add(g.hover_link).add(g.current_match).add(g.cols)
+         .add(th.fg).add(th.bg).add(th.selection_bg).add(th.selection_fg).add(th.match_bg).add(th.match_current_bg)
+         .add(th.match_current_fg).add(th.link).add(th.bold_brighten).add(th.mark_prompt).add(th.mark_ok)
+         .add(th.mark_error).add(th.mark_running);
+        return static_cast<std::uint64_t>(k);
+    }();
+    const auto row_key = [&](int r, const TermRowView& row, float y) {
+        MemoKey k;
+        k.add(frame_key).add(r).add(y).add(static_cast<int>(row.mark)).add(row.cells.size());
+        for (const auto& cell : row.cells)
+            k.add(cell.text).add(cell.fg).add(cell.bg).add(cell.default_fg).add(cell.default_bg).add(cell.flags)
+             .add(static_cast<int>(cell.ul_style)).add(cell.ul_color).add(cell.width).add(cell.link);
+        for (const auto& sp : g.selection) if (sp.row == r) k.add(sp.col).add(sp.len);
+        k.add(-1);
+        for (const auto& sp : g.matches) if (sp.row == r) k.add(sp.col).add(sp.len);
+        return static_cast<std::uint64_t>(k);
+    };
+    std::vector<Node> all_layers = std::move(layers);
     for (int r = 0; r < nrows; ++r) {
         const auto& row = g.lines[static_cast<std::size_t>(r)];
-        const int ncols = std::min(g.cols, static_cast<int>(row.cells.size()));
         const float y = row_y(r);
+      all_layers.push_back(memo(row_key(r, row, y), [&]() -> Node {
+        layers.clear();
+        const int ncols = std::min(g.cols, static_cast<int>(row.cells.size()));
 
         // ── shell-integration mark ──
         if (o.marks && row.mark != TermMark::none) {
@@ -366,39 +396,63 @@ template <ControlContext C>
                     b.width == 2 || a.width == 2) break;
                 ++c1;
             }
-            // Text of the run; skip right halves of wide characters. Box and
-            // block characters are drawn as geometry and become spaces here.
-            std::string text;
-            bool visible = false;
+            // Text of the run, as SEGMENTS of non-blank cells: blank stretches
+            // (the trailing spaces that fill most of every terminal row, the
+            // gaps between `ls` columns) produce no glyphs at all. A run used
+            // to be one string including them: a fullscreen frame shaped and
+            // placed ~38k space glyphs to draw ~500 characters (11 ms of
+            // paint). Wide characters' right halves are skipped; box and
+            // block characters are drawn as geometry and count as blank.
             const bool hidden_run = (a.flags & term_attr::hidden) != 0;
+            const auto blank_at = [&](int k) {
+                const TermCell& cell = row.cells[static_cast<std::size_t>(k)];
+                if (cell.width == 0) return true;
+                if (const char32_t cp = detail::single_cp(cell.text); cp != 0 && detail::term_drawn(cp)) return true;
+                return cell.text.empty() || cell.text == " ";
+            };
             for (int k = c0; k < c1; ++k) {
                 const TermCell& cell = row.cells[static_cast<std::size_t>(k)];
-                if (cell.width == 0) continue;
-                if (const char32_t cp = detail::single_cp(cell.text); cp != 0 && detail::term_drawn(cp)) {
-                    if (!hidden_run) detail::term_draw_cell(cp, col_x(k), y, cw, ch, fa, rect, arc);
-                    text += ' ';
-                    continue;
-                }
-                text += cell.text.empty() ? std::string{" "} : cell.text;
-                if (cell.text != " " && !cell.text.empty()) visible = true;
+                if (cell.width == 0 || hidden_run) continue;
+                if (const char32_t cp = detail::single_cp(cell.text); cp != 0 && detail::term_drawn(cp))
+                    detail::term_draw_cell(cp, col_x(k), y, cw, ch, fa, rect, arc);
             }
-            const bool hidden = (a.flags & term_attr::hidden) != 0;
-            if (visible && !hidden) {
+            // strikethrough is drawn across the text node: keep the run whole
+            const bool whole = (a.flags & term_attr::strike) != 0;
+            constexpr int kGap = 4;   // this many blank cells end a segment
+            int s = c0;
+            while (!hidden_run && s < c1) {
+                if (!whole) while (s < c1 && blank_at(s)) ++s;
+                if (s >= c1) break;
+                int e = s, last = s, gap = 0;   // last: one past the last non-blank cell
+                for (; e < c1; ++e) {
+                    if (blank_at(e)) { if (!whole && ++gap >= kGap) break; }
+                    else { gap = 0; last = e + 1; }
+                }
+                if (whole) last = c1;
+                std::string text;
+                for (int k = s; k < last; ++k) {
+                    const TermCell& cell = row.cells[static_cast<std::size_t>(k)];
+                    if (cell.width == 0) continue;
+                    if (const char32_t cp = detail::single_cp(cell.text); cp != 0 && detail::term_drawn(cp)) { text += ' '; continue; }
+                    text += cell.text.empty() ? std::string{" "} : cell.text;
+                }
                 // line_height(0): the font's natural line box (ascent +
                 // descent + gap), centred in the cell below -- the baseline
                 // Windows Terminal and every native terminal use. The 1.4
                 // default made the box taller than the cell, with all the
                 // extra leading under the glyphs, so text rode 2 px high.
-                auto t = text_owned(text) | font(o.font_size) | family(o.family) | fg(fa) | no_ligatures | clip_text
+                auto t = text_owned(std::move(text)) | font(o.font_size) | family(o.family) | fg(fa) | no_ligatures | clip_text
                        | line_height(0.0f)
                        | (((a.flags & term_attr::bold) != 0) ? bold : weight(FontWeight::regular));
                 Node n = t.build();
                 if ((a.flags & term_attr::italic) != 0) n.style().text.italic = true;
-                if ((a.flags & term_attr::strike) != 0) n.style().text.strikethrough = true;
+                if (whole) n.style().text.strikethrough = true;
                 // A wide char's node spans both of its cells.
-                const float w = static_cast<float>((a.width == 2 ? 2 : c1 - c0)) * cw;
+                const int span = last - s + ((last > s && row.cells[static_cast<std::size_t>(last - 1)].width == 2) ? 1 : 0);
+                const float w = static_cast<float>(std::max(span, a.width == 2 ? 2 : 1)) * cw;
                 layers.push_back((h(node(std::move(n))) | size(w + cw, ch) | align(Align::center)
-                                  | absolute(col_x(c0), y)).build());
+                                  | absolute(col_x(s), y)).build());
+                s = e;
             }
             // Decorations.
             const Color<Srgb> ulc = a.ul_color != 0 ? rgb_of(a.ul_color) : fa;
@@ -434,7 +488,10 @@ template <ControlContext C>
             c0 = c1;
         }
         (void)runs;
+        return (z(h_list(std::move(layers))) | width(pct(100)) | height(pct(100)) | absolute(0.0f, 0.0f)).build();
+      }));
     }
+    layers = std::move(all_layers);
 
     // ── cursor ──
     const bool moving = std::fabs(o.cursor_dx) > 0.02f || std::fabs(o.cursor_dy) > 0.02f;

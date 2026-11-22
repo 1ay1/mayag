@@ -27,6 +27,8 @@
 #include "../render/shader_generated.hpp"
 #include "backend.hpp"   // AtlasView / view_of
 #include "reclaim.hpp"
+#include <chrono>
+#include <cstdio>
 #include "software.hpp"
 
 // dup()/close(): a dmabuf fd is borrowed, and Vulkan takes ownership of the
@@ -275,7 +277,11 @@ class VulkanDevice {
         if (rebuild_swapchain_) { rebuild_swapchain(); rebuild_swapchain_ = false; }
         if (swapchain_ == nullptr) { acquire_failed_ = true; flush_frame_sync(); return; }
 
+        using tclk = std::chrono::steady_clock;
+        static const bool gpu_trace = [] { const char* e = std::getenv("MAYAG_GPU_TRACE"); return e && *e && *e != '0'; }();
+        const auto t0 = tclk::now();
         api_->WaitForFences(device_, 1, &in_flight_, 1, ~0ull);
+        const auto t1 = tclk::now();
 
         // That wait is the completion clock. It returned, so the frame
         // submitted last time is finished, and anything retired during it is
@@ -294,6 +300,7 @@ class VulkanDevice {
         if (acq == vk::VK_ERROR_OUT_OF_DATE_KHR) { rebuild_swapchain(); acquire_failed_ = true; flush_frame_sync(); return; }
         if (acq != vk::VK_SUCCESS && acq != vk::VK_SUBOPTIMAL_KHR) { acquire_failed_ = true; flush_frame_sync(); return; }
         acquire_failed_ = false;
+        const auto t2 = tclk::now();
 
         api_->ResetFences(device_, 1, &in_flight_);
         upload_instances(list);
@@ -346,6 +353,7 @@ class VulkanDevice {
         si.commandBufferCount = 1; si.pCommandBuffers = &cb;
         si.signalSemaphoreCount = static_cast<std::uint32_t>(signals.size());
         si.pSignalSemaphores = signals.data();
+        const auto t3 = tclk::now();
         api_->QueueSubmit(queue_, 1, &si, in_flight_);
 
         vk::VkPresentInfoKHR pi{};
@@ -356,6 +364,11 @@ class VulkanDevice {
         VkResultCheck pr = api_->QueuePresentKHR(queue_, &pi);
         if (pr == vk::VK_ERROR_OUT_OF_DATE_KHR || pr == vk::VK_SUBOPTIMAL_KHR) {
             rebuild_swapchain_ = true;
+        }
+        if (gpu_trace) {
+            const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+            std::fprintf(stderr, "gpu: fence %.2f  acquire %.2f  record %.2f  submit+present %.2f ms  (%zu inst)\n",
+                         ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, tclk::now()), list.instances().size());
         }
         last_presented_ = image_index;
         ++frames_;

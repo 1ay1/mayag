@@ -171,9 +171,11 @@ void test_key_repeat() {
     check(wldetail::key_from_keysym(0xff1b) == Key::escape && wldetail::key_from_keysym(0xff08) == Key::backspace &&
           wldetail::key_from_keysym(0xfe20) == Key::tab && wldetail::key_from_keysym(0xffc9) == Key::f12,
           "keysym -> named key");
-    check(wldetail::key_from_keysym('a') == Key::unknown, "letters stay positional");
+    check(wldetail::key_from_keysym('a') == Key::unknown, "key_from_keysym names only named keys");
     // resolve_key: position for real keyboards, the keymap for virtual ones
-    check(wldetail::resolve_key(16, 'a') == Key::q, "AZERTY's A is still the Q key (shortcuts keep their place)");
+    check(wldetail::resolve_key(16, 'a') == Key::a, "AZERTY's A key is A (ctrl+a is the key labelled A, as in GTK/Qt)");
+    check(wldetail::resolve_key(2, 'e') == Key::e, "a virtual keymap's `e` on code 2 is E, not the digit 1");
+    check(wldetail::resolve_key(46, 0x6d3) == Key::c, "a Cyrillic letter keeps its position: ctrl+c still copies");
     check(wldetail::resolve_key(30, 0) == Key::a, "no keymap: by position");
     check(wldetail::resolve_key(58, 0xff1b) == Key::escape, "caps:escape is Escape");
     check(wldetail::resolve_key(1, 'a') == Key::a, "a virtual keymap's `a` on code 1 is A, not Esc");

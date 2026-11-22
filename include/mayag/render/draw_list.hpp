@@ -187,6 +187,25 @@ class DrawList {
         batches_.assign(o.batches_.begin(), o.batches_.end());
     }
 
+    /// The instances pushed since `first`, with the texture and blend each
+    /// was pushed with (a recording a PaintCache can replay).
+    struct Recorded { Instance inst; Rect clip; std::uint32_t texture; BlendMode blend; };
+    void record_since(std::size_t first, std::vector<Recorded>& out) const {
+        out.clear();
+        for (const Batch& b : batches_) {
+            const std::size_t hi = static_cast<std::size_t>(b.first) + b.count;
+            for (std::size_t i = std::max<std::size_t>(b.first, first); i < hi; ++i)
+                out.push_back({instances_[i], b.clip, b.texture, b.blend});
+        }
+    }
+    /// Push a recording back: the same instances under the same clips,
+    /// batched as push() would. The clip state afterwards is as before.
+    void replay(const std::vector<Recorded>& rec) {
+        const Rect saved = current_clip_;
+        for (const auto& r : rec) { current_clip_ = r.clip; push(r.inst, r.texture, r.blend); }
+        current_clip_ = saved;
+    }
+
     // ── clipping ────────────────────────────────────────────────────────
 
     /// Push an intersected clip rect. Intersecting (rather than replacing) is

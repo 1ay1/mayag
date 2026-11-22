@@ -13,7 +13,10 @@
 #include "../scene/node.hpp"
 #include "draw_list.hpp"
 
+#include <cstring>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 namespace mayag::render {
 
@@ -30,6 +33,8 @@ class GlyphRenderer {
 struct PaintOptions {
     float                dpi_scale = 1.0f;
     const GlyphRenderer* glyphs    = nullptr;
+    /// Replays memo() subtrees that come back unchanged (see PaintCache).
+    class PaintCache*    cache     = nullptr;
     const layout::TextMeasurer* measurer = nullptr;
     bool                 debug_bounds = false;   ///< overlay every node's rect
     /// The opaque colour the frame is cleared to, which text drawn on no fill
@@ -86,7 +91,82 @@ struct Frame2 {
 };
 
 inline void paint_node(const Node& node, DrawList& dl, const PaintOptions& opts,
+                       float inherited_opacity, Frame2 xf);
+
+}  // namespace detail
+
+/// Reuse what a memo() subtree painted last frame.
+///
+/// A memo hit hands the painter the same laid-out subtree as last frame. Its
+/// instances are then the same too -- PROVIDED everything they are computed
+/// from outside the subtree is the same: where it is (its frame and the
+/// accumulated transform), its opacity, the clip it is painted under, the
+/// text backdrop baked into its glyphs, the DPI scale and the glyph atlas's
+/// layout (glyph quads carry atlas uvs). That is the key; a hit replays the
+/// recorded instances instead of walking the subtree and placing every glyph
+/// again. A typed character repaints one terminal row, not all of them.
+class PaintCache {
+  public:
+    /// Set once per frame by the host: the atlas layout the glyphs come from.
+    void begin_frame(std::uint64_t frame, std::uint64_t atlas_epoch) noexcept {
+        frame_ = frame;
+        if (atlas_epoch != atlas_epoch_) { entries_.clear(); atlas_epoch_ = atlas_epoch; }
+    }
+    void end_frame() {
+        std::erase_if(entries_, [this](const auto& kv) { return kv.second.frame + 2 < frame_; });
+    }
+    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+    [[nodiscard]] std::uint64_t epoch() const noexcept { return atlas_epoch_; }
+    struct Stats { std::uint64_t hits = 0, misses = 0; } stats;
+
+    [[nodiscard]] static std::uint64_t key_of(const Node& n, const DrawList& dl, float opacity, const detail::Frame2& xf,
+                                              float dpi) noexcept {
+        std::uint64_t h = n.memo_key();
+        const auto mix = [&](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); h = (h ^ u) * 0x100000001B3ull + 0x9E3779B97F4A7C15ull; };
+        const Rect& fr = n.frame();
+        mix(fr.origin.x); mix(fr.origin.y); mix(fr.size.x); mix(fr.size.y);
+        mix(opacity); mix(xf.sx); mix(xf.sy); mix(xf.tx); mix(xf.ty); mix(dpi);
+        const Rect& c = dl.clip();
+        mix(c.origin.x); mix(c.origin.y); mix(c.size.x); mix(c.size.y);
+        const auto bd = dl.text_backdrop().colour;
+        mix(bd.x); mix(bd.y); mix(bd.z); mix(bd.w);
+        return h;
+    }
+
+    /// Paint `n` (a reused memo root) into `dl`, replaying or recording.
+    void paint(const Node& n, DrawList& dl, const PaintOptions& opts, float opacity, detail::Frame2 xf) {
+        const std::uint64_t k = key_of(n, dl, opacity, xf, opts.dpi_scale);
+        if (auto it = entries_.find(k); it != entries_.end()) {
+            it->second.frame = frame_;
+            dl.replay(it->second.rec);
+            ++stats.hits;
+            return;
+        }
+        ++stats.misses;
+        const std::size_t first = dl.size();
+        PaintOptions inner = opts;
+        inner.cache = nullptr;   // nested memo roots are part of this recording
+        detail::paint_node(n, dl, inner, opacity, xf);
+        Entry& e = entries_[k];
+        e.frame = frame_;
+        dl.record_since(first, e.rec);
+    }
+
+  private:
+    struct Entry { std::vector<DrawList::Recorded> rec; std::uint64_t frame = 0; };
+    std::unordered_map<std::uint64_t, Entry> entries_;
+    std::uint64_t frame_ = 0, atlas_epoch_ = ~0ull;
+};
+
+namespace detail {
+
+inline void paint_node(const Node& node, DrawList& dl, const PaintOptions& opts,
                        float inherited_opacity, Frame2 xf) {
+    // A memo subtree reused from last frame paints what it painted then.
+    if (opts.cache != nullptr && node.memo_key() != 0 && node.memo_reused()) {
+        opts.cache->paint(node, dl, opts, inherited_opacity, xf);
+        return;
+    }
     const Style& st = node.style();
     const float alpha = inherited_opacity * st.opacity;
     if (alpha <= 0.001f) return;

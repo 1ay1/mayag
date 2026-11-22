@@ -281,7 +281,7 @@ class Atlas {
         // 1px is reserved so `uv` never samples row 0 / column 0, which some
         // GPUs treat as a clamp boundary.
         dirty_ = Rect{};
-        ++generation_;
+        ++generation_; ++layout_epoch_;
         ++content_;
     }
 
@@ -293,6 +293,10 @@ class Atlas {
     /// Bumped whenever the texture is reallocated, so a backend knows to
     /// re-upload everything rather than a dirty rect.
     [[nodiscard]] std::uint32_t generation() const noexcept { return generation_; }
+    /// Bumped whenever a glyph's place in the atlas may have changed or been
+    /// given away (reallocation, repack, eviction). Recorded glyph quads are
+    /// valid exactly while this holds (render::PaintCache).
+    [[nodiscard]] std::uint64_t layout_epoch() const noexcept { return layout_epoch_; }
     /// Bumped on EVERY texel write (a glyph added, a repack): what a software
     /// renderer that reuses unchanged pixels between frames keys on.
     [[nodiscard]] std::uint64_t content_version() const noexcept { return content_; }
@@ -467,6 +471,7 @@ class Atlas {
             if (frame_ > it->second.last_used + max_age) {
                 it = entries_.erase(it);
                 ++removed;
+                ++layout_epoch_;
             } else {
                 ++it;
             }
@@ -603,7 +608,7 @@ class Atlas {
         // Everything moved: a new generation means a fresh GPU texture.
         dirty_ = Rect{0, 0, static_cast<float>(width_), static_cast<float>(height_)};
         if (!color_.empty()) color_dirty_ = dirty_;
-        ++generation_;
+        ++generation_; ++layout_epoch_;
         ++content_;
         moved_ = true;
     }
@@ -626,6 +631,7 @@ class Atlas {
     Rect                      dirty_{};
     std::uint64_t             frame_ = 0;
     std::uint32_t             generation_ = 0;
+    std::uint64_t layout_epoch_ = 0;
     std::uint64_t             content_ = 0;     ///< bumped on every texel write (see content_version)
     bool                      moved_ = false;   ///< glyphs moved since take_moved()
     std::uint64_t             last_repack_frame_ = 0;

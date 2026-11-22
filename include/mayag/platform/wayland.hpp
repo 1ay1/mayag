@@ -453,17 +453,17 @@ struct TextInputState {
 
 /// The Key for evdev code `code` whose keymap gives keysym `sym` (0: no map).
 ///
-/// Named keys come from the keysym (caps:escape, remapped Enter). Letters,
-/// digits and punctuation stay POSITIONAL (Key::a is the key left of the
-/// home row on every layout, so shortcuts keep their place) -- except when
-/// the keymap puts a character on a code that is not a character key: a
-/// virtual keyboard (wtype, an IME, a remote desktop) uploads its own map
-/// with `a` on code 1, which read by position is Esc and typed "\ea".
+/// The keymap is the truth, as in GTK and Qt: a key is the keysym it
+/// produces -- named keys (caps:escape, a remapped Enter) and Latin
+/// characters alike, so ctrl+z is the key LABELLED Z on AZERTY and Dvorak,
+/// and a virtual keyboard (wtype, an IME, a remote desktop), whose keymap
+/// puts characters on arbitrary codes, types what it says. Physical position
+/// is the answer only without a keymap, or for a non-Latin layout's letters
+/// (Cyrillic, Greek...), so ctrl+c still copies there.
 [[nodiscard]] inline Key resolve_key(std::uint32_t code, std::uint32_t sym) noexcept {
     const Key pos = key_from_evdev(code);
     if (sym == 0) return pos;
     if (const Key named = key_from_keysym(sym); named != Key::unknown) return named;
-    if (is_char_key(pos)) return pos;
     if (const Key ch = char_key_from_keysym(sym); ch != Key::unknown) return ch;
     return pos;
 }
@@ -751,6 +751,13 @@ class WaylandWindow {
         // screen (unless the program marks inputs itself).
         for (const auto& e : pending_) {
             if (photon_manual_) break;
+            // A bare modifier press (ctrl, shift...) answers with nothing on
+            // screen: timing it measured the wait for some LATER frame (a
+            // 500 ms blink), the 200 ms "zoom" spikes.
+            if (const auto* k = std::get_if<KeyEvent>(&e);
+                k && (k->key == Key::ctrl || k->key == Key::shift || k->key == Key::alt || k->key == Key::super ||
+                      k->key == Key::caps_lock))
+                continue;
             if (!std::holds_alternative<ResizeEvent>(e) && !std::holds_alternative<FocusEvent>(e) &&
                 !std::holds_alternative<CloseRequest>(e)) { note_input(); break; }
         }

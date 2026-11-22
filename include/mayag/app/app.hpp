@@ -164,6 +164,9 @@ class headless_app {
         kernel_.dispatch(std::move(m));
         tick();
     }
+    /// Deliver a message without drawing: the next tick() folds and draws it
+    /// (one input, one frame -- what a benchmark wants to time).
+    void post(msg_type m) { kernel_.dispatch(std::move(m)); }
 
     /// Fold until nothing more arrives within `budget`: for a test that
     /// waits on a background task or stream. Returns as soon as `done` holds.
