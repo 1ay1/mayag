@@ -554,7 +554,17 @@ inline CascadeResult cascade(Node& root, const CascadeInput& in) {
     cascade_detail::Walk w{in, theme, {}, theme.mode == Mode::dark};
     (void)cascade_detail::subtree_state(root, in, w.deep);
     const cascade_detail::Scope top{theme, {}, nullptr};
-    w.visit(root, nullptr, top, 0, false, false);
+    // The theme's face is what text inherits when no ancestor names one:
+    // the root's parent text sets only the family (no other field), so every
+    // explicit `| monospace` / `| family(...)` below still wins.
+    TextStyle root_text{};
+    const TextStyle* root_parent = nullptr;
+    if (theme.font_family != FontFamily::ui) {
+        root_text.family = theme.font_family;
+        root_text.set = text_bits::family;
+        root_parent = &root_text;
+    }
+    w.visit(root, root_parent, top, 0, false, false);
     root.set_cascaded(true);
     return {w.any_transition, w.any_starting};
 }

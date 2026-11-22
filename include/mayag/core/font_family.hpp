@@ -33,7 +33,7 @@ enum class FontFamily : std::uint8_t {
     // 3 .. font_family_count-1: custom_family(n)
 };
 
-inline constexpr std::size_t font_family_count = 16;
+inline constexpr std::size_t font_family_count = 32;   // 3 named + 29 an app preloads (two typeface pickers fit)
 inline constexpr std::size_t custom_family_count = font_family_count - 3;
 
 /// The n-th app-defined role (n < custom_family_count; larger n wraps).

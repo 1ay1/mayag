@@ -132,6 +132,13 @@ struct Theme {
     bool     tab_close_on_hover = true;  ///< the × shows only on the active / hovered tab
     float    mark        = 2.0f;    ///< thickness of active indicators (tab bar, row bar)
 
+    /// The face text is set in when it names none: the font ROLE every widget's
+    /// label, title and body inherits. FontFamily::ui is the stack's primary
+    /// chain; an app that lets the user pick a UI font points it at the role
+    /// that face plays (a custom_family it preloaded). Text that asks for
+    /// `monospace` or another family keeps it.
+    FontFamily font_family = FontFamily::ui;
+
     friend constexpr bool operator==(const Theme&, const Theme&) = default;
 
     [[nodiscard]] constexpr float space(float multiple) const noexcept {
