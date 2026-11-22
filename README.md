@@ -1523,6 +1523,8 @@ if (!r.ok()) mayag::run_simulated<Search>(cfg, r.seed, scenario);   // exact rep
 
 `tests/test_simulate.cpp` does exactly this for the classic out-of-order-results hazard (docs/async-hazards.md #2):
 
+How mayag stays race- and deadlock-free across threads (the four rules, fonts, the checks) is in [docs/threads.md](docs/threads.md).
+
 1. explore finds a seed where a late reply overwrites a newer one.
 2. Replaying that seed fails identically and draws the stale result on screen.
 3. Two runs of a seed draw the identical screen at the identical simulated instant.

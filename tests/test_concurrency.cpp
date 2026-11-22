@@ -17,6 +17,7 @@
 
 #include <mayag/mayag.hpp>
 #include <mayag/widget/find_bar.hpp>
+#include <mayag/widget/scroll_view.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -311,9 +312,63 @@ struct Coalesce {
 
 }  // namespace
 
+// ── two runtimes, two threads ───────────────────────────────────────────────────────────────
+// mayag's ambient per-frame state (the frame's Ctx, the theme memo, the
+// animation request, the scroll-geometry flag, the style free list) is per
+// thread so that two runtimes never see each other's. This proves it: the
+// same program, driven the same way, gives the same pixels alone and while
+// another runtime renders on another thread.
+struct Doppel {
+    struct Model { int n = 0; mayag::ScrollState scroll; };
+    struct Bump {};
+    using Msg = std::variant<Bump>;
+    using Cmd = mayag::Cmd<Msg>;
+    static Cmd update(Model& m, Bump) { ++m.n; return {}; }
+    static Node view(const Model& m) {
+        if (m.n < 3) request_animation_frame();   // the per-thread animation flag
+        std::vector<Node> rows;
+        for (int i = 0; i < 12; ++i)
+            rows.push_back((text_owned("row " + std::to_string(i + m.n)) | font(13)).build());
+        return (v(text_owned("count " + std::to_string(m.n)) | font(16) | bold,
+                  themed(make_theme(Color<Srgb>{0.9f, 0.3f, 0.5f, 1.0f}, Mode::dark),   // the theme memo
+                         [&] { return (box() | width(px(60)) | height(px(14)) | bg(ctx().theme.accent)).build(); }),
+                  scroll_view(ctx(), "list", m.scroll, node(v(std::move(rows))) | height(px(120))))   // the scroll-geometry flag
+                | pad(6) | bg(ctx().theme.surface)).build();
+    }
+};
+
+/// Drive a Doppel through `steps` bumps and frames; its final pixels.
+std::vector<std::uint8_t> twin_run(int steps) {
+    std::vector<std::uint8_t> px;
+    AppConfig cfg = small();
+    cfg.size = {220, 200};
+    run_headless<Doppel>(cfg, [&](auto& rt) {
+        for (int i = 0; i < steps; ++i) {
+            rt.send(Doppel::Bump{});
+            rt.tick();
+        }
+        rt.tick();
+        px = rt.window().read_pixels();
+    });
+    return px;
+}
+
 int main() {
     g_loop_thread = std::this_thread::get_id();
     std::printf("mayag concurrency\n=================\n");
+
+    section("two runtimes on two threads");
+    {
+        const auto alone = twin_run(40);
+        int differ_a = 0, differ_b = 0;   // each written by one thread
+        {
+            std::jthread a([&] { for (int r = 0; r < 6; ++r) differ_a += twin_run(40) != alone ? 1 : 0; });
+            std::jthread b([&] { for (int r = 0; r < 6; ++r) differ_b += twin_run(40) != alone ? 1 : 0; });
+        }
+        check(!alone.empty(), "a runtime renders");
+        check(differ_a + differ_b == 0, "two runtimes rendering at once each get exactly their own pixels (" +
+                                            std::to_string(differ_a + differ_b) + "/12 differed)");
+    }
 
     section("fan-in: 4 tasks x 250 messages");
     {
