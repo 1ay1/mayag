@@ -449,6 +449,8 @@ template <ControlContext C>
                 // Windows Terminal and every native terminal use. The 1.4
                 // default made the box taller than the cell, with all the
                 // extra leading under the glyphs, so text rode 2 px high.
+                // The grid is cells, not text roles: its size IS the cell metric (cw, ch are
+                // measured from o.font_size), so it is never a tier and never snapped.
                 auto t = text_owned(std::move(text)) | font(o.font_size) | family(o.family) | fg(fa) | no_ligatures | clip_text
                        | line_height(0.0f)
                        | (((a.flags & term_attr::bold) != 0) ? bold : weight(FontWeight::regular));
@@ -554,8 +556,8 @@ template <ControlContext C>
         const bool typed = !g.hint_typed.empty() && hnt.label.rfind(g.hint_typed, 0) == 0;
         if (!g.hint_typed.empty() && !typed) continue;
         std::vector<Node> parts;
-        if (typed) parts.push_back((text_owned(g.hint_typed) | font(o.font_size * 0.92f) | family(o.family) | bold | fg(rgb_of(th.hint_typed_fg))).build());
-        parts.push_back((text_owned(hnt.label.substr(typed ? g.hint_typed.size() : 0)) | font(o.font_size * 0.92f) | family(o.family) | bold
+        if (typed) parts.push_back((text_owned(g.hint_typed) | font(o.font_size) | family(o.family) | bold | fg(rgb_of(th.hint_typed_fg))).build());
+        parts.push_back((text_owned(hnt.label.substr(typed ? g.hint_typed.size() : 0)) | font(o.font_size) | family(o.family) | bold
                          | fg(rgb_of(th.hint_fg))).build());
         layers.push_back((h(h_list(std::move(parts))) | height(ch) | align(Align::center) | pad(0, 3)
                           | bg(rgb_of(th.hint_bg)) | radius(3) | absolute(col_x(hnt.at.col), row_y(hnt.at.row))).build());

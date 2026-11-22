@@ -83,14 +83,14 @@ template <ControlContext C>
     const bool hov = c.hovered(pid);
     std::vector<Node> caps_;
     if (recording) {
-        caps_.push_back((text<"Press a shortcut\u2026"> | font(t.font_size * 0.9f)
+        caps_.push_back((text<"Press a shortcut\u2026"> | font(t.type(Tier::body))
                          | fg(var::accent)).build());
     } else if (ch.empty()) {
-        caps_.push_back((text<"Unassigned"> | font(t.font_size * 0.9f) | italic
+        caps_.push_back((text<"Unassigned"> | font(t.type(Tier::body)) | italic
                          | fg(var::text_disabled)).build());
     } else {
         for (auto& cap : chord_caps(ch)) {
-            caps_.push_back((h(text_owned(std::move(cap)) | font(t.font_size * 0.85f)
+            caps_.push_back((h(text_owned(std::move(cap)) | font(t.type(Tier::small))
                                  | semibold | fg(var::text_primary))
                              | pad(t.spaced(2), t.spaced(7))
                              | bg(var::surface_raised) | border(t.stroke(1), t.border_strong)

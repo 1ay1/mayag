@@ -43,13 +43,13 @@ template <ControlContext C>
         const Color<Srgb> st = f.status == 'A' ? t.success : f.status == 'D' ? t.danger : f.status == 'R' ? t.info : t.warning;
         const auto slash = f.path.rfind('/');
         rows.push_back((h(node(file_icon(t, f.path, 11.0f).build()),
-                          text_owned(slash == std::string::npos ? f.path : f.path.substr(slash + 1)) | font(t.font_size * 0.88f)
+                          text_owned(slash == std::string::npos ? f.path : f.path.substr(slash + 1)) | font(t.type(Tier::small))
                               | fg(on ? t.text_primary : t.text_secondary) | ellipsis,
-                          text_owned(slash == std::string::npos ? std::string{} : f.path.substr(0, slash)) | font(t.font_size * 0.75f)
+                          text_owned(slash == std::string::npos ? std::string{} : f.path.substr(0, slash)) | font(t.type(Tier::fine))
                               | fg(var::text_disabled) | ellipsis | grow() | min_size(0, 0),
-                          text_owned("+" + std::to_string(f.added)) | font(t.font_size * 0.75f) | fg(var::success),
-                          text_owned("\u2212" + std::to_string(f.removed)) | font(t.font_size * 0.75f) | fg(var::danger),
-                          text_owned(std::string(1, f.status)) | font(t.font_size * 0.75f) | bold | fg(st) | width(10))
+                          text_owned("+" + std::to_string(f.added)) | font(t.type(Tier::fine)) | fg(var::success),
+                          text_owned("\u2212" + std::to_string(f.removed)) | font(t.type(Tier::fine)) | fg(var::danger),
+                          text_owned(std::string(1, f.status)) | font(t.type(Tier::fine)) | bold | fg(st) | width(10))
                         | gap(t.spaced(6)) | align(Align::center) | pad(t.spaced(4), t.spaced(8)) | width(pct(100)) | radius(t.rounded(4))
                         | bg(on ? t.tint(t.accent, 0.18f) : c.hovered(pid) ? t.surface_raised.fade(0.5f) : t.surface.fade(0.0f))
                         | pointer_cursor | role(a11y::Role::list_item) | selected(on) | id_of(id, i)).build());
@@ -57,24 +57,24 @@ template <ControlContext C>
     const auto btn = [&](std::size_t k, const char* label_, bool primary, bool danger) {
         const auto pid = part_id(id, 4096 + k);
         const bool hov = c.hovered(pid);
-        return (h(text_owned(label_) | font(t.font_size * 0.85f) | semibold
+        return (h(text_owned(label_) | font(t.type(Tier::small)) | semibold
                       | fg(primary ? t.on_accent : danger && hov ? t.danger : hov ? t.text_primary : t.text_secondary))
                 | pad(t.spaced(3), t.spaced(10)) | radius(t.rounded(4)) | bg(primary ? (hov ? t.accent_hover : t.accent) : hov ? t.surface_raised : t.surface.fade(0.0f))
                 | border(t.stroke(1), primary ? t.accent : t.border) | pointer_cursor | id_of(id, 4096 + k)).build();
     };
-    return (v(h(text<"\u2387"> | font(t.font_size) | fg(var::text_disabled),
-                text_owned(std::string{branch}) | font(t.font_size * 0.95f) | semibold | fg(var::text_primary),
-                text_owned(std::to_string(files.size()) + " files") | font(t.font_size * 0.8f) | fg(var::text_disabled),
-                text_owned("+" + std::to_string(add)) | font(t.font_size * 0.8f) | semibold | fg(var::success),
-                text_owned("\u2212" + std::to_string(rem)) | font(t.font_size * 0.8f) | semibold | fg(var::danger),
+    return (v(h(text<"\u2387"> | font(t.type(Tier::body)) | fg(var::text_disabled),
+                text_owned(std::string{branch}) | font(t.type(Tier::body)) | semibold | fg(var::text_primary),
+                text_owned(std::to_string(files.size()) + " files") | font(t.type(Tier::small)) | fg(var::text_disabled),
+                text_owned("+" + std::to_string(add)) | font(t.type(Tier::small)) | semibold | fg(var::success),
+                text_owned("\u2212" + std::to_string(rem)) | font(t.type(Tier::small)) | semibold | fg(var::danger),
                 spacer(),
                 node(btn(changes_action::discard, "Discard", false, true)),
                 node(btn(changes_action::pr, "Open PR", false, false)),
                 node(btn(changes_action::commit, "Commit", true, false)))
                   | gap(t.spaced(8)) | align(Align::center) | pad(t.spaced(8), t.spaced(12)) | width(pct(100)) | bg(var::surface) | border(t.stroke(1), t.border),
               h(v(v_list(std::move(rows), 1.0f)) | width(280) | pad(t.spaced(6)) | height(pct(100)) | border(t.stroke(1), t.border),
-                v(node(diff.empty() ? (v(text<"No changes"> | font(t.font_size) | fg(var::text_disabled)) | pad(t.spaced(20))).build()
-                                    : diff_view(t, diff, t.font_size * 0.92f, 3)))
+                v(node(diff.empty() ? (v(text<"No changes"> | font(t.type(Tier::body)) | fg(var::text_disabled)) | pad(t.spaced(20))).build()
+                                    : diff_view(t, diff, t.type(Tier::body), 3)))
                     | grow() | min_size(0, 0) | pad(t.spaced(6), 0) | clip)
                   | grow() | width(pct(100)) | min_size(0, 0) | align(Align::stretch))
             | width(pct(100)) | height(pct(100)) | bg(var::background) | role(a11y::Role::group) | label("changes")).build();

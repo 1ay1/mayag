@@ -712,7 +712,6 @@ template <ControlContext C, class On>
     namespace o = ssh_manager_ops;
     using A = SshManagerAction;
     const Theme& t = c.theme;
-    const float fs = t.font_size;
     const std::string base{id};
     const auto paper = t.background, ink = t.text_primary;
     const auto muted = mix(ink, paper, 0.45f), line = mix(paper, ink, 0.09f), faint = mix(ink, paper, 0.62f);
@@ -732,9 +731,9 @@ template <ControlContext C, class On>
         const auto txt = primary ? readable_on(tone) : danger ? t.danger : ink;
         std::vector<Node> parts;
         const std::string a11y_name = caption;
-        parts.push_back((text_owned(std::move(caption)) | font(fs * 0.9f) | semibold | fg(txt)).build());
+        parts.push_back((text_owned(std::move(caption)) | font(t.type(Tier::body)) | semibold | fg(txt)).build());
         if (!key.empty())
-            parts.push_back((h(mono(std::move(key), fs * 0.7f, txt.fade(0.7f))) | height(16.0f) | pad(0, 5.0f) | center
+            parts.push_back((h(mono(std::move(key), t.type(Tier::fine), txt.fade(0.7f))) | height(16.0f) | pad(0, 5.0f) | center
                              | radius(4.0f) | bg(txt.fade(0.1f))).build());
         return (h_list(std::move(parts), 8.0f) | align(Align::center) | height(30.0f) | pad(0, primary ? 14.0f : 12.0f)
                 | radius(t.rounded(7.0f)) | bg(fill) | border(1.0f, primary ? tone : mix(paper, ink, 0.12f))
@@ -745,9 +744,9 @@ template <ControlContext C, class On>
     // ── sidebar ─────────────────────────────────────────────────────────────
     const bool filtering = st.filtering || !st.filter.text.empty();
     auto search = h(node(icon_node(Icon::search, 14.0f, filtering ? t.accent : muted)),
-                    node((text_field(t, st.filter, st.filtering, node_id(base + ".filter"), "Filter hosts, #tag", fs * 0.9f)
+                    node((text_field(t, st.filter, st.filtering, node_id(base + ".filter"), "Filter hosts, #tag", t.type(Tier::body))
                           | grow() | border(0, t.border) | bg(paper.fade(0.0f)) | pad(0)).build()),
-                    mono("/", fs * 0.72f, faint))
+                    mono("/", t.type(Tier::fine), faint))
                 | gap(8.0f) | align(Align::center) | height(34.0f) | pad(0, 10.0f) | radius(t.rounded(8.0f))
                 | bg(mix(paper, ink, 0.04f)) | border(1.0f, st.filtering ? t.accent.fade(0.6f) : line)
                 | pointer_cursor | id_of(base + ".search")
@@ -756,8 +755,8 @@ template <ControlContext C, class On>
     std::vector<Node> list;
     for (const auto& g : groups) {
         if (g.folder.empty()) {
-            list.push_back((h(text_owned(g.title) | font(fs * 0.72f) | semibold | tracking(0.9f) | fg(muted),
-                              spacer(), mono(std::to_string(g.hosts.size()), fs * 0.7f, faint))
+            list.push_back((h(text_owned(g.title) | font(t.type(Tier::fine)) | semibold | tracking(0.9f) | fg(muted),
+                              spacer(), mono(std::to_string(g.hosts.size()), t.type(Tier::fine), faint))
                             | align(Align::end) | height(d::kHeadH) | pad(0, 10.0f, 6.0f, 10.0f)).build());
         } else {
             // A folder: click folds it; its gear edits what its hosts share.
@@ -770,12 +769,12 @@ template <ControlContext C, class On>
             const std::string leaf = g.folder.substr(g.folder.rfind('/') == std::string::npos ? 0 : g.folder.rfind('/') + 1);
             list.push_back((h(node(icon_node(g.collapsed ? Icon::chevron_right : Icon::chevron_down, 11.0f, muted)),
                               node(icon_node(g.collapsed ? Icon::folder : Icon::folder_open, 13.0f, fh ? t.accent : t.text_secondary)),
-                              text_owned(leaf) | font(fs * 0.82f) | semibold | fg(fh ? ink : t.text_secondary) | ellipsis | min_size(0, 0) | grow(),
+                              text_owned(leaf) | font(t.type(Tier::small)) | semibold | fg(fh ? ink : t.text_secondary) | ellipsis | min_size(0, 0) | grow(),
                               (h(node(icon_node(Icon::settings, 12.0f, c.hovered(gid) ? ink : shared ? t.accent.fade(0.8f) : faint)))
                                | size(22.0f, 22.0f) | center | radius(5.0f) | bg(c.hovered(gid) ? mix(paper, ink, 0.1f) : paper.fade(0.0f))
                                | tooltip(shared ? "Folder settings (its hosts share them)" : "Folder settings") | id_of_raw(gid)
                                | on_click([op, f = g.folder, fl = p.folders] { return op([f, fl](SshManagerState& s) { o::begin_folder_edit(s, fl, f); }); })),
-                              mono(std::to_string(g.hosts.size()), fs * 0.7f, faint))
+                              mono(std::to_string(g.hosts.size()), t.type(Tier::fine), faint))
                             | gap(6.0f) | align(Align::center) | height(d::kHeadH) | pad(4.0f, 8.0f, 0, 6.0f + 12.0f * depth)
                             | radius(t.rounded(6.0f)) | bg(fh ? mix(paper, ink, 0.035f) : paper.fade(0.0f))
                             | pointer_cursor | id_of_raw(fid)
@@ -794,10 +793,10 @@ template <ControlContext C, class On>
             const bool hov = c.hovered(rid);
             const auto tone = env_tone(t, hst.env);
             std::vector<Node> top;
-            if (hst.pinned) top.push_back((text_owned("\u2605") | font(fs * 0.8f) | fg(t.warning)).build());
-            top.push_back((mono(hst.alias, fs * 0.92f, ink) | (sel ? semibold : weight(FontWeight::regular)) | ellipsis | min_size(0, 0) | grow()).build());
+            if (hst.pinned) top.push_back((text_owned("\u2605") | font(t.type(Tier::small)) | fg(t.warning)).build());
+            top.push_back((mono(hst.alias, t.type(Tier::body), ink) | (sel ? semibold : weight(FontWeight::regular)) | ellipsis | min_size(0, 0) | grow()).build());
             if (hst.env != SshHost::Env::none)
-                top.push_back((h(mono(env_name(hst.env), fs * 0.6f, tone) | bold | tracking(0.5f)) | height(15.0f) | pad(0, 5.0f) | center
+                top.push_back((h(mono(env_name(hst.env), t.type(Tier::fine), tone) | bold | tracking(0.5f)) | height(15.0f) | pad(0, 5.0f) | center
                                | radius(3.0f) | bg(tone.fade(0.14f))).build());
             if (hst.connected)
                 top.push_back((box() | size(7.0f, 7.0f) | radius(3.5f) | bg(t.success) | tooltip(std::to_string(hst.sessions) + " open")).build());
@@ -805,15 +804,15 @@ template <ControlContext C, class On>
                 const auto up = std::count(hst.tunnel.begin(), hst.tunnel.end(), SshHost::Tunnel::up);
                 const bool bad = std::any_of(hst.tunnel.begin(), hst.tunnel.end(), [](SshHost::Tunnel x) { return x == SshHost::Tunnel::down || x == SshHost::Tunnel::conflict; });
                 if (up > 0 || bad)
-                    top.push_back((h(mono("\u21C4", fs * 0.66f, bad ? t.warning : t.success), mono(std::to_string(up), fs * 0.62f, bad ? t.warning : t.success))
+                    top.push_back((h(mono("\u21C4", t.type(Tier::fine), bad ? t.warning : t.success), mono(std::to_string(up), t.type(Tier::fine), bad ? t.warning : t.success))
                                    | gap(2.0f) | align(Align::center) | height(15.0f) | pad(0, 4.0f) | radius(3.0f)
                                    | bg((bad ? t.warning : t.success).fade(0.12f))
                                    | tooltip(bad ? "a tunnel is not running" : std::to_string(up) + (up == 1 ? " tunnel up" : " tunnels up"))).build());
             }
             const std::string age = detail::host_age(hst.last_used, p.now);
             std::vector<Node> sub;
-            sub.push_back((mono(d::host_line(hst), fs * 0.76f, muted) | ellipsis | min_size(0, 0) | grow()).build());
-            if (!age.empty()) sub.push_back(mono(age, fs * 0.7f, faint).build());
+            sub.push_back((mono(d::host_line(hst), t.type(Tier::fine), muted) | ellipsis | min_size(0, 0) | grow()).build());
+            if (!age.empty()) sub.push_back(mono(age, t.type(Tier::fine), faint).build());
             list.push_back((v(h_list(std::move(top), 6.0f) | align(Align::center) | width(pct(100)),
                               h_list(std::move(sub), 8.0f) | align(Align::center) | width(pct(100)))
                             | gap(2.0f) | justify(Justify::center) | height(d::kRowH) | width(pct(100)) | pad(0, 10.0f)
@@ -835,8 +834,8 @@ template <ControlContext C, class On>
     }
     if (shown.empty()) {
         const bool typed = !st.filter.text.empty();
-        list.push_back((v(text_owned(typed ? "No host matches" : "No hosts yet") | font(fs * 0.92f) | fg(t.text_secondary),
-                          text_owned(typed ? "Enter makes it a new host" : "Press n to add one") | font(fs * 0.8f) | fg(muted))
+        list.push_back((v(text_owned(typed ? "No host matches" : "No hosts yet") | font(t.type(Tier::body)) | fg(t.text_secondary),
+                          text_owned(typed ? "Enter makes it a new host" : "Press n to add one") | font(t.type(Tier::small)) | fg(muted))
                         | gap(4.0f) | align(Align::center) | width(pct(100)) | pad(28.0f, 0)).build());
     }
     Node list_view = scroll_view(c, base + ".list", st.list_scroll, v(std::move(list)) | width(pct(100)) | pad(0, 0, 8.0f, 0),
@@ -844,7 +843,7 @@ template <ControlContext C, class On>
 
     const auto new_id = node_id(base + ".new");
     auto new_btn = h(node(icon_node(Icon::plus, 13.0f, c.hovered(new_id) ? ink : t.text_secondary)),
-                     text_owned("New") | font(fs * 0.85f) | semibold | fg(c.hovered(new_id) ? ink : t.text_secondary))
+                     text_owned("New") | font(t.type(Tier::small)) | semibold | fg(c.hovered(new_id) ? ink : t.text_secondary))
                  | gap(5.0f) | align(Align::center) | height(28.0f) | pad(0, 10.0f) | radius(t.rounded(7.0f))
                  | bg(c.hovered(new_id) ? mix(paper, ink, 0.09f) : mix(paper, ink, 0.05f)) | border(1.0f, line)
                  | pointer_cursor | tooltip("New host (n)") | id_of_raw(new_id)
@@ -853,14 +852,14 @@ template <ControlContext C, class On>
     int fresh_total = 0;
     for (const auto& s : p.imports) fresh_total += s.fresh;
     auto import_btn = h(node(icon_node(Icon::arrow_down, 13.0f, st.import_open || c.hovered(imp_id) ? ink : t.text_secondary)),
-                        when(fresh_total > 0, h(mono(std::to_string(fresh_total), fs * 0.62f, readable_on(t.accent)) | bold)
+                        when(fresh_total > 0, h(mono(std::to_string(fresh_total), t.type(Tier::fine), readable_on(t.accent)) | bold)
                                                  | height(14.0f) | pad(0, 4.0f) | center | radius(7.0f) | bg(t.accent)))
                     | gap(4.0f) | align(Align::center) | height(28.0f) | pad(0, 8.0f) | radius(t.rounded(7.0f))
                     | bg(st.import_open || c.hovered(imp_id) ? mix(paper, ink, 0.09f) : mix(paper, ink, 0.05f)) | border(1.0f, line)
                     | pointer_cursor | tooltip("Import from PuTTY, MobaXterm (i)") | id_of_raw(imp_id)
                     | on_click([op] { return op([](SshManagerState& s) { s.import_open = !s.import_open; }); });
-    auto side_head = h(v(text_owned("SSH hosts") | font(fs * 1.15f) | semibold | fg(ink),
-                         text_owned(std::to_string(hosts.size()) + (hosts.size() == 1 ? " host" : " hosts")) | font(fs * 0.76f) | fg(muted))
+    auto side_head = h(v(text_owned("SSH hosts") | font(t.type(Tier::large)) | semibold | fg(ink),
+                         text_owned(std::to_string(hosts.size()) + (hosts.size() == 1 ? " host" : " hosts")) | font(t.type(Tier::fine)) | fg(muted))
                            | gap(1.0f) | grow(),
                        std::move(import_btn), std::move(new_btn))
                    | gap(6.0f) | align(Align::center) | width(pct(100));
@@ -868,18 +867,18 @@ template <ControlContext C, class On>
     std::vector<Node> drawer;
     if (st.import_open) {
         if (p.imports.empty())
-            drawer.push_back((v(text_owned("Nothing to import") | font(fs * 0.85f) | semibold | fg(t.text_secondary),
-                                text_owned("No PuTTY sessions or MobaXterm bookmarks were found on this machine.") | font(fs * 0.78f) | fg(muted) | wrap_text | width(pct(100)))
+            drawer.push_back((v(text_owned("Nothing to import") | font(t.type(Tier::small)) | semibold | fg(t.text_secondary),
+                                text_owned("No PuTTY sessions or MobaXterm bookmarks were found on this machine.") | font(t.type(Tier::small)) | fg(muted) | wrap_text | width(pct(100)))
                               | gap(3.0f) | width(pct(100))).build());
         for (std::size_t q = 0; q < p.imports.size(); ++q) {
             const auto& s = p.imports[q];
             const auto rid = part_id(base + ".imp", q);
             const bool none = s.fresh == 0;
-            drawer.push_back((h(v(text_owned(s.name) | font(fs * 0.88f) | semibold | fg(ink),
+            drawer.push_back((h(v(text_owned(s.name) | font(t.type(Tier::small)) | semibold | fg(ink),
                                   text_owned(std::to_string(s.total) + (s.total == 1 ? " session" : " sessions")
-                                             + (none ? ", all here already" : ", " + std::to_string(s.fresh) + " new")) | font(fs * 0.76f) | fg(muted))
+                                             + (none ? ", all here already" : ", " + std::to_string(s.fresh) + " new")) | font(t.type(Tier::fine)) | fg(muted))
                                     | gap(1.0f) | grow() | min_size(0, 0),
-                                h(text_owned(none ? "Done" : "Import") | font(fs * 0.82f) | semibold
+                                h(text_owned(none ? "Done" : "Import") | font(t.type(Tier::small)) | semibold
                                       | fg(none ? muted : c.hovered(rid) ? readable_on(t.accent) : t.accent))
                                     | height(26.0f) | pad(0, 10.0f) | center | radius(t.rounded(6.0f))
                                     | bg(none ? paper.fade(0.0f) : c.hovered(rid) ? t.accent : t.accent.fade(0.12f))
@@ -900,22 +899,22 @@ template <ControlContext C, class On>
                        std::move(search))
                          | gap(12.0f) | pad(16.0f, 14.0f, 6.0f, 14.0f) | width(pct(100)),
                      node(std::move(list_view)) | grow() | min_size(0, 0) | width(pct(100)) | pad(0, 6.0f),
-                     h(mono(p.source, fs * 0.72f, faint) | ellipsis | grow() | min_size(0, 0)) | pad(10.0f, 16.0f) | width(pct(100))
+                     h(mono(p.source, t.type(Tier::fine), faint) | ellipsis | grow() | min_size(0, 0)) | pad(10.0f, 16.0f) | width(pct(100))
                          | inner_shadow(0.0f, line, {0.0f, 1.0f}))
                  | width(d::kSideW) | height(pct(100)) | bg(mix(paper, ink, 0.02f)) | inner_shadow(0.0f, line, {-1.0f, 0.0f});
 
     // ── detail / editor ────────────────────────────────────────────────────
     std::vector<Node> pane;
     const auto section = [&](std::string title) {
-        return (text_owned(std::move(title)) | font(fs * 0.72f) | semibold | tracking(1.0f) | fg(muted) | pad(10.0f, 0, 2.0f, 0)).build();
+        return (text_owned(std::move(title)) | font(t.type(Tier::fine)) | semibold | tracking(1.0f) | fg(muted) | pad(10.0f, 0, 2.0f, 0)).build();
     };
     const auto card = [&](std::vector<Node> rows) {
         return (v(std::move(rows)) | width(pct(100)) | pad(4.0f, 16.0f) | radius(t.rounded(10.0f))
                 | bg(mix(paper, ink, 0.025f)) | border(1.0f, mix(paper, ink, 0.075f))).build();
     };
     const auto kv = [&](std::string k, std::string v_, bool last_row, Color<Srgb> col) {
-        return (h(text_owned(std::move(k)) | font(fs * 0.85f) | fg(muted) | width(110.0f),
-                  mono(v_.empty() ? std::string{"\u2014"} : std::move(v_), fs * 0.88f, v_.empty() ? faint : col) | grow() | ellipsis | min_size(0, 0))
+        return (h(text_owned(std::move(k)) | font(t.type(Tier::small)) | fg(muted) | width(110.0f),
+                  mono(v_.empty() ? std::string{"\u2014"} : std::move(v_), t.type(Tier::small), v_.empty() ? faint : col) | grow() | ellipsis | min_size(0, 0))
                 | align(Align::center) | height(36.0f) | width(pct(100))
                 | inner_shadow(0.0f, last_row ? line.fade(0.0f) : line.fade(0.7f), {0.0f, -1.0f})).build();
     };
@@ -936,17 +935,17 @@ template <ControlContext C, class On>
             std::size_t members = 0;
             for (const auto& h_ : hosts) members += h_.folder == st.edit_folder || h_.folder.rfind(st.edit_folder + "/", 0) == 0 ? 1 : 0;
             pane.push_back((v(h(node(icon_node(Icon::folder_open, 22.0f, t.accent)),
-                                text_owned(st.edit_folder.empty() ? std::string{"New folder"} : st.edit_folder) | font(fs * 1.45f) | semibold | fg(ink))
+                                text_owned(st.edit_folder.empty() ? std::string{"New folder"} : st.edit_folder) | font(t.type(Tier::title)) | semibold | fg(ink))
                                   | gap(10.0f) | align(Align::center),
                               text_owned("What its " + std::to_string(members) + (members == 1 ? " host shares" : " hosts share")
                                          + " (and those in sub-folders): a host's own value always wins. Renaming moves them all.")
-                                  | font(fs * 0.82f) | fg(muted) | wrap_text | width(pct(100)))
+                                  | font(t.type(Tier::small)) | fg(muted) | wrap_text | width(pct(100)))
                             | gap(6.0f) | width(pct(100))).build());
         } else
-        pane.push_back((v(text_owned(is_new ? "New host" : "Edit " + orig->alias) | font(fs * 1.45f) | semibold | fg(ink),
+        pane.push_back((v(text_owned(is_new ? "New host" : "Edit " + orig->alias) | font(t.type(Tier::title)) | semibold | fg(ink),
                           text_owned(owns ? "Saved in " + p.store + ". Tab moves between fields; Enter saves."
                                           : "Connection details come from " + p.source + "; hand keeps your notes, tunnels and command.")
-                              | font(fs * 0.82f) | fg(muted) | wrap_text | width(pct(100)))
+                              | font(t.type(Tier::small)) | fg(muted) | wrap_text | width(pct(100)))
                         | gap(4.0f) | width(pct(100))).build());
         const auto field_row = [&](SshField f, bool last_row) {
             const auto fid = node_id(base + ".f", static_cast<std::size_t>(f));
@@ -970,7 +969,7 @@ template <ControlContext C, class On>
                     const bool on_ = st.env == q;
                     const auto tone = q == 0 ? t.text_secondary : env_tone(t, static_cast<SshHost::Env>(q));
                     const auto sid = part_id(base + ".env", static_cast<std::size_t>(q));
-                    segs.push_back((h(text_owned(names[static_cast<std::size_t>(q)]) | font(fs * 0.85f) | (on_ ? semibold : weight(FontWeight::regular))
+                    segs.push_back((h(text_owned(names[static_cast<std::size_t>(q)]) | font(t.type(Tier::small)) | (on_ ? semibold : weight(FontWeight::regular))
                                       | fg(on_ ? (q == 0 ? ink : tone) : c.hovered(sid) ? ink : t.text_secondary))
                                     | grow() | height(26.0f) | center | radius(t.rounded(5.0f))
                                     | bg(on_ ? (q == 0 ? mix(paper, ink, 0.12f) : tone.fade(0.16f)) : paper.fade(0.0f))
@@ -980,11 +979,11 @@ template <ControlContext C, class On>
                 ctl = (h_list(std::move(segs), 2.0f) | pad(2.0f) | radius(t.rounded(7.0f)) | width(pct(100))
                        | bg(mix(paper, ink, 0.05f)) | border(1.0f, focused ? t.accent.fade(0.7f) : line)).build();
             } else if (locked) {
-                ctl = (h(mono(d::text_of(st, f).empty() ? std::string{"\u2014"} : d::text_of(st, f), fs * 0.9f, muted) | grow() | ellipsis | min_size(0, 0),
+                ctl = (h(mono(d::text_of(st, f).empty() ? std::string{"\u2014"} : d::text_of(st, f), t.type(Tier::body), muted) | grow() | ellipsis | min_size(0, 0),
                          node(icon_node(Icon::pin, 12.0f, faint)) | tooltip("from " + p.source))
                        | align(Align::center) | height(32.0f) | pad(0, 10.0f) | width(pct(100))).build();
             } else {
-                ctl = (node((text_field(t, st.fields[static_cast<std::size_t>(f)], focused, fid, hint, fs * 0.9f)
+                ctl = (node((text_field(t, st.fields[static_cast<std::size_t>(f)], focused, fid, hint, t.type(Tier::body))
                              | monospace | width(pct(100)) | border(1.0f, focused ? t.accent : line)
                              | radius(t.rounded(7.0f)) | bg(mix(paper, ink, focused ? 0.03f : 0.015f))).build())
                        | width(pct(100))
@@ -1001,7 +1000,7 @@ template <ControlContext C, class On>
                     if (name == typed || chips.size() >= 6) continue;
                     const auto cid = node_id(base + ".fchip." + name);
                     chips.push_back((h(node(icon_node(Icon::folder, 11.0f, c.hovered(cid) ? ink : muted)),
-                                       mono(name, fs * 0.76f, c.hovered(cid) ? ink : t.text_secondary))
+                                       mono(name, t.type(Tier::fine), c.hovered(cid) ? ink : t.text_secondary))
                                      | gap(4.0f) | align(Align::center) | height(22.0f) | pad(0, 7.0f) | radius(t.rounded(5.0f))
                                      | bg(c.hovered(cid) ? mix(paper, ink, 0.1f) : mix(paper, ink, 0.05f)) | pointer_cursor | id_of_raw(cid)
                                      | on_click([op, name] {
@@ -1016,17 +1015,17 @@ template <ControlContext C, class On>
             if (f == SshField::folder && !inh.name.empty() && (!inh.user.empty() || !inh.jump.empty() || !inh.identity.empty() || inh.port > 0))
                 under.push_back((text_owned("shares " + std::string{!inh.user.empty() ? "user " + inh.user + "  " : ""} + (!inh.jump.empty() ? "jump " + inh.jump + "  " : "")
                                             + (!inh.identity.empty() ? "key " + inh.identity + "  " : "") + (inh.port > 0 ? "port " + std::to_string(inh.port) : ""))
-                                 | font(fs * 0.76f) | fg(t.accent) | ellipsis | width(pct(100))).build());
+                                 | font(t.type(Tier::fine)) | fg(t.accent) | ellipsis | width(pct(100))).build());
             if (f == SshField::forwards)
                 for (const auto& fw : d::split_forwards(d::text_of(st, f))) {
                     std::string why;
                     const auto pf = ssh_forward_parse(fw, &why);
                     const auto col = pf ? t.text_secondary : t.danger;
-                    under.push_back((h(mono(pf ? std::string{pf->flag() + 1} : "!", fs * 0.7f, pf ? t.accent : t.danger) | bold | width(14.0f),
-                                       mono(pf ? pf->describe() : fw + "  \u2014  " + why, fs * 0.78f, col) | ellipsis | min_size(0, 0))
+                    under.push_back((h(mono(pf ? std::string{pf->flag() + 1} : "!", t.type(Tier::fine), pf ? t.accent : t.danger) | bold | width(14.0f),
+                                       mono(pf ? pf->describe() : fw + "  \u2014  " + why, t.type(Tier::small), col) | ellipsis | min_size(0, 0))
                                      | gap(6.0f) | align(Align::center)).build());
                 }
-            return (h(text_owned(d::field_label(f)) | font(fs * 0.88f) | fg(focused ? ink : t.text_secondary) | width(110.0f) | pad(8.0f, 0, 0, 0),
+            return (h(text_owned(d::field_label(f)) | font(t.type(Tier::small)) | fg(focused ? ink : t.text_secondary) | width(110.0f) | pad(8.0f, 0, 0, 0),
                       v(node(std::move(ctl)), v(std::move(under)) | gap(3.0f) | pad(under.empty() ? 0.0f : 4.0f, 2.0f, 0, 2.0f)) | grow() | min_size(0, 0))
                     | align(Align::start) | width(pct(100)) | pad(7.0f, 0)
                     | inner_shadow(0.0f, last_row ? line.fade(0.0f) : line.fade(0.6f), {0.0f, -1.0f})).build();
@@ -1038,7 +1037,7 @@ template <ControlContext C, class On>
                 rows.push_back(field_row(f, f == SshField::identity));
             pane.push_back(card(std::move(rows)));
             if (!st.error.empty())
-                pane.push_back((h(node(icon_node(Icon::circle_alert, 14.0f, t.danger)), text_owned(st.error) | font(fs * 0.85f) | fg(t.danger) | wrap_text | grow())
+                pane.push_back((h(node(icon_node(Icon::circle_alert, 14.0f, t.danger)), text_owned(st.error) | font(t.type(Tier::small)) | fg(t.danger) | wrap_text | grow())
                                 | gap(8.0f) | align(Align::center) | pad(8.0f, 12.0f) | radius(t.rounded(8.0f)) | bg(t.danger.fade(0.08f))
                                 | border(1.0f, t.danger.fade(0.25f)) | width(pct(100))).build());
             if (!st.edit_folder.empty())
@@ -1062,11 +1061,11 @@ template <ControlContext C, class On>
         // what saving gives you, as a command line; or what is wrong
         const std::string err = !st.error.empty() ? st.error : live_err;
         if (!err.empty())
-            pane.push_back((h(node(icon_node(Icon::circle_alert, 14.0f, t.danger)), text_owned(err) | font(fs * 0.85f) | fg(t.danger) | wrap_text | grow())
+            pane.push_back((h(node(icon_node(Icon::circle_alert, 14.0f, t.danger)), text_owned(err) | font(t.type(Tier::small)) | fg(t.danger) | wrap_text | grow())
                             | gap(8.0f) | align(Align::center) | pad(8.0f, 12.0f) | radius(t.rounded(8.0f)) | bg(t.danger.fade(0.08f))
                             | border(1.0f, t.danger.fade(0.25f)) | width(pct(100))).build());
         else
-            pane.push_back((h(mono("$", fs * 0.85f, t.accent), mono(d::command_line(draft), fs * 0.82f, t.text_secondary) | wrap_text | grow() | min_size(0, 0))
+            pane.push_back((h(mono("$", t.type(Tier::small), t.accent), mono(d::command_line(draft), t.type(Tier::small), t.text_secondary) | wrap_text | grow() | min_size(0, 0))
                             | gap(8.0f) | pad(10.0f, 12.0f) | radius(t.rounded(8.0f)) | bg(mix(paper, colors::black, 0.15f))
                             | border(1.0f, line) | width(pct(100))).build());
         }
@@ -1075,17 +1074,17 @@ template <ControlContext C, class On>
         const auto tone = env_tone(t, hst.env);
         // the host, big, with its badges
         std::vector<Node> title;
-        title.push_back((mono(hst.alias, fs * 1.5f, ink) | semibold | ellipsis | min_size(0, 0)).build());
+        title.push_back((mono(hst.alias, t.type(Tier::title), ink) | semibold | ellipsis | min_size(0, 0)).build());
         if (hst.env != SshHost::Env::none)
-            title.push_back((h(mono(env_name(hst.env), fs * 0.68f, tone) | bold | tracking(0.6f)) | height(20.0f) | pad(0, 7.0f) | center
+            title.push_back((h(mono(env_name(hst.env), t.type(Tier::fine), tone) | bold | tracking(0.6f)) | height(20.0f) | pad(0, 7.0f) | center
                              | radius(4.0f) | bg(tone.fade(0.15f)) | border(1.0f, tone.fade(0.35f))).build());
         if (hst.connected)
             title.push_back((h(box() | size(7.0f, 7.0f) | radius(3.5f) | bg(t.success),
-                               text_owned(std::to_string(hst.sessions) + " open") | font(fs * 0.78f) | fg(t.success))
+                               text_owned(std::to_string(hst.sessions) + " open") | font(t.type(Tier::small)) | fg(t.success))
                              | gap(5.0f) | align(Align::center)).build());
         const auto pin_id = node_id(base + ".pin");
         title.push_back(spacer().build());
-        title.push_back((h(hst.pinned ? (text_owned("\u2605") | font(fs * 1.25f) | fg(t.warning)).build()
+        title.push_back((h(hst.pinned ? (text_owned("\u2605") | font(t.type(Tier::large)) | fg(t.warning)).build()
                                       : icon_node(Icon::star, 16.0f, c.hovered(pin_id) ? ink : faint, 1.5f))
                          | size(30.0f, 30.0f) | center | radius(t.rounded(7.0f)) | bg(c.hovered(pin_id) ? mix(paper, ink, 0.07f) : paper.fade(0.0f))
                          | pointer_cursor | tooltip(hst.pinned ? "Unpin (p)" : "Pin (p)") | id_of_raw(pin_id)
@@ -1093,10 +1092,10 @@ template <ControlContext C, class On>
         const std::string src = hst.editable ? "saved in " + p.store : hst.source == "known" ? "from known_hosts" : "from " + p.source;
         const std::string age = detail::host_age(hst.last_used, p.now);
         pane.push_back((v(h_list(std::move(title), 10.0f) | align(Align::center) | width(pct(100)),
-                          mono(d::host_line(hst), fs * 0.9f, t.text_secondary),
+                          mono(d::host_line(hst), t.type(Tier::body), t.text_secondary),
                           text_owned(src + (hst.uses > 0 ? "  \u00B7  " + std::to_string(hst.uses) + (hst.uses == 1 ? " connection" : " connections")
                                                                + (age.empty() ? "" : ", last " + age + " ago") : "  \u00B7  never connected"))
-                              | font(fs * 0.78f) | fg(muted))
+                              | font(t.type(Tier::small)) | fg(muted))
                         | gap(5.0f) | width(pct(100))).build());
         // actions
         std::vector<Node> acts;
@@ -1119,8 +1118,8 @@ template <ControlContext C, class On>
                 const auto tid = part_id(base + ".tab", static_cast<std::size_t>(k));
                 const bool on_ = st.tab == k, hov = c.hovered(tid);
                 return (h(node(icon_node(ic, 13.0f, on_ ? t.accent : hov ? ink : muted)),
-                          text_owned(std::move(label)) | font(fs * 0.88f) | (on_ ? semibold : weight(FontWeight::regular)) | fg(on_ || hov ? ink : t.text_secondary),
-                          mono(std::move(key), fs * 0.68f, faint))
+                          text_owned(std::move(label)) | font(t.type(Tier::small)) | (on_ ? semibold : weight(FontWeight::regular)) | fg(on_ || hov ? ink : t.text_secondary),
+                          mono(std::move(key), t.type(Tier::fine), faint))
                         | gap(6.0f) | align(Align::center) | height(34.0f) | pad(0, 4.0f)
                         | inner_shadow(0.0f, on_ ? t.accent : paper.fade(0.0f), {0.0f, -2.0f})
                         | pointer_cursor | id_of_raw(tid)
@@ -1156,8 +1155,8 @@ template <ControlContext C, class On>
                 for (std::size_t q = 0; q < parts.size(); ++q) {
                     const auto bid = part_id(base + ".crumb", q);
                     const bool last = q + 1 == parts.size();
-                    if (q > 0) crumbs.push_back(mono("/", fs * 0.8f, faint).build());
-                    crumbs.push_back((h(mono(q == 0 ? std::string{"\u2302"} : parts[q].first, fs * 0.84f, last ? ink : c.hovered(bid) ? t.accent : t.text_secondary)
+                    if (q > 0) crumbs.push_back(mono("/", t.type(Tier::small), faint).build());
+                    crumbs.push_back((h(mono(q == 0 ? std::string{"\u2302"} : parts[q].first, t.type(Tier::small), last ? ink : c.hovered(bid) ? t.accent : t.text_secondary)
                                         | (last ? semibold : weight(FontWeight::regular)))
                                       | pad(2.0f, 4.0f) | radius(4.0f) | bg(c.hovered(bid) && !last ? mix(paper, ink, 0.07f) : paper.fade(0.0f))
                                       | pointer_cursor | id_of_raw(bid) | tooltip(parts[q].second)
@@ -1174,18 +1173,18 @@ template <ControlContext C, class On>
             bar.push_back(button("frefresh", "\u21BB", "r", false, false, act(A::Kind::files_open, here)));
             pane.push_back((h_list(std::move(bar), 8.0f) | align(Align::center) | width(pct(100)) | pad(6.0f, 0)).build());
             if (!fv.busy.empty() && mine)
-                pane.push_back((h(node(icon_node(Icon::refresh, 13.0f, t.accent)), text_owned(fv.busy) | font(fs * 0.84f) | fg(t.accent) | grow())
+                pane.push_back((h(node(icon_node(Icon::refresh, 13.0f, t.accent)), text_owned(fv.busy) | font(t.type(Tier::small)) | fg(t.accent) | grow())
                                 | gap(8.0f) | align(Align::center) | pad(7.0f, 12.0f) | radius(t.rounded(7.0f)) | bg(t.accent.fade(0.08f)) | width(pct(100))).build());
             std::vector<Node> rows;
             if (!mine || (fv.loading && fv.entries.empty())) {
-                rows.push_back((h(node(icon_node(Icon::refresh, 16.0f, muted)), text_owned("Listing files over SFTP\u2026") | font(fs * 0.88f) | fg(muted))
+                rows.push_back((h(node(icon_node(Icon::refresh, 16.0f, muted)), text_owned("Listing files over SFTP\u2026") | font(t.type(Tier::small)) | fg(muted))
                                 | gap(10.0f) | align(Align::center) | pad(26.0f, 0) | width(pct(100)) | justify(Justify::center)).build());
             } else if (!fv.error.empty()) {
-                rows.push_back((v(h(node(icon_node(Icon::circle_alert, 16.0f, t.danger)), text_owned("Could not list " + (here.empty() ? std::string{"the files"} : here)) | font(fs * 0.92f) | semibold | fg(t.danger)) | gap(8.0f) | align(Align::center),
-                                  text_owned(fv.error) | font(fs * 0.84f) | fg(t.text_secondary) | wrap_text | width(pct(100)))
+                rows.push_back((v(h(node(icon_node(Icon::circle_alert, 16.0f, t.danger)), text_owned("Could not list " + (here.empty() ? std::string{"the files"} : here)) | font(t.type(Tier::body)) | semibold | fg(t.danger)) | gap(8.0f) | align(Align::center),
+                                  text_owned(fv.error) | font(t.type(Tier::small)) | fg(t.text_secondary) | wrap_text | width(pct(100)))
                                 | gap(6.0f) | pad(14.0f, 16.0f) | width(pct(100))).build());
             } else if (fv.entries.empty()) {
-                rows.push_back((text_owned("Empty folder. Upload (u) puts files here.") | font(fs * 0.86f) | fg(muted) | pad(20.0f, 16.0f)).build());
+                rows.push_back((text_owned("Empty folder. Upload (u) puts files here.") | font(t.type(Tier::small)) | fg(muted) | pad(20.0f, 16.0f)).build());
             } else {
                 for (std::size_t q = 0; q < fv.entries.size(); ++q) {
                     const auto& e = fv.entries[q];
@@ -1194,10 +1193,10 @@ template <ControlContext C, class On>
                     const std::string full = here.empty() || here.back() == '/' ? here + e.name : here + "/" + e.name;
                     const auto dl = part_id(base + ".dl", q);
                     rows.push_back((h(node(icon_node(e.dir ? Icon::folder : e.link ? Icon::link : Icon::file, 15.0f, e.dir ? t.accent : e.link ? t.info : muted)),
-                                      mono(e.name + (e.link && !e.target.empty() ? "  \u2192 " + e.target : ""), fs * 0.88f, e.dir ? ink : t.text_secondary)
+                                      mono(e.name + (e.link && !e.target.empty() ? "  \u2192 " + e.target : ""), t.type(Tier::small), e.dir ? ink : t.text_secondary)
                                           | grow() | ellipsis | min_size(0, 0),
-                                      mono(e.dir ? std::string{} : d::human_size(e.size), fs * 0.76f, faint) | width(70.0f) | text_align(TextAlign::right),
-                                      mono(e.when, fs * 0.74f, faint) | width(96.0f) | text_align(TextAlign::right),
+                                      mono(e.dir ? std::string{} : d::human_size(e.size), t.type(Tier::fine), faint) | width(70.0f) | text_align(TextAlign::right),
+                                      mono(e.when, t.type(Tier::fine), faint) | width(96.0f) | text_align(TextAlign::right),
                                       (h(node(icon_node(Icon::arrow_down, 13.0f, c.hovered(dl) ? t.accent : sel || hov ? muted : paper.fade(0.0f))))
                                        | size(26.0f, 26.0f) | center | radius(5.0f) | bg(c.hovered(dl) ? mix(paper, ink, 0.1f) : paper.fade(0.0f))
                                        | tooltip("Download (d)") | id_of_raw(dl)
@@ -1239,10 +1238,10 @@ template <ControlContext C, class On>
                             ));
         if (!hst.folder.empty()) {
             const auto fid = node_id(base + ".infolder");
-            pane.push_back((h(node(icon_node(Icon::folder, 13.0f, muted)), text_owned("In " + hst.folder) | font(fs * 0.82f) | fg(t.text_secondary),
+            pane.push_back((h(node(icon_node(Icon::folder, 13.0f, muted)), text_owned("In " + hst.folder) | font(t.type(Tier::small)) | fg(t.text_secondary),
                               text_owned(hst.editable ? "" : "\u00B7  its shared settings apply to hosts saved here; this one's come from " + p.source)
-                                  | font(fs * 0.78f) | fg(faint) | ellipsis | min_size(0, 0) | grow(),
-                              text_owned("folder settings") | font(fs * 0.82f) | fg(c.hovered(fid) ? t.accent : muted) | pointer_cursor | id_of_raw(fid)
+                                  | font(t.type(Tier::small)) | fg(faint) | ellipsis | min_size(0, 0) | grow(),
+                              text_owned("folder settings") | font(t.type(Tier::small)) | fg(c.hovered(fid) ? t.accent : muted) | pointer_cursor | id_of_raw(fid)
                                   | on_click([op, f = hst.folder, fl = p.folders] { return op([f, fl](SshManagerState& s) { o::begin_folder_edit(s, fl, f); }); }))
                             | gap(8.0f) | align(Align::center) | pad(2.0f, 4.0f)).build());
         }
@@ -1261,26 +1260,26 @@ template <ControlContext C, class On>
                 const auto scol = ts == T::up ? t.success : ts == T::down ? t.warning : ts == T::conflict ? t.danger : muted;
                 const std::string stext = ts == T::up ? "up" : ts == T::down ? "not running" : ts == T::conflict ? "port taken" : ts == T::remote ? "on the server" : "idle";
                 std::vector<Node> right;
-                right.push_back((h(box() | size(7.0f, 7.0f) | radius(3.5f) | bg(scol), mono(stext, fs * 0.72f, scol))
+                right.push_back((h(box() | size(7.0f, 7.0f) | radius(3.5f) | bg(scol), mono(stext, t.type(Tier::fine), scol))
                                  | gap(5.0f) | align(Align::center) | tooltip(note.empty() ? stext : note)).build());
                 if (fw->kind == SshForward::Kind::local && d::webby(fw->listen) && ts == T::up) {
                     const auto oid = part_id(base + ".open", q);
                     const std::string url = std::string{fw->listen == 443 || fw->listen == 8443 ? "https" : "http"} + "://localhost:" + std::to_string(fw->listen);
-                    right.push_back((h(node(icon_node(Icon::external, 12.0f, c.hovered(oid) ? ink : t.accent)), mono("open", fs * 0.72f, c.hovered(oid) ? ink : t.accent))
+                    right.push_back((h(node(icon_node(Icon::external, 12.0f, c.hovered(oid) ? ink : t.accent)), mono("open", t.type(Tier::fine), c.hovered(oid) ? ink : t.accent))
                                      | gap(4.0f) | align(Align::center) | height(22.0f) | pad(0, 7.0f) | radius(5.0f)
                                      | bg(c.hovered(oid) ? t.accent.fade(0.2f) : t.accent.fade(0.1f)) | pointer_cursor | tooltip(url) | id_of_raw(oid)
                                      | on_click([op, i = st.sel, url] { return op([i, url](SshManagerState& s) { s.out.push_back({A::Kind::open_url, i, {}, {}, url, {}}); }); })).build());
                 }
-                rows.push_back((h(h(mono(std::string{fw->flag() + 1}, fs * 0.72f, kind_col) | bold) | size(20.0f, 20.0f) | center | radius(5.0f) | bg(kind_col.fade(0.14f)),
-                                  mono(fw->describe(), fs * 0.86f, ink) | grow() | ellipsis | min_size(0, 0),
-                                  mono(fw->flag() + std::string{" "} + fw->arg(), fs * 0.74f, faint),
+                rows.push_back((h(h(mono(std::string{fw->flag() + 1}, t.type(Tier::fine), kind_col) | bold) | size(20.0f, 20.0f) | center | radius(5.0f) | bg(kind_col.fade(0.14f)),
+                                  mono(fw->describe(), t.type(Tier::small), ink) | grow() | ellipsis | min_size(0, 0),
+                                  mono(fw->flag() + std::string{" "} + fw->arg(), t.type(Tier::fine), faint),
                                   h_list(std::move(right), 8.0f) | align(Align::center))
                                 | gap(10.0f) | align(Align::center) | height(36.0f) | width(pct(100))
                                 | inner_shadow(0.0f, q + 1 == hst.forwards.size() ? line.fade(0.0f) : line.fade(0.7f), {0.0f, -1.0f})).build());
             }
             if (rows.empty())
                 rows.push_back((h(text_owned("No tunnels. Edit to forward a port (L5432:db:5432) or open a SOCKS proxy (D1080).")
-                                  | font(fs * 0.82f) | fg(muted) | wrap_text | grow())
+                                  | font(t.type(Tier::small)) | fg(muted) | wrap_text | grow())
                                 | pad(10.0f, 0) | width(pct(100))).build());
             pane.push_back(card(std::move(rows)));
         }
@@ -1294,7 +1293,7 @@ template <ControlContext C, class On>
         // the exact command
         const auto cid = node_id(base + ".cmd");
         pane.push_back(section("COMMAND"));
-        pane.push_back((h(mono("$", fs * 0.85f, t.accent), mono(d::command_line(hst), fs * 0.82f, t.text_secondary) | wrap_text | grow() | min_size(0, 0),
+        pane.push_back((h(mono("$", t.type(Tier::small), t.accent), mono(d::command_line(hst), t.type(Tier::small), t.text_secondary) | wrap_text | grow() | min_size(0, 0),
                           node(icon_node(Icon::copy, 14.0f, c.hovered(cid) ? ink : muted)))
                         | gap(8.0f) | align(Align::center) | pad(10.0f, 12.0f) | radius(t.rounded(8.0f))
                         | bg(c.hovered(cid) ? mix(paper, colors::black, 0.1f) : mix(paper, colors::black, 0.15f)) | border(1.0f, line)
@@ -1303,8 +1302,8 @@ template <ControlContext C, class On>
         }   // overview
     } else {
         pane.push_back((v(node(icon_node(Icon::server, 30.0f, muted.fade(0.6f))),
-                          text_owned("No host selected") | font(fs * 1.05f) | fg(t.text_secondary),
-                          text_owned("Pick one on the left, or press n to add a host") | font(fs * 0.85f) | fg(muted))
+                          text_owned("No host selected") | font(t.type(Tier::body)) | fg(t.text_secondary),
+                          text_owned("Pick one on the left, or press n to add a host") | font(t.type(Tier::small)) | fg(muted))
                         | gap(8.0f) | align(Align::center) | width(pct(100)) | pad(90.0f, 0)).build());
     }
     Node detail = scroll_view(c, base + ".detail", st.detail_scroll, v(std::move(pane)) | gap(8.0f) | pad(22.0f, 56.0f, 26.0f, 26.0f) | width(pct(100)),
@@ -1313,9 +1312,9 @@ template <ControlContext C, class On>
     // ── footer: what the keys do here ─────────────────────────────────────────
     std::vector<Node> keys;
     const auto hint = [&](std::string k, std::string what) {
-        return (h(h(mono(std::move(k), fs * 0.72f, t.text_secondary)) | height(18.0f) | pad(0, 5.0f) | center | radius(4.0f)
+        return (h(h(mono(std::move(k), t.type(Tier::fine), t.text_secondary)) | height(18.0f) | pad(0, 5.0f) | center | radius(4.0f)
                     | bg(mix(paper, ink, 0.06f)) | border(1.0f, line),
-                  text_owned(std::move(what)) | font(fs * 0.78f) | fg(muted))
+                  text_owned(std::move(what)) | font(t.type(Tier::small)) | fg(muted))
                 | gap(6.0f) | align(Align::center)).build();
     };
     if (st.editing) {

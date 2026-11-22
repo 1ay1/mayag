@@ -36,7 +36,7 @@ struct PromptEditorSpec {
 template <ControlContext C>
 inline void prompt_editor(const C& c, std::string_view id, const TextEditState& in, const PromptEditorSpec& s) {
     const Theme& t = c.theme;
-    const float fs = t.font_size * 1.02f;
+    const float fs = t.type(Tier::body);
     const float lh = std::round(fs * 1.5f);
     std::vector<std::string> lines;
     for (std::size_t st = 0, i = 0; i <= in.text.size(); ++i)
@@ -67,28 +67,28 @@ inline void prompt_editor(const C& c, std::string_view id, const TextEditState& 
     std::vector<Node> chips;
     for (std::size_t k = 0; k < s.attachments.size(); ++k) {
         const auto xid = part_id(id, 64 + k);
-        chips.push_back((h(text<"@"> | font(t.font_size * 0.8f) | fg(var::info),
-                           text_owned(s.attachments[k]) | font(t.font_size * 0.82f) | fg(var::text_secondary),
-                           h(text<"\u00D7"> | font(t.font_size * 0.8f) | fg(c.hovered(xid) ? t.text_primary : t.text_disabled)) | pointer_cursor | id_of(id, 64 + k))
+        chips.push_back((h(text<"@"> | font(t.type(Tier::small)) | fg(var::info),
+                           text_owned(s.attachments[k]) | font(t.type(Tier::small)) | fg(var::text_secondary),
+                           h(text<"\u00D7"> | font(t.type(Tier::small)) | fg(c.hovered(xid) ? t.text_primary : t.text_disabled)) | pointer_cursor | id_of(id, 64 + k))
                          | gap(t.spaced(4)) | align(Align::center) | pad(t.spaced(1), t.spaced(6)) | radius(t.rounded(4)) | bg(t.tint(t.info, 0.12f))).build());
     }
     const auto send = part_id(id, 1), tgt = part_id(id, 3);
     const bool can = !in.text.empty();
     c.overlay(Overlay{
-        .content = (v(h(text<"\u2192"> | font(t.font_size * 0.85f) | fg(var::text_disabled),
+        .content = (v(h(text<"\u2192"> | font(t.type(Tier::small)) | fg(var::text_disabled),
                         h(text_owned(s.broadcast ? "broadcast to " + std::to_string(s.broadcast_count) + " panes" : s.target)
-                              | font(t.font_size * 0.85f) | fg(s.broadcast ? t.danger : t.text_secondary),
-                          text<" \u2304"> | font(t.font_size * 0.75f) | fg(var::text_disabled))
+                              | font(t.type(Tier::small)) | fg(s.broadcast ? t.danger : t.text_secondary),
+                          text<" \u2304"> | font(t.type(Tier::fine)) | fg(var::text_disabled))
                             | pad(t.spaced(1), t.spaced(6)) | radius(t.rounded(4)) | bg(c.hovered(tgt) ? t.surface_raised : t.surface.fade(0.0f)) | pointer_cursor | id_of(id, 3),
                         spacer(),
                         node(key_hint(t, "esc", "cancel").build()))
                         | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
                       node(chips.empty() ? Node{} : (h_list(std::move(chips), 6.0f) | wrap | gap(t.spaced(6))).build()),
                       v(v_list(std::move(rows))) | width(pct(100)) | max_size(1e6f, lh * 12.0f) | clip | cursor(CursorShape::text) | id_of(id, 0),
-                      h(text_owned(std::to_string(in.text.size()) + " chars") | font(t.font_size * 0.75f) | fg(var::text_disabled),
+                      h(text_owned(std::to_string(in.text.size()) + " chars") | font(t.type(Tier::fine)) | fg(var::text_disabled),
                         spacer(),
-                        h(text<"Send"> | font(t.font_size * 0.88f) | semibold | fg(can ? t.on_accent : t.text_disabled),
-                          text<"\u2318\u23CE"> | font(t.font_size * 0.75f) | fg(can ? t.on_accent.fade(0.7f) : t.text_disabled))
+                        h(text<"Send"> | font(t.type(Tier::small)) | semibold | fg(can ? t.on_accent : t.text_disabled),
+                          text<"\u2318\u23CE"> | font(t.type(Tier::fine)) | fg(can ? t.on_accent.fade(0.7f) : t.text_disabled))
                             | gap(t.spaced(6)) | pad(t.spaced(4), t.spaced(12)) | radius(t.radius_small)
                             | bg(can ? (c.hovered(send) ? t.accent_hover : (s.broadcast ? t.danger : t.accent)) : t.surface_raised)
                             | cursor(can ? CursorShape::pointer : CursorShape::arrow) | id_of(id, 1))

@@ -76,10 +76,10 @@ template <ControlContext C>
 [[nodiscard]] inline Node host_badge(const C& c, const SshHost& h_, bool compact = false) {
     const Theme& t = c.theme;
     const Color<Srgb> tone = env_tone(t, h_.env);
-    return (h(text<"\u21C4"> | font(t.font_size * 0.78f) | fg(tone),
-              text_owned(compact ? h_.alias : (h_.user.empty() ? h_.alias : h_.user + "@" + h_.alias)) | font(t.font_size * 0.8f)
+    return (h(text<"\u21C4"> | font(t.type(Tier::small)) | fg(tone),
+              text_owned(compact ? h_.alias : (h_.user.empty() ? h_.alias : h_.user + "@" + h_.alias)) | font(t.type(Tier::small))
                   | semibold | fg(var::text_primary) | ellipsis,
-              text_owned(compact ? "" : env_name(h_.env)) | font(t.font_size * 0.68f) | bold | tracking(0.6f) | fg(tone))
+              text_owned(compact ? "" : env_name(h_.env)) | font(t.type(Tier::fine)) | bold | tracking(0.6f) | fg(tone))
             | gap(t.spaced(4)) | align(Align::center) | pad(t.spaced(1), t.spaced(6)) | radius(t.rounded(4))
             | bg(t.tint(tone, h_.env == SshHost::Env::prod ? 0.22f : 0.12f)) | border(t.stroke(1), t.tint(tone, 0.4f))).build();
 }
@@ -168,7 +168,7 @@ template <ControlContext C>
 inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& query, const std::vector<SshHost>& hosts,
                       const std::vector<int>& ranked, int sel, const SshHostsProps& p) {
     const Theme& t = c.theme;
-    const float fs = t.font_size;
+    const float fs = t.type(Tier::body);
     const auto paper = t.overlay, ink = t.text_primary;
     const auto dim = t.text_secondary, faint = t.text_disabled;
     const auto mono = [&](std::string s, float size, Color<Srgb> col) {
@@ -183,7 +183,7 @@ inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& quer
     const int top = std::clamp(s - p.max_rows + 2, 0, std::max(0, n - p.max_rows));
 
     const auto header = [&](const char* label_) {
-        return (h(mono(label_, fs * 0.68f, faint) | semibold | tracking(1.0f)) | pad(t.spaced(5), t.spaced(12), t.spaced(2), t.spaced(12))).build();
+        return (h(mono(label_, t.type(Tier::fine), faint) | semibold | tracking(1.0f)) | pad(t.spaced(5), t.spaced(12), t.spaced(2), t.spaced(12))).build();
     };
     const auto group_of = [&](const SshHost& h_) {
         if (h_.pinned) return 0;
@@ -208,7 +208,7 @@ inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& quer
         longest = std::max(longest, h_.alias.size());
         any_env = any_env || h_.env != SshHost::Env::none;
     }
-    const float cell = fs * 0.62f;   // a monospace advance at fs
+    const float cell = t.type(Tier::fine);   // a monospace advance at fs
     const float alias_w = std::round(cell * static_cast<float>(std::min<std::size_t>(longest, 22)) + 4.0f);
     const float env_w = any_env ? std::round(fs * 0.62f * 0.66f * 7.0f + 14.0f) : 0.0f;
     for (int k = top; k < std::min(n, top + p.max_rows); ++k) {
@@ -227,26 +227,26 @@ inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& quer
         // columns, so addresses line up down the list:
         //   ★ | alias (fixed) | ENV (fixed) | address (grows) | #tags | ● n | age
         std::vector<Node> line;
-        line.push_back((mono(h_.pinned ? "\u2605" : " ", fs * 0.8f, h_.pinned ? t.warning : faint) | width(fs)).build());
+        line.push_back((mono(h_.pinned ? "\u2605" : " ", t.type(Tier::small), h_.pinned ? t.warning : faint) | width(fs)).build());
         line.push_back((h(node(fuzzy_text(h_.alias, m.ok ? m.positions : std::vector<std::uint16_t>{}, fs, ink, t.accent).build()) | monospace)
                         | width(alias_w) | clip).build());
         line.push_back((h(h_.env == SshHost::Env::none ? Node{}
-                          : (h(mono(env_name(h_.env), fs * 0.62f, tone) | bold | tracking(0.8f))
+                          : (h(mono(env_name(h_.env), t.type(Tier::fine), tone) | bold | tracking(0.8f))
                              | pad(1.0f, 5.0f) | radius(t.rounded(3)) | bg(t.tint(tone, h_.env == SshHost::Env::prod ? 0.20f : 0.12f))).build())
                         | width(env_w)).build());
         // the address only when it says more than the alias
         std::string addr = detail::host_addr(h_);
         if (addr == h_.alias) addr.clear();
-        line.push_back((mono(addr, fs * 0.8f, dim) | ellipsis | grow() | min_size(0, 0)).build());
+        line.push_back((mono(addr, t.type(Tier::small), dim) | ellipsis | grow() | min_size(0, 0)).build());
         std::string tags;
         for (std::size_t i = 0; i < std::min<std::size_t>(h_.tags.size(), 3); ++i) tags += (i ? " #" : "#") + h_.tags[i];
-        if (!tags.empty()) line.push_back(mono(tags, fs * 0.74f, faint).build());
+        if (!tags.empty()) line.push_back(mono(tags, t.type(Tier::fine), faint).build());
         if (h_.connected)
-            line.push_back((h(mono("\u25CF", fs * 0.6f, t.success),
-                              mono(h_.sessions > 1 ? std::to_string(h_.sessions) : "", fs * 0.74f, t.success))
+            line.push_back((h(mono("\u25CF", t.type(Tier::fine), t.success),
+                              mono(h_.sessions > 1 ? std::to_string(h_.sessions) : "", t.type(Tier::fine), t.success))
                             | gap(3.0f) | align(Align::center)).build());
         const std::string age = !h_.last.empty() ? h_.last : detail::host_age(h_.last_used, p.now);
-        line.push_back((mono(age.empty() && !h_.source.empty() ? h_.source : age, fs * 0.74f, faint) | min_size(28, 0)
+        line.push_back((mono(age.empty() && !h_.source.empty() ? h_.source : age, t.type(Tier::fine), faint) | min_size(28, 0)
                         | text_align(TextAlign::right)).build());
         rows.push_back(row_frame((h_list(std::move(line), t.spaced(8)) | align(Align::center) | grow() | min_size(0, 0)).build(),
                                  pid, on));
@@ -254,13 +254,13 @@ inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& quer
     if (n == 0) {
         if (adhoc) {
             const auto pid = part_id(id, part_inc);
-            rows.push_back(row_frame((h(mono("\u21B5", fs * 0.8f, t.accent) | width(fs),
+            rows.push_back(row_frame((h(mono("\u21B5", t.type(Tier::small), t.accent) | width(fs),
                                         mono("ssh " + typed, fs, ink) | ellipsis | grow() | min_size(0, 0),
-                                        mono("not in your hosts \u2014 connect as typed", fs * 0.74f, faint))
+                                        mono("not in your hosts \u2014 connect as typed", t.type(Tier::fine), faint))
                                       | gap(t.spaced(8)) | align(Align::center) | grow()).build(),
                                      pid, s == 0));
         } else {
-            rows.push_back((h(mono(hosts.empty() ? "No hosts yet \u2014 type user@host to connect" : "No hosts match", fs * 0.9f, dim))
+            rows.push_back((h(mono(hosts.empty() ? "No hosts yet \u2014 type user@host to connect" : "No hosts match", t.type(Tier::body), dim))
                             | pad(t.spaced(14), t.spaced(14))).build());
         }
     }
@@ -274,17 +274,17 @@ inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& quer
         .content = (v(h(mono("ssh", fs, t.accent) | bold,
                         node((text_field(t, query, true, part_id(id, part_dec), "host, user@host[:port], #tag", fs)
                               | monospace | grow() | border(0, t.border) | bg(paper.fade(0.0f))).build()),
-                        mono(typed.empty() ? count : std::to_string(n) + " / " + count, fs * 0.74f, faint))
+                        mono(typed.empty() ? count : std::to_string(n) + " / " + count, t.type(Tier::fine), faint))
                         | gap(t.spaced(8)) | align(Align::center) | pad(t.spaced(8), t.spaced(14)) | width(pct(100)),
                       box() | height(1) | width(pct(100)) | bg(var::border),
                       v(v_list(std::move(rows), 1.0f)) | pad(t.spaced(4), t.spaced(6)) | width(pct(100)),
-                      h(node(key_hint(t, "\u23CE", p.action, fs * 0.78f).build()),
-                        node(key_hint(t, "\u2303S", "pin", fs * 0.78f).build()),
-                        node(key_hint(t, "\u2303Y", "copy cmd", fs * 0.78f).build()),
-                        node(key_hint(t, "\u2303E", "edit config", fs * 0.78f).build()),
-                        node(key_hint(t, "\u2303\u21E7H", "manage hosts", fs * 0.78f).build()),
+                      h(node(key_hint(t, "\u23CE", p.action, t.type(Tier::small)).build()),
+                        node(key_hint(t, "\u2303S", "pin", t.type(Tier::small)).build()),
+                        node(key_hint(t, "\u2303Y", "copy cmd", t.type(Tier::small)).build()),
+                        node(key_hint(t, "\u2303E", "edit config", t.type(Tier::small)).build()),
+                        node(key_hint(t, "\u2303\u21E7H", "manage hosts", t.type(Tier::small)).build()),
                         spacer(),
-                        mono(p.source, fs * 0.72f, faint) | ellipsis)
+                        mono(p.source, t.type(Tier::fine), faint) | ellipsis)
                         | gap(t.spaced(12)) | align(Align::center) | pad(t.spaced(6), t.spaced(14)) | width(pct(100))
                         | bg(mix(paper, ink, 0.025f)))
                     | width(w) | bg(paper) | border(t.stroke(1), t.border_strong) | radius(t.radius_medium) | clip
@@ -340,15 +340,15 @@ template <ControlContext C>
     }
     const auto btn = [&](std::size_t k, const char* label_) {
         const auto pid = part_id(id, k);
-        return (h(text_owned(label_) | font(t.font_size * 0.82f) | semibold | fg(c.hovered(pid) ? t.text_primary : t.text_secondary))
+        return (h(text_owned(label_) | font(t.type(Tier::small)) | semibold | fg(c.hovered(pid) ? t.text_primary : t.text_secondary))
                 | pad(t.spaced(2), t.spaced(9)) | radius(t.rounded(4)) | bg(c.hovered(pid) ? t.surface_raised : t.tint(tone, 0.12f)) | border(t.stroke(1), t.tint(tone, 0.35f))
                 | pointer_cursor | id_of(id, k)).build();
     };
     const bool can_retry = s.state == S::lost || s.state == S::reconnecting;
-    return (h(text_owned(glyph) | font(t.font_size * 0.9f) | bold | fg(tone) | width(14),
-              text_owned(words) | font(t.font_size * 0.88f) | fg(var::text_primary),
-              text_owned(s.detail) | font(t.font_size * 0.8f) | fg(var::text_secondary) | ellipsis | grow() | min_size(0, 0),
-              text_owned(s.mosh && can_retry ? "mosh: keep typing, input is buffered" : "") | font(t.font_size * 0.78f) | fg(var::text_disabled),
+    return (h(text_owned(glyph) | font(t.type(Tier::body)) | bold | fg(tone) | width(14),
+              text_owned(words) | font(t.type(Tier::small)) | fg(var::text_primary),
+              text_owned(s.detail) | font(t.type(Tier::small)) | fg(var::text_secondary) | ellipsis | grow() | min_size(0, 0),
+              text_owned(s.mosh && can_retry ? "mosh: keep typing, input is buffered" : "") | font(t.type(Tier::small)) | fg(var::text_disabled),
               node(can_retry ? btn(0, "Reconnect") : Node{}),
               node(s.state == S::lost ? btn(1, "Close") : Node{}))
             | gap(t.spaced(10)) | align(Align::center) | pad(t.spaced(5), t.spaced(10)) | width(pct(100))
@@ -378,19 +378,19 @@ inline void host_key_dialog(const C& c, std::string_view id, const HostKeyPrompt
         const auto pid = part_id(id, part);
         const bool hov = c.hovered(pid);
         const Color<Srgb> face = primary ? (danger ? t.danger : t.accent) : hov ? t.surface_raised : t.surface;
-        return (h(text_owned(label_) | font(t.font_size * 0.92f) | semibold | fg(primary ? t.on_accent : t.text_primary))
+        return (h(text_owned(label_) | font(t.type(Tier::body)) | semibold | fg(primary ? t.on_accent : t.text_primary))
                 | pad(t.spaced(6), t.spaced(14)) | radius(t.radius_small) | bg(face) | border(t.stroke(1), primary ? face : t.border)
                 | pointer_cursor | role(a11y::Role::button) | id_of(id, part)).build();
     };
     const auto fp_row = [&](const char* label_, const std::string& fp, Color<Srgb> col) {
-        return (h(text_owned(label_) | font(t.font_size * 0.8f) | fg(var::text_disabled) | width(70),
-                  text_owned(fp) | font(t.font_size * 0.88f) | fg(col) | no_ligatures | wrap_text | grow() | min_size(0, 0))
+        return (h(text_owned(label_) | font(t.type(Tier::small)) | fg(var::text_disabled) | width(70),
+                  text_owned(fp) | font(t.type(Tier::small)) | fg(col) | no_ligatures | wrap_text | grow() | min_size(0, 0))
                 | width(pct(100))).build();
     };
     c.overlay(Overlay{
-        .content = (v(h(text_owned(k.changed ? "\u26A0" : "\U0001F511") | font(t.font_size * 1.2f) | fg(tone),
+        .content = (v(h(text_owned(k.changed ? "\u26A0" : "\U0001F511") | font(t.type(Tier::large)) | fg(tone),
                         text_owned(k.changed ? "HOST KEY CHANGED for " + k.host : "First connection to " + k.host)
-                            | font(t.font_size * 1.1f) | semibold | fg(k.changed ? t.danger : t.text_primary))
+                            | font(t.type(Tier::large)) | semibold | fg(k.changed ? t.danger : t.text_primary))
                         | gap(t.spaced(8)) | align(Align::center),
                       text_owned(k.changed
                                      ? "The key " + k.host + " presented does not match the one in known_hosts (line " +
@@ -398,7 +398,7 @@ inline void host_key_dialog(const C& c, std::string_view id, const HostKeyPrompt
                                            "or the server was reinstalled. Verify the new fingerprint with its administrator."
                                      : "The authenticity of " + k.host + " (" + k.address + ") can't be established yet. "
                                        "Check that this fingerprint matches the server's before trusting it.")
-                          | font(t.font_size * 0.92f) | fg(var::text_secondary) | wrap_text | line_height(1.45f),
+                          | font(t.type(Tier::body)) | fg(var::text_secondary) | wrap_text | line_height(1.45f),
                       v(node(fp_row(k.algorithm.c_str(), k.fingerprint, t.text_primary)),
                         node(k.changed ? fp_row("on record", k.known_fingerprint, t.text_disabled) : Node{}))
                           | gap(t.spaced(6)) | pad(t.spaced(10), t.spaced(12)) | width(pct(100)) | bg(var::background) | border(t.stroke(1), t.border) | radius(t.radius_small),
@@ -441,22 +441,22 @@ template <ControlContext C>
         const char* kind = f.kind == PortForward::Kind::local ? "L" : f.kind == PortForward::Kind::remote ? "R" : "D";
         const Color<Srgb> tone = !f.error.empty() ? t.danger : f.active ? t.success : t.text_disabled;
         const auto tid = part_id(id, i * 4), oid = part_id(id, i * 4 + 1), rid = part_id(id, i * 4 + 2);
-        rows.push_back((h(h(text_owned(kind) | font(t.font_size * 0.75f) | bold | fg(var::on_accent)) | size(18, 18) | center | radius(t.rounded(4)) | bg(tone),
-                          text_owned(std::to_string(f.listen)) | font(t.font_size * 0.92f) | semibold | fg(var::text_primary) | width(52),
+        rows.push_back((h(h(text_owned(kind) | font(t.type(Tier::fine)) | bold | fg(var::on_accent)) | size(18, 18) | center | radius(t.rounded(4)) | bg(tone),
+                          text_owned(std::to_string(f.listen)) | font(t.type(Tier::body)) | semibold | fg(var::text_primary) | width(52),
                           text_owned(f.kind == PortForward::Kind::dynamic ? std::string{"SOCKS proxy"} : "\u2192 " + f.target)
-                              | font(t.font_size * 0.88f) | fg(var::text_secondary) | ellipsis | grow() | min_size(0, 0),
+                              | font(t.type(Tier::small)) | fg(var::text_secondary) | ellipsis | grow() | min_size(0, 0),
                           text_owned(!f.error.empty() ? f.error : f.connections > 0 ? std::to_string(f.connections) + " conn" : "")
-                              | font(t.font_size * 0.78f) | fg(f.error.empty() ? t.text_disabled : t.danger),
-                          h(text_owned(f.active ? "on" : "off") | font(t.font_size * 0.75f) | fg(c.hovered(tid) ? t.text_primary : tone))
+                              | font(t.type(Tier::small)) | fg(f.error.empty() ? t.text_disabled : t.danger),
+                          h(text_owned(f.active ? "on" : "off") | font(t.type(Tier::fine)) | fg(c.hovered(tid) ? t.text_primary : tone))
                               | pad(0, t.spaced(6)) | radius(t.rounded(8)) | border(t.stroke(1), tone) | pointer_cursor | id_of(id, i * 4),
-                          node(f.kind == PortForward::Kind::local ? (h(text<"open \u2197"> | font(t.font_size * 0.78f) | fg(c.hovered(oid) ? t.text_primary : t.accent))
+                          node(f.kind == PortForward::Kind::local ? (h(text<"open \u2197"> | font(t.type(Tier::small)) | fg(c.hovered(oid) ? t.text_primary : t.accent))
                                                                      | pointer_cursor | id_of(id, i * 4 + 1)).build() : Node{}),
-                          h(text<"\u00D7"> | font(t.font_size * 0.9f) | fg(c.hovered(rid) ? t.danger : t.text_disabled)) | pointer_cursor | id_of(id, i * 4 + 2))
+                          h(text<"\u00D7"> | font(t.type(Tier::body)) | fg(c.hovered(rid) ? t.danger : t.text_disabled)) | pointer_cursor | id_of(id, i * 4 + 2))
                         | gap(t.spaced(8)) | align(Align::center) | pad(t.spaced(4), t.spaced(8)) | width(pct(100)) | radius(t.rounded(4))
                         | bg(c.hovered(tid) || c.hovered(oid) || c.hovered(rid) ? t.surface_raised.fade(0.5f) : t.surface.fade(0.0f))).build());
     }
     const auto aid = part_id(id, part_inc);
-    rows.push_back((h(text<"+ forward a port"> | font(t.font_size * 0.85f) | fg(c.hovered(aid) ? t.text_primary : t.text_disabled))
+    rows.push_back((h(text<"+ forward a port"> | font(t.type(Tier::small)) | fg(c.hovered(aid) ? t.text_primary : t.text_disabled))
                     | pad(t.spaced(4), t.spaced(8)) | pointer_cursor | id_of(id, part_inc)).build());
     return v_list(std::move(rows), 1.0f).build();
 }

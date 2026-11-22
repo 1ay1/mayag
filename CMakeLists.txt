@@ -452,6 +452,13 @@ if(MAYAG_BUILD_TESTS)
     target_compile_definitions(mayag_cascade_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
     add_test(NAME mayag_cascade_tests COMMAND mayag_cascade_tests)
 
+    # The type scale: its rules over every base size, and its tokens.
+    add_executable(mayag_type_tests tests/test_type.cpp)
+    target_link_libraries(mayag_type_tests PRIVATE mayag)
+    target_compile_options(mayag_type_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_type_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
+    add_test(NAME mayag_type_tests COMMAND mayag_type_tests)
+
     # The widget boundary (mayag.hpp includes no widget; nothing outside
     # widget/ includes one; widget/all.hpp is complete) and the DSL's
     # dynamic children.
@@ -702,6 +709,10 @@ if(MAYAG_BUILD_TESTS)
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_one_look.txt
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_look.cmake)
+        # Every text size is a tier of the type scale (style/type.hpp).
+        add_test(NAME mayag_type_scale
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/type_scale.cmake)
         # Cache keys are made of values, never of an object's (padded) bytes.
         add_test(NAME mayag_no_byte_hash
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag

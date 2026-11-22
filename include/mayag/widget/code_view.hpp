@@ -164,7 +164,7 @@ template <ControlContext C>
                                     const CodeTheme& th, const CodeViewOptions& o = {}) {
     const Theme& t = c.theme;   // geometry follows the theme's knobs (t.rounded / t.stroke)
     using namespace editor;
-    const float fs = o.font_size;
+    const float fs = o.font_size;   // the editor's cells: exact, like the terminal grid
     const float lh = std::round(fs * o.line_height);
     const float cw = detail::cell_width(c, fs, o.family);
     const int digits = std::max(3, static_cast<int>(std::to_string(ed.line_count()).size()));
@@ -317,7 +317,7 @@ template <ControlContext C>
         if (at < s.size()) push_run(at, static_cast<std::uint32_t>(s.size()), th.of(Tok::text));
         if (ed.folds.contains(l)) {
             const int hidden_n = ed.fold_end(l).value_or(l) - l;
-            runs.push_back((h(text_owned(" \u22EF " + std::to_string(hidden_n) + " lines ") | font(fs * 0.85f) | family(o.family) | fg(th.fold_marker))
+            runs.push_back((h(text_owned(" \u22EF " + std::to_string(hidden_n) + " lines ") | font(t.type_at(o.font_size, Tier::small)) | family(o.family) | fg(th.fold_marker))
                             | bg(th.folded_bg) | radius(t.rounded(3)) | pad(0, t.spaced(2)) | margin(0, 0, 0, 6)
                             | id_of(id, part_fold_base + static_cast<std::size_t>(l))).build());
         }
@@ -355,7 +355,7 @@ template <ControlContext C>
             if (std::find(shown.begin(), shown.end(), l) != shown.end()) continue;
             shown.push_back(l);
             const float ex = col_x(l, ed.line_len(l)) + cw * 3.0f;
-            layers.push_back((h(text_owned(d.message) | font(fs * 0.88f) | fg(col) | ellipsis)
+            layers.push_back((h(text_owned(d.message) | font(t.type_at(o.font_size, Tier::small)) | fg(col) | ellipsis)
                               | height(lh) | align(Align::center) | pad(0, t.spaced(8)) | max_size(560, lh)
                               | bg(mix(th.bg, col, 0.10f)) | radius(t.rounded(3))
                               | absolute(ex, row_y(vr))).build());
@@ -389,7 +389,7 @@ template <ControlContext C>
         const bool active = l == cur.line;
         if (o.line_numbers) {
             const int shown_no = o.relative_numbers && !active ? std::abs(l - cur.line) : l + 1;
-            gut.push_back((h(text_owned(std::to_string(shown_no)) | font(fs * 0.9f) | family(o.family)
+            gut.push_back((h(text_owned(std::to_string(shown_no)) | font(fs) | family(o.family)
                                  | fg(active ? th.line_no_active : th.line_no) | text_align(TextAlign::right) | width(static_cast<float>(digits) * cw))
                            | height(lh) | align(Align::center) | absolute(12, y)).build());
         }

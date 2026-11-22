@@ -474,7 +474,7 @@ template <ControlContext C, class On>
     namespace o = settings_ops;
     using E = SettingEdit;
     const Theme& t = c.theme;
-    const float fs = t.font_size;
+    const float fs = t.type(Tier::body);
     const std::string base{id};
     const auto vis = settings_shown(specs, st.query, st.selected);
     auto sp = std::make_shared<const std::vector<SettingSpec>>(specs);
@@ -507,9 +507,9 @@ template <ControlContext C, class On>
         const Color<Srgb> ink = on_ || hov ? t.text_primary : t.text_secondary;
         std::vector<Node> parts;
         if (specs[i].page_icon != Icon::count_) parts.push_back(icon_node(specs[i].page_icon, 15.0f, on_ ? t.accent : muted));
-        parts.push_back((text_owned(cap(page)) | font(fs * 0.95f) | grow() | fg(ink)
+        parts.push_back((text_owned(cap(page)) | font(t.type(Tier::body)) | grow() | fg(ink)
                          | (on_ ? weight(FontWeight::medium) : weight(FontWeight::regular))).build());
-        if (mods) parts.push_back((h(text_owned(std::to_string(mods)) | font(fs * 0.72f) | fg(t.accent))
+        if (mods) parts.push_back((h(text_owned(std::to_string(mods)) | font(t.type(Tier::fine)) | fg(t.accent))
                                    | height(16.0f) | pad(0, 5.0f) | center | radius(t.rounded(8.0f)) | bg(t.accent.fade(0.14f))).build());
         nav.push_back((h_list(std::move(parts), 10.0f) | align(Align::center) | height(32.0f) | pad(0, 10.0f) | radius(t.rounded(7.0f))
                        | bg(on_ ? mix(t.background, t.text_primary, 0.08f) : hov ? mix(t.background, t.text_primary, 0.04f)
@@ -525,15 +525,15 @@ template <ControlContext C, class On>
                          })).build());
     }
     Node mark = p.logo ? *p.logo
-                       : (h(text_owned(p.brand) | font(fs * 0.95f) | semibold | fg(t.on_accent))
+                       : (h(text_owned(p.brand) | font(t.type(Tier::body)) | semibold | fg(t.on_accent))
                           | size(26.0f, 26.0f) | center | radius(t.rounded(6.0f)) | bg(t.accent)).build();
     auto brand = h(node(std::move(mark)),
                    v(text_owned(p.title) | font(fs * (p.logo ? 1.35f : 1.05f)) | semibold | fg(t.text_primary),
-                     text_owned(p.subtitle) | font(fs * 0.8f) | fg(muted))
+                     text_owned(p.subtitle) | font(t.type(Tier::small)) | fg(muted))
                        | gap(1.0f))
                | gap(12.0f) | align(Align::center) | height(p.logo ? 76.0f : 52.0f) | pad(0, 14.0f);
     auto sidebar = v(std::move(brand), v(std::move(nav)) | gap(1.0f) | pad(0, 8.0f), spacer(),
-                     text_owned(p.footer) | font(fs * 0.75f) | fg(muted) | ellipsis | width(pct(100)) | pad(12.0f, 16.0f))
+                     text_owned(p.footer) | font(t.type(Tier::fine)) | fg(muted) | ellipsis | width(pct(100)) | pad(12.0f, 16.0f))
                  | width(kSetSidebarW) | height(pct(100)) | bg(mix(t.background, t.text_primary, 0.02f))
                  | inner_shadow(0.0f, line, {-1.0f, 0.0f});
 
@@ -545,9 +545,9 @@ template <ControlContext C, class On>
         field.push_back((text_owned(st.query) | font(fs) | fg(t.text_primary)).build());
         if (st.filtering) field.push_back((box() | size(1.5f, 16.0f) | bg(t.accent)).build());
         field.push_back((box() | grow()).build());
-        field.push_back((text_owned(std::to_string(vis.size()) + " found") | font(fs * 0.8f) | fg(muted)).build());
+        field.push_back((text_owned(std::to_string(vis.size()) + " found") | font(t.type(Tier::small)) | fg(muted)).build());
     }
-    field.push_back((h(text_owned("/") | font(fs * 0.75f) | fg(muted)) | size(18.0f, 18.0f) | center | radius(t.rounded(4.0f))
+    field.push_back((h(text_owned("/") | font(t.type(Tier::fine)) | fg(muted)) | size(18.0f, 18.0f) | center | radius(t.rounded(4.0f))
                      | border(t.stroke(1), line)).build());
     auto search = h(std::move(field)) | gap(8.0f) | align(Align::center) | height(32.0f) | pad(0, 10.0f) | grow()
                 | radius(t.rounded(6.0f)) | bg(mix(t.background, t.text_primary, 0.04f))
@@ -557,7 +557,7 @@ template <ControlContext C, class On>
     const auto rid_all = node_id(base + ".reset_all");
     const bool rh = modified && c.hovered(rid_all);
     auto header = h(std::move(search),
-                    h(text_owned("Reset all") | font(fs * 0.85f) | fg(!modified ? muted.fade(0.5f) : rh ? t.text_primary : t.text_secondary))
+                    h(text_owned("Reset all") | font(t.type(Tier::small)) | fg(!modified ? muted.fade(0.5f) : rh ? t.text_primary : t.text_secondary))
                         | height(30.0f) | pad(0, 12.0f) | center | radius(t.rounded(6.0f))
                         | bg(rh ? mix(t.background, t.text_primary, 0.08f) : t.background.fade(0.0f))
                         | border(t.stroke(1), modified ? line : line.fade(0.0f))
@@ -603,8 +603,8 @@ template <ControlContext C, class On>
     const std::string page_title = !searching ? cap(selected_page)
                                  : vis.empty() ? std::string{"No results"}
                                  : std::to_string(vis.size()) + (vis.size() == 1 ? " setting" : " settings");
-    blocks.push_back((v(text_owned(page_title) | font(fs * 1.55f) | semibold | fg(t.text_primary),
-                        text_owned(subtitle) | font(fs * 0.85f) | fg(muted) | ellipsis | width(pct(100)))
+    blocks.push_back((v(text_owned(page_title) | font(t.type(Tier::title)) | semibold | fg(t.text_primary),
+                        text_owned(subtitle) | font(t.type(Tier::small)) | fg(muted) | ellipsis | width(pct(100)))
                       | gap(4.0f) | justify(Justify::end) | height(kSetPageH) | pad(0, 4.0f, 6.0f, 4.0f) | width(pct(100))).build());
     std::size_t k = 0;
     while (k < vis.size()) {
@@ -630,7 +630,7 @@ template <ControlContext C, class On>
                                     }});
                                 });
                     ctl = (h(std::move(knob),
-                             h(text_owned(setting_readout(s)) | font(fs * 0.9f) | monospace
+                             h(text_owned(setting_readout(s)) | font(t.type(Tier::body)) | monospace
                                    | fg(s.modified ? t.accent : t.text_primary))
                                  | width(kSetValueW) | height(26.0f) | center | radius(t.rounded(5.0f))
                                  | bg(mix(t.background, t.text_primary, 0.05f)) | border(t.stroke(1), line))
@@ -648,7 +648,7 @@ template <ControlContext C, class On>
                     for (std::size_t q = 0; q < s.options.size(); ++q) {
                         const bool on_ = static_cast<int>(q) == static_cast<int>(s.value);
                         const bool sh = c.hovered(part_id(rid, q));
-                        segs.push_back((h(text_owned(s.options[q]) | font(fs * 0.88f)
+                        segs.push_back((h(text_owned(s.options[q]) | font(t.type(Tier::small))
                                               | fg(on_ ? t.text_primary : sh ? t.text_primary : t.text_secondary)
                                               | (on_ ? semibold : weight(FontWeight::regular)))
                                         | grow() | height(24.0f) | center | radius(t.rounded(4.0f))
@@ -719,7 +719,7 @@ template <ControlContext C, class On>
                        | gap(4.0f) | align(Align::center) | height(20.0f);
             // Rows sit inside the section's card: the selected one a raised
             // wash with an accent edge, the rest split by inset hairlines.
-            rows.push_back((h(v(std::move(title), text_owned(s.hint) | font(fs * 0.84f) | fg(muted) | clamp_lines(2) | width(pct(100)))
+            rows.push_back((h(v(std::move(title), text_owned(s.hint) | font(t.type(Tier::small)) | fg(muted) | clamp_lines(2) | width(pct(100)))
                                   | gap(3.0f) | grow() | min_size(0, 0),
                               node(std::move(ctl)))
                             | gap(24.0f) | align(Align::center) | height(kSetRowH) | width(pct(100))
@@ -737,7 +737,7 @@ template <ControlContext C, class On>
         // wash sits concentric inside the card's corners.
         std::string head_text = first.section;
         for (char& ch : head_text) ch = ch == '_' ? ' ' : static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-        auto head = h(text_owned(std::move(head_text)) | font(fs * 0.72f) | semibold | tracking(1.1f) | fg(muted))
+        auto head = h(text_owned(std::move(head_text)) | font(t.type(Tier::fine)) | semibold | tracking(1.1f) | fg(muted))
                   | align(Align::end) | height(kSetHeadH) | pad(0, 6.0f, 9.0f, 6.0f);
         auto card = v(std::move(rows)) | width(pct(100)) | pad(kSetCardPad)
                   | radius(t.rounded(11.0f)) | bg(mix(t.background, t.text_primary, 0.022f))
@@ -746,8 +746,8 @@ template <ControlContext C, class On>
     }
     if (vis.empty())
         blocks.push_back((v(node(icon_node(Icon::search, 28.0f, muted.fade(0.6f))),
-                            text_owned("No settings match \u201C" + st.query + "\u201D") | font(fs * 1.05f) | fg(t.text_secondary),
-                            text_owned("Try fewer words, or press esc to clear the search") | font(fs * 0.85f) | fg(muted))
+                            text_owned("No settings match \u201C" + st.query + "\u201D") | font(t.type(Tier::body)) | fg(t.text_secondary),
+                            text_owned("Try fewer words, or press esc to clear the search") | font(t.type(Tier::small)) | fg(muted))
                           | gap(8.0f) | align(Align::center) | width(pct(100)) | pad(56.0f, 0)).build());
     auto content = v(std::move(blocks)) | gap(kSetGap) | pad(4.0f, 28.0f, 32.0f, 28.0f) | width(pct(100));
     Node body = scroll_view(c, base + ".rows", st.scroll, std::move(content),
@@ -755,9 +755,9 @@ template <ControlContext C, class On>
 
     // ── footer: key hints ────────────────────────────────────────────────
     const auto hint = [&](std::string_view k, std::string_view what) {
-        return (h(h(text_owned(std::string{k}) | font(fs * 0.75f) | fg(t.text_secondary))
+        return (h(h(text_owned(std::string{k}) | font(t.type(Tier::fine)) | fg(t.text_secondary))
                       | height(18.0f) | pad(0, 5.0f) | center | radius(t.rounded(4.0f)) | border(t.stroke(1), line),
-                  text_owned(std::string{what}) | font(fs * 0.78f) | fg(muted))
+                  text_owned(std::string{what}) | font(t.type(Tier::small)) | fg(muted))
                 | gap(6.0f) | align(Align::center)).build();
     };
     std::vector<Node> keys;
@@ -769,7 +769,7 @@ template <ControlContext C, class On>
     }
     std::string path;
     if (has_sel) { const auto& s = specs[static_cast<std::size_t>(st.selected)]; path = s.section + "." + s.key; }
-    auto footer = h(text_owned(path) | font(fs * 0.8f) | monospace | fg(muted) | grow() | ellipsis | min_size(0, 0),
+    auto footer = h(text_owned(path) | font(t.type(Tier::small)) | monospace | fg(muted) | grow() | ellipsis | min_size(0, 0),
                     h(std::move(keys)) | gap(14.0f) | align(Align::center))
                 | gap(12.0f) | align(Align::center) | height(36.0f) | width(pct(100)) | pad(0, 20.0f)
                 | inner_shadow(0.0f, line, {0.0f, 1.0f});

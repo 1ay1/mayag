@@ -16,13 +16,13 @@ template <fixed_string Label>
     const Color<Srgb> label = contrast_ratio(tone, wash) >= 3.0f ? tone : mayag::detail::contrasting_on(wash, 4.5f, 0.6f);
     // Single-word content: never wrap, and reserve room for at least the
     // first glyph so a crowded row cannot crush it into a sliver.
-    return h(text<Label> | font(t.font_size * 0.8f) | semibold | fg(label)
-                         | ellipsis | min_size(t.font_size * 0.7f, 0.0f))
+    return h(text<Label> | font(t.type(Tier::small)) | semibold | fg(label)
+                         | ellipsis | min_size(t.type(Tier::small) * 0.85f, 0.0f))
          | center
          | pad(t.spaced(3.0f), t.spaced(9.0f))
          | bg(tone.fade(0.16f))
          | border(t.stroke(1), tone.fade(0.35f))
-         | radius(t.capsule(t.font_size * 0.8f * 1.3f + t.spaced(6.0f)));
+         | radius(t.capsule(t.type(Tier::small) * 1.3f + t.spaced(6.0f)));
 }
 
 }  // namespace mayag::dsl

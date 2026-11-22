@@ -97,9 +97,9 @@ template <ControlContext C>
     const bool hov = c.hovered(nid);
     std::vector<Node> parts;
     if (current.has_swatches) parts.push_back(detail::swatch_strip(c, current, 9.0f));
-    parts.push_back(detail::option_label(c, current, t.font_size * 0.95f, t.text_primary).build());
+    parts.push_back(detail::option_label(c, current, t.type(Tier::body), t.text_primary).build());
     parts.push_back((h(text_owned(std::string{ui_glyph(t, open ? "\uF077" : "\uF078", open ? "\u02C4" : "\u02C5")})
-                         | font(t.font_size * 0.72f) | fg(open || hov ? t.accent : t.text_secondary))
+                         | font(t.type(Tier::fine)) | fg(open || hov ? t.accent : t.text_secondary))
                      | size(16.0f, 32.0f) | center).build());
     return (h(std::move(parts)) | gap(t.spaced(8)) | align(Align::center) | width(width_px) | height(32.0f)
             | pad(0, t.spaced(8), 0, t.spaced(10)) | radius(t.radius_small)
@@ -117,13 +117,13 @@ template <ControlContext C, class Pick, class Wheel>
                                       const ScrollState& sc, float width_px, Pick pick, Wheel wheel) {
     const Theme& t = c.theme;
     const std::string base{id};
-    const float fs = t.font_size * 0.92f;
+    const float fs = t.type(Tier::body);
 
-    auto search = h(text_owned(std::string{ui_glyph(t, "\uF002", "/")}) | font(fs * 0.85f) | fg(query.empty() ? t.text_disabled : t.accent),
+    auto search = h(text_owned(std::string{ui_glyph(t, "\uF002", "/")}) | font(t.type(Tier::small)) | fg(query.empty() ? t.text_disabled : t.accent),
                     text_owned(query.empty() ? std::string{"type to filter\u2026"} : std::string{query} + "\u258F")
                         | font(fs) | family(FontFamily::mono) | fg(query.empty() ? t.text_disabled : t.text_primary)
                         | grow() | ellipsis | min_size(0, 0),
-                    text_owned(std::to_string(filtered.size()) + "/" + std::to_string(opts.size())) | font(fs * 0.85f)
+                    text_owned(std::to_string(filtered.size()) + "/" + std::to_string(opts.size())) | font(t.type(Tier::small))
                         | family(FontFamily::mono) | fg(t.text_disabled))
                 | gap(t.spaced(8)) | align(Align::center) | height(36.0f) | pad(0, t.spaced(12)) | width(pct(100))
                 | inner_shadow(0.0f, t.border, {0.0f, -1.0f});
@@ -136,7 +136,7 @@ template <ControlContext C, class Pick, class Wheel>
         const auto pid = part_id(base, static_cast<std::size_t>(oi));
         const bool is_hot = k == hot, cur = oi == current, hov = c.hovered(pid);
         std::vector<Node> parts;
-        parts.push_back((text_owned(cur ? std::string{ui_glyph(t, "\uF00C", "\u2713")} : std::string{}) | font(fs * 0.8f)
+        parts.push_back((text_owned(cur ? std::string{ui_glyph(t, "\uF00C", "\u2713")} : std::string{}) | font(t.type(Tier::fine))
                          | fg(t.accent) | width(14.0f)).build());
         parts.push_back(detail::option_label(c, o, fs, cur || is_hot ? t.text_primary : t.text_secondary).build());
         if (o.has_swatches) parts.push_back(detail::swatch_strip(c, o, 8.0f));
@@ -153,7 +153,7 @@ template <ControlContext C, class Pick, class Wheel>
         list = (h(text_owned("nothing matches") | font(fs) | fg(t.text_disabled)) | height(kSelectRowH * 2.0f)
                 | width(pct(100)) | center).build();
 
-    auto hints = h(text_owned("\u2191\u2193 preview  \u00B7  enter keep  \u00B7  esc revert") | font(fs * 0.8f) | family(FontFamily::mono)
+    auto hints = h(text_owned("\u2191\u2193 preview  \u00B7  enter keep  \u00B7  esc revert") | font(t.type(Tier::fine)) | family(FontFamily::mono)
                        | fg(t.text_disabled))
                | height(26.0f) | pad(0, t.spaced(12)) | align(Align::center) | width(pct(100))
                | inner_shadow(0.0f, t.border, {0.0f, 1.0f});

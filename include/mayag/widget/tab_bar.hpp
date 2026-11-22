@@ -46,20 +46,20 @@ template <ControlContext C>
         const bool hov = c.hovered(pid) || c.hovered(cid);
         const bool show_x = hov || (on && !tb.dirty);
         Node close = show_x
-            ? (h(text<"\u00D7"> | font(t.font_size * 1.05f) | fg(c.hovered(cid) ? t.text_primary : t.text_secondary))
+            ? (h(text<"\u00D7"> | font(t.type(Tier::body)) | fg(c.hovered(cid) ? t.text_primary : t.text_secondary))
                | size(18, 18) | center | radius(t.rounded(4))
                | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
                | pointer_cursor | label("close tab") | id_of(id, part_close + i)).build()
             : tb.dirty ? (h(node(dot(t.text_secondary, 7).build())) | size(18, 18) | center).build()
                        : (box() | size(18, 18)).build();
-        auto title_node = text_owned(tb.title) | font(t.font_size) | fg(on ? t.text_primary : t.text_secondary)
+        auto title_node = text_owned(tb.title) | font(t.type(Tier::body)) | fg(on ? t.text_primary : t.text_secondary)
                         | ellipsis;
         Node tn = title_node.build();
         if (tb.preview) tn.style().text.italic = true;
         if (tb.errors > 0) tn.style().text.color = t.danger;
-        items.push_back((h(node(file_icon(t, tb.title, t.font_size).build()),
+        items.push_back((h(node(file_icon(t, tb.title, t.type(Tier::body)).build()),
                            node(std::move(tn)),
-                           text_owned(tb.detail) | font(t.font_size * 0.85f) | fg(var::text_disabled) | ellipsis,
+                           text_owned(tb.detail) | font(t.type(Tier::small)) | fg(var::text_disabled) | ellipsis,
                            node(std::move(close)))
                          | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(6), 0, t.spaced(12)) | height(pct(100)) | max_size(260, 1e6f)
                          | bg(on ? t.background : (hov ? mix(t.surface, t.background, 0.5f) : t.surface))

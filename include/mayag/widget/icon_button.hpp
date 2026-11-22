@@ -41,7 +41,7 @@ template <ControlContext C>
     const Sheet& s = sheet_of(t);
     const float hgt = p.height > 0.0f ? p.height : t.bar_height;
     const float w = p.width > 0.0f ? p.width : hgt;
-    return h(text_owned(std::string{glyph}) | font(t.font_size * t.chrome_type * 1.1f * p.glyph))
+    return h(text_owned(std::string{glyph}) | glyph_size(t.type(Tier::large) * p.glyph))
          | size(w, hgt) | center
          | with_look(p.danger ? s.icon_button_danger : s.icon_button, t)
          | selected(p.active)

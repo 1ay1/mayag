@@ -80,7 +80,7 @@ template <ControlContext C>
                    | bg(hot ? mix(paper, ink, 0.07f) : mix(paper, ink, 0.035f))
                    | inner_shadow(0.0f, mix(paper, tone, 0.6f), {0.0f, 1.0f})
                    | pointer_cursor | id_of(id) | absolute(0.0f, b.size.y - h_)).build());
-    const float fs = b.font_size * 0.72f;
+    const float fs = t.type_at(b.font_size, Tier::fine);
     out.push_back((hud_chip(c, {{fresh ? "+" + std::to_string(p.fresh) : "\u2193 click to return", fresh ? tone : mix(ink, paper, 0.4f)}},
                             {.tag = "LIVE", .tone = tone, .size = fs})
                    | absolute(b.padding + 10.0f, b.size.y - h_ - std::round(fs * 1.75f) * 0.5f)).build());
@@ -108,7 +108,7 @@ template <ControlContext C>
     const auto ink = t.text_primary, paper = t.background;
     const auto dim = mix(ink, paper, 0.45f), faint = mix(paper, ink, 0.12f);
     const auto tone = term_detail::command_tone(t, p.state);
-    const float fs = b.font_size * 0.92f;
+    const float fs = t.type_at(b.font_size, Tier::body);
     const float hh = std::round(b.cell_h + 8.0f);
     const float w = b.size.x - b.right_inset;
     const float through = static_cast<float>(p.at) / static_cast<float>(std::max<std::int64_t>(p.span, 1));
@@ -116,13 +116,13 @@ template <ControlContext C>
     if (p.state == CommandState::running) tag = std::string{spinner_frame(p.now)} + " " + tag;
     const bool hot = c.hovered(node_id(id));
     std::vector<Node> row;
-    row.push_back((h(mono(tag, fs * 0.85f, paper) | semibold) | height(std::round(fs * 1.5f)) | pad(0, fs * 0.45f) | center | bg(tone)).build());
+    row.push_back((h(mono(tag, t.type_at(b.font_size, Tier::fine), paper) | semibold) | height(std::round(fs * 1.5f)) | pad(0, fs * 0.45f) | center | bg(tone)).build());
     if (!p.cwd.empty()) row.push_back(mono(p.cwd, fs, t.accent).build());
     row.push_back(mono("\u276F", fs, t.info).build());
     row.push_back((mono(p.line.empty() ? "(command)" : p.line, fs, ink) | semibold | grow() | ellipsis | min_size(0, 0)).build());
-    row.push_back(mono(std::to_string(p.at) + "/" + std::to_string(p.span), fs * 0.85f, dim).build());
-    if (!p.time.empty()) row.push_back(mono(p.time, fs * 0.85f, p.state == CommandState::running ? tone : dim).build());
-    row.push_back(mono(hot ? "\u2191 prompt" : "", fs * 0.85f, tone).build());
+    row.push_back(mono(std::to_string(p.at) + "/" + std::to_string(p.span), t.type_at(b.font_size, Tier::fine), dim).build());
+    if (!p.time.empty()) row.push_back(mono(p.time, t.type_at(b.font_size, Tier::fine), p.state == CommandState::running ? tone : dim).build());
+    row.push_back(mono(hot ? "\u2191 prompt" : "", t.type_at(b.font_size, Tier::fine), tone).build());
     const float e = 1.0f - (1.0f - p.ease) * (1.0f - p.ease);
     return (v(h(std::move(row)) | gap(10.0f) | align(Align::center) | height(hh - 2.0f) | width(pct(100))
                   | pad(0, b.padding + 10.0f, 0, b.padding + (p.marks ? 10.0f : 0.0f)),
@@ -147,7 +147,7 @@ template <ControlContext C>
     const Theme& t = c.theme;
     const bool fresh = p.fresh > 0;
     const auto acc = fresh ? t.success : t.warning;
-    const float fs = b.font_size * 0.85f;
+    const float fs = t.type_at(b.font_size, Tier::small);
     std::vector<HudSeg> segs = fresh ? std::vector<HudSeg>{{"+" + std::to_string(p.fresh), acc, true}, {"\u2193", acc}}
                                      : std::vector<HudSeg>{{std::to_string(p.rows_up) + "\u2191", t.text_primary, true},
                                                            {std::to_string(std::clamp(p.percent, 0, 100)) + "%", mix(t.text_primary, t.background, 0.45f)}};
@@ -184,7 +184,7 @@ template <ControlContext C>
 [[nodiscard]] inline std::vector<Node> scrollback_peek(const C& c, std::string_view id, const TermBox& b, const PeekProps& p) {
     const Theme& t = c.theme;
     const auto ink = t.text_primary, paper = t.background, dim = mix(ink, paper, 0.45f);
-    const float pfs = b.font_size * 0.82f;
+    const float pfs = t.type_at(b.font_size, Tier::small);
     const float pcw = detail::term_cell_width(c, pfs, p.view.family);
     const float pch = std::round(pfs * p.view.line_height);
     const float cw_ = static_cast<float>(p.cols) * pcw + 10.0f + 12.0f;

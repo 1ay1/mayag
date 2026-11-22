@@ -46,11 +46,11 @@ template <ControlContext C, class Pick>
         const SectionTab& tb = tabs[i];
         std::vector<Node> parts;
         if (!tb.icon.empty())
-            parts.push_back((text_owned(tb.icon) | font(t.font_size * 0.95f) | fg(on ? t.accent : ink)).build());
-        parts.push_back((text_owned(tb.title) | font(t.font_size) | fg(ink)
+            parts.push_back((text_owned(tb.icon) | font(t.type(Tier::body)) | fg(on ? t.accent : ink)).build());
+        parts.push_back((text_owned(tb.title) | font(t.type(Tier::body)) | fg(ink)
                          | (on ? semibold : weight(FontWeight::regular))).build());
         if (!tb.count.empty())
-            parts.push_back((text_owned(tb.count) | font(t.font_size * 0.72f) | monospace | fg(t.accent) | pad(1, 5)
+            parts.push_back((text_owned(tb.count) | font(t.type(Tier::fine)) | monospace | fg(t.accent) | pad(1, 5)
                              | radius(t.capsule(14)) | bg(t.accent.fade(0.14f))).build());
         auto row = h(std::move(parts)) | gap(t.spaced(7))
                  | align(Align::center) | pad(t.spaced(9), t.spaced(14), t.spaced(8), t.spaced(14));

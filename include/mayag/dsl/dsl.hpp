@@ -1675,6 +1675,35 @@ struct LineHeight {
 };
 [[nodiscard]] constexpr LineHeight line_height(float v) { return {v}; }
 
+/// Text at a tier of the type scale (style/type.hpp): its size, resolved by
+/// the cascade against the theme in force, and the line height that suits
+/// it. The way to size text: `| type(Tier::small)`, `| type(Scale::content,
+/// Tier::body)`. (`font(px)` remains for sizes the widget already holds as a
+/// tier -- `font(t.type(Tier::small))` -- and is linted against arithmetic.)
+struct TypeMod {
+    MAYAG_TEXT_MODIFIER(TypeMod, "type");
+    Scale scale;
+    Tier tier;
+    constexpr void apply(Style& s) const {
+        s.text.set |= text_bits::size | text_bits::line_height;
+        s.text.size = var::type(scale, tier);
+        s.text.line_height = tier_line_height(tier);
+    }
+};
+[[nodiscard]] constexpr TypeMod type(Tier tier) { return {Scale::ui, tier}; }
+[[nodiscard]] constexpr TypeMod type(Scale scale, Tier tier) { return {scale, tier}; }
+
+/// A GLYPH sized to the geometry around it -- a check in a 16 px box, a
+/// tab's monogram, a powerline wedge as tall as the bar. Not text: it
+/// takes no tier, and is the one place a size may be computed (the
+/// type_rules lint allows arithmetic here and nowhere else in font sizes).
+struct GlyphSize {
+    MAYAG_TEXT_MODIFIER(GlyphSize, "glyph_size");
+    float px;
+    constexpr void apply(Style& s) const { s.text.set |= text_bits::size; s.text.size = px; }
+};
+[[nodiscard]] constexpr GlyphSize glyph_size(float px) { return {px}; }
+
 struct Tracking {
     MAYAG_TEXT_MODIFIER(Tracking, "tracking");
     float v;

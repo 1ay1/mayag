@@ -131,7 +131,7 @@ template <ControlContext C>
     for (std::size_t k = 0; k < 3; ++k) {
         const auto pid = part_id(id, tab_part_window + k);
         const bool hov = c.hovered(pid), close = k == 2;
-        cells.push_back((h(text_owned(glyphs[k]) | font(close ? fs * 1.15f : fs) | monospace | fg(hov ? (close ? colors::white : ink) : dim))
+        cells.push_back((h(text_owned(glyphs[k]) | glyph_size(close ? fs * 1.15f : fs) | monospace | fg(hov ? (close ? colors::white : ink) : dim))
                          | size(w, height) | center
                          | bg(hov ? (close ? t.danger : mix(base, ink, 0.10f)) : base.fade(0.0f))
                          | pointer_cursor | label(names[k]) | id_of(id, tab_part_window + k)).build());
@@ -219,7 +219,7 @@ inline void arc_ring_paint(DrawList& dl, const Rect& r, const void* user) {
     const float inner = d - 5.0f;
     const char* g = process_glyph(tb.process, !tb.host.empty());
     const bool two = std::string_view{g}.size() == 2 && static_cast<unsigned char>(g[0]) < 0x80;
-    Node core = (h(text_owned(g) | font(two ? inner * 0.42f : inner * 0.56f) | bold | fg(mix(hue, colors::white, active ? 0.35f : 0.12f)))
+    Node core = (h(text_owned(g) | glyph_size(two ? inner * 0.42f : inner * 0.56f) | bold | fg(mix(hue, colors::white, active ? 0.35f : 0.12f)))
                  | size(inner, inner) | center | radius(inner * 0.5f) | bg(chip) | absolute(2.5f, 2.5f)).build();
     Node ring;
     const Color<Srgb> track = mix(t.surface, hue, 0.16f);
@@ -287,7 +287,7 @@ template <ControlContext C>
     const bool lifted = o.style == S::pill;
     const float tab_h = lifted ? o.height - 10.0f : o.height - 1.0f;
     const float rad = o.radius >= 0.0f ? o.radius : t.rounded(10);
-    const float fs = t.font_size * o.font_scale;
+    const float fs = t.type_at(t.font_size * o.font_scale, Tier::body);   // the strip may be scaled; its tiers follow
     // a production host is red whatever the palette says: its icon and pill
     // carry it even when the strip is one line and has no room for the address
     const auto hue_of = [&](const TermTabInfo& tb) { return tb.host_danger ? t.danger : o.hue ? tab_hue(tb) : t.accent; };
@@ -335,7 +335,7 @@ template <ControlContext C>
         const float flash = !tb.running && tb.last_exit >= 0 && tb.finished_ago < 4.0
                                 ? 1.0f - static_cast<float>(tb.finished_ago / 4.0) : 0.0f;
         const auto glyph = [&](std::string s, Color<Srgb> col) {
-            return (text_owned(std::move(s)) | font(fs * 0.86f) | monospace | semibold | fg(col)).build();
+            return (text_owned(std::move(s)) | font(t.type_at(fs, Tier::small)) | monospace | semibold | fg(col)).build();
         };
 
         // Trailing slot: the status glyph defines its size and is ALWAYS laid
@@ -380,13 +380,13 @@ template <ControlContext C>
         std::vector<Node> title_parts;
         if (dot) title_parts.push_back((box() | size(5, 5) | bg((tb.running ? hue : mix(hue, t.text_secondary, 0.45f)).fade(pulse))
                                         | radius(2.5f)).build());
-        title_parts.push_back((text_owned(tb.title.empty() ? tb.process : tb.title) | font(fs * 0.98f)
+        title_parts.push_back((text_owned(tb.title.empty() ? tb.process : tb.title) | font(fs)
                                | (on ? semibold : weight(FontWeight::medium)) | fg(title_col) | ellipsis | grow() | min_size(0, 0)).build());
         Node title_row = (h_list(std::move(title_parts), t.spaced(5)) | align(Align::center) | width(pct(100))).build();
         std::vector<Node> lines;
         lines.push_back(std::move(title_row));
         if (two_lines)
-            lines.push_back((text_owned(line2) | font(fs * 0.78f)
+            lines.push_back((text_owned(line2) | font(t.type_at(fs, Tier::small))
                              | fg(!tb.host.empty() && tb.host_danger ? t.danger : tb.running ? mix(hue, t.text_secondary, 0.3f) : t.text_disabled)
                              | ellipsis | width(pct(100))).build());
 
@@ -408,10 +408,10 @@ template <ControlContext C>
     // New tab + profile menu, as one rounded group.
     const auto plus = part_id(id, part_inc), menu = part_id(id, part_menu);
     const float bh = std::min(tab_h, 26.0f);
-    if (o.new_button) items.push_back((h(h(text<"+"> | font(fs * 1.1f) | monospace | fg(c.hovered(plus) ? t.text_primary : t.text_secondary))
+    if (o.new_button) items.push_back((h(h(text<"+"> | glyph_size(fs * 1.1f) | monospace | fg(c.hovered(plus) ? t.text_primary : t.text_secondary))
                            | size(bh, bh) | center | radius(std::min(rad, 3.0f)) | bg(c.hovered(plus) ? mix(t.surface, t.text_primary, 0.07f) : t.surface.fade(0.0f))
                            | pointer_cursor | label("new tab") | id_of(id, part_inc),
-                       h(text<"\u2304"> | font(fs * 0.8f) | fg(c.hovered(menu) ? t.text_primary : t.text_disabled))
+                       h(text<"\u2304"> | glyph_size(fs * 0.8f) | fg(c.hovered(menu) ? t.text_primary : t.text_disabled))
                            | size(16, bh) | center | radius(std::min(rad, 3.0f)) | bg(c.hovered(menu) ? mix(t.surface, t.text_primary, 0.07f) : t.surface.fade(0.0f))
                            | pointer_cursor | label("new tab menu") | id_of(id, part_menu))
                      | gap(t.spaced(1)) | align(Align::center) | margin(0, 0, 0, 4)).build());
@@ -483,7 +483,7 @@ template <ControlContext C>
 [[nodiscard]] inline Node tab_line(const C& c, std::string_view id, const std::vector<TermTabInfo>& tabs, int active,
                                    double time, const TabStripOptions& o) {
     const Theme& t = c.theme;
-    const float fs = t.font_size * o.font_scale * 0.92f;
+    const float fs = t.type_at(t.font_size * o.font_scale, Tier::body);
     const float hgt = std::clamp(o.height, 20.0f, 40.0f);
     const auto paper = t.background, ink = t.text_primary;
     const auto bar = mix(paper, ink, 0.045f);        // the strip: one step off the terminal

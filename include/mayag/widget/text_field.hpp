@@ -67,7 +67,7 @@ namespace mayag::dsl {
                                      std::string_view placeholder = {},
                                      float text_size = 0.0f,
                                      const std::function<float(std::string_view)>& measure = {}) {
-    const float font_size = text_size > 0.0f ? text_size : t.font_size;
+    const float font_size = text_size > 0.0f ? t.type_at(text_size, Tier::body) : t.type(Tier::body);
     const bool showing_placeholder = state.text.empty() && !placeholder.empty();
 
     // Caret and selection are VISUAL positions on the shaped line: the

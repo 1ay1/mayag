@@ -92,7 +92,7 @@ int main() {
     Style lit; elevation(6.0f).apply(lit);
     ok(s.shadow_count == 2 && s.shadows[0] == lit.shadows[0] && s.shadows[1] == lit.shadows[1],
        "depth(6) == elevation(6) exactly");
-    ok(fid(a, "x")->style().text.size == t.font_size * 1.6f, "font_xl");
+    ok(fid(a, "x")->style().text.size == t.type(Tier::title), "font_xl is the title tier");
 
     Theme flat = derive({.roundness = 0, .density = 0.5f, .depth = 0});
     Node b = v(box() | pad(var::space(2)) | radius(var::radius_md) | elevation(var::depth(6)) | dsl::id<"a">);

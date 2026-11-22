@@ -16,7 +16,7 @@ namespace mayag::dsl {
 
 [[nodiscard]] inline auto key_hint(const Theme& t, std::string_view keys, std::string_view action,
                                    float size = 0.0f) {
-    const float s = size > 0.0f ? size : t.font_size * 0.85f;
+    const float s = size > 0.0f ? t.type_at(size, Tier::body) : t.type(Tier::small);   // a size handed in is snapped to the scale
     return h(h(text_owned(std::string{keys}) | font(s) | semibold | fg(var::text_primary))
                  | pad(t.spaced(1), t.spaced(5)) | bg(var::surface_raised) | border(t.stroke(1), t.border_strong) | radius(t.rounded(3)),
              text_owned(std::string{action}) | font(s) | fg(var::text_secondary))

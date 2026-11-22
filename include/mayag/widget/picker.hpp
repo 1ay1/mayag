@@ -114,26 +114,26 @@ inline void picker(const C& c, std::string_view id, const TextEditState& query,
         const bool on = k == sel;
         rows.push_back((h(box() | size(t.mark, 14) | with_look(sheet_of(t).mark, t),
                           node(it.icon_name.empty() ? Node{} : file_icon(t, it.icon_name, 12.0f).build()),
-                          node(fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.font_size,
+                          node(fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.type(Tier::body),
                                           t.text_primary, t.accent).build()),
-                          text_owned(it.detail) | font(t.font_size * 0.88f) | fg(var::text_disabled) | ellipsis
+                          text_owned(it.detail) | font(t.type(Tier::small)) | fg(var::text_disabled) | ellipsis
                               | grow() | min_size(0, 0),
-                          node(it.hint.empty() ? Node{} : key_hint(t, it.hint, "", t.font_size * 0.82f).build()))
+                          node(it.hint.empty() ? Node{} : key_hint(t, it.hint, "", t.type(Tier::small)).build()))
                         | gap(t.spaced(9)) | align(Align::center) | pad(0, t.spaced(12), 0, t.spaced(6)) | height(30)
                         | width(pct(100)) | with_look(sheet_of(t).item, t) | group()
                         | pointer_cursor | role(a11y::Role::menu_item) | selected(on) | label(it.label)
                         | id_of(id, static_cast<std::size_t>(k))).build());
     }
     if (rows.empty())
-        rows.push_back((h(text_owned(st.empty_text) | font(t.font_size) | fg(var::text_disabled)) | pad(t.spaced(14), t.spaced(12))).build());
+        rows.push_back((h(text_owned(st.empty_text) | font(t.type(Tier::body)) | fg(var::text_disabled)) | pad(t.spaced(14), t.spaced(12))).build());
 
     std::vector<Node> foot;
-    for (const auto& [k, a] : st.footer) foot.push_back(key_hint(t, k, a, t.font_size * 0.8f).build());
+    for (const auto& [k, a] : st.footer) foot.push_back(key_hint(t, k, a, t.type(Tier::small)).build());
     foot.push_back((spacer()).build());
     foot.push_back((text_owned(std::to_string(n) + (n == static_cast<int>(items.size()) ? "" : " of " + std::to_string(items.size())))
-                    | font(t.font_size * 0.8f) | fg(var::text_disabled)).build());
+                    | font(t.type(Tier::small)) | fg(var::text_disabled)).build());
 
-    const float qsize = t.font_size * 1.08f;
+    const float qsize = t.type(Tier::body);
     c.overlay(Overlay{
         .content = (v(h(text_owned(st.prefix) | font(qsize) | fg(var::accent),
                         node((text_field(t, query, true, part_id(id, part_inc), st.placeholder, qsize)

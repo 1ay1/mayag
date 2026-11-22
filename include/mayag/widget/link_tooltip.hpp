@@ -17,8 +17,8 @@ template <ControlContext C>
 inline void link_tooltip(const C& c, std::string_view id, Vec2 at, std::string_view url, std::string_view hint = {}) {
     const Theme& t = c.theme;
     c.overlay(Overlay{
-        .content = (h(text_owned(std::string{url}) | font(t.font_size * 0.88f) | fg(var::info) | ellipsis | max_size(520, 1e4f),
-                      text_owned(std::string{hint}) | font(t.font_size * 0.8f) | fg(var::text_disabled))
+        .content = (h(text_owned(std::string{url}) | font(t.type(Tier::small)) | fg(var::info) | ellipsis | max_size(520, 1e4f),
+                      text_owned(std::string{hint}) | font(t.type(Tier::small)) | fg(var::text_disabled))
                     | gap(t.spaced(10)) | align(Align::center) | pad(t.spaced(5), t.spaced(9))
                     | bg(var::overlay) | border(t.stroke(1), t.border_strong) | radius(t.radius_small) | elevation(t.lift(10))).build(),
         .id = part_id(id, part_menu),

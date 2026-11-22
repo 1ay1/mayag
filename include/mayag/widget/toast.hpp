@@ -28,7 +28,7 @@ inline void toasts(const C& c, std::string_view id, const std::vector<Toast>& it
     const Theme& t = c.theme;
     // one compact monospace line per toast: [tag] title  body  ×
     std::vector<Node> cards;
-    const float fs = t.font_size * 0.9f;
+    const float fs = t.type(Tier::body);
     const auto dim = mix(t.text_primary, t.background, 0.45f);
     float widest = 0.0f;
     for (std::size_t i = 0; i < items.size(); ++i) {

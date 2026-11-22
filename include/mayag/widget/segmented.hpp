@@ -31,7 +31,7 @@ template <ControlContext C, class Pick>
     for (std::size_t i = 0; i < options.size(); ++i) {
         const bool on  = static_cast<int>(i) == chosen;
         auto seg = h(text_owned(std::string{options[i]})
-                         | font(t.font_size * 0.92f)
+                         | font(t.type(Tier::body))
                          | (on ? semibold : weight(FontWeight::regular)))
                  | pad(t.spaced(5), t.spaced(12)) | center
                  | with_look(sheet_of(t).segment, t)

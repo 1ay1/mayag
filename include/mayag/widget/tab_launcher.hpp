@@ -36,7 +36,7 @@ inline void tab_launcher(const C& c, std::string_view id, std::uint64_t anchor, 
     const Theme& t = c.theme;
     std::vector<Node> rows;
     const auto header = [&](const char* s) {
-        rows.push_back((text_owned(s) | font(t.font_size * 0.7f) | semibold | tracking(1.0f) | fg(var::text_disabled) | pad(t.spaced(8), t.spaced(10), t.spaced(4), t.spaced(10))).build());
+        rows.push_back((text_owned(s) | font(t.type(Tier::fine)) | semibold | tracking(1.0f) | fg(var::text_disabled) | pad(t.spaced(8), t.spaced(10), t.spaced(4), t.spaced(10))).build());
     };
     header("PROFILES");
     for (std::size_t k = 0; k < profiles.size(); ++k) {
@@ -50,12 +50,12 @@ inline void tab_launcher(const C& c, std::string_view id, std::uint64_t anchor, 
         const auto pid = part_id(id, k);
         const bool on = c.hovered(pid) || keyboard == static_cast<int>(k);
         rows.push_back((h(node(tab_icon(t, look_as, 0.0, on, 26.0f)),
-                          v(h(text_owned(p.name) | font(t.font_size) | semibold | fg(p.danger ? t.danger : t.text_primary),
-                              text_owned(p.is_default ? "default" : "") | font(t.font_size * 0.7f) | fg(var::text_disabled))
+                          v(h(text_owned(p.name) | font(t.type(Tier::body)) | semibold | fg(p.danger ? t.danger : t.text_primary),
+                              text_owned(p.is_default ? "default" : "") | font(t.type(Tier::fine)) | fg(var::text_disabled))
                                 | gap(t.spaced(6)) | align(Align::center),
-                            text_owned(p.command) | font(t.font_size * 0.78f) | fg(var::text_secondary) | ellipsis | no_ligatures)
+                            text_owned(p.command) | font(t.type(Tier::small)) | fg(var::text_secondary) | ellipsis | no_ligatures)
                               | gap(t.spaced(1)) | grow() | min_size(0, 0),
-                          text_owned(p.shortcut) | font(t.font_size * 0.8f) | fg(on ? t.text_secondary : t.text_disabled))
+                          text_owned(p.shortcut) | font(t.type(Tier::small)) | fg(on ? t.text_secondary : t.text_disabled))
                         | gap(t.spaced(10)) | align(Align::center) | pad(t.spaced(6), t.spaced(10)) | width(pct(100)) | radius(t.rounded(8))
                         | bg(on ? mix(t.overlay, hue, 0.16f) : t.overlay.fade(0.0f))
                         | border(t.stroke(1), on ? mix(t.border_strong, hue, 0.4f) : t.border.fade(0.0f))
@@ -70,7 +70,7 @@ inline void tab_launcher(const C& c, std::string_view id, std::uint64_t anchor, 
             dir.cwd = recent[j];
             const Color<Srgb> hue = tab_hue(dir);
             rows.push_back((h(box() | size(8, 8) | radius(t.rounded(4)) | bg(hue) | margin(0, 9, 0, 9),
-                              text_owned(recent[j]) | font(t.font_size * 0.9f) | fg(on ? t.text_primary : t.text_secondary) | ellipsis
+                              text_owned(recent[j]) | font(t.type(Tier::body)) | fg(on ? t.text_primary : t.text_secondary) | ellipsis
                                   | grow() | min_size(0, 0))
                             | align(Align::center) | pad(t.spaced(5), t.spaced(10)) | width(pct(100)) | radius(t.rounded(8))
                             | bg(on ? mix(t.overlay, hue, 0.12f) : t.overlay.fade(0.0f))

@@ -81,7 +81,7 @@ template <ControlContext C>
     if (y > -b.cell_h && y < b.size.y)
         out.push_back((box() | size(b.cell_w, b.cell_h) | bg(t.warning.fade(0.35f)) | border(2.0f, t.warning)
                        | absolute(b.col_x(static_cast<float>(p.col)), y)).build());
-    const float fs = b.font_size * 0.85f;
+    const float fs = t.type_at(b.font_size, Tier::small);
     const auto dim = mix(t.text_primary, t.background, 0.45f);
     const char* mode = p.visual == 1 ? "VISUAL" : p.visual == 2 ? "V-LINE" : p.visual == 3 ? "V-BLOCK" : "COPY";
     std::vector<HudSeg> segs{{"L" + std::to_string(p.line + 1) + ":" + std::to_string(p.col + 1), t.text_primary, true}};
@@ -111,7 +111,7 @@ template <ControlContext C>
     using term_detail::mono;
     const Theme& t = c.theme;
     const auto ink = t.text_primary, paper = t.background, dim = mix(ink, paper, 0.45f);
-    const float fs = b.font_size * 0.85f;
+    const float fs = t.type_at(b.font_size, Tier::small);
     const float fcw = detail::term_cell_width(c, fs, b.family);
     const std::string base{id};
     const std::string size_s = std::to_string(p.lines) + "L " + std::to_string(p.chars) + "ch" + (p.block ? " \u25A6" : "");
@@ -164,7 +164,7 @@ inline void hint_bar(const C& c, std::string_view id, const HintBarProps& p) {
     const std::string n = std::to_string(p.count) + " targets";
     c.overlay(Overlay{.content = hud_chip(c, {{p.typed.empty() ? n : p.typed + "\u258F", t.text_primary, true},
                                               {"a-z copy/open", dim}, {"A-Z type", dim}, {"esc", dim}},
-                                          {.tag = "HINT", .tone = t.warning, .size = p.font_size * 0.85f}).build(),
+                                          {.tag = "HINT", .tone = t.warning, .size = t.type_at(p.font_size, Tier::small)}).build(),
                       .id = node_id(id), .placement = Placement::cursor, .dismiss = Dismiss::never,
                       .offset = 0.0f, .layer = 5, .at = Vec2{16.0f, p.y}, .passthrough = true});
 }

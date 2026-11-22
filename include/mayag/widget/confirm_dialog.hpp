@@ -50,21 +50,21 @@ inline void confirm_dialog(const C& c, std::string_view id, const ConfirmSpec& s
         const auto pid = part_id(id, part);
         const bool hov = c.hovered(pid);
         const Color<Srgb> face = primary ? (s.danger ? t.danger : t.accent) : (hov ? t.surface_raised : t.surface);
-        return (h(text_owned(text_) | font(t.font_size) | semibold | fg(primary ? t.on_accent : t.text_primary))
+        return (h(text_owned(text_) | font(t.type(Tier::body)) | semibold | fg(primary ? t.on_accent : t.text_primary))
                 | pad(t.spaced(7), t.spaced(16)) | radius(t.radius_small) | bg(primary && hov ? mix(face, colors::white, 0.1f) : face)
                 | border(t.stroke(1), primary ? face : t.border) | pointer_cursor | role(a11y::Role::button) | id_of(id, part)).build();
     };
     Node pv = preview.empty() ? Node{}
-        : (v(text_owned(preview) | font(t.font_size * 0.92f) | fg(var::text_secondary) | no_ligatures | wrap_text | line_height(1.4f))
+        : (v(text_owned(preview) | font(t.type(Tier::body)) | fg(var::text_secondary) | no_ligatures | wrap_text | line_height(1.4f))
            | pad(t.spaced(10), t.spaced(12)) | width(pct(100)) | bg(var::background) | border(t.stroke(1), t.border) | radius(t.radius_small)).build();
     Node rem = s.remember.empty() ? Node{}
-        : (h(h(text_owned(s.remember_on ? "\u2713" : "") | font(11) | bold | fg(var::on_accent)) | size(16, 16) | center | radius(t.rounded(4))
+        : (h(h(text_owned(s.remember_on ? "\u2713" : "") | glyph_size(11) | bold | fg(var::on_accent)) | size(16, 16) | center | radius(t.rounded(4))
                  | bg(s.remember_on ? t.accent : t.surface) | border(t.stroke(1), t.border_strong),
-             text_owned(s.remember) | font(t.font_size * 0.9f) | fg(var::text_secondary))
+             text_owned(s.remember) | font(t.type(Tier::body)) | fg(var::text_secondary))
            | gap(t.spaced(8)) | align(Align::center) | pointer_cursor | id_of(id, 2)).build();
     c.overlay(Overlay{
-        .content = (v(text_owned(s.title) | font(t.font_size * 1.15f) | semibold | fg(var::text_primary),
-                      text_owned(s.body) | font(t.font_size) | fg(var::text_secondary) | wrap_text | line_height(1.45f),
+        .content = (v(text_owned(s.title) | font(t.type(Tier::large)) | semibold | fg(var::text_primary),
+                      text_owned(s.body) | font(t.type(Tier::body)) | fg(var::text_secondary) | wrap_text | line_height(1.45f),
                       node(std::move(pv)),
                       h(node(std::move(rem)), spacer(), node(button_(0, s.cancel, false)), node(button_(1, s.confirm, true)))
                           | gap(t.spaced(8)) | align(Align::center) | width(pct(100)))

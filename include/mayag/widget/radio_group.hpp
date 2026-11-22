@@ -27,7 +27,7 @@ template <ControlContext C>
                               | border(t.stroke(1.5f), detail::edge(t, c.focused(pid), hov,
                                                           on ? t.accent : t.border_strong))
                               | radius(t.rounded(9)),
-                            text_owned(std::string{options[i]}) | font(t.font_size)
+                            text_owned(std::string{options[i]}) | font(t.type(Tier::body))
                               | fg(var::text_primary))
                         | gap(t.spaced(10)) | align(Align::center)
                         | pointer_cursor

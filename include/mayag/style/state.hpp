@@ -24,6 +24,7 @@
 
 #include "../core/color.hpp"
 #include "../core/math.hpp"
+#include "type.hpp"
 
 #include <bit>
 #include <cstdint>
@@ -345,7 +346,7 @@ enum class NumKind : std::uint8_t { space, font, radius, line, depth };
 
 namespace num_code {
 inline constexpr int space  = 0;        ///< + round(k * 16), k in [0, 512)
-inline constexpr int font   = 10000;    ///< + round(k * 100), k in [0, 100)
+inline constexpr int font   = 10000;    ///< + scale * 8 + tier index (style/type.hpp)
 inline constexpr int radius = 20100;    ///< + role
 inline constexpr int line   = 20200;    ///< + role
 inline constexpr int depth  = 30000;    ///< + round(dp * 16)
@@ -377,16 +378,29 @@ struct Num {
 [[nodiscard]] constexpr Num space(float k) noexcept {
     return num_of(num_code::space + static_cast<int>(num::clamp(k, 0.0f, 511.0f) * 16.0f + 0.5f));
 }
-/// `k` times the theme's base font size.
-[[nodiscard]] constexpr Num font_scale(float k) noexcept {
-    return num_of(num_code::font + static_cast<int>(num::clamp(k, 0.0f, 99.0f) * 100.0f + 0.5f));
+/// A text size: `face`'s `tier`, resolved by the cascade against the theme
+/// in force (so a subtree theme or a morph re-sizes it). There is no
+/// arbitrary multiple: a size is a role on the type scale (style/type.hpp).
+[[nodiscard]] constexpr Num type(Scale scale, Tier tier) noexcept {
+    return num_of(num_code::font + static_cast<int>(scale) * 8 + tier_index(tier));
 }
-inline constexpr Num font_xs  = font_scale(0.75f);
-inline constexpr Num font_sm  = font_scale(0.85f);
-inline constexpr Num font_md  = font_scale(1.0f);
-inline constexpr Num font_lg  = font_scale(1.15f);
-inline constexpr Num font_xl  = font_scale(1.6f);
-inline constexpr Num font_2xl = font_scale(2.2f);
+[[nodiscard]] constexpr Num type(Tier tier) noexcept { return type(Scale::ui, tier); }
+
+// Interface text by tier: `font(var::small)`.
+inline constexpr Num fine    = type(Tier::fine);
+inline constexpr Num small   = type(Tier::small);
+inline constexpr Num body    = type(Tier::body);
+inline constexpr Num large   = type(Tier::large);
+inline constexpr Num title   = type(Tier::title);
+inline constexpr Num display = type(Tier::display);
+// The older t-shirt names, now tiers (they were 0.75 / 0.85 / 1 / 1.15 /
+// 1.6 / 2.2 times the base: six sizes no rule related).
+inline constexpr Num font_xs  = fine;
+inline constexpr Num font_sm  = small;
+inline constexpr Num font_md  = body;
+inline constexpr Num font_lg  = large;
+inline constexpr Num font_xl  = title;
+inline constexpr Num font_2xl = display;
 
 inline constexpr Num radius_sm   = num_of(num_code::radius + 0);
 inline constexpr Num radius_md   = num_of(num_code::radius + 1);
@@ -412,7 +426,7 @@ inline constexpr Motion motion_emphasis = Motion::emphasis;
 inline constexpr Motion motion_gentle   = Motion::gentle;
 
 static_assert(is_num(space(2)) && code_of(space(2)) == 32);
-static_assert(code_of(font_sm) == num_code::font + 85);
+static_assert(code_of(small) == num_code::font + 1 && code_of(type(Scale::content, Tier::body)) == num_code::font + 10);
 static_assert(!is_num(-500000.0f) && !is_num(1.0e9f));
 
 }  // namespace var

@@ -57,16 +57,16 @@ template <ControlContext C>
         const bool hov = c.hovered(pid) || c.hovered(did) || static_cast<int>(i) == keyboard;
         const Color<Srgb> tone = agent_tone(t, it.agent.state);
         rows.push_back((h(box() | width(3) | bg(tone),
-                          v(h(text_owned(agent_glyph(it.agent.state, time)) | font(t.font_size * 0.85f) | bold | fg(tone),
-                              text_owned(it.agent.agent) | font(t.font_size * 0.88f) | semibold | fg(var::text_primary),
-                              text_owned(agent_state_words(it.agent.state)) | font(t.font_size * 0.8f) | fg(tone),
+                          v(h(text_owned(agent_glyph(it.agent.state, time)) | font(t.type(Tier::small)) | bold | fg(tone),
+                              text_owned(it.agent.agent) | font(t.type(Tier::small)) | semibold | fg(var::text_primary),
+                              text_owned(agent_state_words(it.agent.state)) | font(t.type(Tier::small)) | fg(tone),
                               spacer(),
-                              text_owned(waited(it.agent.since)) | font(t.font_size * 0.75f) | fg(var::text_disabled),
-                              node(hov ? (h(text<"\u00D7"> | font(t.font_size * 0.85f) | fg(c.hovered(did) ? t.text_primary : t.text_disabled))
+                              text_owned(waited(it.agent.since)) | font(t.type(Tier::fine)) | fg(var::text_disabled),
+                              node(hov ? (h(text<"\u00D7"> | font(t.type(Tier::small)) | fg(c.hovered(did) ? t.text_primary : t.text_disabled))
                                           | pointer_cursor | label("dismiss") | id_of(id, 4096 + i)).build() : Node{}))
                                 | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
-                            text_owned(it.agent.message) | font(t.font_size * 0.85f) | fg(var::text_secondary) | wrap_text | clamp_lines(2),
-                            text_owned(it.where) | font(t.font_size * 0.75f) | fg(var::text_disabled) | ellipsis)
+                            text_owned(it.agent.message) | font(t.type(Tier::small)) | fg(var::text_secondary) | wrap_text | clamp_lines(2),
+                            text_owned(it.where) | font(t.type(Tier::fine)) | fg(var::text_disabled) | ellipsis)
                               | gap(t.spaced(3)) | pad(t.spaced(7), t.spaced(10)) | grow() | min_size(0, 0))
                         | align(Align::stretch) | width(pct(100)) | radius(t.radius_small)
                         | bg(hov ? t.surface_raised : t.surface) | border(t.stroke(1), hov ? t.tint(tone, 0.5f) : t.border)
@@ -75,13 +75,13 @@ template <ControlContext C>
     }
     const int urgent = static_cast<int>(std::count_if(items.begin(), items.end(), [](const auto& x) {
         return x.agent.state == AgentState::needs_approval || x.agent.state == AgentState::needs_input; }));
-    Node empty = items.empty() ? (v(text<"Nothing is waiting for you."> | font(t.font_size * 0.88f) | fg(var::text_disabled))
+    Node empty = items.empty() ? (v(text<"Nothing is waiting for you."> | font(t.type(Tier::small)) | fg(var::text_disabled))
                                   | pad(t.spaced(10), t.spaced(4))).build() : Node{};
-    return (v(h(text<"WAITING ON YOU"> | font(t.font_size * 0.72f) | semibold | tracking(0.8f) | fg(var::text_secondary),
+    return (v(h(text<"WAITING ON YOU"> | font(t.type(Tier::fine)) | semibold | tracking(0.8f) | fg(var::text_secondary),
                 spacer(),
-                node(urgent > 0 ? (h(text_owned(std::to_string(urgent)) | font(t.font_size * 0.75f) | bold | fg(var::on_accent))
+                node(urgent > 0 ? (h(text_owned(std::to_string(urgent)) | font(t.type(Tier::fine)) | bold | fg(var::on_accent))
                                    | pad(0, t.spaced(6)) | radius(t.rounded(8)) | bg(var::warning)).build() : Node{}),
-                text<"\u2318J"> | font(t.font_size * 0.72f) | fg(var::text_disabled))
+                text<"\u2318J"> | font(t.type(Tier::fine)) | fg(var::text_disabled))
                   | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
               node(std::move(empty)),
               v(v_list(std::move(rows), 6.0f)) | width(pct(100)))

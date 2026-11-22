@@ -49,7 +49,7 @@ inline constexpr std::size_t term_part_close = part_dec + 4096;
 /// (part_bar): `on_drag(Move{})` for a client-decorated window.
 ///
 /// Shape, height, type and widths come from the theme (Theme::tab_shape,
-/// bar_height, chrome_type, tab_width), colours from its Sheet (strip, tab,
+/// bar_height, tab_width; text from the type scale), colours from its Sheet (strip, tab,
 /// mark). The ACTIVE tab is drawn in var::background -- the colour of the
 /// content under it -- and, in the `block` shape, has no border at its foot,
 /// so it reads as the top of the pane it shows rather than as a button.
@@ -59,7 +59,7 @@ template <ControlContext C, Responder... Grab>
     const Theme& t = c.theme;
     const Sheet& sh = sheet_of(t);
     const float H = t.bar_height;
-    const float fs = t.font_size * t.chrome_type;
+    const float fs = t.type(Tier::body);
     const TabShape shape = t.tab_shape;
     const bool nerd = t.icons == IconSet::nerd;
     std::vector<Node> items;
@@ -74,19 +74,19 @@ template <ControlContext C, Responder... Grab>
         // Status glyph left of the title: an agent's state outranks everything.
         Node status;
         if (tb.agent.state != AgentState::none)
-            status = (text_owned(agent_glyph(tb.agent.state, time)) | font(fs * 0.92f) | bold
+            status = (text_owned(agent_glyph(tb.agent.state, time)) | font(t.type(Tier::body)) | bold
                       | fg(agent_tone(t, tb.agent.state))).build();
-        else if (tb.bell) status = (text_owned(nerd ? "\uF0F3" : "\u25B2") | font(fs * 0.8f) | fg(var::warning)).build();
+        else if (tb.bell) status = (text_owned(nerd ? "\uF0F3" : "\u25B2") | font(t.type(Tier::small)) | fg(var::warning)).build();
         else if (tb.running) status = (text_owned(spinner_frame(time)) | font(fs) | fg(var::accent)).build();
-        else if (tb.exit_code > 0) status = (text_owned(std::to_string(tb.exit_code)) | font(fs * 0.78f) | bold
+        else if (tb.exit_code > 0) status = (text_owned(std::to_string(tb.exit_code)) | font(t.type(Tier::small)) | bold
                                              | fg(var::danger) | pad(0, 4) | border(t.stroke(1), t.danger.fade(0.6f))
                                              | radius(t.rounded(3))).build();
-        else if (tb.activity && !on) status = (text<"\u25CF"> | font(fs * 0.76f) | fg(var::warning)).build();
-        else if (t.tab_numbers && i < 9) status = (text_owned(std::to_string(i + 1)) | font(fs * 0.85f)
+        else if (tb.activity && !on) status = (text<"\u25CF"> | font(t.type(Tier::fine)) | fg(var::warning)).build();
+        else if (t.tab_numbers && i < 9) status = (text_owned(std::to_string(i + 1)) | font(t.type(Tier::small))
                                                    | fg(on ? var::accent : var::text_disabled)).build();
         // The close cross: always takes its space so titles never shift.
         const bool show_close = !t.tab_close_on_hover || hov || on;
-        Node close = (h(text_owned(nerd ? "\uF00D" : "\u00D7") | font(nerd ? fs * 0.82f : fs * 1.05f)
+        Node close = (h(text_owned(nerd ? "\uF00D" : "\u00D7") | font(nerd ? t.type(Tier::small) : t.type(Tier::body))
                         | fg(c.hovered(cid) ? t.text_primary : t.text_disabled))
                       | size(H * 0.55f, H * 0.55f) | center | radius(t.rounded(4))
                       | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
@@ -120,7 +120,7 @@ template <ControlContext C, Responder... Grab>
                          node(remote ? host_badge(c, *tb.host, true) : Node{}),
                          text_owned(label_text) | font(fs) | (on ? semibold : weight(FontWeight::regular))
                              | ellipsis | grow() | min_size(0, 0),
-                         text_owned(tb.readonly ? (nerd ? "\uF023" : "\U0001F512") : "") | font(fs * 0.85f),
+                         text_owned(tb.readonly ? (nerd ? "\uF023" : "\U0001F512") : "") | font(t.type(Tier::small)),
                          node(std::move(close)))
                      | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(6), 0, t.spaced(12))
                      | width(pct(100)) | height(pct(100));
@@ -150,7 +150,7 @@ template <ControlContext C, Responder... Grab>
             auto lit = h(std::move(content)) | fg(ink) | width(w) | height(H) | shrink() | min_size(90, H) | bg(body)
                      | transition() | group() | clip | pointer_cursor
                      | role(a11y::Role::tab) | selected(on) | label(label_text) | tooltip(tip) | id_of(id, i);
-            auto wedge = h(text<"\uE0B0"> | font(H * 1.02f) | line_height(1.0f) | fg(body)) | size(H * 0.5f, H) | center
+            auto wedge = h(text<"\uE0B0"> | glyph_size(H * 1.02f) | line_height(1.0f) | fg(body)) | size(H * 0.5f, H) | center
                        | bg(var::surface) | clip;
             items.push_back((h(std::move(lit), std::move(wedge)) | height(H)).build());
             continue;
@@ -179,11 +179,11 @@ template <ControlContext C, Responder... Grab>
         items.push_back(std::move(tab));
     }
     const auto plus = part_id(id, part_inc), menu = part_id(id, part_menu);
-    items.push_back((h(text_owned(nerd ? "\uF067" : "+") | font(nerd ? fs * 0.9f : fs * 1.3f)
+    items.push_back((h(text_owned(nerd ? "\uF067" : "+") | font(nerd ? t.type(Tier::body) : t.type(Tier::large))
                        | fg(c.hovered(plus) ? t.text_primary : t.text_secondary))
                      | size(H, H) | center | bg(c.hovered(plus) ? t.surface_raised : t.surface.fade(0.0f)) | transition()
                      | pointer_cursor | label("new tab") | tooltip("New tab", "ctrl shift t") | id_of(id, part_inc)).build());
-    items.push_back((h(text_owned(nerd ? "\uF078" : "\u2304") | font(fs * 0.78f)
+    items.push_back((h(text_owned(nerd ? "\uF078" : "\u2304") | font(t.type(Tier::small))
                        | fg(c.hovered(menu) ? t.text_primary : t.text_disabled))
                      | size(H * 0.62f, H) | center | pointer_cursor | label("new tab menu") | tooltip("Commands", "ctrl shift p")
                      | id_of(id, part_menu)).build());

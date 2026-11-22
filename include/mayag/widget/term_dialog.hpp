@@ -91,7 +91,7 @@ template <ControlContext C>
 [[nodiscard]] inline Node term_dialog(const C& c, std::string_view id, const TermDialogSpec& s) {
     namespace d = term_dialog_detail;
     const Theme& t = c.theme;
-    const float fs = t.font_size * 0.95f;
+    const float fs = t.type(Tier::body);
     const auto paper = t.background, ink = t.text_primary;
     // Neutral greys from the scheme's own fg/bg: the dialog is quiet, and
     // colour lands only where it means something (the badge, the action).
@@ -108,12 +108,12 @@ template <ControlContext C>
                | size(38.0f, 38.0f) | center | radius(t.rounded(10.0f))
                | bg(tone.fade(0.13f)) | border(1.0f, tone.fade(0.28f));
     std::vector<Node> text_col;
-    text_col.push_back((h(mono(s.tag, fs * 0.72f, tone) | semibold | tracking(1.2f), box() | grow(),
-                          mono(s.meta, fs * 0.78f, dim))
+    text_col.push_back((h(mono(s.tag, t.type(Tier::fine), tone) | semibold | tracking(1.2f), box() | grow(),
+                          mono(s.meta, t.type(Tier::fine), dim))
                         | align(Align::center) | width(pct(100))).build());
-    text_col.push_back((mono(s.title, fs * 1.18f, ink) | semibold).build());
+    text_col.push_back((mono(s.title, t.type(Tier::large), ink) | semibold).build());
     if (!s.body.empty())
-        text_col.push_back((text_owned(s.body) | font(fs * 0.9f) | fg(dim) | wrap_text | line_height(1.45f) | width(pct(100))).build());
+        text_col.push_back((text_owned(s.body) | font(t.type(Tier::small)) | fg(dim) | wrap_text | line_height(1.45f) | width(pct(100))).build());
     auto head = h(std::move(badge), v(std::move(text_col)) | gap(5.0f) | grow() | min_size(0, 0))
               | gap(14.0f) | align(Align::start) | width(pct(100));
 
@@ -129,18 +129,18 @@ template <ControlContext C>
             const auto& l = s.preview[i];
             std::string num = std::to_string(i + 1);
             num = std::string(static_cast<std::size_t>(std::max(digits - static_cast<int>(num.size()), 0)), ' ') + num;
-            lines.push_back((h(mono(l.flag ? "\u25B6" : " ", fs * 0.7f, danger.fade(0.6f + 0.4f * pulse)) | width(10.0f),
-                               mono(num, fs * 0.85f, l.flag ? danger : mix(paper, ink, 0.3f)),
-                               mono(l.text.empty() ? std::string{" "} : l.text, fs * 0.92f, l.flag ? ink : mix(ink, paper, 0.15f))
+            lines.push_back((h(mono(l.flag ? "\u25B6" : " ", t.type(Tier::fine), danger.fade(0.6f + 0.4f * pulse)) | width(10.0f),
+                               mono(num, t.type(Tier::small), l.flag ? danger : mix(paper, ink, 0.3f)),
+                               mono(l.text.empty() ? std::string{" "} : l.text, t.type(Tier::small), l.flag ? ink : mix(ink, paper, 0.15f))
                                    | grow() | ellipsis | min_size(0, 0),
-                               mono(l.note.empty() ? std::string{} : "\u26A0 " + l.note, fs * 0.8f, danger))
+                               mono(l.note.empty() ? std::string{} : "\u26A0 " + l.note, t.type(Tier::fine), danger))
                              | gap(8.0f) | align(Align::center) | height(std::round(fs * 1.55f)) | pad(0, 8.0f, 0, 4.0f)
                              | bg(l.flag ? danger.fade(0.055f + 0.025f * pulse) : paper.fade(0.0f))
                              | when(l.flag, inner_shadow(0.0f, danger.fade(0.8f), {2.0f, 0.0f}))).build());
         }
         if (s.preview_more > 0)
             lines.push_back((h(mono("\u22EF " + std::to_string(s.preview_more) + " more line" + (s.preview_more == 1 ? "" : "s"),
-                                    fs * 0.85f, dim))
+                                    t.type(Tier::small), dim))
                              | height(std::round(fs * 1.5f)) | pad(0, 22.0f)).build());
         rows.push_back((v(std::move(lines)) | pad(4.0f, 0) | width(pct(100))
                         | bg(luminance(paper) < 0.4f ? mix(paper, colors::black, 0.18f) : mix(paper, ink, 0.03f))
@@ -156,7 +156,7 @@ template <ControlContext C>
         foot.push_back((h(h(node(std::move(mark)))
                               | size(15.0f, 15.0f) | center | radius(std::min(r, 4.0f))
                               | bg(s.remember_on ? tone : paper.fade(0.0f)) | border(1.0f, s.remember_on ? tone : hov ? dim : mix(paper, ink, 0.24f)),
-                          mono(s.remember, fs * 0.82f, hov ? ink : dim))
+                          mono(s.remember, t.type(Tier::small), hov ? ink : dim))
                         | gap(8.0f) | align(Align::center) | pointer_cursor | id_of(id, 100)).build());
     }
     foot.push_back((box() | grow()).build());
@@ -179,9 +179,9 @@ template <ControlContext C>
             edge = focus ? mix(paper, ink, 0.28f) : mix(paper, ink, 0.16f);
             label_col = focus || hov ? ink : mix(ink, paper, 0.2f);
         }
-        auto keycap = h(mono(a.key, fs * 0.72f, label_col.fade(0.7f))) | height(17.0f) | pad(0, 5.0f) | center
+        auto keycap = h(mono(a.key, t.type(Tier::fine), label_col.fade(0.7f))) | height(17.0f) | pad(0, 5.0f) | center
                     | radius(4.0f) | bg(label_col.fade(0.10f));
-        foot.push_back((h(mono(a.label, fs * 0.92f, label_col) | semibold, std::move(keycap))
+        foot.push_back((h(mono(a.label, t.type(Tier::small), label_col) | semibold, std::move(keycap))
                         | gap(8.0f) | align(Align::center) | height(32.0f) | pad(0, 8.0f, 0, 14.0f) | radius(t.rounded(7.0f))
                         | bg(fill) | border(1.0f, edge)
                         | when(focus && coloured, shadow(14.0f, face.fade(0.30f), {0.0f, 4.0f}))

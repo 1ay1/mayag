@@ -40,19 +40,19 @@ template <ControlContext C>
         const auto bgc = sel ? t.tint(t.accent, 0.20f) : hov ? t.surface_raised.fade(0.5f) : t.surface.fade(0.0f);
         if (r.header) {
             return (h(node(file_icon(t, r.file, 12.0f).build()),
-                      text_owned(r.file) | font(t.font_size) | fg(var::text_primary) | grow() | ellipsis | min_size(0, 0),
-                      text_owned(r.errors ? std::to_string(r.errors) + " \u2716" : "") | font(t.font_size * 0.85f) | fg(var::danger),
-                      text_owned(r.warnings ? std::to_string(r.warnings) + " \u26A0" : "") | font(t.font_size * 0.85f) | fg(var::warning))
+                      text_owned(r.file) | font(t.type(Tier::body)) | fg(var::text_primary) | grow() | ellipsis | min_size(0, 0),
+                      text_owned(r.errors ? std::to_string(r.errors) + " \u2716" : "") | font(t.type(Tier::small)) | fg(var::danger),
+                      text_owned(r.warnings ? std::to_string(r.warnings) + " \u26A0" : "") | font(t.type(Tier::small)) | fg(var::warning))
                     | gap(t.spaced(8)) | align(Align::center) | pad(0, t.spaced(12)) | height(rh) | width(pct(100)) | bg(bgc)
                     | id_of(id, static_cast<std::size_t>(i))).build();
         }
         const Color<Srgb> tone = r.severity == 0 ? t.danger : r.severity == 1 ? t.warning : r.severity == 2 ? t.info : t.text_secondary;
         const char* mark = r.severity == 0 ? "\u2716" : r.severity == 1 ? "\u26A0" : "\u24D8";
         return (h(strut(18),
-                  text_owned(mark) | font(t.font_size * 0.85f) | fg(tone) | width(16),
-                  text_owned(r.message) | font(t.font_size * 0.95f) | fg(var::text_primary) | ellipsis | grow() | min_size(0, 0),
-                  text_owned(r.source) | font(t.font_size * 0.85f) | fg(var::text_disabled),
-                  text_owned(std::to_string(r.line + 1) + ":" + std::to_string(r.col + 1)) | font(t.font_size * 0.85f)
+                  text_owned(mark) | font(t.type(Tier::small)) | fg(tone) | width(16),
+                  text_owned(r.message) | font(t.type(Tier::body)) | fg(var::text_primary) | ellipsis | grow() | min_size(0, 0),
+                  text_owned(r.source) | font(t.type(Tier::small)) | fg(var::text_disabled),
+                  text_owned(std::to_string(r.line + 1) + ":" + std::to_string(r.col + 1)) | font(t.type(Tier::small))
                       | fg(var::text_disabled) | width(60) | text_align(TextAlign::right))
                 | gap(t.spaced(8)) | align(Align::center) | pad(0, t.spaced(12)) | height(rh) | width(pct(100)) | bg(bgc)
                 | pointer_cursor | role(a11y::Role::list_item) | selected(sel)

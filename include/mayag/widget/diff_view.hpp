@@ -80,9 +80,9 @@ struct DiffStats { int added = 0, removed = 0; };
         const auto& l = lines[k];
         const Color<Srgb> tone = l.op == Op::add ? t.success : l.op == Op::del ? t.danger : t.text_secondary;
         const char* sign = l.op == Op::add ? "+" : l.op == Op::del ? "-" : " ";
-        rows.push_back((h(text_owned(l.old_no ? std::to_string(l.old_no) : "") | font(size * 0.9f)
+        rows.push_back((h(text_owned(l.old_no ? std::to_string(l.old_no) : "") | font(size)   // line numbers: the same tier, told apart by colour
                               | fg(var::text_disabled) | text_align(TextAlign::right) | width(gutter),
-                          text_owned(l.new_no ? std::to_string(l.new_no) : "") | font(size * 0.9f)
+                          text_owned(l.new_no ? std::to_string(l.new_no) : "") | font(size)   // line numbers: the same tier, told apart by colour
                               | fg(var::text_disabled) | text_align(TextAlign::right) | width(gutter),
                           text_owned(sign) | font(size) | bold | fg(tone) | width(size * 1.2f)
                               | text_align(TextAlign::center),

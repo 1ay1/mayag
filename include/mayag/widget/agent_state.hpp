@@ -80,9 +80,9 @@ template <ControlContext C>
     const Theme& t = c.theme;
     if (a.state == AgentState::none) return Node{};
     const Color<Srgb> tone = agent_tone(t, a.state);
-    return (h(text_owned(agent_glyph(a.state, time)) | font(t.font_size * 0.85f) | bold | fg(tone),
-              text_owned(a.agent) | font(t.font_size * 0.82f) | semibold | fg(var::text_primary),
-              text_owned(words ? agent_state_words(a.state) : "") | font(t.font_size * 0.78f) | fg(tone))
+    return (h(text_owned(agent_glyph(a.state, time)) | font(t.type(Tier::small)) | bold | fg(tone),
+              text_owned(a.agent) | font(t.type(Tier::small)) | semibold | fg(var::text_primary),
+              text_owned(words ? agent_state_words(a.state) : "") | font(t.type(Tier::small)) | fg(tone))
             | gap(t.spaced(5)) | align(Align::center) | pad(t.spaced(1), t.spaced(7)) | radius(t.rounded(9))
             | bg(t.tint(tone, 0.14f)) | border(t.stroke(1), t.tint(tone, 0.32f))).build();
 }

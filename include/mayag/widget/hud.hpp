@@ -33,7 +33,7 @@ struct HudProps {
 template <ControlContext C>
 [[nodiscard]] inline auto hud_chip(const C& c, const std::vector<HudSeg>& segs, const HudProps& p = {}) {
     const Theme& t = c.theme;
-    const float fs = p.size > 0.0f ? p.size : t.font_size * 0.9f;
+    const float fs = t.type_at(p.size > 0.0f ? p.size : t.font_size, Tier::body);
     const bool toned = p.tone.a > 0.0f;
     const auto paper = t.background, ink = t.text_primary;
     std::vector<Node> parts;

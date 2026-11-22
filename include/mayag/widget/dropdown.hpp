@@ -35,9 +35,9 @@ template <ControlContext C>
         for (std::size_t i = 0; i < options.size(); ++i) {
             const auto pid = part_id(id, i);
             const bool on = static_cast<int>(i) == chosen;
-            rows.push_back((h(text_owned(on ? "\u2713" : " ") | font(t.font_size * 0.9f)
+            rows.push_back((h(text_owned(on ? "\u2713" : " ") | font(t.type(Tier::body))
                                   | fg(var::accent) | width(16),
-                              text_owned(options[i]) | font(t.font_size)
+                              text_owned(options[i]) | font(t.type(Tier::body))
                                   | fg(var::text_primary) | grow())
                             | align(Align::center) | pad(t.spaced(7), t.spaced(10)) | width(pct(100))
                             | bg(c.hovered(pid) ? t.accent.fade(0.18f) : t.overlay.fade(0.0f))
@@ -59,8 +59,8 @@ template <ControlContext C>
             .layer = layer,
         });
     }
-    return h(text_owned(current) | font(t.font_size) | fg(var::text_primary) | grow(),
-             text<"\u25BE"> | font(t.font_size * 0.85f) | fg(var::text_secondary))
+    return h(text_owned(current) | font(t.type(Tier::body)) | fg(var::text_primary) | grow(),
+             text<"\u25BE"> | font(t.type(Tier::small)) | fg(var::text_secondary))
          | align(Align::center) | gap(t.spaced(8)) | pad(t.spaced(7), t.spaced(11)) | width(width_px)
          | bg(hov || open ? t.surface_raised : t.surface)
          | border(t.stroke(1), detail::edge(t, c.focused(nid) || open, hov, t.border))

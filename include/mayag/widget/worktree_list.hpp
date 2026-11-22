@@ -45,34 +45,34 @@ template <ControlContext C>
         const Color<Srgb> tone = agent_tone(t, w.agent.state);
         Node checks;
         switch (w.checks) {
-            case Worktree::Checks::pending: checks = (text<"\u25CB checks"> | font(t.font_size * 0.72f) | fg(var::warning)).build(); break;
-            case Worktree::Checks::passing: checks = (text<"\u2713 checks"> | font(t.font_size * 0.72f) | fg(var::success)).build(); break;
-            case Worktree::Checks::failing: checks = (text<"\u2716 checks"> | font(t.font_size * 0.72f) | fg(var::danger)).build(); break;
+            case Worktree::Checks::pending: checks = (text<"\u25CB checks"> | font(t.type(Tier::fine)) | fg(var::warning)).build(); break;
+            case Worktree::Checks::passing: checks = (text<"\u2713 checks"> | font(t.type(Tier::fine)) | fg(var::success)).build(); break;
+            case Worktree::Checks::failing: checks = (text<"\u2716 checks"> | font(t.type(Tier::fine)) | fg(var::danger)).build(); break;
             default: break;
         }
         const bool has_diff = w.added + w.removed > 0;
         rows.push_back((v(h(text_owned(w.agent.state == AgentState::none ? "\u2387" : agent_glyph(w.agent.state, time))
-                                | font(t.font_size * 0.9f) | bold | fg(w.agent.state == AgentState::none ? t.text_disabled : tone) | width(14),
-                            text_owned(w.branch) | font(t.font_size * 0.92f) | semibold | fg(on ? t.text_primary : t.text_secondary)
+                                | font(t.type(Tier::body)) | bold | fg(w.agent.state == AgentState::none ? t.text_disabled : tone) | width(14),
+                            text_owned(w.branch) | font(t.type(Tier::body)) | semibold | fg(on ? t.text_primary : t.text_secondary)
                                 | ellipsis | grow() | min_size(0, 0),
-                            text_owned(w.pr) | font(t.font_size * 0.75f) | fg(var::accent))
+                            text_owned(w.pr) | font(t.type(Tier::fine)) | fg(var::accent))
                               | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
                           h(strut(14),
-                            node(w.host ? host_badge(c, *w.host, true) : (text_owned(w.path) | font(t.font_size * 0.75f) | fg(var::text_disabled) | ellipsis).build()),
+                            node(w.host ? host_badge(c, *w.host, true) : (text_owned(w.path) | font(t.type(Tier::fine)) | fg(var::text_disabled) | ellipsis).build()),
                             spacer(),
                             node(std::move(checks)))
                               | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
                           h(strut(14),
                             text_owned(w.agent.state == AgentState::none ? std::string{"no agent"} : w.agent.agent + " \u00B7 " + agent_state_words(w.agent.state))
-                                | font(t.font_size * 0.75f) | fg(w.agent.state == AgentState::none ? t.text_disabled : tone),
+                                | font(t.type(Tier::fine)) | fg(w.agent.state == AgentState::none ? t.text_disabled : tone),
                             spacer(),
-                            node(has_diff ? (h(text_owned("+" + std::to_string(w.added)) | font(t.font_size * 0.75f) | fg(var::success),
-                                               text_owned("\u2212" + std::to_string(w.removed)) | font(t.font_size * 0.75f) | fg(var::danger),
-                                               text_owned(std::to_string(w.files) + "f") | font(t.font_size * 0.75f) | fg(var::text_disabled))
+                            node(has_diff ? (h(text_owned("+" + std::to_string(w.added)) | font(t.type(Tier::fine)) | fg(var::success),
+                                               text_owned("\u2212" + std::to_string(w.removed)) | font(t.type(Tier::fine)) | fg(var::danger),
+                                               text_owned(std::to_string(w.files) + "f") | font(t.type(Tier::fine)) | fg(var::text_disabled))
                                              | gap(t.spaced(4)) | pad(0, t.spaced(5)) | radius(t.rounded(3)) | bg(c.hovered(rid) ? t.surface_raised : t.surface.fade(0.0f))
                                              | pointer_cursor | label("review changes") | id_of(id, 4096 + i)).build() : Node{}),
                             text_owned(w.ahead || w.behind ? "\u2191" + std::to_string(w.ahead) + " \u2193" + std::to_string(w.behind) : "")
-                                | font(t.font_size * 0.72f) | fg(var::text_disabled))
+                                | font(t.type(Tier::fine)) | fg(var::text_disabled))
                               | gap(t.spaced(6)) | align(Align::center) | width(pct(100)))
                         | gap(t.spaced(3)) | pad(t.spaced(7), t.spaced(8)) | width(pct(100)) | radius(t.radius_small)
                         | bg(on ? t.surface_raised : hov ? t.surface_raised.fade(0.5f) : t.surface.fade(0.0f))
@@ -81,8 +81,8 @@ template <ControlContext C>
                         | id_of(id, i)).build());
     }
     const auto nid = part_id(id, part_inc);
-    return (v(h(text<"WORKSPACES"> | font(t.font_size * 0.72f) | semibold | tracking(0.8f) | fg(var::text_secondary), spacer(),
-                h(text<"+ New agent"> | font(t.font_size * 0.8f) | fg(c.hovered(nid) ? t.text_primary : t.accent))
+    return (v(h(text<"WORKSPACES"> | font(t.type(Tier::fine)) | semibold | tracking(0.8f) | fg(var::text_secondary), spacer(),
+                h(text<"+ New agent"> | font(t.type(Tier::small)) | fg(c.hovered(nid) ? t.text_primary : t.accent))
                     | pad(t.spaced(1), t.spaced(6)) | radius(t.rounded(4)) | bg(c.hovered(nid) ? t.surface_raised : t.surface.fade(0.0f)) | pointer_cursor | id_of(id, part_inc))
                   | align(Align::center) | width(pct(100)),
               v(v_list(std::move(rows), 3.0f)) | width(pct(100)))

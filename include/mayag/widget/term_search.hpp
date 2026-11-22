@@ -23,7 +23,7 @@ template <ControlContext C>
 inline void term_search(const C& c, std::string_view id, std::uint64_t anchor, const TextEditState& query,
                         bool case_sensitive, bool regex, int index, int count) {
     const Theme& t = c.theme;
-    const float fs = t.font_size * 0.9f;
+    const float fs = t.type(Tier::body);
     const auto dim = mix(t.text_primary, t.background, 0.45f);
     const bool none = !query.text.empty() && count == 0;
     const auto btn = [&](std::size_t part, const char* glyph, bool on, const char* what) {

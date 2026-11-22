@@ -39,9 +39,9 @@ inline void hover_card(const C& c, std::string_view id, Vec2 at, const std::vect
                              | pad(t.spaced(8), t.spaced(12)) | width(pct(100)) | bg(var::surface)).build());
         } else {
             parts.push_back((h(node(s.kind == K::prose ? Node{} : (box() | size(3, px * 1.3f) | bg(tone) | radius(t.rounded(1))).build()),
-                               v(text_owned(s.text) | font(px * 0.95f) | fg(s.kind == K::prose ? t.text_secondary : tone)
+                               v(text_owned(s.text) | font(px) | fg(s.kind == K::prose ? t.text_secondary : tone)
                                      | wrap_text | line_height(1.45f),
-                                 text_owned(s.source) | font(px * 0.8f) | fg(var::text_disabled))
+                                 text_owned(s.source) | font(t.type_at(px, Tier::small)) | fg(var::text_disabled))
                                    | gap(t.spaced(3)) | grow() | min_size(0, 0))
                              | gap(t.spaced(8)) | pad(t.spaced(8), t.spaced(12)) | width(pct(100))).build());
         }

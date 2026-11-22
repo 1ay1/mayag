@@ -60,7 +60,7 @@ template <ControlContext C>
     if (hov) {
         const auto action = [&](std::size_t k, const char* glyph, const char* what) {
             const auto aid = part_id(id, block_part(index, k));
-            actions.push_back((h(text_owned(glyph) | font(t.font_size * 0.9f) | fg(c.hovered(aid) ? t.text_primary : t.text_secondary))
+            actions.push_back((h(text_owned(glyph) | font(t.type(Tier::body)) | fg(c.hovered(aid) ? t.text_primary : t.text_secondary))
                                | size(24, 20) | center | radius(t.rounded(4)) | bg(c.hovered(aid) ? t.surface_raised : t.surface.fade(0.0f))
                                | pointer_cursor | label(what) | id_of(id, block_part(index, k))).build());
         };
@@ -70,25 +70,25 @@ template <ControlContext C>
         action(block_action::collapse, b.collapsed ? "\u203A" : "\u2304", b.collapsed ? "expand" : "collapse");
     }
     Node status = running
-        ? (h(text<"running"> | font(t.font_size * 0.78f) | fg(var::info)) | pad(t.spaced(1), t.spaced(7)) | radius(t.rounded(9)) | bg(t.tint(t.info, 0.15f))).build()
-        : failed ? (h(text_owned("exit " + std::to_string(b.exit_code)) | font(t.font_size * 0.78f) | fg(var::danger))
+        ? (h(text<"running"> | font(t.type(Tier::small)) | fg(var::info)) | pad(t.spaced(1), t.spaced(7)) | radius(t.rounded(9)) | bg(t.tint(t.info, 0.15f))).build()
+        : failed ? (h(text_owned("exit " + std::to_string(b.exit_code)) | font(t.type(Tier::small)) | fg(var::danger))
                     | pad(t.spaced(1), t.spaced(7)) | radius(t.rounded(9)) | bg(t.tint(t.danger, 0.15f))).build()
-                 : (text<"\u2713"> | font(t.font_size * 0.85f) | fg(var::success)).build();
+                 : (text<"\u2713"> | font(t.type(Tier::small)) | fg(var::success)).build();
 
-    auto header = h(text_owned(b.cwd) | font(t.font_size * 0.82f) | fg(var::info),
-                    text_owned(b.branch.empty() ? "" : " \u2387 " + b.branch) | font(t.font_size * 0.82f) | fg(var::text_disabled),
+    auto header = h(text_owned(b.cwd) | font(t.type(Tier::small)) | fg(var::info),
+                    text_owned(b.branch.empty() ? "" : " \u2387 " + b.branch) | font(t.type(Tier::small)) | fg(var::text_disabled),
                     spacer(),
                     h(h_list(std::move(actions), 2.0f)),
-                    text_owned(b.started) | font(t.font_size * 0.78f) | fg(var::text_disabled),
-                    text_owned(running ? "" : format_duration(b.seconds)) | font(t.font_size * 0.78f) | fg(var::text_disabled),
+                    text_owned(b.started) | font(t.type(Tier::small)) | fg(var::text_disabled),
+                    text_owned(running ? "" : format_duration(b.seconds)) | font(t.type(Tier::small)) | fg(var::text_disabled),
                     node(std::move(status)))
                 | gap(t.spaced(10)) | align(Align::center) | width(pct(100)) | height(20);
-    auto cmd = h(text<"\u276F"> | font(t.font_size) | bold | fg(failed ? t.danger : t.success),
-                 text_owned(b.command) | font(t.font_size) | semibold | fg(var::text_primary) | no_ligatures | ellipsis
+    auto cmd = h(text<"\u276F"> | font(t.type(Tier::body)) | bold | fg(failed ? t.danger : t.success),
+                 text_owned(b.command) | font(t.type(Tier::body)) | semibold | fg(var::text_primary) | no_ligatures | ellipsis
                      | grow() | min_size(0, 0))
              | gap(t.spaced(8)) | align(Align::center) | width(pct(100));
     Node body = b.collapsed
-        ? (text_owned("\u22EF " + std::to_string(b.output_lines) + " lines hidden") | font(t.font_size * 0.85f)
+        ? (text_owned("\u22EF " + std::to_string(b.output_lines) + " lines hidden") | font(t.type(Tier::small))
            | fg(var::text_disabled)).build()
         : std::move(output);
     return (h(box() | width(3) | bg(edge),

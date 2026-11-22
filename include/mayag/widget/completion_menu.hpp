@@ -61,11 +61,11 @@ inline void completion_menu(const C& c, std::string_view id, const std::vector<C
         const auto [mark, col] = completion_badge(it.kind);
         const auto badge_col = rgb8(static_cast<std::uint8_t>(col >> 16), static_cast<std::uint8_t>(col >> 8), static_cast<std::uint8_t>(col));
         const bool on = k == sel;
-        rows.push_back((h(h(text_owned(mark) | font(px * 0.72f) | bold | fg(badge_col))
+        rows.push_back((h(h(text_owned(mark) | glyph_size(px * 0.72f) | bold | fg(badge_col))
                               | size(26, 16) | center | radius(t.rounded(3)) | bg(mix(t.overlay, badge_col, 0.14f)),
                           node(fuzzy_text(it.label, matches[static_cast<std::size_t>(k)].positions, px,
                                           t.text_primary, t.accent).build()),
-                          text_owned(it.detail) | font(px * 0.86f) | fg(var::text_disabled) | ellipsis
+                          text_owned(it.detail) | font(t.type_at(px, Tier::small)) | fg(var::text_disabled) | ellipsis
                               | grow() | min_size(0, 0) | text_align(TextAlign::right))
                         | gap(t.spaced(8)) | align(Align::center) | pad(0, t.spaced(8)) | height(std::round(px * 1.75f)) | width(pct(100))
                         | bg(on ? t.tint(t.accent, 0.22f) : t.overlay.fade(0.0f)) | radius(t.rounded(4))
@@ -74,8 +74,8 @@ inline void completion_menu(const C& c, std::string_view id, const std::vector<C
     }
     const CompletionItem& cur = items[static_cast<std::size_t>(order[static_cast<std::size_t>(sel)])];
     Node docs = cur.doc.empty() && cur.detail.empty() ? Node{}
-        : (v(text_owned(cur.detail) | font(px * 0.9f) | fg(var::accent) | wrap_text | no_ligatures,
-             text_owned(cur.doc) | font(px * 0.9f) | fg(var::text_secondary) | wrap_text | line_height(1.45f))
+        : (v(text_owned(cur.detail) | font(px) | fg(var::accent) | wrap_text | no_ligatures,
+             text_owned(cur.doc) | font(px) | fg(var::text_secondary) | wrap_text | line_height(1.45f))
            | gap(t.spaced(8)) | pad(t.spaced(10), t.spaced(12)) | width(300)
            | bg(var::overlay) | border(t.stroke(1), t.border_strong) | radius(t.radius_small) | elevation(t.lift(14))).build();
     const bool scrolled = n > kRows;

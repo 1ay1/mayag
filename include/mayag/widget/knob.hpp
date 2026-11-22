@@ -184,7 +184,7 @@ template <ControlContext C>
               | border(t.stroke(1), on ? t.success : hot ? t.text_secondary : t.border_strong)
               | shadow(on && hot ? 8.0f : 0.0f, t.success.fade(on && hot ? 0.5f : 0.0f), {0.0f, 0.0f});
     return (h(std::move(mark),
-              text_owned(on ? "on" : "off") | font(t.font_size * 0.92f) | monospace
+              text_owned(on ? "on" : "off") | font(t.type(Tier::body)) | monospace
                   | fg(on ? t.success : t.text_disabled) | width(30.0f))
             | gap(8.0f) | align(Align::center) | height(kBarRowH) | pointer_cursor
             | role(a11y::Role::checkbox) | checked(on) | label(id) | id_of(id)).build();
@@ -199,7 +199,7 @@ template <ControlContext C, class Pick>
         const bool on = static_cast<int>(i) == chosen;
         const auto pid = part_id(id, i);
         const bool hov = c.hovered(pid);
-        segs.push_back((h(text_owned(opts[i]) | font(t.font_size * 0.9f) | monospace
+        segs.push_back((h(text_owned(opts[i]) | font(t.type(Tier::body)) | monospace
                               | fg(on ? t.background : hov ? t.text_primary : t.text_secondary)
                               | (on ? semibold : weight(FontWeight::regular)))
                         | height(22.0f) | pad(0, 9.0f) | center | radius(2.0f)

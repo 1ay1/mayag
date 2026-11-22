@@ -105,7 +105,10 @@ namespace cascade_detail {
 [[nodiscard]] inline float num_value(const Theme& t, int code) noexcept {
     namespace c = var::num_code;
     if (code < c::font)   return t.space_unit * static_cast<float>(code - c::space) * (1.0f / 16.0f);
-    if (code < c::radius) return t.font_size * static_cast<float>(code - c::font) * 0.01f;
+    if (code < c::radius) {
+        const int k = code - c::font;   // face * 8 + tier index
+        return t.type(static_cast<Scale>(k / 8), static_cast<Tier>(k % 8 - 2));
+    }
     if (code < c::line) {
         switch (code - c::radius) {
             case 0: return t.radius_small;

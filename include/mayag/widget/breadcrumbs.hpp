@@ -25,12 +25,12 @@ template <ControlContext C>
     const Theme& t = c.theme;
     std::vector<Node> parts;
     for (std::size_t i = 0; i < crumbs.size(); ++i) {
-        if (i > 0) parts.push_back((text<"\u203A"> | font(t.font_size) | fg(var::text_disabled)).build());
+        if (i > 0) parts.push_back((text<"\u203A"> | font(t.type(Tier::body)) | fg(var::text_disabled)).build());
         const auto pid = part_id(id, i);
         const bool hov = c.hovered(pid);
         const Crumb& k = crumbs[i];
         parts.push_back((h(node(k.file ? file_icon(t, k.text, 11.0f).build() : Node{}),
-                           text_owned(k.text) | font(t.font_size * 0.92f)
+                           text_owned(k.text) | font(t.type(Tier::body))
                                | fg(hov ? t.text_primary : k.symbol ? t.accent : i + 1 == crumbs.size() ? t.text_primary : t.text_secondary))
                          | gap(t.spaced(4)) | align(Align::center) | pad(t.spaced(1), t.spaced(4)) | radius(t.rounded(3))
                          | bg(hov ? t.surface_raised : t.surface.fade(0.0f)) | pointer_cursor

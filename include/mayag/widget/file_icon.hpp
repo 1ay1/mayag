@@ -56,7 +56,7 @@ struct FileKind { const char* mark; std::uint32_t colour; const char* nerd = "\u
                           static_cast<std::uint8_t>(k.colour));
     const bool nerd = t.icons == IconSet::nerd;
     // A devicon is a full-size glyph; a letter mark is set small and bold.
-    return h(text_owned(nerd ? k.nerd : k.mark) | font(nerd ? s * 1.05f : s * 0.78f)
+    return h(text_owned(nerd ? k.nerd : k.mark) | glyph_size(nerd ? s * 1.05f : s * 0.78f)
              | weight(nerd ? FontWeight::regular : FontWeight::bold) | fg(col))
          | size(s * 1.35f, s * 1.35f) | center;
 }

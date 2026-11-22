@@ -38,16 +38,16 @@ inline void context_menu(const C& c, std::string_view id, const std::vector<Menu
     for (std::size_t i = 0; i < items.size(); ++i) {
         const MenuItem& it = items[i];
         if (!it.section.empty())
-            rows.push_back((text_owned(it.section) | font(t.font_size * 0.75f) | semibold | tracking(0.6f)
+            rows.push_back((text_owned(it.section) | font(t.type(Tier::fine)) | semibold | tracking(0.6f)
                             | fg(var::text_disabled) | pad(t.spaced(6), t.spaced(10), t.spaced(2), t.spaced(10))).build());
         if (it.separator) { rows.push_back((box() | height(1) | width(pct(100)) | bg(var::border) | margin(4, 0)).build()); continue; }
         const auto pid = part_id(id, i);
         const bool hov = it.enabled && (c.hovered(pid) || static_cast<int>(i) == keyboard_index);
-        rows.push_back((h(text_owned(it.checked ? "\u2713" : "") | font(t.font_size * 0.9f) | fg(var::accent) | width(14),
-                          text_owned(it.label) | font(t.font_size)
+        rows.push_back((h(text_owned(it.checked ? "\u2713" : "") | font(t.type(Tier::body)) | fg(var::accent) | width(14),
+                          text_owned(it.label) | font(t.type(Tier::body))
                               | fg(!it.enabled ? t.text_disabled : it.danger ? t.danger : hov ? t.text_primary : t.text_primary)
                               | grow() | min_size(0, 0),
-                          text_owned(it.shortcut) | font(t.font_size * 0.85f) | fg(hov ? t.text_secondary : t.text_disabled))
+                          text_owned(it.shortcut) | font(t.type(Tier::small)) | fg(hov ? t.text_secondary : t.text_disabled))
                         | gap(t.spaced(8)) | align(Align::center) | pad(0, t.spaced(10)) | height(26) | width(pct(100))
                         | bg(hov ? (it.danger ? t.tint(t.danger, 0.22f) : t.tint(t.accent, 0.22f)) : t.overlay.fade(0.0f))
                         | radius(t.rounded(4)) | cursor(it.enabled ? CursorShape::pointer : CursorShape::arrow)

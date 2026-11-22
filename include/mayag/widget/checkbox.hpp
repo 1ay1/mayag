@@ -16,12 +16,12 @@ template <ControlContext C>
     const Theme& t = c.theme;
     const auto nid = node_id(id);
     const bool hov = c.hovered(nid);
-    return h(z(text<"\u2713"> | font(12) | bold | fg(t.on_accent.fade(on ? 1.0f : 0.0f)))
+    return h(z(text<"\u2713"> | glyph_size(12) | bold | fg(t.on_accent.fade(on ? 1.0f : 0.0f)))
                  | size(18, 18) | center
                  | bg(on ? t.accent : t.surface)
                  | border(t.stroke(1.5f), detail::edge(t, c.focused(nid), hov, on ? t.accent : t.border_strong))
                  | radius(t.rounded(5)),
-             text_owned(std::string{caption_text}) | font(t.font_size) | fg(var::text_primary))
+             text_owned(std::string{caption_text}) | font(t.type(Tier::body)) | fg(var::text_primary))
          | gap(t.spaced(10)) | align(Align::center)
          | pointer_cursor
          | role(a11y::Role::checkbox) | checked(on) | label(caption_text)

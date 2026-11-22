@@ -38,22 +38,22 @@ inline void agent_toasts(const C& c, std::string_view id, const std::vector<Agen
         const auto btn = [&](std::size_t k, const char* label_, bool primary) {
             const auto pid = part_id(id, i * 4 + k);
             const bool hov = c.hovered(pid);
-            return (h(text_owned(label_) | font(t.font_size * 0.82f) | semibold | fg(primary ? t.on_accent : hov ? t.text_primary : t.text_secondary))
+            return (h(text_owned(label_) | font(t.type(Tier::small)) | semibold | fg(primary ? t.on_accent : hov ? t.text_primary : t.text_secondary))
                     | pad(t.spaced(3), t.spaced(9)) | radius(t.rounded(4)) | bg(primary ? (hov ? mix(tone, colors::white, 0.12f) : tone) : hov ? t.surface_raised : t.surface)
                     | border(t.stroke(1), primary ? tone : t.border) | pointer_cursor | id_of(id, i * 4 + k)).build();
         };
         const auto did = part_id(id, i * 4 + note_action::dismiss);
         const bool approval = n.agent.state == AgentState::needs_approval;
         cards.push_back((h(box() | width(3) | bg(tone),
-                           v(h(text_owned(agent_glyph(n.agent.state, time)) | font(t.font_size * 0.85f) | bold | fg(tone),
-                               text_owned(n.agent.agent) | font(t.font_size * 0.9f) | semibold | fg(var::text_primary),
-                               text_owned(agent_state_words(n.agent.state)) | font(t.font_size * 0.8f) | fg(tone),
+                           v(h(text_owned(agent_glyph(n.agent.state, time)) | font(t.type(Tier::small)) | bold | fg(tone),
+                               text_owned(n.agent.agent) | font(t.type(Tier::body)) | semibold | fg(var::text_primary),
+                               text_owned(agent_state_words(n.agent.state)) | font(t.type(Tier::small)) | fg(tone),
                                spacer(),
-                               h(text<"\u00D7"> | font(t.font_size * 0.9f) | fg(c.hovered(did) ? t.text_primary : t.text_disabled))
+                               h(text<"\u00D7"> | font(t.type(Tier::body)) | fg(c.hovered(did) ? t.text_primary : t.text_disabled))
                                    | pointer_cursor | id_of(id, i * 4 + note_action::dismiss))
                                  | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
-                             text_owned(n.agent.message) | font(t.font_size * 0.88f) | fg(var::text_secondary) | wrap_text | clamp_lines(3),
-                             text_owned(n.where) | font(t.font_size * 0.75f) | fg(var::text_disabled),
+                             text_owned(n.agent.message) | font(t.type(Tier::small)) | fg(var::text_secondary) | wrap_text | clamp_lines(3),
+                             text_owned(n.where) | font(t.type(Tier::fine)) | fg(var::text_disabled),
                              h(node(approval ? btn(note_action::approve, "Approve  y", true) : btn(note_action::go, "Go to pane", true)),
                                node(approval ? btn(note_action::deny, "Deny  n", false) : Node{}),
                                node(approval ? btn(note_action::go, "Go to pane", false) : Node{}))

@@ -44,16 +44,16 @@ template <ControlContext C>
     const Theme& t = c.theme;
     const auto cid = part_id(id, pane_part_close);
     const auto tag = [&](std::string_view s, Color<Srgb> col) {
-        return (text_owned(std::string{s}) | font(t.font_size * 0.68f) | bold | tracking(0.8f) | fg(col)
+        return (text_owned(std::string{s}) | font(t.type(Tier::fine)) | bold | tracking(0.8f) | fg(col)
                 | pad(1, 5) | border(t.stroke(1), col.fade(0.55f)) | radius(t.rounded(2))).build();
     };
     Node strip = p.show_title
         ? (h(node(dot(p.focused ? t.accent : t.text_disabled, 5).build()),
-             text_owned(p.title) | font(t.font_size * t.chrome_type * 0.94f) | (p.focused ? semibold : weight(FontWeight::regular))
+             text_owned(p.title) | font(t.type(Tier::body)) | (p.focused ? semibold : weight(FontWeight::regular))
                  | fg(p.focused ? t.text_primary : t.text_secondary) | ellipsis | grow() | min_size(0, 0),
              node(p.broadcast ? tag("BROADCAST", t.danger) : Node{}),
              node(p.zoomed ? tag("ZOOM", t.warning) : Node{}),
-             h(text<"\u00D7"> | font(t.font_size) | fg(c.hovered(cid) ? t.text_primary : t.text_disabled))
+             h(text<"\u00D7"> | font(t.type(Tier::body)) | fg(c.hovered(cid) ? t.text_primary : t.text_disabled))
                  | size(18, 18) | center | radius(t.rounded(3)) | bg(c.hovered(cid) ? t.surface_raised : t.surface.fade(0.0f))
                  | transition() | pointer_cursor | label("close pane") | tooltip("Close pane", "ctrl shift w") | id_of(id, pane_part_close))
            | gap(t.spaced(7)) | align(Align::center) | pad(0, t.spaced(8)) | height(std::round(t.bar_height * 0.72f)) | width(pct(100))
@@ -62,9 +62,9 @@ template <ControlContext C>
         : Node{};
     Node footer = p.exited
         ? (h(text_owned(p.exit_code == 0 ? "[process completed]" : "[process exited with code " + std::to_string(p.exit_code) + "]")
-                 | font(t.font_size * 0.88f) | fg(p.exit_code == 0 ? t.text_secondary : t.danger),
+                 | font(t.type(Tier::small)) | fg(p.exit_code == 0 ? t.text_secondary : t.danger),
              spacer(),
-             h(text<"Restart  \u23CE"> | font(t.font_size * 0.85f) | fg(var::on_accent)) | pad(t.spaced(3), t.spaced(10)) | radius(t.rounded(4))
+             h(text<"Restart  \u23CE"> | font(t.type(Tier::small)) | fg(var::on_accent)) | pad(t.spaced(3), t.spaced(10)) | radius(t.rounded(4))
                  | bg(c.hovered(part_id(id, part_inc)) ? t.accent_hover : t.accent) | pointer_cursor | id_of(id, part_inc))
            | align(Align::center) | pad(t.spaced(6), t.spaced(12)) | width(pct(100)) | bg(var::surface)).build()
         : Node{};

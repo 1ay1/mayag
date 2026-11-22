@@ -33,7 +33,7 @@ template <ControlContext C>
     const auto chip = [&](std::size_t part, std::string_view glyph, bool on, std::string_view what) {
         const auto pid = part_id(id, part);
         const bool hov = c.hovered(pid);
-        return (h(text_owned(std::string{glyph}) | font(t.font_size * 0.9f) | semibold
+        return (h(text_owned(std::string{glyph}) | font(t.type(Tier::body)) | semibold
                       | fg(on ? t.on_accent : hov ? t.text_primary : t.text_secondary))
                 | size(26, 22) | center | radius(t.rounded(4))
                 | bg(on ? t.accent : hov ? t.surface_raised : t.surface.fade(0.0f))
@@ -43,14 +43,14 @@ template <ControlContext C>
     const auto button_ = [&](std::size_t part, std::string_view glyph, bool enabled, std::string_view what) {
         const auto pid = part_id(id, part);
         const bool hov = enabled && c.hovered(pid);
-        return (h(text_owned(std::string{glyph}) | font(t.font_size) | fg(enabled ? (hov ? t.text_primary : t.text_secondary) : t.text_disabled))
+        return (h(text_owned(std::string{glyph}) | font(t.type(Tier::body)) | fg(enabled ? (hov ? t.text_primary : t.text_secondary) : t.text_disabled))
                 | size(26, 22) | center | radius(t.rounded(4)) | bg(hov ? t.surface_raised : t.surface.fade(0.0f))
                 | cursor(enabled ? CursorShape::pointer : CursorShape::arrow)
                 | role(a11y::Role::button) | disabled(!enabled) | label(what) | id_of(id, part)).build();
     };
     const bool none = !query.text.empty() && match_count == 0;
     auto field = [&](const TextEditState& st, std::size_t part, std::string_view ph, bool focused) {
-        return (text_field(t, st, focused, part_id(id, part), ph, t.font_size)
+        return (text_field(t, st, focused, part_id(id, part), ph, t.type(Tier::body))
                 | width(300) | border(t.stroke(1), none && part == find_part::query ? t.danger : focused ? t.accent : t.border)).build();
     };
     const std::string count = query.text.empty() ? std::string{}
@@ -61,7 +61,7 @@ template <ControlContext C>
                   node(chip(find_part::case_, "Aa", opts.case_sensitive, "match case")),
                   node(chip(find_part::word, "ab", opts.whole_word, "whole word")),
                   node(chip(find_part::regex, ".*", opts.regex, "regex")),
-                  text_owned(count) | font(t.font_size * 0.9f) | fg(none ? t.danger : t.text_secondary) | width(82)
+                  text_owned(count) | font(t.type(Tier::body)) | fg(none ? t.danger : t.text_secondary) | width(82)
                       | text_align(TextAlign::center),
                   node(button_(find_part::prev, "\u2191", match_count > 0, "previous match")),
                   node(button_(find_part::next, "\u2193", match_count > 0, "next match")),
@@ -72,7 +72,7 @@ template <ControlContext C>
         ? (h(strut(26), node(field(replacement, find_part::replace, "Replace", focus_field == 1)),
              node(button_(find_part::replace_one, "\u21B5", match_count > 0, "replace")),
              node(button_(find_part::replace_all, "\u21CA", match_count > 0, "replace all")),
-             text<"replace / all"> | font(t.font_size * 0.8f) | fg(var::text_disabled))
+             text<"replace / all"> | font(t.type(Tier::small)) | fg(var::text_disabled))
            | gap(t.spaced(4)) | align(Align::center) | width(pct(100))).build()
         : Node{};
     return (v(std::move(row1), node(std::move(row2))) | gap(t.spaced(5)) | pad(t.spaced(6), t.spaced(10)) | width(pct(100))

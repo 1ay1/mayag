@@ -21,9 +21,9 @@ template <ControlContext C, Element Control>
     // step smaller and quieter; the control right-aligned on the row's
     // centre line. The row tints on hover so the eye can track which
     // control belongs to which label across a wide panel.
-    return (h(v(text_owned(std::string{title_text}) | font(t.font_size * 0.95f) | weight(FontWeight::medium)
+    return (h(v(text_owned(std::string{title_text}) | font(t.type(Tier::body)) | weight(FontWeight::medium)
                     | fg(var::text_primary),
-                text_owned(std::string{description_text}) | font(t.font_size * 0.82f)
+                text_owned(std::string{description_text}) | font(t.type(Tier::small))
                     | fg(var::text_disabled) | wrap_text | line_height(1.35f))
                 | gap(t.spaced(2)) | grow() | min_size(0, 0),
               v(std::move(control)) | align(Align::end))
@@ -43,7 +43,7 @@ template <ControlContext C>
     }
     std::string caps;
     for (char ch : title_text) caps.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
-    return (v(text_owned(std::move(caps)) | font(t.font_size * 0.72f) | semibold
+    return (v(text_owned(std::move(caps)) | font(t.type(Tier::fine)) | semibold
                   | tracking(1.1f) | fg(var::text_disabled) | pad(0, t.spaced(2)),
               v(v_list(std::move(body)))
                   | width(pct(100))

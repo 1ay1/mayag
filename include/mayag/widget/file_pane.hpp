@@ -412,13 +412,18 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     namespace d = file_pane_detail;
     using A = FilePaneAction;
     const Theme& t = c.theme;
-    // Two faces, two sizes each, from the theme's one type scale -- nothing
-    // else. The chrome (title, toolbar, crumbs, keys) is interface text: `ui`,
-    // and `ui2` one step down. The content (names, meta, the preview) is the
-    // list's face at p.text_size: `nf`, and `nf2` one step down. A size that
-    // is neither is a bug: it reads as a third, unchosen size.
-    const float ui = t.ui_text(), ui2 = t.step_down(ui);
-    const float nf = Theme::type_snap(d::name_px(p)), nf2 = t.step_down(nf);
+    // Every size is a tier of the theme's type scale (style/type.hpp):
+    //
+    //   interface face   ui    body    the title, the filter field
+    //                    ui2   small   crumbs, chips, counts, notes
+    //                    ui3   fine    the key hints: wanted small, and the
+    //                                  scale's floor keeps them legible
+    //   content face     nf    body    names, the preview's file name
+    //   (p.text_size)    nf2   small   ages, sizes, git marks, the preview
+    //
+    // A size that is none of these is a bug: it reads as a size nobody chose.
+    const float ui = t.type(Tier::body), ui2 = t.type(Tier::small), ui3 = t.type(Tier::fine);
+    const float nf = t.type_at(d::name_px(p), Tier::body), nf2 = t.type_at(d::name_px(p), Tier::small);
     const float rh = d::row_h(nf), ri = std::round(nf * 1.38f);
     const std::string base{id};
     const auto paper = t.background, ink = t.text_primary;
@@ -740,7 +745,9 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     if (!p.note.empty())
         foot.push_back((text_owned(p.note) | font(ui2) | fg(muted) | wrap_text | width(pct(100)) | pad(6.0f, 10.0f)).build());
     const auto key = [&](std::string k, std::string what) {
-        return (h(mono(std::move(k), ui2, t.text_secondary), text_owned(std::move(what)) | font(ui2) | fg(faint)) | gap(4.0f) | align(Align::center)).build();
+        // one size for key and label (the fine tier); the key reads by colour
+        return (h(mono(std::move(k), ui3, t.text_secondary), text_owned(std::move(what)) | font(ui3) | fg(faint))
+                | gap(4.0f) | align(Align::center)).build();
     };
     std::vector<Node> keys;
     if (st.filtering) {
@@ -751,7 +758,8 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         keys.push_back(key("\u23CE", remote ? "open / get" : "open"));
         keys.push_back(key("/", "filter"));
         keys.push_back(key("s", "sort"));
-        keys.push_back(key("\u21E5", "cd"));
+        // a word, not U+21E5: the Mac's monospace faces have no ⇥, so it drew as nothing
+        keys.push_back(key("tab", "cd"));
     } else {
         keys.push_back(key("click", "select"));
         keys.push_back(key("\u2325click", "paste path"));

@@ -24,7 +24,7 @@ inline void resize_hud(const C& c, std::string_view id, int cols, int rows, std:
     std::vector<HudSeg> segs{{std::to_string(cols) + "\u00D7" + std::to_string(rows), t.text_primary, true}};
     if (!extra.empty()) segs.push_back({std::string{extra}, dim});
     c.overlay(Overlay{
-        .content = (hud_chip(c, segs, {.tone = t.accent, .size = t.font_size * 0.8f})).build(),
+        .content = (hud_chip(c, segs, {.tone = t.accent, .size = t.type(Tier::small)})).build(),
         .id = part_id(id, part_menu),
         .placement = Placement::centered,
         .dismiss = Dismiss::never,

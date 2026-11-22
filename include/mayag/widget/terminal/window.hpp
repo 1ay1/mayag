@@ -44,7 +44,7 @@ inline void corner_controls(const C& c, std::string_view id, const CornerControl
     for (std::size_t k = 0; k < 3; ++k) {
         const auto pid = part_id(id, tab_part_window + k);
         const bool hov = c.hovered(pid), close = k == 2;
-        cells.push_back((h(text_owned(glyphs[k]) | font(close ? fs * 1.15f : fs) | monospace
+        cells.push_back((h(text_owned(glyphs[k]) | glyph_size(close ? fs * 1.15f : fs) | monospace
                            | fg(hov ? (close ? colors::white : t.text_primary) : t.text_secondary))
                          | size(w, p.cell) | center
                          | bg(hov ? (close ? t.danger : mix(t.background, t.text_primary, 0.14f)) : t.background.fade(0.0f))

@@ -149,14 +149,14 @@ template <ControlContext C>
     else if (s.running > 0 && s.progress >= 0) ring = detail::arc_ring(hue, mix(t.surface, hue, 0.2f), 0.0f, static_cast<float>(s.progress) / 100.0f, d);
     else if (s.running > 0) ring = detail::arc_ring(hue, track, static_cast<float>(time * 0.7), 0.28f, d);
     else ring = detail::arc_ring(hue, track, 0.0f, active ? 1.0f : 0.0f, d);
-    Node tile = (h(text_owned(mono) | font(inner * 0.40f) | bold | fg(active ? mix(hue, colors::white, 0.55f) : mix(hue, colors::white, 0.25f)))
+    Node tile = (h(text_owned(mono) | glyph_size(inner * 0.40f) | bold | fg(active ? mix(hue, colors::white, 0.55f) : mix(hue, colors::white, 0.25f)))
                  | size(inner, inner) | center | radius(inner * 0.32f)
                  | linear_gradient(mix(t.surface_raised, hue, active ? 0.42f : hov ? 0.30f : 0.22f), mix(t.surface, hue, active ? 0.26f : 0.14f))
                  | border(t.stroke(1), mix(t.border, hue, active ? 0.6f : 0.25f))
                  | absolute(4, 4)).build();
     const int badge_n = s.attention();
     Node badge = badge_n > 0
-        ? (h(text_owned(std::to_string(badge_n)) | font(9.5f) | bold | fg(colors::white)) | min_size(15, 15) | pad(0, t.spaced(3)) | center | radius(t.rounded(7.5f))
+        ? (h(text_owned(std::to_string(badge_n)) | glyph_size(9.5f) | bold | fg(colors::white)) | min_size(15, 15) | pad(0, t.spaced(3)) | center | radius(t.rounded(7.5f))
            | bg(s.failed ? t.danger : s.bells ? t.warning : t.success) | border(t.stroke(1.5f), t.surface) | absolute(d - 13.0f, -3.0f)).build()
         : Node{};
     return (z(node(std::move(ring)), node(std::move(tile)), node(std::move(badge))) | size(d, d)).build();
@@ -188,12 +188,12 @@ template <ControlContext C>
         }
         const Color<Srgb> sub_col = s.failed ? t.danger : s.running ? mix(hue, t.text_secondary, 0.25f) : t.text_disabled;
         rows.push_back((h(node(std::move(tile)),
-                          v(h(text_owned(w.name) | font(t.font_size) | (on ? semibold : weight(FontWeight::medium))
+                          v(h(text_owned(w.name) | font(t.type(Tier::body)) | (on ? semibold : weight(FontWeight::medium))
                                   | fg(on ? t.text_primary : t.text_secondary) | ellipsis | grow() | min_size(0, 0),
-                              text_owned(i < 9 ? workspace_key_label(static_cast<int>(i) + 1) : std::string{}) | font(t.font_size * 0.72f)
+                              text_owned(i < 9 ? workspace_key_label(static_cast<int>(i) + 1) : std::string{}) | font(t.type(Tier::fine))
                                   | fg(hov ? t.text_secondary : t.text_disabled))
                                 | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
-                            text_owned(summary_text(s, w.tabs.size())) | font(t.font_size * 0.76f) | fg(sub_col) | ellipsis,
+                            text_owned(summary_text(s, w.tabs.size())) | font(t.type(Tier::fine)) | fg(sub_col) | ellipsis,
                             h(node(tab_lights(c, w.tabs, hue, time)), spacer(),
                               node(s.running > 0 && !s.activity.empty() ? activity_sparkline(s.activity, mix(hue, t.text_secondary, 0.2f), 10.0f, 12) : Node{}))
                                 | align(Align::center) | width(pct(100)) | margin(3, 0, 0, 0))
@@ -206,12 +206,12 @@ template <ControlContext C>
     }
     const auto plus = part_id(id, part_inc), tog = part_id(id, part_menu);
     Node add = o.expanded
-        ? (h(h(text<"+"> | font(t.font_size * 1.2f) | fg(c.hovered(plus) ? t.text_primary : t.text_secondary)) | size(26, 26) | center
+        ? (h(h(text<"+"> | font(t.type(Tier::large)) | fg(c.hovered(plus) ? t.text_primary : t.text_secondary)) | size(26, 26) | center
                  | radius(t.rounded(8)) | border(t.stroke(1), t.border) | dashed(3, 2),
-             text<"New workspace"> | font(t.font_size * 0.9f) | fg(c.hovered(plus) ? t.text_primary : t.text_disabled))
+             text<"New workspace"> | font(t.type(Tier::body)) | fg(c.hovered(plus) ? t.text_primary : t.text_disabled))
            | gap(t.spaced(10)) | align(Align::center) | pad(t.spaced(6), t.spaced(12)) | width(pct(100)) | radius(t.rounded(10))
            | bg(c.hovered(plus) ? mix(t.surface, colors::white, 0.03f) : t.surface.fade(0.0f)) | pointer_cursor | id_of(id, part_inc)).build()
-        : (h(h(text<"+"> | font(t.font_size * 1.2f) | fg(c.hovered(plus) ? t.text_primary : t.text_secondary)) | size(30, 30) | center
+        : (h(h(text<"+"> | font(t.type(Tier::large)) | fg(c.hovered(plus) ? t.text_primary : t.text_secondary)) | size(30, 30) | center
                  | radius(t.rounded(10)) | border(t.stroke(1), t.border) | dashed(3, 2))
            | width(pct(100)) | center | height(44) | pointer_cursor | id_of(id, part_inc)).build();
 
@@ -219,20 +219,20 @@ template <ControlContext C>
     int run = 0, fail = 0;
     for (const auto& w : ws) { const auto s = summarize(w); run += s.running; fail += s.failed; }
     Node footer = o.expanded
-        ? (h(h(text<"\u2039"> | font(t.font_size) | fg(c.hovered(tog) ? t.text_primary : t.text_disabled)) | size(22, 22) | center | radius(t.rounded(6))
+        ? (h(h(text<"\u2039"> | font(t.type(Tier::body)) | fg(c.hovered(tog) ? t.text_primary : t.text_disabled)) | size(22, 22) | center | radius(t.rounded(6))
                  | bg(c.hovered(tog) ? t.surface_raised : t.surface.fade(0.0f)) | pointer_cursor | label("collapse") | id_of(id, part_menu),
              spacer(),
              node(run ? detail::arc_ring(t.info, t.surface.fade(0.0f), static_cast<float>(time * 0.8), 0.3f, 11.0f) : Node{}),
-             text_owned(run ? " " + std::to_string(run) + " running" : std::string{"all quiet"}) | font(t.font_size * 0.76f)
+             text_owned(run ? " " + std::to_string(run) + " running" : std::string{"all quiet"}) | font(t.type(Tier::fine))
                  | fg(run ? t.info : t.text_disabled),
-             text_owned(fail ? " \u00B7 " + std::to_string(fail) + " failed" : std::string{}) | font(t.font_size * 0.76f) | fg(var::danger))
+             text_owned(fail ? " \u00B7 " + std::to_string(fail) + " failed" : std::string{}) | font(t.type(Tier::fine)) | fg(var::danger))
            | align(Align::center) | pad(t.spaced(8), t.spaced(10)) | width(pct(100))).build()
-        : (h(text<"\u203A"> | font(t.font_size) | fg(c.hovered(tog) ? t.text_primary : t.text_disabled)) | size(28, 28) | center | radius(t.rounded(6))
+        : (h(text<"\u203A"> | font(t.type(Tier::body)) | fg(c.hovered(tog) ? t.text_primary : t.text_disabled)) | size(28, 28) | center | radius(t.rounded(6))
            | bg(c.hovered(tog) ? t.surface_raised : t.surface.fade(0.0f)) | pointer_cursor | label("expand") | id_of(id, part_menu)
            | margin(0, 0, 8, 18)).build();
 
     return (v(box() | height(o.top_inset + 10.0f),
-              node(o.expanded ? (text<"WORKSPACES"> | font(t.font_size * 0.68f) | semibold | tracking(1.1f) | fg(var::text_disabled) | pad(t.spaced(4), t.spaced(12), t.spaced(6), t.spaced(12))).build()
+              node(o.expanded ? (text<"WORKSPACES"> | font(t.type(Tier::fine)) | semibold | tracking(1.1f) | fg(var::text_disabled) | pad(t.spaced(4), t.spaced(12), t.spaced(6), t.spaced(12))).build()
                               : Node{}),
               v(v_list(std::move(rows), 3.0f)) | width(pct(100)) | pad(0, o.expanded ? 6.0f : 0.0f),
               node(std::move(add)) | margin(4, o.expanded ? 6.0f : 0.0f),
