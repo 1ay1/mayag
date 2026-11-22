@@ -695,6 +695,10 @@ if(MAYAG_BUILD_TESTS)
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_one_look.txt
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_look.cmake)
+        # Cache keys are made of values, never of an object's (padded) bytes.
+        add_test(NAME mayag_no_byte_hash
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/no_byte_hash.cmake)
         add_test(NAME mayag_runtime_banlist
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_include.txt

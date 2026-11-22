@@ -900,6 +900,12 @@ class window_host {
     /// The theme the last frame was drawn in (mid-morph: the blend).
     [[nodiscard]] const Theme& theme() const noexcept { return theme_; }
     [[nodiscard]] const LatencyStats& latency() const noexcept { return latency_; }
+    /// memo() on or off (MAYAG_MEMO=0 at startup). Off, every frame is built
+    /// from scratch: a test draws a scene both ways and compares the pixels,
+    /// so a memo key that misses an input shows up as a mismatch.
+    void set_memo(bool on) noexcept { memo_on_ = on; dirty_ = true; }
+    /// memo() hits and misses since startup (or the last report).
+    [[nodiscard]] const MemoCache::Stats& memo_stats() const noexcept { return memos_.stats; }
     [[nodiscard]] bool busy_loop_detected() const noexcept { return busy_warned_; }
     [[nodiscard]] std::string_view renderer_name() const noexcept { return window_.renderer_name(); }
     [[nodiscard]] bool frames_on() const noexcept { return frames_on_; }

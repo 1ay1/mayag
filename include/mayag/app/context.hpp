@@ -144,18 +144,14 @@ template <class F>
 
 namespace detail {
 using mayag::memo_mix;
-/// The Ctx facts a subtree can read without them being in its key.
-[[nodiscard]] inline std::uint64_t ctx_fingerprint(const Ctx& c) noexcept {
+/// The Ctx facts a subtree can read without them being in its key. The theme
+/// goes in by VALUE (MemoCache::theme_id), never by its bytes: Theme has
+/// padding, and hashing padding made every key change at random.
+[[nodiscard]] inline std::uint64_t ctx_fingerprint(const Ctx& c, MemoCache& cache) {
     std::uint64_t h = 0;
     std::uint32_t u;
     for (float f : {c.size.x, c.size.y, c.dpi_scale}) { std::memcpy(&u, &f, 4); h = memo_mix(h, u); }
-    const auto* b = reinterpret_cast<const unsigned char*>(&c.theme);
-    for (std::size_t i = 0; i < sizeof(Theme); i += 8) {
-        std::uint64_t w = 0;
-        std::memcpy(&w, b + i, std::min<std::size_t>(8, sizeof(Theme) - i));
-        h = memo_mix(h, w);
-    }
-    return h;
+    return memo_mix(h, cache.theme_id(c.theme));
 }
 }  // namespace detail
 
@@ -192,8 +188,9 @@ Node Ctx::memoize(std::uint64_t key, F&& build) const {
 template <class F>
 Node Ctx::memoize(std::uint64_t site, std::uint64_t key, F&& build) const {
     const Ctx& c = *this;
-    const std::uint64_t k = detail::memo_mix(detail::memo_mix(key, detail::ctx_fingerprint(c)), 1) | 1u;
     MemoCache* cache = c.memos;
+    if (cache == nullptr) return Node(build());   // no live window: nothing to reuse
+    const std::uint64_t k = detail::memo_mix(detail::memo_mix(key, detail::ctx_fingerprint(c, *cache)), 1) | 1u;
     // A subtree that asked about hover/press/focus while building depends on
     // them, so a hit also needs them unchanged.
     const std::uint64_t interaction = c.input != nullptr

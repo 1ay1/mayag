@@ -338,11 +338,10 @@ struct Walk {
     [[nodiscard]] std::uint64_t scope_hash(const Scope& sc) {
         if (&sc.theme != hashed_theme) {
             hashed_theme = &sc.theme;
-            static_assert(std::is_trivially_copyable_v<Theme>);
-            std::uint64_t h = 0xcbf29ce484222325ull;
-            const auto* b = reinterpret_cast<const unsigned char*>(&sc.theme);
-            for (std::size_t i = 0; i < sizeof(Theme); ++i) h = (h ^ b[i]) * 0x100000001b3ull;
-            theme_hash = h;
+            // By VALUE, never by bytes: Theme has padding, and a byte hash of
+            // it changes with whatever the stack held -- every memo env then
+            // mismatched and was re-cascaded (MemoCache::theme_id).
+            theme_hash = in.memos != nullptr ? in.memos->theme_id(sc.theme) * 0x9E3779B97F4A7C15ull : 0;
         }
         std::uint64_t h = theme_hash ^ (sc.explicit_theme ? 0x9E3779B97F4A7C15ull : 0);
         for (const Scope* s = &sc; s != nullptr; s = s->parent) {

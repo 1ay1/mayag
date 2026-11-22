@@ -57,6 +57,12 @@ struct TermCell {
 struct TermRowView {
     std::vector<TermCell> cells;
     TermMark              mark = TermMark::none;   ///< shell-integration mark drawn in the margin
+    /// A token for `cells`: two rows with the same nonzero version have equal
+    /// cells, so the view keys the row's cached subtree on it instead of
+    /// hashing every cell each frame. 0 = unknown: the cells are hashed. A
+    /// producer that can't PROVE the promise (hand uses toe's row_version,
+    /// property-tested in toe/tests/damage_test.cpp) must leave it 0.
+    std::uint64_t         version = 0;
 };
 
 struct TermSpan { int row = 0, col = 0, len = 1; };     ///< a run of cells on one visible row
@@ -324,7 +330,8 @@ template <ControlContext C>
     const auto row_key = [&](int r, const TermRowView& row, float y) {
         MemoKey k;
         k.add(frame_key).add(r).add(y).add(static_cast<int>(row.mark)).add(row.cells.size());
-        for (const auto& cell : row.cells)
+        if (row.version != 0) k.add(row.version);
+        else for (const auto& cell : row.cells)
             k.add(cell.text).add(cell.fg).add(cell.bg).add(cell.default_fg).add(cell.default_bg).add(cell.flags)
              .add(static_cast<int>(cell.ul_style)).add(cell.ul_color).add(cell.width).add(cell.link);
         for (const auto& sp : g.selection) if (sp.row == r) k.add(sp.col).add(sp.len);

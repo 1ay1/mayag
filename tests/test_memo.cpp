@@ -125,6 +125,19 @@ std::vector<std::vector<std::uint8_t>> run_script() {
 }  // namespace
 
 int main() {
+    {   // a theme is keyed by VALUE: padding bytes (whatever the stack held) never change its id
+        alignas(Theme) unsigned char a[sizeof(Theme)], b[sizeof(Theme)];
+        std::memset(a, 0xAB, sizeof a);
+        std::memset(b, 0xCD, sizeof b);
+        const Theme* ta = ::new (a) Theme;   // default-init: members set, padding left as it was
+        const Theme* tb = ::new (b) Theme;
+        MemoCache cache;
+        check(std::memcmp(a, b, sizeof(Theme)) != 0, "(the two themes' bytes do differ: the test exercises padding)");
+        check(*ta == *tb && cache.theme_id(*ta) == cache.theme_id(*tb), "equal themes, different padding: one memo key");
+        Theme other = *ta;
+        other.tab_numbers = !other.tab_numbers;
+        check(cache.theme_id(other) != cache.theme_id(*ta), "a changed theme field: a different memo key");
+    }
     std::printf("mayag memo()\n============\n");
     g_memo = false;
     const auto plain = run_script();

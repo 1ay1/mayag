@@ -259,6 +259,25 @@ class MemoCache {
 
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
 
+    /// A stable id for a theme's VALUE: equal themes (Theme's defaulted
+    /// operator==, which the compiler keeps complete as fields are added) get
+    /// the same id, different ones different ids, never reused. A memo key
+    /// folds this in instead of the theme's bytes: Theme has padding (after
+    /// its bools and its one-byte enums), and padding is whatever the stack
+    /// held -- hashing it made the key change frame to frame, so memo()
+    /// missed at random (measured: a whole terminal re-laid on a keystroke).
+    [[nodiscard]] std::uint64_t theme_id(const Theme& t) {
+        for (auto& e : themes_)
+            if (e.theme == t) { e.frame = frame_; return e.id; }
+        if (themes_.size() >= kThemes) {   // the least recently used goes
+            auto lru = std::min_element(themes_.begin(), themes_.end(),
+                                        [](const ThemeId& a, const ThemeId& b) { return a.frame < b.frame; });
+            themes_.erase(lru);
+        }
+        themes_.push_back({t, ++theme_seq_, frame_});
+        return theme_seq_;
+    }
+
   private:
     static void collect_ids(const Node& n, std::vector<std::uint64_t>& out, std::vector<std::uint64_t>& starting) {
         if (const std::uint64_t id = n.style().id; id != 0) {
@@ -281,6 +300,10 @@ class MemoCache {
     std::unordered_map<std::uint64_t, Site> sites_;
     std::vector<std::pair<Node*, std::uint64_t>> live_;
     std::uint64_t frame_ = 0;
+    struct ThemeId { Theme theme; std::uint64_t id = 0, frame = 0; };
+    static constexpr std::size_t kThemes = 8;   // a frame rarely draws more than two or three
+    std::vector<ThemeId> themes_;
+    std::uint64_t theme_seq_ = 0;
 };
 
 }  // namespace mayag
