@@ -127,6 +127,10 @@ struct Theme {
     float    bar_height  = 34.0f;   ///< tab strip / title bar
     float    status_height = 26.0f; ///< status bar
     float    chrome_type = 0.92f;   ///< chrome text, a multiple of font_size
+    /// The type scale's one step: secondary text (meta, captions, hints) is
+    /// this fraction of the text it sits beside. One ratio for every widget,
+    /// so a panel has two sizes per face, not one per author's whim.
+    float    type_step   = 0.84f;
     float    tab_width   = 200.0f;  ///< a tab's preferred width
     bool     tab_numbers = true;    ///< 1..9 on idle tabs
     bool     tab_close_on_hover = true;  ///< the × shows only on the active / hovered tab
@@ -167,6 +171,17 @@ struct Theme {
     [[nodiscard]] constexpr float spaced(float px) const noexcept { return px * (space_unit / 8.0f); }
     /// Border width `px`, following line weight.
     [[nodiscard]] constexpr float stroke(float px) const noexcept { return px * line_hairline; }
+
+    // ── the type scale ──────────────────────────────────────────────────
+    // Sizes land on half points: two labels 0.3 px apart rasterise to
+    // visibly different heights, and read as a third size nobody chose.
+
+    /// Snap a text size to the scale's grid (half points).
+    [[nodiscard]] static constexpr float type_snap(float px) noexcept { return num::round(px * 2.0f) * 0.5f; }
+    /// Interface text: headers, toolbars, labels -- the chrome's one size.
+    [[nodiscard]] constexpr float ui_text() const noexcept { return type_snap(font_size * chrome_type); }
+    /// One step down from `px`: the secondary text beside text of size `px`.
+    [[nodiscard]] constexpr float step_down(float px) const noexcept { return type_snap(px * type_step); }
     /// Elevation `dp`, following depth (0: flat themes draw no shadow).
     [[nodiscard]] constexpr float lift(float dp) const noexcept { return dp * depth_scale; }
 
@@ -375,7 +390,7 @@ namespace detail {
         &Theme::radius_small, &Theme::radius_medium, &Theme::radius_large, &Theme::space_unit,
         &Theme::font_size, &Theme::line_hairline, &Theme::line_strong, &Theme::line_focus,
         &Theme::depth_scale, &Theme::motion_scale, &Theme::window_opacity,
-        &Theme::bar_height, &Theme::status_height, &Theme::chrome_type, &Theme::tab_width, &Theme::mark};
+        &Theme::bar_height, &Theme::status_height, &Theme::chrome_type, &Theme::type_step, &Theme::tab_width, &Theme::mark};
     for (auto m : floats_) r.*m = num::lerp(a.*m, b.*m, t);
     r.motion_ui       = detail::lerp_spring(a.motion_ui, b.motion_ui, t);
     r.motion_emphasis = detail::lerp_spring(a.motion_emphasis, b.motion_emphasis, t);

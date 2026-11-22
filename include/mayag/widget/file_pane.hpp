@@ -412,9 +412,14 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     namespace d = file_pane_detail;
     using A = FilePaneAction;
     const Theme& t = c.theme;
-    const float fs = t.font_size * 0.92f;   // the pane's chrome: header, toolbar, keys -- interface text
-    // its content -- names, sizes, ages, the preview -- at p.text_size, in p.family
-    const float nf = d::name_px(p), rh = d::row_h(nf), ri = std::round(nf * 1.38f);
+    // Two faces, two sizes each, from the theme's one type scale -- nothing
+    // else. The chrome (title, toolbar, crumbs, keys) is interface text: `ui`,
+    // and `ui2` one step down. The content (names, meta, the preview) is the
+    // list's face at p.text_size: `nf`, and `nf2` one step down. A size that
+    // is neither is a bug: it reads as a third, unchosen size.
+    const float ui = t.ui_text(), ui2 = t.step_down(ui);
+    const float nf = Theme::type_snap(d::name_px(p)), nf2 = t.step_down(nf);
+    const float rh = d::row_h(nf), ri = std::round(nf * 1.38f);
     const std::string base{id};
     const auto paper = t.background, ink = t.text_primary;
     const auto muted = mix(ink, paper, 0.45f), faint = mix(ink, paper, 0.62f), line = mix(paper, ink, 0.09f);
@@ -476,13 +481,13 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         }
         bool after_root = false;
         for (std::size_t n = 0; n < keep.size(); ++n) {
-            if (n > 0 && !after_root) crumb_nodes.push_back(mono("/", fs * 0.72f, faint.fade(0.7f)).build());
+            if (n > 0 && !after_root) crumb_nodes.push_back(mono("/", ui2, faint.fade(0.7f)).build());
             const std::size_t k = keep[n];
-            if (k == gap_mark) { crumb_nodes.push_back(mono("\u2026", fs * 0.72f, faint).build()); after_root = false; continue; }
+            if (k == gap_mark) { crumb_nodes.push_back(mono("\u2026", ui2, faint).build()); after_root = false; continue; }
             const bool last = k + 1 == cr.size();
             const auto cid = part_id(base + ".crumb", k);
             const bool hov = c.hovered(cid);
-            crumb_nodes.push_back((h(mono(cr[k].first, fs * 0.74f, last ? t.text_secondary : hov ? t.accent : muted))
+            crumb_nodes.push_back((h(mono(cr[k].first, ui2, last ? t.text_secondary : hov ? t.accent : muted))
                                    | pad(1.0f, 2.0f) | radius(t.rounded(3.0f)) | bg(hov && !last ? t.accent.fade(0.1f) : paper.fade(0.0f))
                                    | when(!last, pointer_cursor) | tooltip(cr[k].second) | id_of_raw(cid)
                                    | on_click([op, f = emit(A::Kind::list, cr[k].second)] { return op(f); })).build());
@@ -490,8 +495,8 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         }
     }
     std::vector<Node> title_bits;
-    title_bits.push_back((text_owned(leaf.empty() ? std::string{"files"} : leaf) | font(fs * 1.02f) | semibold | fg(ink) | ellipsis | min_size(0, 0)).build());
-    if (remote) title_bits.push_back((h(node(icon_node(Icon::server, 10.0f, t.info)), mono(p.where, fs * 0.7f, t.info) | ellipsis | min_size(0, 0))
+    title_bits.push_back((text_owned(leaf.empty() ? std::string{"files"} : leaf) | font(ui) | semibold | fg(ink) | ellipsis | min_size(0, 0)).build());
+    if (remote) title_bits.push_back((h(node(icon_node(Icon::server, 10.0f, t.info)), mono(p.where, ui2, t.info) | ellipsis | min_size(0, 0))
                                       | gap(4.0f) | align(Align::center) | pad(1.0f, 5.0f) | radius(t.rounded(4.0f)) | bg(t.info.fade(0.1f))
                                       | min_size(0, 0)).build());
     auto head = h(node(icon_node(remote ? Icon::server : Icon::folder_open, 14.0f, remote ? t.info : t.accent)),
@@ -507,12 +512,12 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     if (st.filtering || !st.filter.empty()) {
         const std::string count = std::to_string(vis.size()) + " of " + std::to_string(p.entries.size());
         toolbar = (h((h(node(icon_node(Icon::search, 12.0f, t.accent)),
-                        mono(st.filter.empty() ? std::string{"type to filter"} : st.filter, fs * 0.84f, st.filter.empty() ? faint : ink)
+                        mono(st.filter.empty() ? std::string{"type to filter"} : st.filter, ui, st.filter.empty() ? faint : ink)
                             | ellipsis | min_size(0, 0),
-                        mono(st.filtering ? "\u258F" : "", fs * 0.84f, t.accent),
+                        mono(st.filtering ? "\u258F" : "", ui, t.accent),
                         spacer(),
-                        mono(count, fs * 0.7f, muted),
-                        mono("esc", fs * 0.66f, faint))
+                        mono(count, ui2, muted),
+                        mono("esc", ui2, faint))
                       | gap(6.0f) | align(Align::center) | height(26.0f) | width(pct(100)) | pad(0, 8.0f) | radius(t.rounded(6.0f))
                       | bg(t.accent.fade(0.07f)) | border(1.0f, t.accent.fade(st.filtering ? 0.45f : 0.2f))))
                    | width(pct(100)) | pad(0, 8.0f, 6.0f, 8.0f) | inner_shadow(0.0f, line, {0.0f, -1.0f})).build();
@@ -525,8 +530,8 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         const std::string follow_word = p.following ? "follows the shell" : "follow the shell";
         const std::string sort_word = file_sort_names[static_cast<int>(st.sort) & 3];
         const float chip_pad = 7.0f * 2.0f + 11.0f + 5.0f;   // padding, icon, gap
-        const float follow_full = chip_pad + detail::text_advance(c, follow_word, fs * 0.8f);
-        const float sort_full = 6.0f * 2.0f + 11.0f + 4.0f + detail::text_advance(c, sort_word, fs * 0.74f);
+        const float follow_full = chip_pad + detail::text_advance(c, follow_word, ui2);
+        const float sort_full = 6.0f * 2.0f + 11.0f + 4.0f + detail::text_advance(c, sort_word, ui2);
         const float icons = 5.0f * 26.0f, room = p.width - 14.0f - 8.0f;   // pads, the spacer's gap
         const bool sort_words = icons + 26.0f + sort_full + 26.0f <= room;
         const bool follow_words = sort_words && icons + follow_full + sort_full + 4.0f <= room;
@@ -536,7 +541,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
             std::vector<Node> bits;
             bits.push_back(node(icon_node(Icon::link, follow_words ? 11.0f : 13.0f, p.following ? t.accent : hov ? ink : muted)).build());
             if (follow_words)
-                bits.push_back((text_owned(follow_word) | font(fs * 0.8f) | fg(p.following ? t.accent : hov ? ink : t.text_secondary)).build());
+                bits.push_back((text_owned(follow_word) | font(ui2) | fg(p.following ? t.accent : hov ? ink : t.text_secondary)).build());
             tools.push_back((h_list(std::move(bits), 5.0f) | align(Align::center) | height(follow_words ? 22.0f : 24.0f)
                              | pad(0, follow_words ? 7.0f : 5.5f)
                              | radius(t.rounded(5.0f))
@@ -550,7 +555,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
             const bool hov = c.hovered(sid);
             std::vector<Node> bits;
             bits.push_back(node(icon_node(Icon::list_tree, sort_words ? 11.0f : 13.0f, hov ? ink : muted)).build());
-            if (sort_words) bits.push_back((text_owned(sort_word) | font(fs * 0.74f) | fg(hov ? ink : muted)).build());
+            if (sort_words) bits.push_back((text_owned(sort_word) | font(ui2) | fg(hov ? ink : muted)).build());
             tools.push_back((h_list(std::move(bits), 4.0f) | align(Align::center) | height(24.0f)
                              | pad(0, sort_words ? 6.0f : 5.5f)
                              | radius(t.rounded(5.0f))
@@ -575,9 +580,9 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     // ── the list ───────────────────────────────────────────────────────────
     std::vector<Node> rows;
     const auto note_row = [&](Icon ic, Color<Srgb> col, std::string title, std::string body) {
-        return (v(h(node(icon_node(ic, 14.0f, col)), text_owned(std::move(title)) | font(fs * 0.9f) | semibold | fg(col) | wrap_text | grow())
+        return (v(h(node(icon_node(ic, 14.0f, col)), text_owned(std::move(title)) | font(ui) | semibold | fg(col) | wrap_text | grow())
                       | gap(7.0f) | align(Align::center),
-                  text_owned(std::move(body)) | font(fs * 0.8f) | fg(t.text_secondary) | wrap_text | width(pct(100)))
+                  text_owned(std::move(body)) | font(ui2) | fg(t.text_secondary) | wrap_text | width(pct(100)))
                 | gap(5.0f) | pad(12.0f, 12.0f) | width(pct(100))).build();
     };
     if (!p.error.empty()) rows.push_back(note_row(Icon::circle_alert, t.danger, "Could not list this folder", p.error));
@@ -603,9 +608,9 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         const std::string age_full = p.age && e.mtime > 0 ? d::age(p.now, e.mtime) : std::string{};
         const std::string size_full = e.dir ? std::string{} : d::human(e.size);
         const std::string git_s = p.git && e.git && !e.dir ? std::string(1, e.git == '?' ? 'U' : e.git == 'U' ? '!' : e.git) : std::string{};
-        const float git_w = p.git && e.git ? (e.dir ? 5.0f : detail::text_advance(c, git_s, nf * 0.8f, p.family)) + 7.0f : 0.0f;
-        const float age_w = age_full.empty() ? 0.0f : detail::text_advance(c, age_full, nf * 0.78f, p.family) + 7.0f;
-        const float size_w = size_full.empty() ? 0.0f : detail::text_advance(c, size_full, nf * 0.8f, p.family) + 7.0f;
+        const float git_w = p.git && e.git ? (e.dir ? 5.0f : detail::text_advance(c, git_s, nf2, p.family)) + 7.0f : 0.0f;
+        const float age_w = age_full.empty() ? 0.0f : detail::text_advance(c, age_full, nf2, p.family) + 7.0f;
+        const float size_w = size_full.empty() ? 0.0f : detail::text_advance(c, size_full, nf2, p.family) + 7.0f;
         // the row's inner width: the pane, less the list's and the row's padding and the scrollbar's lane
         const float inner = p.width - 12.0f - 16.0f - 10.0f - ri - 7.0f;
         const float name_w = detail::text_advance(c, e.name, nf, p.family);
@@ -632,13 +637,13 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
             if (p.git && e.git) {
                 const auto gc = git_col(e.git);
                 if (e.dir) cells.push_back((box() | size(5.0f, 5.0f) | radius(2.5f) | bg(gc)).build());
-                else cells.push_back(cell(git_s, nf * 0.8f, gc).build());
+                else cells.push_back(cell(git_s, nf2, gc).build());
             }
             if (!ag.empty()) {
                 const bool recent = p.now - e.mtime < 3600;
-                cells.push_back(cell(ag, nf * 0.78f, recent ? mix(t.accent, faint, 0.25f) : faint).build());
+                cells.push_back(cell(ag, nf2, recent ? mix(t.accent, faint, 0.25f) : faint).build());
             }
-            if (!sz.empty()) cells.push_back(cell(sz, nf * 0.8f, faint).build());
+            if (!sz.empty()) cells.push_back(cell(sz, nf2, faint).build());
             return cells;
         };
         // a name that doesn't fit is shortened in the middle -- "compile_comm…ands.json":
@@ -707,18 +712,20 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     Node preview;
     if (p.preview) {
         const auto& pv = *p.preview;
-        const float lh = std::round(nf * 0.82f * 1.55f);
+        // the body is file content one step down; its line numbers the same
+        // size, just fainter (a size of their own was a fourth size)
+        const float lh = std::round(nf2 * 1.55f);
         const int n = std::min(static_cast<int>(pv.lines.size()), std::max(p.preview_lines, 0));
         std::vector<Node> ls;
         for (int i = 0; i < n; ++i)
-            ls.push_back((h(cell(std::to_string(i + 1), nf * 0.68f, faint.fade(0.7f)) | width(std::round(nf * 2.0f)),
-                            cell(pv.lines[static_cast<std::size_t>(i)].empty() ? std::string{" "} : pv.lines[static_cast<std::size_t>(i)], nf * 0.82f, muted)
+            ls.push_back((h(cell(std::to_string(i + 1), nf2, faint.fade(0.55f)) | width(std::round(nf2 * 2.4f)),
+                            cell(pv.lines[static_cast<std::size_t>(i)].empty() ? std::string{" "} : pv.lines[static_cast<std::size_t>(i)], nf2, muted)
                                 | ellipsis | grow() | min_size(0, 0))
                           | gap(4.0f) | align(Align::center) | height(lh) | width(pct(100)) | clip).build());
         const float body_h = pv.lines.empty() ? 0.0f : lh * static_cast<float>(std::max(p.preview_lines, 1));
         preview = (v(h(node(icon_node(Icon::eye, 11.0f, t.accent.fade(0.8f))),
-                       cell(pv.name, nf * 0.86f, t.text_secondary) | ellipsis | grow() | min_size(0, 0),
-                       mono(pv.note, fs * 0.66f, faint))
+                       cell(pv.name, nf, t.text_secondary) | ellipsis | grow() | min_size(0, 0),
+                       cell(pv.note, nf2, faint))
                          | gap(6.0f) | align(Align::center) | width(pct(100)) | height(22.0f),
                      v(std::move(ls)) | width(pct(100)) | height(body_h) | clip)
                    | width(pct(100)) | pad(4.0f, 10.0f, 6.0f, 10.0f) | bg(mix(paper, ink, 0.045f))
@@ -728,12 +735,12 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     // ── foot: busy / note, then the keys ──────────────────────────────────
     std::vector<Node> foot;
     if (!p.busy.empty())
-        foot.push_back((h(node(icon_node(Icon::refresh, 12.0f, t.accent)), text_owned(p.busy) | font(fs * 0.8f) | fg(t.accent) | ellipsis | grow() | min_size(0, 0))
+        foot.push_back((h(node(icon_node(Icon::refresh, 12.0f, t.accent)), text_owned(p.busy) | font(ui2) | fg(t.accent) | ellipsis | grow() | min_size(0, 0))
                         | gap(6.0f) | align(Align::center) | width(pct(100)) | pad(6.0f, 10.0f) | bg(t.accent.fade(0.08f))).build());
     if (!p.note.empty())
-        foot.push_back((text_owned(p.note) | font(fs * 0.76f) | fg(muted) | wrap_text | width(pct(100)) | pad(6.0f, 10.0f)).build());
+        foot.push_back((text_owned(p.note) | font(ui2) | fg(muted) | wrap_text | width(pct(100)) | pad(6.0f, 10.0f)).build());
     const auto key = [&](std::string k, std::string what) {
-        return (h(mono(std::move(k), fs * 0.7f, t.text_secondary), text_owned(std::move(what)) | font(fs * 0.74f) | fg(faint)) | gap(4.0f) | align(Align::center)).build();
+        return (h(mono(std::move(k), ui2, t.text_secondary), text_owned(std::move(what)) | font(ui2) | fg(faint)) | gap(4.0f) | align(Align::center)).build();
     };
     std::vector<Node> keys;
     if (st.filtering) {
