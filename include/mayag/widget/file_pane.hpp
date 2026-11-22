@@ -110,6 +110,13 @@ struct FilePaneProps {
     bool        dirs_first = true, git = true, size_bars = true, age = true, type_colors = true;
     std::optional<FilePreview> preview;
     int         preview_lines = 12;
+    /// The size of a file name, px (0: 10.5). Everything in the list --
+    /// names, sizes, ages, icons, row height, the preview -- scales with it;
+    /// the header and toolbar are interface text (the theme's size).
+    float       text_size = 0.0f;
+    /// The face of names, paths and sizes (an app passes its terminal's or its
+    /// interface's role).
+    FontFamily  family = FontFamily::mono;
 };
 
 /// One row as shown: which entry, and which of its characters the filter matched.
@@ -120,7 +127,13 @@ struct FileShown {
 };
 
 namespace file_pane_detail {
-inline constexpr float kRow = 26.0f;
+inline constexpr float kRow = 26.0f;   ///< a row, at kRefName names
+inline constexpr float kRefName = 10.5f;   ///< names when the app gives no text_size
+/// The size file names are set in, px.
+[[nodiscard]] inline float name_px(const FilePaneProps& p) { return p.text_size > 0.0f ? p.text_size : kRefName; }
+/// A row's height for names of `name` px: a name and a size bar with air
+/// around them; kRow at the reference size.
+[[nodiscard]] inline float row_h(float name) { return std::max(22.0f, std::round(name * 1.9f + 6.0f)); }
 [[nodiscard]] inline std::string human(std::uint64_t n) {
     const char* u[] = {"B", "KB", "MB", "GB", "TB"};
     double v = static_cast<double>(n);
@@ -304,12 +317,12 @@ enum class Kind : std::uint8_t { dir, code, config, doc, image, archive, exec, o
     const auto emit = [](A::Kind kind, std::string path) {
         return FilePaneOp{[kind, path](FilePaneState& s) { s.out.push_back({kind, path}); }};
     };
-    const auto step = [n](int by) {
-        return FilePaneOp{[n, by](FilePaneState& s) {
+    const auto step = [n, rh = d::row_h(d::name_px(p))](int by) {
+        return FilePaneOp{[n, by, rh](FilePaneState& s) {
             s.sel = std::clamp(s.sel + by, 0, std::max(n - 1, 0));
-            const float y = file_pane_detail::kRow * static_cast<float>(s.sel);
+            const float y = rh * static_cast<float>(s.sel);
             if (y < s.scroll.offset.y) s.scroll.offset.y = y;
-            else if (y + file_pane_detail::kRow > s.scroll.offset.y + s.scroll.viewport.y) s.scroll.offset.y = y + file_pane_detail::kRow - s.scroll.viewport.y;
+            else if (y + rh > s.scroll.offset.y + s.scroll.viewport.y) s.scroll.offset.y = y + rh - s.scroll.viewport.y;
         }};
     };
     const auto open_sel = [&]() -> std::optional<FilePaneOp> {
@@ -399,7 +412,9 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     namespace d = file_pane_detail;
     using A = FilePaneAction;
     const Theme& t = c.theme;
-    const float fs = t.font_size * 0.92f;
+    const float fs = t.font_size * 0.92f;   // the pane's chrome: header, toolbar, keys -- interface text
+    // its content -- names, sizes, ages, the preview -- at p.text_size, in p.family
+    const float nf = d::name_px(p), rh = d::row_h(nf), ri = std::round(nf * 1.38f);
     const std::string base{id};
     const auto paper = t.background, ink = t.text_primary;
     const auto muted = mix(ink, paper, 0.45f), faint = mix(ink, paper, 0.62f), line = mix(paper, ink, 0.09f);
@@ -408,6 +423,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     const auto op = [on](auto f) { return on(FilePaneOp{std::move(f)}); };
     const auto emit = [](A::Kind kind, std::string path) { return [kind, path](FilePaneState& s) { s.out.push_back({kind, path}); }; };
     const auto mono = [&](std::string s, float size, Color<Srgb> col) { return text_owned(std::move(s)) | font(size) | monospace | fg(col); };
+    const auto cell = [&](std::string s, float size, Color<Srgb> col) { return text_owned(std::move(s)) | font(size) | family(p.family) | fg(col); };
     const auto icon_btn = [&](std::string_view bid, Icon ic, std::string tip, auto click, bool lit = false) {
         const auto nid = node_id(base + "." + std::string{bid});
         const bool hov = c.hovered(nid);
@@ -565,27 +581,27 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         const Icon ic = e.dir ? Icon::folder : e.link ? Icon::link : kind == d::Kind::code ? Icon::file_code : Icon::file;
 
         std::vector<Node> cells;
-        cells.push_back(node(icon_node(ic, 14.0f, e.link && !e.dir ? t.info : kind_col(kind))).build());
-        cells.push_back((h(vis[q].hits.empty() ? (mono(e.name, fs * 0.88f, name_col) | ellipsis | min_size(0, 0)).build()
-                                               : (fuzzy_text(e.name, vis[q].hits, fs * 0.88f, name_col, t.accent) | min_size(0, 0)).build())
+        cells.push_back(node(icon_node(ic, ri, e.link && !e.dir ? t.info : kind_col(kind))).build());
+        cells.push_back((h(vis[q].hits.empty() ? (cell(e.name, nf, name_col) | ellipsis | min_size(0, 0)).build()
+                                               : (fuzzy_text(e.name, vis[q].hits, nf, name_col, t.accent) | family(p.family) | min_size(0, 0)).build())
                          | grow() | min_size(0, 0) | clip).build());
         if (p.git && e.git) {
             const auto gc = git_col(e.git);
             if (e.dir) cells.push_back((box() | size(5.0f, 5.0f) | radius(2.5f) | bg(gc)).build());
-            else cells.push_back(mono(std::string(1, e.git == '?' ? 'U' : e.git == 'U' ? '!' : e.git), fs * 0.7f, gc).build());
+            else cells.push_back(cell(std::string(1, e.git == '?' ? 'U' : e.git == 'U' ? '!' : e.git), nf * 0.8f, gc).build());
         }
         if (p.age && e.mtime > 0) {
             const bool recent = p.now - e.mtime < 3600;
-            cells.push_back(mono(d::age(p.now, e.mtime), fs * 0.68f, recent ? mix(t.accent, faint, 0.25f) : faint).build());
+            cells.push_back(cell(d::age(p.now, e.mtime), nf * 0.78f, recent ? mix(t.accent, faint, 0.25f) : faint).build());
         }
-        if (!e.dir) cells.push_back(mono(d::human(e.size), fs * 0.7f, faint).build());
+        if (!e.dir) cells.push_back(cell(d::human(e.size), nf * 0.8f, faint).build());
         const bool bar = p.size_bars && !e.dir && biggest > 0 && e.size > 0;
-        auto row_line = h_list(std::move(cells), 7.0f) | align(Align::center) | width(pct(100)) | height(bar ? d::kRow - 3.0f : d::kRow);
+        auto row_line = h_list(std::move(cells), 7.0f) | align(Align::center) | width(pct(100)) | height(bar ? rh - 3.0f : rh);
         Node content;
         if (bar) {
             const float f = std::sqrt(static_cast<float>(static_cast<double>(e.size) / static_cast<double>(biggest)));
             content = (v(std::move(row_line),
-                         h(box() | width(21.0f) | height(2.0f),
+                         h(box() | width(ri + 7.0f) | height(2.0f),
                            box() | width(pct(std::max(f, 0.02f) * 80.0f)) | height(2.0f) | radius(1.0f) | bg(kind_col(kind).fade(0.5f)))
                              | height(3.0f) | width(pct(100)))
                        | width(pct(100))).build();
@@ -594,7 +610,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         }
         const auto row_bg = lit ? mix(paper, ink, 0.1f) : sel ? mix(paper, ink, 0.06f) : hov ? mix(paper, ink, 0.04f)
                           : e.fresh > 0.0f ? t.accent.fade(0.22f * e.fresh) : paper.fade(0.0f);
-        rows.push_back((v(std::move(content)) | height(d::kRow) | width(pct(100)) | pad(0, 8.0f) | radius(t.rounded(5.0f))
+        rows.push_back((v(std::move(content)) | height(rh) | width(pct(100)) | pad(0, 8.0f) | radius(t.rounded(5.0f))
                         | bg(row_bg)
                         | when(lit, inner_shadow(0.0f, t.accent, {2.0f, 0.0f}))
                         | when(!lit && e.fresh > 0.0f, inner_shadow(0.0f, t.accent.fade(e.fresh), {2.0f, 0.0f}))
@@ -620,17 +636,17 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     Node preview;
     if (p.preview) {
         const auto& pv = *p.preview;
-        const float lh = std::round(fs * 0.72f * 1.55f);
+        const float lh = std::round(nf * 0.82f * 1.55f);
         const int n = std::min(static_cast<int>(pv.lines.size()), std::max(p.preview_lines, 0));
         std::vector<Node> ls;
         for (int i = 0; i < n; ++i)
-            ls.push_back((h(mono(std::to_string(i + 1), fs * 0.6f, faint.fade(0.7f)) | width(20.0f),
-                            mono(pv.lines[static_cast<std::size_t>(i)].empty() ? std::string{" "} : pv.lines[static_cast<std::size_t>(i)], fs * 0.72f, muted)
+            ls.push_back((h(cell(std::to_string(i + 1), nf * 0.68f, faint.fade(0.7f)) | width(std::round(nf * 2.0f)),
+                            cell(pv.lines[static_cast<std::size_t>(i)].empty() ? std::string{" "} : pv.lines[static_cast<std::size_t>(i)], nf * 0.82f, muted)
                                 | ellipsis | grow() | min_size(0, 0))
                           | gap(4.0f) | align(Align::center) | height(lh) | width(pct(100)) | clip).build());
         const float body_h = pv.lines.empty() ? 0.0f : lh * static_cast<float>(std::max(p.preview_lines, 1));
         preview = (v(h(node(icon_node(Icon::eye, 11.0f, t.accent.fade(0.8f))),
-                       mono(pv.name, fs * 0.76f, t.text_secondary) | ellipsis | grow() | min_size(0, 0),
+                       cell(pv.name, nf * 0.86f, t.text_secondary) | ellipsis | grow() | min_size(0, 0),
                        mono(pv.note, fs * 0.66f, faint))
                          | gap(6.0f) | align(Align::center) | width(pct(100)) | height(22.0f),
                      v(std::move(ls)) | width(pct(100)) | height(body_h) | clip)

@@ -85,6 +85,9 @@ struct SettingSpec {
     int         decimals = 1;
     std::string unit;               ///< "pt", "%", "×", "ms"
     float       scale = 1.0f;       ///< readout = value * scale
+    /// The readout at `lo`, when `lo` means "not set" ("auto": follow
+    /// something else). Empty: the number.
+    std::string zero_label;
     std::vector<std::string> options;                          ///< choice / cycle
     std::vector<std::array<std::uint32_t, 8>> option_swatches; ///< cycle previews (paper, ink, 6 colours)
     std::vector<FontFamily> option_families;                   ///< cycle: set each label in its face
@@ -265,6 +268,7 @@ inline void settings_reveal(SettingsPanelState& st, const std::vector<SettingSpe
 }
 
 [[nodiscard]] inline std::string setting_readout(const SettingSpec& s) {
+    if (!s.zero_label.empty() && s.value <= s.lo) return s.zero_label;
     char buf[48];
     std::snprintf(buf, sizeof buf, "%.*f%s", std::max(s.decimals, 0), static_cast<double>(s.value * s.scale), s.unit.c_str());
     return buf;
