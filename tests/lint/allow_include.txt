@@ -58,3 +58,6 @@ platform/macos_loop.hpp: atomic const_cast
 
 # libwayland's listener tables are declared non-const in C.
 platform/wayland_protocol.hpp: const_cast
+# render_to_pixels' default FontStack: one per thread, so two threads can never
+# draw through one atlas (the language guarantees it; no lock, no claim).
+mayag.hpp: thread_local

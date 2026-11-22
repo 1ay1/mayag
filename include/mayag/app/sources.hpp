@@ -187,16 +187,8 @@ using Unlocked = jaal::unlocked;
 template <class T>
 using CoOwned = jaal::co_owned<T>;
 
-/// May a T move to another thread? (it holds nothing the sender can still
-/// reach). Every message, task argument and stream argument must be.
-template <class T>
-concept Sendable = jaal::Sendable<T>;
-/// May threads share ONE T for reading? (`Shared<T>`)
-template <class T>
-concept Shareable = jaal::Shareable<T>;
-/// May threads share ONE T and call it concurrently? (`CoOwned<T>`)
-template <class T>
-concept Sync = jaal::Sync<T>;
+// Sendable / Shareable / Sync live in core/sync.hpp (lower layers state
+// their own proofs with them).
 
 /// Data reachable only under its lock, in a lock order the compiler
 /// checks: `Guarded<Cache>` (a leaf lock), or `Guarded<Cache, Rank<20,
@@ -250,8 +242,8 @@ class keymap {
 /// (an input gesture, a test), but it is LOOP-ONLY: no Sink carries one --
 /// sending it from a task or stream does not compile, and sending a Msg
 /// that holds one aborts on the spot. A task sends a plain message instead.
-template <class Model>
-inline constexpr bool jaal::sendable_opt_in<mayag::Edit<Model>> = true;
+/// (No Sendable claim: an Edit is NOT Sendable -- it can't be a task argument
+/// or be shared. Being loop-only is what lets it sit in a Msg: jaal::Postable.)
 template <class Model>
 inline constexpr bool jaal::loop_only<mayag::Edit<Model>> = true;
 

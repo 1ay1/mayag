@@ -25,6 +25,7 @@
 #include <jaal/core/frozen.hpp>
 #include <jaal/core/sendable.hpp>
 #include <jaal/core/shared.hpp>
+#include <jaal/core/sync.hpp>
 #include <jaal/kernel/cell.hpp>
 
 namespace mayag {
@@ -34,6 +35,21 @@ using Cell = jaal::cell<T>;
 
 template <class T>
 using Frozen = jaal::shared<T>;
+
+/// May a T move to another thread? (it holds nothing the sender can still
+/// reach). Every message, task argument and stream argument must be.
+template <class T>
+concept Sendable = jaal::Sendable<T>;
+/// May T be a program's message? Sendable, plus loop-only alternatives
+/// (Edit), which the Sink keeps on the loop.
+template <class T>
+concept Postable = jaal::Postable<T>;
+/// May threads share ONE T for reading? (`Frozen<T>`)
+template <class T>
+concept Shareable = jaal::Shareable<T>;
+/// May threads share ONE T and call it concurrently? (`CoOwned<T>`)
+template <class T>
+concept Sync = jaal::Sync<T>;
 
 }  // namespace mayag
 
