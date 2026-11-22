@@ -437,6 +437,13 @@ if(MAYAG_BUILD_TESTS)
     add_test(NAME mayag_tests COMMAND mayag_tests)
     set_tests_properties(mayag_tests PROPERTIES TIMEOUT 120)
 
+    # What every window backend shares (platform/keys.hpp, photon.hpp):
+    # tested headless, on every platform, not only where the backend runs.
+    add_executable(mayag_platform_shared_tests tests/test_platform_shared.cpp)
+    target_link_libraries(mayag_platform_shared_tests PRIVATE mayag)
+    target_compile_options(mayag_platform_shared_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_platform_shared_tests COMMAND mayag_platform_shared_tests)
+
     # The cascade: inheritance, state variants, tokens, transitions. Mostly
     # pure style resolution, plus one live headless app; never a display.
     add_executable(mayag_cascade_tests tests/test_cascade.cpp)

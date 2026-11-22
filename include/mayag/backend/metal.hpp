@@ -178,7 +178,9 @@ struct AutoreleasePool {
 /// What the caller wants echoed back for a frame. Host-clock seconds
 /// (host_seconds(), the clock NSEvent timestamps and presentedTime use).
 struct FrameTag {
-    double input_s  = -1.0;   ///< newest input this frame shows; < 0 = none
+    double input_s  = -1.0;   ///< oldest unshown input this frame shows; < 0 = none
+    double read_s   = -1.0;   ///< when the app read that input
+    double commit_s = 0.0;    ///< when the frame was handed over
     double target_s = 0.0;    ///< the vblank the frame was drawn to make; 0 = unknown
 };
 
@@ -353,12 +355,23 @@ class MetalDevice {
 
     void resize(Vec2 logical, float dpi_scale) {
         if (!valid_) return;
+        if (logical != viewport_ || dpi_scale != dpi_) content_changed_ = true;
         dpi_ = dpi_scale;
         struct { double w, h; } size{static_cast<double>(logical.x * dpi_scale), static_cast<double>(logical.y * dpi_scale)};
         mtl::msg<void>(layer_, mtl::sel("setDrawableSize:"), size);
         mtl::msg<void>(layer_, mtl::sel("setContentsScale:"), static_cast<double>(dpi_scale));
         viewport_ = logical;
     }
+
+    /// The screen would change even for an identical draw list: a resize, or
+    /// a texture's pixels changed (an image, the atlas). Same contract as
+    /// VulkanDevice::needs_present -- the window skips a frame only when
+    /// neither the list nor this says anything moved.
+    [[nodiscard]] bool needs_present() const noexcept { return content_changed_; }
+    /// A newer frame replaces one still queued (displaySyncEnabled off: the
+    /// layer shows the newest drawable at the next refresh), so drawing again
+    /// never delays the screen. MAYAG_PRESENT=fifo turns this off.
+    [[nodiscard]] bool replaces_queued() const noexcept { return valid_ && !fifo_; }
 
     /// Render one frame: one draw call per batch, each with its own scissor.
     ///
@@ -468,6 +481,7 @@ class MetalDevice {
         msg<void>(enc, sel("endEncoding"));
         if (present_drawable != nullptr) {
             msg<void>(cmd, sel("presentDrawable:"), present_drawable);
+            content_changed_ = false;   // the screen now has every change made so far
         }
         msg<void>(cmd, sel("commit"));
         if (present_drawable != nullptr) flush_core_animation();
@@ -492,6 +506,7 @@ class MetalDevice {
     void upload_image(std::uint32_t key, const std::uint8_t* rgba, int w, int h) {
         using namespace mtl;
         if (device_ == nullptr || rgba == nullptr || w <= 0 || h <= 0 || key == 0) return;
+        content_changed_ = true;
         auto& img = images_[key];
         if (img.texture == nullptr || img.w != w || img.h != h) {
             if (img.texture != nullptr) msg<void>(img.texture, sel("release"));
@@ -525,6 +540,7 @@ class MetalDevice {
             need += static_cast<std::size_t>(r[2]) * static_cast<std::size_t>(r[3]) * 4;
         }
         if (need != packed.size()) return false;
+        content_changed_ = true;
         std::size_t at = 0;
         for (const auto& r : rects) {
             struct { std::uint64_t x, y, z, w, h, d; } region{
@@ -560,6 +576,7 @@ class MetalDevice {
             scratch_w_ = std::max(w, iw);
             scratch_h_ = std::max(h, ih);
         }
+        content_changed_ = true;
         struct Origin { std::uint64_t x, y, z; };
         struct Size { std::uint64_t w, h, d; };
         const Size size{static_cast<std::uint64_t>(w), static_cast<std::uint64_t>(h), 1};
@@ -603,6 +620,7 @@ class MetalDevice {
         using namespace mtl;
         const auto it = images_.find(key);
         if (it == images_.end()) return;
+        content_changed_ = true;
         if (it->second.texture != nullptr) msg<void>(it->second.texture, sel("release"));
         images_.erase(it);
     }
@@ -610,6 +628,7 @@ class MetalDevice {
     void upload_atlas(const std::uint8_t* pixels, int width, int height) {
         using namespace mtl;
         if (device_ == nullptr || pixels == nullptr || width <= 0 || height <= 0) return;
+        content_changed_ = true;
 
         if (atlas_texture_ == nullptr || atlas_w_ != width || atlas_h_ != height) {
             id desc = msg_cls<id>(objc_getClass("MTLTextureDescriptor"),
@@ -684,6 +703,7 @@ class MetalDevice {
         using namespace mtl;
         if (!atlas.has_color()) return;
         const int w = atlas.width(), h = atlas.height();
+        if (full || !atlas.color_dirty_region().empty()) content_changed_ = true;
         if (color_texture_ == nullptr || color_w_ != w || color_h_ != h || full) {
             if (color_texture_ != nullptr) msg<void>(color_texture_, sel("release"));
             id desc = msg_cls<id>(objc_getClass("MTLTextureDescriptor"),
@@ -720,6 +740,7 @@ class MetalDevice {
     void upload_region(const std::uint8_t* pixels, int atlas_width, const Rect& r) {
         using namespace mtl;
         if (device_ == nullptr || atlas_texture_ == nullptr || pixels == nullptr) return;
+        content_changed_ = true;
 
         const int x = std::max(0, static_cast<int>(r.left()));
         const int y = std::max(0, static_cast<int>(r.top()));
@@ -1004,6 +1025,7 @@ class MetalDevice {
         id enc = msg<id>(cmd, sel("renderCommandEncoderWithDescriptor:"), desc);
         msg<void>(enc, sel("endEncoding"));
         msg<void>(cmd, sel("presentDrawable:"), drawable);
+        content_changed_ = false;
         msg<void>(cmd, sel("commit"));
         flush_core_animation();
     }
@@ -1045,6 +1067,7 @@ class MetalDevice {
     float         dpi_ = 1.0f;
     bool          valid_ = false;
     bool          fifo_ = false;
+    bool          content_changed_ = true;   ///< pixels changed since the last present (see needs_present)
     std::uint32_t last_instances_ = 0;
     std::uint32_t last_draw_calls_ = 0;
     PresentSink*  sink_ = nullptr;   // immortal; copies of the device share it

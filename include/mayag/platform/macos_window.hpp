@@ -24,6 +24,8 @@
 #include "../render/draw_list.hpp"
 #include "raw_input.hpp"
 #include "types.hpp"
+#include "keys.hpp"
+#include "photon.hpp"
 
 #if defined(MAYAG_WITH_METAL)
 #include "../backend/metal.hpp"
@@ -541,7 +543,17 @@ class MacWindow {
                 gpu_size_ = Vec2{static_cast<float>(w), static_cast<float>(h)};
             }
             if (atlas_sync_) atlas_sync_(gpu_);
+            // Same pixels as what's on screen: don't wake the GPU and the
+            // compositor for it (a hover or model change that didn't change
+            // the picture). Texture and atlas uploads count as changes. The
+            // host sees frames_skipped move and keeps the refresh slot free
+            // for the change that is coming (the shell's echo).
+            if (last_had_frame_ && clear == last_clear_ && dl.same_as(last_list_) && !gpu_.needs_present()) {
+                ++frames_skipped_;
+                return;
+            }
             gpu_.submit(dl, clear, next_tag());
+            last_list_.assign_from(dl); last_clear_ = clear; last_had_frame_ = true;
             return;
         }
 #endif
@@ -559,10 +571,23 @@ class MacWindow {
         // inputs did not change keep their pixels -- shaded, encoded and all
         // -- and a frame that changed nothing is not handed to the compositor.
         backend::Tiled::render(dl, fb_, sampler_, &backend::shared_pool(), clear);
-        if (!backend::Tiled::any_damage(fb_) && blitted_) return;
+        if (!backend::Tiled::any_damage(fb_) && blitted_) { ++frames_skipped_; return; }
         backend::Tiled::encode_damaged(fb_, pixels_, &backend::shared_pool());
         blit(w, h);
         blitted_ = true;
+    }
+
+    /// Frames not handed over because they matched what is on screen.
+    [[nodiscard]] std::uint64_t frames_skipped() const noexcept { return frames_skipped_; }
+    /// See window_host::next_draw_at: with displaySyncEnabled off the layer
+    /// shows the newest drawable at the next refresh, so a draw never waits
+    /// behind a queued one (MAYAG_PRESENT=fifo restores the queue).
+    [[nodiscard]] bool replaces_queued_frames() const noexcept {
+#if defined(MAYAG_WITH_METAL)
+        return gpu_enabled_ && gpu_.replaces_queued();
+#else
+        return false;
+#endif
     }
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() { return fb_.to_rgba8(); }
@@ -597,20 +622,11 @@ class MacWindow {
         return DisplayTiming{vb, duration_cast<nanoseconds>(duration<double>(period_s_)), vblank_seq_};
     }
 
-    /// Input to photon, measured by the drawables' presented handlers.
+    /// Input to photon, measured by the drawables' presented handlers
+    /// (photon.hpp: the same meter as Wayland's).
     [[nodiscard]] PhotonStats photon_stats() {
         drain_feedback();
-        PhotonStats s;
-        s.samples = static_cast<int>(photon_count_);
-        if (photon_count_ == 0) return s;
-        double sum = 0.0;
-        for (std::size_t i = 0; i < photon_count_; ++i) {
-            sum += photon_[i];
-            s.worst_ms = std::max(s.worst_ms, photon_[i]);
-        }
-        s.mean_ms = sum / static_cast<double>(photon_count_);
-        s.last_ms = photon_last_;
-        return s;
+        return photon_.stats();
     }
 
     /// How long before a vblank the late-latch draw must be SUBMITTED to make
@@ -827,11 +843,10 @@ class MacWindow {
             std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const double age = steady - at;
         if (age < 0.0 || age > 1.0) return;  // not a plausible input time
-        const double host = host_now() - age;
-        if (unshown_input_ < 0.0 || host < unshown_input_) unshown_input_ = host;
+        photon_.mark(host_now() - age, host_now());
     }
     /// Every measured sample, as it is measured (ms).
-    void set_photon_sink(std::function<void(double)> f) { photon_sink_ = std::move(f); }
+    void set_photon_sink(std::function<void(double)> f) { photon_sink_ = static_cast<bool>(f); photon_.set_sink(std::move(f)); }
 
     void set_clipboard(std::string_view s) {
         using namespace objc;
@@ -974,8 +989,11 @@ class MacWindow {
         translate_one(ev, out);
         // Every event translate_one emits is user input (resize and close are
         // reported by dispatch()). Stamp it with the time the HID stack saw
-        // it, which is where input-to-photon honestly starts.
-        if (out.size() > before && !photon_manual_) note_input(msg<double>(ev, sel("timestamp")));
+        // it, which is where input-to-photon honestly starts -- unless it is
+        // a bare modifier, whose answer is nothing on screen (photon.hpp).
+        if (photon_manual_) return;
+        for (std::size_t i = before; i < out.size(); ++i)
+            if (starts_photon_clock(out[i])) { note_input(msg<double>(ev, sel("timestamp"))); break; }
     }
 
     static double host_now() noexcept {
@@ -983,22 +1001,27 @@ class MacWindow {
         return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) * 1e-9;
     }
 
-    /// A frame shows the NEWEST input it was drawn with (pointer moves
-    /// coalesce), so latency is measured from that.
+    /// An input event arrived; the meter keeps the oldest one not yet on
+    /// screen (photon.hpp).
     void note_input(double ts) noexcept {
         const double now = host_now();
         // NSEvent.timestamp is seconds since boot on the mach_absolute_time
         // clock, the same one host_now() reads. Guard anyway: a
         // synthetic event (timestamp 0) must not record a 40-day latency.
-        unshown_input_ = (ts > now - 1.0 && ts <= now + 0.001) ? ts : now;
+        photon_.note((ts > now - 1.0 && ts <= now + 0.001) ? ts : now, now);
     }
 
 #if defined(MAYAG_WITH_METAL)
+    /// Every frame committed while an input is unshown carries it, so a frame
+    /// replaced before scanout never takes the sample with it.
     [[nodiscard]] backend::FrameTag next_tag() noexcept {
+        const double now = host_now();
+        const PhotonMeter::Frame f = photon_.take(now);
         backend::FrameTag tag;
-        tag.input_s = std::exchange(unshown_input_, -1.0);
+        tag.input_s  = f.input_at;
+        tag.read_s   = f.read_at;
+        tag.commit_s = f.commit_at;
         if (vblank_host_s_ > 0.0 && period_s_ > 0.0) {
-            const double now = host_now();
             const double n   = std::ceil((now - vblank_host_s_) / period_s_);
             tag.target_s     = vblank_host_s_ + std::max(n, 1.0) * period_s_;
         }
@@ -1013,30 +1036,21 @@ class MacWindow {
         if (frames.empty()) return;
         refresh_period();
         for (const auto& f : frames) {
-            if (f.presented_s <= 0.0) {
-                // Replaced by a newer frame before scanout. The input it
-                // carried is still not on screen: the next frame owns it, or
-                // the measurement would quietly skip the worst cases.
-                if (f.tag.input_s >= 0.0)
-                    orphan_input_ = orphan_input_ < 0.0 ? f.tag.input_s
-                                                        : std::min(orphan_input_, f.tag.input_s);
-                continue;
-            }
+            // Replaced by a newer frame before scanout: nothing to measure.
+            // The input it carried is still unshown in the meter, and the
+            // frames after it carry it too (next_tag), so the sample is not lost.
+            if (f.presented_s <= 0.0) continue;
             if (f.presented_s > vblank_host_s_) {
                 vblank_host_s_ = f.presented_s;
                 ++vblank_seq_;
             }
-            double input = f.tag.input_s;
-            if (orphan_input_ >= 0.0) {
-                input = input < 0.0 ? orphan_input_ : std::min(input, orphan_input_);
-                orphan_input_ = -1.0;
-            }
-            if (input >= 0.0) record_photon((f.presented_s - input) * 1e3);
-            if (trace_) {
-                std::fprintf(stderr, "photon-trace lead %.3f slip %.3f lat %.3f\n",
-                             f.tag.target_s > 0.0 ? (f.tag.target_s - f.submit_s) * 1e3 : -1.0,
-                             f.tag.target_s > 0.0 ? (f.presented_s - f.tag.target_s) * 1e3 : -1.0,
-                             input >= 0.0 ? (f.presented_s - input) * 1e3 : -1.0);
+            photon_.presented(PhotonMeter::Frame{f.tag.input_s, f.tag.read_s, f.tag.commit_s}, f.presented_s,
+                              period_s_ * 1e3);
+            if (PhotonMeter::trace_level() >= 2 && f.tag.target_s > 0.0) {
+                // the late-latch schedule: how early the frame was handed
+                // over for the vblank it aimed at, and how far it slipped
+                std::fprintf(stderr, "latch lead %.3f slip %.3f ms\n",
+                             (f.tag.target_s - f.submit_s) * 1e3, (f.presented_s - f.tag.target_s) * 1e3);
             }
             learn_latch(f);
         }
@@ -1070,14 +1084,6 @@ class MacWindow {
         if (!msg<BOOL>(screen, sel("respondsToSelector:"), sel("maximumFramesPerSecond"))) return;
         const long fps = msg<long>(screen, sel("maximumFramesPerSecond"));
         if (fps > 0) period_s_ = 1.0 / static_cast<double>(fps);
-    }
-
-    void record_photon(double ms) {
-        if (ms < 0.0 || ms > 1000.0) return;   // a clock glitch, not a frame
-        photon_[photon_next_++ % photon_.size()] = ms;
-        photon_count_ = std::min(photon_count_ + 1, photon_.size());
-        photon_last_ = ms;
-        if (photon_sink_) photon_sink_(ms);
     }
 
     void translate_one(id ev, std::vector<Event>& out) {
@@ -1170,12 +1176,12 @@ class MacWindow {
                 if (!repeat) raw_key(ev, true, mods);
                 // While the input method composes, this key is its own (Enter
                 // picks the candidate, Escape cancels): not the app's.
-                const Key key = key_from_code(code);
+                const Key key = key_of(ev, code);
                 Mods km = mods;
                 // ⌥ types characters (the Mac way): ⌥e is text, not Alt+e --
                 // a terminal must not ALSO send ESC e. Keys that type nothing
                 // (arrows, Delete, Return) keep their ⌥.
-                if (km.alt && !ime_->option_as_alt && !km.ctrl && !km.super && types_text(key)) km.alt = false;
+                if (km.alt && !ime_->option_as_alt && !km.ctrl && !km.super && is_char_key(key)) km.alt = false;
                 if (!ime_->marked) out.push_back(KeyEvent{key, km, repeat});
                 // Text does NOT come from `characters`: AppKit is about to
                 // hand this key to the content view (sendEvent:), whose input
@@ -1206,13 +1212,20 @@ class MacWindow {
         }
     }
 
-    /// Virtual key codes are POSITIONAL on macOS (they describe where the key
-    /// is, not what it prints), so this table is layout-independent.
-    [[nodiscard]] static bool types_text(Key k) {
-        const auto v = static_cast<int>(k);
-        return (v >= static_cast<int>(Key::a) && v <= static_cast<int>(Key::z)) ||
-               (v >= static_cast<int>(Key::n0) && v <= static_cast<int>(Key::n9)) ||
-               (v >= static_cast<int>(Key::minus) && v <= static_cast<int>(Key::grave)) || k == Key::space;
+    /// The Key a key-down/up event is. A character key is the character the
+    /// layout puts on it (charactersIgnoringModifiers -- what AppKit's own
+    /// menu shortcuts match), so ctrl+z is the key labelled Z on AZERTY and
+    /// Dvorak, exactly as on Wayland (platform/keys.hpp holds the one rule).
+    /// Named keys and the keypad keep their position; so does a key typing
+    /// no Latin character (ж, é, a dead key): ctrl+c still copies there.
+    /// Not for flagsChanged events, which have no characters (AppKit throws).
+    [[nodiscard]] static Key key_of(id ev, unsigned short code) {
+        using namespace objc;
+        const Key pos = key_from_code(code);
+        constexpr unsigned short kIsoSection = 10;   // § / < : a character key with no US twin
+        if (!is_char_key(pos) && code != kIsoSection) return pos;
+        const std::string s = from_nsstring(msg<id>(ev, sel("charactersIgnoringModifiers")));
+        return layout_key(pos, s.size() == 1 ? static_cast<unsigned char>(s[0]) : 0u);
     }
 
     /// Virtual key codes are POSITIONAL on macOS (they describe where the key
@@ -1645,7 +1658,9 @@ class MacWindow {
         const auto e = evdev_from_code(code);
         if (e == 0) return;
         const auto t = static_cast<std::uint32_t>(msg<double>(ev, sel("timestamp")) * 1000.0);
-        raw_(raw::Key{t, e, pressed, key_from_code(code), mods});
+        // the same Key the KeyEvent carries (Wayland's raw keys resolve too)
+        const bool keyed = msg<unsigned long>(ev, sel("type")) != ev_flags_changed;
+        raw_(raw::Key{t, e, pressed, keyed ? key_of(ev, code) : key_from_code(code), mods});
     }
 
     bool gpu_enabled_ = false;
@@ -1656,7 +1671,12 @@ class MacWindow {
     /// header keeps knowing nothing about the font stack — the window moves
     /// pixels, it does not understand typefaces.
     std::function<void(backend::MetalDevice&)> atlas_sync_;
+    // The last frame handed to Metal, to skip an identical one (as Wayland).
+    DrawList    last_list_{};
+    Color<Srgb> last_clear_{};
+    bool        last_had_frame_ = false;
 #endif
+    std::uint64_t frames_skipped_ = 0;   ///< identical frames not resubmitted
 
     /// Cached across frames; rebuilt only when the surface resizes.
     CGContextRef    ctx_ = nullptr;
@@ -1668,22 +1688,14 @@ class MacWindow {
 
     // Presentation timing (host seconds, CACurrentMediaTime's clock).
     static constexpr double kMinLatchMargin = 0.75e-3;
-    double        unshown_input_  = -1.0;     // newest input not yet on screen
-    double        orphan_input_   = -1.0;     // input from a frame that was replaced
     double        vblank_host_s_  = 0.0;      // last frame that reached the glass
     double        period_s_       = 1.0 / 60.0;
     std::uint64_t vblank_seq_     = 0;
     double        latch_margin_s_ = 2.0e-3;   // learned; see latch_margin()
     std::uint64_t latch_tried_ = 0, latch_missed_ = 0;
-    std::array<double, 120> photon_{};
-    std::size_t   photon_next_ = 0, photon_count_ = 0;
-    double        photon_last_ = 0.0;
+    PhotonMeter   photon_;                    // input to photon (photon.hpp, shared with Wayland)
     bool          photon_manual_ = false;
-    std::function<void(double)> photon_sink_;
-    bool          trace_ = [] {
-        const char* v = std::getenv("MAYAG_PHOTON");
-        return v != nullptr && std::string_view{v} == "2";
-    }();
+    bool          photon_sink_ = false;       // someone listens: drain feedback every dispatch
 };
 
 }  // namespace mayag::platform

@@ -54,6 +54,8 @@
 #include "../render/draw_list.hpp"
 #include "raw_input.hpp"
 #include "types.hpp"
+#include "keys.hpp"
+#include "photon.hpp"
 #include "wayland_protocol.hpp"
 
 #include <jaal/core/capability.hpp>
@@ -422,35 +424,6 @@ struct TextInputState {
     return Key::unknown;
 }
 
-/// The character key a Latin keysym is (letters either case, digits, space,
-/// the punctuation Key names); unknown for anything else.
-[[nodiscard]] constexpr Key char_key_from_keysym(std::uint32_t sym) noexcept {
-    if (sym >= 'a' && sym <= 'z') return static_cast<Key>(static_cast<int>(Key::a) + static_cast<int>(sym - 'a'));
-    if (sym >= 'A' && sym <= 'Z') return static_cast<Key>(static_cast<int>(Key::a) + static_cast<int>(sym - 'A'));
-    if (sym >= '0' && sym <= '9') return static_cast<Key>(static_cast<int>(Key::n0) + static_cast<int>(sym - '0'));
-    switch (sym) {
-        case ' ': return Key::space;
-        case '-': return Key::minus;
-        case '=': return Key::equal;
-        case '[': return Key::bracket_left;
-        case ']': return Key::bracket_right;
-        case '\\': return Key::backslash;
-        case ';': return Key::semicolon;
-        case '\'': return Key::quote;
-        case ',': return Key::comma;
-        case '.': return Key::period;
-        case '/': return Key::slash;
-        case '`': return Key::grave;
-        default: break;
-    }
-    return Key::unknown;
-}
-
-/// Is `k` a character key (a letter, digit, space or punctuation)?
-[[nodiscard]] constexpr bool is_char_key(Key k) noexcept {
-    return (k >= Key::a && k <= Key::grave) || k == Key::space;
-}
-
 /// The Key for evdev code `code` whose keymap gives keysym `sym` (0: no map).
 ///
 /// The keymap is the truth, as in GTK and Qt: a key is the keysym it
@@ -464,8 +437,8 @@ struct TextInputState {
     const Key pos = key_from_evdev(code);
     if (sym == 0) return pos;
     if (const Key named = key_from_keysym(sym); named != Key::unknown) return named;
-    if (const Key ch = char_key_from_keysym(sym); ch != Key::unknown) return ch;
-    return pos;
+    // Latin keysyms are their ASCII code points: the shared character rule
+    return layout_key(pos, sym);
 }
 
 /// mayag cursor -> wp_cursor_shape_device_v1 shape.
@@ -751,15 +724,7 @@ class WaylandWindow {
         // screen (unless the program marks inputs itself).
         for (const auto& e : pending_) {
             if (photon_manual_) break;
-            // A bare modifier press (ctrl, shift...) answers with nothing on
-            // screen: timing it measured the wait for some LATER frame (a
-            // 500 ms blink), the 200 ms "zoom" spikes.
-            if (const auto* k = std::get_if<KeyEvent>(&e);
-                k && (k->key == Key::ctrl || k->key == Key::shift || k->key == Key::alt || k->key == Key::super ||
-                      k->key == Key::caps_lock))
-                continue;
-            if (!std::holds_alternative<ResizeEvent>(e) && !std::holds_alternative<FocusEvent>(e) &&
-                !std::holds_alternative<CloseRequest>(e)) { note_input(); break; }
+            if (starts_photon_clock(e)) { note_input(); break; }
         }
 
         // A protocol error is fatal and unrecoverable — the compositor has
@@ -812,12 +777,6 @@ class WaylandWindow {
                 return;
             }
             request_feedback();   // before the commit vkQueuePresentKHR makes
-            {
-                static const bool commits = [] { const char* e = std::getenv("MAYAG_PHOTON"); return e && *e == '3'; }();
-                if (commits)
-                    std::fprintf(stderr, "commit %.3f%s\n", wldetail::monotonic_now(),
-                                 unshown_input_ >= 0.0 ? ("  +" + std::to_string((wldetail::monotonic_now() - unshown_input_) * 1e3) + " ms after input").c_str() : "");
-            }
             gpu_->submit(dl, clear);
             last_list_.assign_from(dl); last_clear_ = clear; last_had_frame_ = true;
             // Still ask for a frame callback, same as the shm path.
@@ -1757,9 +1716,7 @@ class WaylandWindow {
     struct Feedback {
         Impl*      w;
         wl::proxy* proxy;
-        double     input_at;   // monotonic seconds of the newest input it shows; <0: none
-        double     read_at;    // when this process read that input
-        double     commit_at;  // when the frame went to the compositor
+        PhotonMeter::Frame frame;   // the input it carries, when it was committed
     };
 
     void request_feedback() {
@@ -1775,7 +1732,7 @@ class WaylandWindow {
         // FIRST one presented shows it. (Under MAILBOX a frame is discarded
         // when a newer one replaces it at the same vblank -- the newer one
         // shows the input too, and its feedback is the one that answers.)
-        auto fb = std::make_unique<Feedback>(Feedback{this, p, unshown_input_, unshown_read_, wldetail::monotonic_now()});
+        auto fb = std::make_unique<Feedback>(Feedback{this, p, photon_.take(wldetail::monotonic_now())});
         wl::add_listener(p, &feedback_listener, fb.get());
         pending_feedback_.push_back(std::move(fb));
     }
@@ -1792,28 +1749,12 @@ class WaylandWindow {
         // CLOCK_MONOTONIC is the default presentation clock on Linux; a
         // compositor using another one says so in clock_id, which we read.
         if (w->pres_clock_monotonic_) {
-            static const bool all = [] { const char* e = std::getenv("MAYAG_PHOTON"); return e && *e == '3'; }();
-            if (all) std::fprintf(stderr, "present %.3f  commit %.3f  +%.2f ms\n", secs, fb->commit_at, (secs - fb->commit_at) * 1e3);
             w->vblank_s_ = secs;
             ++w->vblank_seq_;
             if (refresh_ns > 0) w->period_ns_ = refresh_ns;
-            if (fb->input_at >= 0.0 && fb->input_at > w->shown_input_) {
-                w->shown_input_ = fb->input_at;
-                if (w->unshown_input_ == fb->input_at) w->unshown_input_ = -1.0;
-                w->record_photon((secs - fb->input_at) * 1000.0);
-                static const bool trace = [] { const char* e = std::getenv("MAYAG_PHOTON"); return e && (*e == '2' || *e == '3'); }();
-                if (trace)
-                    std::fprintf(stderr, "photon %.3f  to-us %6.2f  in-us %6.2f  compositor %6.2f  = %6.2f ms  (period %.2f, flags %s%s%s%s)\n", fb->input_at,
-                                 (fb->read_at - fb->input_at) * 1e3, (fb->commit_at - fb->read_at) * 1e3,
-                                 (secs - fb->commit_at) * 1e3, (secs - fb->input_at) * 1e3, w->period_ns_ / 1e6,
-                                 (pres_flags & 1u) ? "v" : "-", (pres_flags & 2u) ? "c" : "-", (pres_flags & 4u) ? "h" : "-",
-                                 (pres_flags & 8u) ? "z" : "-");
-                // where it went: to us, through us, through the compositor
-                w->stage_sum_[0] += (fb->read_at - fb->input_at) * 1000.0;
-                w->stage_sum_[1] += (fb->commit_at - fb->read_at) * 1000.0;
-                w->stage_sum_[2] += (secs - fb->commit_at) * 1000.0;
-                ++w->stage_n_;
-            }
+            const char flags[5] = {(pres_flags & 1u) ? 'v' : '-', (pres_flags & 2u) ? 'c' : '-',
+                                   (pres_flags & 4u) ? 'h' : '-', (pres_flags & 8u) ? 'z' : '-', '\0'};
+            w->photon_.presented(fb->frame, secs, static_cast<double>(w->period_ns_) / 1e6, flags);
         }
         w->retire_feedback(fb);
     }
@@ -1856,20 +1797,9 @@ class WaylandWindow {
             if (age < 1000) t = now - static_cast<double>(age) / 1000.0;
             last_event_ms_ = 0;
         }
-        if (unshown_input_ < 0.0) {   // the oldest input still waiting is the one to measure
-            unshown_input_ = t;
-            unshown_read_ = now;
-        }
+        photon_.note(t, now);
     }
     void note_event_time(std::uint32_t ms) noexcept { if (ms != 0) last_event_ms_ = ms; }
-
-    void record_photon(double ms) {
-        if (ms < 0.0 || ms > 5000.0) return;   // a clock glitch, not a frame
-        photon_[photon_next_++ % photon_.size()] = ms;
-        photon_count_ = std::min(photon_count_ + 1, photon_.size());
-        photon_last_ = ms;
-        if (photon_sink_) photon_sink_(ms);
-    }
 
     // ── input to photon, for a program that forwards input ───────────────
     //
@@ -1882,9 +1812,7 @@ class WaylandWindow {
     void set_photon_manual(bool on) noexcept { photon_manual_ = on; }
     /// The next frame drawn shows the answer to input from `at` (monotonic
     /// seconds). The oldest unshown mark is kept: the honest latency.
-    void mark_input(double at) noexcept {
-        if (unshown_input_ < 0.0 || at < unshown_input_) unshown_input_ = at;
-    }
+    void mark_input(double at) noexcept { photon_.mark(at, wldetail::monotonic_now()); }
     /// An input event's wl timestamp (ms, CLOCK_MONOTONIC, wrapping) as
     /// monotonic seconds; `now` if it is implausible (synthetic events).
     [[nodiscard]] double event_seconds(std::uint32_t ms) const noexcept {
@@ -1894,7 +1822,7 @@ class WaylandWindow {
         return age < 1000 ? now - static_cast<double>(age) / 1000.0 : now;
     }
     /// Every measured sample, as it is measured (ms).
-    void set_photon_sink(std::function<void(double)> f) { photon_sink_ = std::move(f); }
+    void set_photon_sink(std::function<void(double)> f) { photon_.set_sink(std::move(f)); }
 
     [[nodiscard]] std::optional<DisplayTiming> display_timing() const noexcept {
         if (vblank_s_ <= 0.0 || period_ns_ == 0) return std::nullopt;
@@ -1905,29 +1833,7 @@ class WaylandWindow {
             duration_cast<steady_clock::duration>(duration<double>(vblank_s_))};
         return DisplayTiming{vb, nanoseconds{period_ns_}, vblank_seq_};
     }
-    [[nodiscard]] PhotonStats photon_stats() const noexcept {
-        PhotonStats s;
-        s.samples = static_cast<int>(photon_count_);
-        s.last_ms = photon_last_;
-        double sum = 0.0;
-        for (std::size_t i = 0; i < photon_count_; ++i) {
-            sum += photon_[i];
-            s.worst_ms = std::max(s.worst_ms, photon_[i]);
-        }
-        if (photon_count_ > 0) {
-            s.mean_ms = sum / static_cast<double>(photon_count_);
-            std::array<double, 120> v{};
-            std::copy_n(photon_.begin(), photon_count_, v.begin());
-            std::sort(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(photon_count_));
-            const auto at = [&](double q) { return v[static_cast<std::size_t>(q * static_cast<double>(photon_count_ - 1) + 0.5)]; };
-            s.best_ms = v[0];
-            s.p50_ms = at(0.50);
-            s.p95_ms = at(0.95);
-        }
-        if (stage_n_ > 0)
-            for (std::size_t i = 0; i < 3; ++i) s.stage_ms[i] = stage_sum_[i] / static_cast<double>(stage_n_);
-        return s;
-    }
+    [[nodiscard]] PhotonStats photon_stats() const noexcept { return photon_.stats(); }
 
     static void on_frame_done(void* data, wl::proxy* cb, std::uint32_t) {
         Impl* w = self(data);
@@ -2605,17 +2511,9 @@ class WaylandWindow {
     double     vblank_s_  = 0.0;          // last presented frame, monotonic s
     std::uint64_t vblank_seq_ = 0;
     std::uint32_t period_ns_ = 0;         // refresh period from the compositor
-    double     unshown_input_ = -1.0;     // oldest input not yet on screen (s)
     std::uint32_t last_event_ms_ = 0;     // newest input's wl timestamp this dispatch
-    std::array<double, 120> photon_{};
-    std::size_t photon_next_ = 0, photon_count_ = 0;
-    std::array<double, 3> stage_sum_{};   // event->read, read->commit, commit->scanout (ms, summed)
-    std::uint64_t stage_n_ = 0;
-    double unshown_read_ = -1.0;
-    double shown_input_ = -1.0;   // newest input a presented frame has shown
-    double     photon_last_ = 0.0;
+    PhotonMeter photon_;                  // input to photon (photon.hpp, shared with Cocoa)
     bool       photon_manual_ = false;
-    std::function<void(double)> photon_sink_;
     wl::proxy* frame_callback_ = nullptr;
     wl::proxy* pool_           = nullptr;
 
