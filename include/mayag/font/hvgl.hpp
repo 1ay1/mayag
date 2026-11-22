@@ -83,15 +83,15 @@ class HvglSource {
     }
 
     [[nodiscard]] bool valid() const noexcept { return !data_.empty(); }
-    void set_coords(const var::Coords* c) noexcept { coords_ = c; }
+    void set_coords(const var::Coords& c) { coords_ = c; }
 
     [[nodiscard]] Outline load(std::uint32_t gid) const {
         Outline out;
         if (!valid() || gid >= n_glyphs_) return out;
         // The root part's axes are the font's fvar axes, in order, already
         // normalised (avar applied) by Face.
-        std::vector<double> root(coords_ != nullptr ? coords_->size() : 0, 0.0);
-        for (std::size_t i = 0; i < root.size(); ++i) root[i] = static_cast<double>((*coords_)[i]);
+        std::vector<double> root(coords_.size(), 0.0);
+        for (std::size_t i = 0; i < root.size(); ++i) root[i] = static_cast<double>(coords_[i]);
         std::size_t budget = 1 << 16;   // parts visited, for hostile trees
         part(gid, root, {}, {}, Motion{}, out, 0, budget);
         return out;
@@ -119,7 +119,7 @@ class HvglSource {
     std::span<const std::uint8_t> data_;
     std::uint32_t n_parts_ = 0, index_ = 0, n_glyphs_ = 0;
     std::vector<Remap> remap_;
-    const var::Coords* coords_ = nullptr;
+    var::Coords coords_;   ///< this face's instance (a copy: no pointer into the Face)
 
     static std::uint32_t le32(const std::uint8_t* p) noexcept {
         return std::uint32_t(p[0]) | std::uint32_t(p[1]) << 8 | std::uint32_t(p[2]) << 16 | std::uint32_t(p[3]) << 24;

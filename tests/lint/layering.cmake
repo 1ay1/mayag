@@ -62,6 +62,7 @@ set(jaal_ok
     backend/vulkan_device.hpp                                                  # a device handle opted into jaal::sendable
     font/system.hpp                                                            # the font scan runs on a jaal worker
     font/ot_layout.hpp                                                         # lock-free lazy tables (jaal::once)
+    font/mapped_file.hpp                                                       # its Sendable/Frozen claim (jaal traits)
     core/sync.hpp)                                                             # Cell / Frozen: jaal's thread-safety types, for every layer
 
 set(hits "")

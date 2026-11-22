@@ -1258,6 +1258,7 @@ inline std::optional<AttachedFamily> attach_family(FontStack& stack, FontFamily 
     const bool variable = face->is_variable();
     const std::string fam = e->family;
     const std::size_t at = stack.add_family(role, std::move(face));
+    stack.name_family(role, fam);
     if (!variable) {
         for (const auto& o : db.entries()) {
             if (o.family != fam || (o.path == e->path && o.face_index == e->face_index)) continue;

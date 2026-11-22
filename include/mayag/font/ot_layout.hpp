@@ -502,8 +502,7 @@ class Layout {
     /// first use, once (jaal::once: the body takes no lock and never waits),
     /// so opening a face stays free.
     [[nodiscard]] const std::vector<LookupInfo>& lookups(int ti) const {
-        jaal::once(cache_->once[ti], [&] { build_lookups(ti); });
-        return cache_->lookups[ti];
+        return (*lookups_)[static_cast<std::size_t>(ti)].get([&] { return build_lookups(ti); });
     }
 
   private:
@@ -555,16 +554,15 @@ class Layout {
         }
     }
 
-    void build_lookups(int ti) const;
+    [[nodiscard]] std::vector<LookupInfo> build_lookups(int ti) const;
 
     std::span<const std::uint8_t> gdef_;
     std::size_t glyph_class_def_ = npos, mark_attach_def_ = npos, mark_sets_ = npos, var_store_ = npos;
     Table tables_[2];
-    struct Cache {
-        std::once_flag once[2];
-        std::vector<LookupInfo> lookups[2];
-    };
-    std::unique_ptr<Cache> cache_ = std::make_unique<Cache>();
+    // Built on first use, once, then read-only (jaal::lazy): shared by every
+    // thread that shapes with this face. In a unique_ptr so Layout can move.
+    std::unique_ptr<const std::array<jaal::lazy<std::vector<LookupInfo>>, 2>> lookups_ =
+        std::make_unique<const std::array<jaal::lazy<std::vector<LookupInfo>>, 2>>();
 };
 
 /// Where a subtable's FIRST-glyph coverage lives (for digests), by real type.
@@ -580,9 +578,9 @@ class Layout {
     return off16(r, s, s + 2);
 }
 
-inline void Layout::build_lookups(int ti) const {
+inline std::vector<LookupInfo> Layout::build_lookups(int ti) const {
     const Table& tb = tables_[ti];
-    auto& out = cache_->lookups[ti];
+    std::vector<LookupInfo> out;
     out.resize(tb.lookup_count);
     const Reader r = tb.reader();
     const std::uint16_t ext = (ti == table::gsub) ? 7 : 9;
@@ -613,6 +611,7 @@ inline void Layout::build_lookups(int ti) const {
             li.digest.add(d);
         }
     }
+    return out;
 }
 
 // ── plans ─────────────────────────────────────────────────────────────────────

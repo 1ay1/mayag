@@ -96,8 +96,8 @@ class Face {
                                                            ot::Error* err = nullptr) {
         auto face = std::shared_ptr<Face>(new Face);
         face->source_index_ = face_index;
-        face->bytes_ = std::make_shared<const Bytes>(std::move(data));
-        return face->init(face->bytes_->span(), face_index, err) ? face : nullptr;
+        face->bytes_ = Frozen<Bytes>::make(std::move(data));
+        return face->init((*face->bytes_)->span(), face_index, err) ? face : nullptr;
     }
 
     /// Load from a file, mapped: pages fault in only where the parser and
@@ -111,10 +111,10 @@ class Face {
             if (err != nullptr) *err = ot::Error::too_small;
             return nullptr;
         }
-        face->bytes_ = std::make_shared<const Bytes>(std::move(mapped));
+        face->bytes_ = Frozen<Bytes>::make(std::move(mapped));
         face->source_path_ = path;
         face->source_index_ = face_index;
-        return face->init(face->bytes_->span(), face_index, err) ? face : nullptr;
+        return face->init((*face->bytes_)->span(), face_index, err) ? face : nullptr;
     }
 
     /// `base` at another point of its design space (USER units per axis, e.g.
@@ -126,7 +126,7 @@ class Face {
     /// never one face moved back and forth.
     Face(const Face& base, std::span<const std::pair<std::uint32_t, float>> vals)
         : bytes_(base.bytes_), source_path_(base.source_path_), source_index_(base.source_index_) {
-        [[maybe_unused]] const bool ok = init(bytes_->span(), base.source_index_, nullptr);
+        [[maybe_unused]] const bool ok = init((*bytes_)->span(), base.source_index_, nullptr);
         assert(ok && "a parsed face re-parses");
         base_id_ = base.base_id_;
         user_ = base.user_;
@@ -184,7 +184,7 @@ class Face {
             face->user_.reserve(face->axes_.size());
             for (const auto& ax : face->axes_) face->user_.push_back(ax.def);
             face->hvar_ = var::parse_hvar(face->file_.table(ot::tags::hvar));
-            face->glyphs_.set_coords(&face->coords_);
+            face->glyphs_.set_coords(face->coords_);
         }
 
         // ── vector colour glyphs (COLR/CPAL) ─────────────────────────────
@@ -718,7 +718,7 @@ class Face {
         user_ = std::move(next_user);
         if (next == coords_) return;   // no-op move: geometry unchanged
         coords_ = std::move(next);
-        glyphs_.set_coords(&coords_);
+        glyphs_.set_coords(coords_);
         caches_->outline.with([](auto& c) { c.clear(); });
         caches_->cg_metrics.with([](auto& c) { c.reset(); });
         // Derive the id from the position, not a running counter, so the same
@@ -759,7 +759,7 @@ class Face {
             return owned.empty() ? mapped.data() : std::span<const std::uint8_t>{owned};
         }
     };
-    std::shared_ptr<const Bytes> bytes_;   ///< every span in file_ and the sources points in here
+    std::optional<Frozen<Bytes>> bytes_;   ///< every span in file_ and the sources points in here (set by the factories)
     std::string               source_path_;        ///< the file, when from_file
     std::uint32_t             source_index_ = 0;   ///< its index in a collection
 #if defined(_WIN32)
@@ -774,7 +774,7 @@ class Face {
     TrackTable                tracking_;
     bool                      coretext_emoji_ = false;   ///< Apple Color Emoji: bitmap_box applies
     LigatureTable             ligatures_;
-    std::unique_ptr<ot::Layout> layout_;      // GSUB/GPOS/GDEF, read in place
+    std::unique_ptr<const ot::Layout> layout_;   // GSUB/GPOS/GDEF, read in place (its lazy tables are jaal::lazy)
     std::uint32_t             id_ = 0;
     std::uint32_t             base_id_ = 0;   // stable id ignoring variation
 
@@ -1122,6 +1122,7 @@ class FontStack : public Shaper {
         f->siblings_ = siblings_;
         f->exclusive_ = exclusive_;
         f->family_face_ = family_face_;
+        f->family_names_ = family_names_;
         return f;
     }
 
@@ -1194,6 +1195,13 @@ class FontStack : public Shaper {
     /// (a face added, a role reassigned): text measured before is stale.
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_.read([](const std::uint64_t& g) { return g; }); }
     /// The face playing `role`, if one was assigned.
+    /// The family name a role was attached as ("JetBrains Mono"); "" when
+    /// the role has no family of its own. Set by system::attach_family.
+    [[nodiscard]] const std::string& family_name(FontFamily role) const noexcept {
+        return family_names_[index_of(role)];
+    }
+    void name_family(FontFamily role, std::string name) { family_names_[index_of(role)] = std::move(name); }
+
     [[nodiscard]] const Face* family_face(FontFamily role) const noexcept {
         const std::size_t i = family_face_[index_of(role)];
         return i < faces_.size() ? faces_[i].get() : nullptr;
@@ -2286,6 +2294,7 @@ class FontStack : public Shaper {
     std::vector<std::size_t> exclusive_;
     mutable Cell<std::uint64_t> generation_;   ///< bumped when faces or their order change
     mutable Cell<bool>          drawing_;      ///< a DrawLease is held
+    std::array<std::string, font_family_count> family_names_{};   ///< see family_name()
     std::array<std::size_t, font_family_count> family_face_ = [] {
         std::array<std::size_t, font_family_count> a{};
         a.fill(static_cast<std::size_t>(-1));

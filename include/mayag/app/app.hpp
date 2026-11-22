@@ -100,11 +100,11 @@ template <Program P>
 
 /// Run P on the native window. This is main() for a mayag app.
 template <Program P>
-int run(AppConfig cfg = {});
+int run(AppConfig cfg = {}, jaal::prog::flags_t<P> flags = {});
 
 /// Run P on a window the caller opened and keeps.
 template <Program P, class W>
-int run_on(W& window, AppConfig cfg = {});
+int run_on(W& window, AppConfig cfg = {}, jaal::prog::flags_t<P> flags = {});
 
 // ── headless driving ────────────────────────────────────────────────────
 
@@ -125,7 +125,7 @@ class headless_app {
     using model_type  = typename P::Model;
     using msg_type    = typename P::Msg;
 
-    explicit headless_app(AppConfig cfg)
+    explicit headless_app(AppConfig cfg, const jaal::prog::flags_t<P>& flags = {})
         : host_cfg_(cfg),
           reactor_(make_reactor()),
           window_(open_window(cfg)),
@@ -133,7 +133,7 @@ class headless_app {
           fwd_{host_},
           kernel_(kernel_type::start(fwd_, jaal::platform::steady_clock{},
                                      detail::kernel_options(host_cfg_),
-                                     [w = reactor_.waker()] { w.wake(); })) {
+                                     [w = reactor_.waker()] { w.wake(); }, {}, flags)) {
         cx_.emplace(*this);
         step();
         draw();
@@ -296,12 +296,12 @@ class embedded_app {
     using event_type  = jaal::kernel_event_t<host_type>;
     using kernel_type = jaal::kernel::kernel<P, event_type, jaal::platform::steady_clock>;
 
-    embedded_app(W& window, const AppConfig& cfg, loop_hooks hooks)
+    embedded_app(W& window, const AppConfig& cfg, loop_hooks hooks, const jaal::prog::flags_t<P>& flags = {})
         : hooks_(std::move(hooks)),
           host_(window, cfg),
           fwd_{host_},
           kernel_(kernel_type::start(fwd_, jaal::platform::steady_clock{},
-                                     detail::kernel_options(cfg), hooks_.wake)) {
+                                     detail::kernel_options(cfg), hooks_.wake, {}, flags)) {
         host_.set_external_loop(true);
         cx_.emplace(*this);
         host_.attach(*cx_);
@@ -418,8 +418,13 @@ class embedded_app {
 /// always software and always in CI.
 template <Program P, class Driver>
 int run_headless(AppConfig cfg, Driver&& drive) {
+    return run_headless<P>(std::move(cfg), jaal::prog::flags_t<P>{}, std::forward<Driver>(drive));
+}
+/// ...starting P from `flags` (P::Flags: the data its init takes).
+template <Program P, class Driver>
+int run_headless(AppConfig cfg, jaal::prog::flags_t<P> flags, Driver&& drive) {
     cfg.log_renderer = false;
-    headless_app<P> app{std::move(cfg)};
+    headless_app<P> app{std::move(cfg), flags};
     // A driver may return its verdict (an int, 0 = pass, or a bool, true =
     // pass). It used to be dropped, so an example whose self-check printed
     // FAIL still exited 0 and ctest called it green.
@@ -470,8 +475,19 @@ void log_photon(W& window) {
 }
 }  // namespace detail
 
+/// Open a window and run P in it, with flags built from the FONTS once they
+/// are loaded: `make(stack)` returns P::Flags. Fonts load on a worker while
+/// the window opens (they don't depend on each other), so a program whose
+/// starting data includes its font set gets it without a global and without
+/// losing that overlap.
+template <Program P, class Make>
+    requires std::invocable<Make&, std::shared_ptr<typo::FontStack>> &&
+             std::convertible_to<std::invoke_result_t<Make&, std::shared_ptr<typo::FontStack>>, jaal::prog::flags_t<P>>
+int run(AppConfig cfg, Make make);
+
+/// Open a window and run P in it, starting from `flags` when P has Flags.
 template <Program P>
-int run(AppConfig cfg) {
+int run(AppConfig cfg, jaal::prog::flags_t<P> flags) {
     detail::apply_env_overrides(cfg);
     // Fonts and the window/GPU don't depend on each other: start the font
     // scan on a worker, open the window here, then collect it.
@@ -490,13 +506,37 @@ int run(AppConfig cfg) {
         cfg.fonts = fonts->get();
         startup::mark("fonts ready");
     }
-    return run_on<P>(window, std::move(cfg));
+    return run_on<P>(window, std::move(cfg), std::move(flags));
+}
+
+template <Program P, class Make>
+    requires std::invocable<Make&, std::shared_ptr<typo::FontStack>> &&
+             std::convertible_to<std::invoke_result_t<Make&, std::shared_ptr<typo::FontStack>>, jaal::prog::flags_t<P>>
+int run(AppConfig cfg, Make make) {
+    detail::apply_env_overrides(cfg);
+    std::optional<typo::system::FontLoad> fonts;
+    if (cfg.fonts == nullptr) {
+        if (cfg.font_loader != nullptr) fonts.emplace(cfg.font_loader);
+        else fonts.emplace();
+    }
+    auto opened = platform::Native::open(detail::window_config(cfg));
+    if (!opened) {
+        std::fprintf(stderr, "mayag: could not open a window\n");
+        return 1;
+    }
+    platform::Native window = std::move(*opened);
+    if (fonts) {
+        cfg.fonts = fonts->get();
+        startup::mark("fonts ready");
+    }
+    jaal::prog::flags_t<P> flags = make(cfg.fonts);
+    return run_on<P>(window, std::move(cfg), std::move(flags));
 }
 
 /// Run P on a window the caller opened and keeps (to read it back after,
 /// say). Returns when the program quits.
 template <Program P, class W>
-int run_on(W& window, AppConfig cfg) {
+int run_on(W& window, AppConfig cfg, jaal::prog::flags_t<P> flags) {
     detail::apply_env_overrides(cfg);
 #if MAYAG_COCOA_LOOP
     if constexpr (std::same_as<W, platform::MacWindow>) {
@@ -508,7 +548,7 @@ int run_on(W& window, AppConfig cfg) {
     hooks.arm     = [&loop](std::optional<std::chrono::nanoseconds> d) { loop.arm(d); };
     hooks.frames  = [&loop](bool on) { loop.frames(on); };
     hooks.stopped = [&loop] { loop.stop(); };
-    embedded_app<P, W> app{window, cfg, std::move(hooks)};
+    embedded_app<P, W> app{window, cfg, std::move(hooks), flags};
     if (cfg.log_renderer) detail::log_renderer(app.host().renderer_name());
 
     // Declared after `app`, so they are torn down before it: ^C works again
@@ -536,7 +576,7 @@ int run_on(W& window, AppConfig cfg) {
     window_host<P, W> host{window, std::move(cfg)};
     startup::mark("host constructed");
     if (log) detail::log_renderer(host.renderer_name());
-    const int code = jaal::run<P>(host, std::move(opt));
+    const int code = jaal::run<P>(host, std::move(opt), jaal::durable<P>{}, std::move(flags));
     detail::log_photon(window);
     return code;
     }

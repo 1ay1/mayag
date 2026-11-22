@@ -283,7 +283,7 @@ class GlyfSource {
     /// the font has gvar), every subsequent `load` interpolates the outline to
     /// those coordinates — the variable-font instance. A null/empty coords
     /// leaves the default master untouched.
-    void set_coords(const var::Coords* coords) noexcept { coords_ = coords; }
+    void set_coords(const var::Coords& coords) { coords_ = coords; }
     [[nodiscard]] bool is_variable() const noexcept {
         return gvar_header_.ok && gvar_header_.axis_count > 0;
     }
@@ -409,8 +409,8 @@ class GlyfSource {
             fx[i] = static_cast<float>(xs[i]);
             fy[i] = static_cast<float>(ys[i]);
         }
-        if (coords_ != nullptr && !coords_->empty() && gvar_header_.ok) {
-            var::apply_gvar(gvar_, gvar_header_, gid, *coords_, fx, fy, ends);
+        if (!coords_.empty() && gvar_header_.ok) {
+            var::apply_gvar(gvar_, gvar_header_, gid, coords_, fx, fy, ends);
         }
 
         // ---- build contours ----
@@ -537,12 +537,12 @@ class GlyfSource {
         // A composite glyph's gvar "points" are one per component (its offset)
         // followed by four phantom points (metrics). We vary the offsets so
         // built-up glyphs (accented letters) track the axis too.
-        if (coords_ != nullptr && !coords_->empty() && gvar_header_.ok && !comps.empty()) {
+        if (!coords_.empty() && gvar_header_.ok && !comps.empty()) {
             const std::size_t n = comps.size();
             std::vector<float> fx(n + 4, 0.0f), fy(n + 4, 0.0f);
             for (std::size_t i = 0; i < n; ++i) { fx[i] = comps[i].dx; fy[i] = comps[i].dy; }
             std::vector<std::uint16_t> ends{static_cast<std::uint16_t>(n + 4 - 1)};
-            var::apply_gvar(gvar_, gvar_header_, gid, *coords_, fx, fy, ends, /*composite=*/true);
+            var::apply_gvar(gvar_, gvar_header_, gid, coords_, fx, fy, ends, /*composite=*/true);
             for (std::size_t i = 0; i < n; ++i) {
                 if (comps[i].args_are_xy) { comps[i].dx = fx[i]; comps[i].dy = fy[i]; }
             }
@@ -564,7 +564,7 @@ class GlyfSource {
 
     std::span<const std::uint8_t> gvar_{};
     var::GvarHeader               gvar_header_{};
-    const var::Coords*            coords_ = nullptr;
+    var::Coords                   coords_;   ///< this face's instance (a copy: no pointer into the Face)
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1229,7 +1229,7 @@ class Cff2Source {
 
     [[nodiscard]] bool valid() const noexcept { return charstrings_.count() > 0; }
     [[nodiscard]] bool is_variable() const noexcept { return region_count_ > 0; }
-    void set_coords(const var::Coords* c) noexcept { coords_ = c; }
+    void set_coords(const var::Coords& c) { coords_ = c; }
 
     [[nodiscard]] Outline load(std::uint16_t gid) const {
         Outline out;
@@ -1305,13 +1305,13 @@ class Cff2Source {
         const std::size_t ivd = ivd_offsets_[st.vsindex];
         const std::uint16_t n = var::detail::u16(d, ivd + 4);
         st.scalars.resize(n, 0.0f);
-        if (coords_ == nullptr || coords_->empty()) return;
+        if (coords_.empty()) return;
         for (std::uint16_t j = 0; j < n; ++j) {
             const std::uint16_t ri = var::detail::u16(d, ivd + 6 + 2u * j);
             if (ri >= region_count_) continue;
             const std::size_t roff = region_list_ + 4 +
                 static_cast<std::size_t>(ri) * axis_count_ * 6;
-            st.scalars[j] = var::detail::region_scalar(d, roff, axis_count_, *coords_);
+            st.scalars[j] = var::detail::region_scalar(d, roff, axis_count_, coords_);
         }
     }
 
@@ -1571,7 +1571,7 @@ class Cff2Source {
     std::uint16_t            axis_count_ = 0;
     std::uint16_t            region_count_ = 0;
     std::vector<std::size_t> ivd_offsets_;
-    const var::Coords*       coords_ = nullptr;
+    var::Coords              coords_;   ///< this face's instance (a copy: no pointer into the Face)
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1632,7 +1632,7 @@ class GlyphSource {
     /// Point this source at a set of normalized axis coordinates. Only the
     /// glyf/gvar and CFF2 (blend) paths vary. The pointer must outlive every
     /// subsequent load() call.
-    void set_coords(const var::Coords* c) noexcept {
+    void set_coords(const var::Coords& c) {
         if (kind_ == Kind::glyf) glyf_.set_coords(c);
         if (kind_ == Kind::cff2) cff2_.set_coords(c);
         if (kind_ == Kind::hvgl) hvgl_.set_coords(c);

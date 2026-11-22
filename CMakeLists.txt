@@ -697,6 +697,23 @@ if(MAYAG_BUILD_TESTS)
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_include.txt
                          -P ${_MAYAG_PRUNE})
+        # Every trust claim (sendable_opt_in / frozen_opt_in) checked field by
+        # field with C++26 reflection: a leaf nobody vouched for, or a stale
+        # vouch, fails. Needs GCC 16+ (-freflection); the test COMPILES the
+        # audit (static_asserts) with that compiler, whatever builds mayag.
+        find_program(MAYAG_REFLECT_CXX NAMES g++-16 g++)
+        if(MAYAG_REFLECT_CXX)
+            execute_process(COMMAND ${MAYAG_REFLECT_CXX} -std=c++26 -freflection -x c++ -fsyntax-only -
+                            INPUT_FILE /dev/null RESULT_VARIABLE _refl_rc OUTPUT_QUIET ERROR_QUIET)
+            if(_refl_rc EQUAL 0)
+                add_test(NAME mayag_claims_audited
+                         COMMAND ${MAYAG_REFLECT_CXX} -std=c++26 -freflection -fsyntax-only -DMAYAG_PLATFORM_HEADLESS
+                                 -I${CMAKE_CURRENT_SOURCE_DIR}/include -I${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/include
+                                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/claims_audited.cpp)
+                set_tests_properties(mayag_claims_audited PROPERTIES LABELS "static")
+            endif()
+        endif()
+
         # No hidden shared state: a mutable `static` is shared by every
         # runtime and thread in the process. Const, a Cell, or a listed reason.
         add_test(NAME mayag_shared_statics

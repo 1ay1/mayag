@@ -22,6 +22,7 @@
 #include "color.hpp"
 #include "geometry.hpp"
 
+#include <jaal/core/audit.hpp>
 #include <jaal/core/frozen.hpp>
 #include <jaal/core/sendable.hpp>
 #include <jaal/core/shared.hpp>
@@ -35,6 +36,12 @@ using Cell = jaal::cell<T>;
 
 template <class T>
 using Frozen = jaal::shared<T>;
+
+/// A trust claim checked field by field (C++26 reflection; true unchecked
+/// without it). See jaal/core/audit.hpp and tests/claims_audited.cpp:
+///     static_assert(mayag::audit::claim<Face, mayag::audit::rule::shareable,
+///                   mayag::audit::fields_t<>, mayag::audit::types_t<"std::span">>);
+namespace audit = jaal::audit;
 
 /// May a T move to another thread? (it holds nothing the sender can still
 /// reach). Every message, task argument and stream argument must be.

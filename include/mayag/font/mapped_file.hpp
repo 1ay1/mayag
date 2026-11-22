@@ -28,6 +28,9 @@
 #include <string>
 #include <vector>
 
+#include <jaal/core/frozen.hpp>
+#include <jaal/core/sendable.hpp>
+
 #if defined(_WIN32)
 #  include "../core/win32.hpp"   // windows.h, with its keyword macros removed
 #  undef IN
@@ -177,3 +180,11 @@ class MappedFile {
 };
 
 }  // namespace mayag::typo
+
+// A MappedFile may change threads and be shared frozen. Its one raw pointer
+// is the read-only mapping (or owned_'s buffer) THIS object owns: nothing
+// else frees it, and the mapping is PROT_READ / PAGE_READONLY -- no writes
+// exist to race with. Checked field by field on a reflection build:
+// every other field is proven, and ptr_ is the only one vouched for.
+template <> inline constexpr bool jaal::sendable_opt_in<mayag::typo::MappedFile> = true;
+template <> inline constexpr bool jaal::frozen_opt_in<mayag::typo::MappedFile>   = true;

@@ -108,9 +108,67 @@ struct read_clipboard {
     }
 };
 
+/// Do something to the world -- write a file, a pty, start a program -- and
+/// optionally answer with a message. update() DESCRIBES it; the runtime runs
+/// it on the loop thread, after update() returns, in the order the Cmd lists
+/// its effects. So update stays a pure function of (Model, Msg), and the
+/// world sees the effects in exactly the order they were asked for.
+///
+///     using Cmd = mayag::Cmd<Msg, mayag::run>;
+///     return Cmd::run([](std::string path, Config c) { save(path, c); }, path, m.cfg);
+///     return Cmd::run([](std::string p) -> Msg { return Loaded{read(p)}; }, path);
+///
+/// The body is CAPTURELESS and takes Sendable arguments, copied when the
+/// effect is made: it sees the values update chose, never the model, which
+/// may have moved on by the time it runs. It returns void, a Msg, or
+/// std::optional<Msg> (the answer is folded next, like any message).
+template <class Msg> struct Run { std::function<std::optional<Msg>()> go; };
+struct run {
+    static constexpr std::string_view name = "run";
+    template <class Msg> using type = Run<Msg>;
+    template <class F, class M>
+    static auto fmap(F&& f, Run<M> e) -> Run<std::invoke_result_t<F, M>> {
+        using To = std::invoke_result_t<F, M>;
+        return {[f = std::forward<F>(f), g = std::move(e.go)]() -> std::optional<To> {
+            if (auto m = g()) return f(std::move(*m));
+            return std::nullopt;
+        }};
+    }
+    template <class Id, class F, class M>
+    static auto fmap_with(const Id& id, F&& f, Run<M> e) -> Run<std::invoke_result_t<F, const Id&, M>> {
+        using To = std::invoke_result_t<F, const Id&, M>;
+        return {[id, f = std::forward<F>(f), g = std::move(e.go)]() -> std::optional<To> {
+            if (auto m = g()) return f(id, std::move(*m));
+            return std::nullopt;
+        }};
+    }
+    template <class Self, class Msg> struct ctors {
+        template <class F, class... A>
+            requires std::is_empty_v<F> && std::default_initializable<F> && std::invocable<const F&, A...>
+        [[nodiscard]] static Self run(F, A... args) {
+            static_assert((jaal::Sendable<A> && ...),
+                          "mayag::run: an argument is not Sendable -- pass owned values (the body must not "
+                          "reach the model or anything else update can see later)");
+            using R = std::invoke_result_t<const F&, A...>;
+            static_assert(std::is_void_v<R> || std::convertible_to<R, Msg> || std::same_as<R, std::optional<Msg>>,
+                          "mayag::run: the body returns void, a Msg, or std::optional<Msg>");
+            return Self(Run<Msg>{[... a = std::move(args)]() mutable -> std::optional<Msg> {
+                if constexpr (std::is_void_v<R>) {
+                    F{}(std::move(a)...);
+                    return std::nullopt;
+                } else if constexpr (std::same_as<R, std::optional<Msg>>) {
+                    return F{}(std::move(a)...);
+                } else {
+                    return Msg(F{}(std::move(a)...));
+                }
+            }});
+        }
+    };
+};
+
 /// Every window effect, for a program that wants the whole set.
 template <class Msg>
 using window_cmd = jaal::Cmd<Msg, set_title, write_clipboard, set_fullscreen, set_cursor,
-                             focus, upload_image, release_image, patch_image, read_clipboard, window_action>;
+                             focus, upload_image, release_image, patch_image, read_clipboard, window_action, run>;
 
 }  // namespace mayag
