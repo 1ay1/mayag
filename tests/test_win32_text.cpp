@@ -155,13 +155,14 @@ int main() {
     std::printf("  mean %.3f/255, worst %.0f/255, %.3f%% of channels off by >8\n", r.mean, r.worst, r.over8);
     check(r.mean < 0.25, "mayag's Windows text matches Direct2D on average (< 0.25/255)");
     check(r.worst <= 6, "and pixel by pixel (worst <= 6/255)");
-    check(typo::FontConfig{}.native_raster, "the native look is the default on Windows");
+    check(!typo::FontConfig{}.native_raster, "the default look is mayag's own on Windows too (native() is an opt-in)");
 
-    // Vertical metrics as DirectWrite reports them. The comparison above
-    // takes its baseline from mayag's own metrics, so it cannot see this:
-    // mayag used hhea where Windows uses usWin*, which put Consolas'
-    // baseline 2.3 px high and every terminal line against the top of its row.
-    std::printf("\nvertical metrics vs IDWriteFontFace::GetMetrics\n");
+    // Vertical metrics beside DirectWrite's. mayag uses ONE rule on every
+    // platform (Face::metrics: typo when USE_TYPO_METRICS, else hhea), so a
+    // font sits on the same baseline everywhere; DirectWrite's usWin* split
+    // is reported for reference only. Where text sits in its line is checked
+    // on every platform by test_font's "glyphs centred in their line".
+    std::printf("\nvertical metrics: mayag (every platform) vs IDWriteFontFace::GetMetrics\n");
     const auto& db = typo::system::Database::instance();
     for (std::string_view fam : {"Consolas", "Cascadia Mono", "Cascadia Code", "Courier New", "Segoe UI",
                                  "Arial", "Lilex", "JetBrains Mono"}) {
@@ -174,12 +175,10 @@ int main() {
         dw->GetMetrics(&m);
         const float px = 13.0f, s = px / static_cast<float>(m.designUnitsPerEm);
         const auto mine = face->metrics(px);
-        const float da = std::abs(mine.ascent - m.ascent * s), dd = std::abs(mine.descent - m.descent * s),
-                    dg = std::abs(mine.line_gap - static_cast<float>(m.lineGap) * s);
         std::printf("  %-14.*s ascent %.2f/%.2f descent %.2f/%.2f gap %.2f/%.2f\n", static_cast<int>(fam.size()),
                     fam.data(), mine.ascent, m.ascent * s, mine.descent, m.descent * s, mine.line_gap,
                     static_cast<float>(m.lineGap) * s);
-        check(da < 0.01f && dd < 0.01f && dg < 0.01f, std::string{fam} + ": ascent, descent and gap match DirectWrite");
+        check(mine.ascent > 0.0f && mine.descent > 0.0f, std::string{fam} + ": metrics present");
     }
 #else
     std::printf("  (not Windows -- skipped)\n");

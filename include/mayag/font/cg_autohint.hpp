@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -94,10 +95,17 @@ inline constexpr double kSmoothingPerLevel = 0.0025;
 /// (FontSmoothing for light text: min(0.3, 0.015125 px per px)).
 [[nodiscard]] inline double light_dilation(double ppem) noexcept { return std::fmin(ppem * 0.015125, kSmoothingMax); }
 
+/// How the pixel heights are chosen. `coregraphics`: as CoreGraphics does
+/// (from the smoothing-GROWN heights, so they round up a pixel more often:
+/// glyphs sit high). `nearest`: the font's own heights to the nearest pixel,
+/// FreeType's light hinting -- glyphs centred where the font put them.
+enum class Targets : std::uint8_t { coregraphics, nearest };
+
 /// CGFontAutohintTransformCreate: nothing unless ppem is an integer in
 /// 7..18; otherwise choose the targets and build the map for `dilation`.
 [[nodiscard]] inline std::optional<Transform> create(double ppem, double upem, double xh, double cap, double asc,
-                                                     double stem, double dilation) noexcept {
+                                                     double stem, double dilation,
+                                                     Targets targets = Targets::coregraphics) noexcept {
     if (!(ppem > 0.0) || !(upem > 0.0) || !(xh > 0.0) || !(cap > xh)) return std::nullopt;
     const double r = std::trunc(ppem);
     if (r != ppem || r < 7.0 || r > 18.0) return std::nullopt;
@@ -108,7 +116,10 @@ inline constexpr double kSmoothingPerLevel = 0.0025;
     // the light-dilated and undilated maps).
     int w1 = static_cast<int>(xh * s + 2.0 * dl + 0.5), w2 = static_cast<int>(cap * s + 2.0 * dl + 0.5);
     const int xb = static_cast<int>(xh * s + 0.5);
-    if (xb != w1) {
+    if (targets == Targets::nearest) {
+        w1 = xb;
+        w2 = static_cast<int>(cap * s + 0.5);
+    } else if (xb != w1) {
         const int cb = static_cast<int>(cap * s + 0.5);
         const auto dev = [](const Transform& t) { return std::fabs(t.s1 - 1.0) + std::fabs(t.s2 - 1.0); };
         const double a = dev(evaluate(stem, dl, xh, cap, s, asc, w1, w2)) + dev(evaluate(stem, 0.0, xh, cap, s, asc, w1, w2));

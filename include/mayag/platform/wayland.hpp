@@ -2012,6 +2012,7 @@ class WaylandWindow {
                               std::uint32_t state) {
         Impl* w = self(data);
         w->pointer_serial_ = serial;
+        w->note_event_time(time_ms);   // the photon clock starts at the press / release
         if (w->raw_) w->raw_(raw::Button{time_ms, button, state == 1});
 
         // evdev button codes.
@@ -2046,6 +2047,7 @@ class WaylandWindow {
     static void on_ptr_axis(void* data, wl::proxy*, std::uint32_t time_ms,
                             std::uint32_t axis, wl::fixed_t value) {
         Impl* w = self(data);
+        w->note_event_time(time_ms);   // ...and at the wheel notch
         if (w->raw_) w->raw_(raw::Axis{time_ms, axis, value});
         // Wayland's axis is "down/right is positive", and its magnitude is in
         // surface units. mayag scrolls content, so the sign is inverted here

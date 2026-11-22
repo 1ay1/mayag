@@ -1493,6 +1493,43 @@ void test_sdf_matches_bitmap() {
                                   "% of coverage text (got " + std::to_string(100.0 * diff / ink) + "%)");
 }
 
+// A capital sits in the middle of its line: the space above the cap height
+// and below the baseline match the font's own (unhinted) split to within
+// half a pixel -- at every hinted size, in the default look, which is the
+// same on every platform. CoreGraphics' rounding (from the smoothing-grown
+// heights, growth all upwards) put text ~1 px high in a terminal row.
+void test_glyphs_centred() {
+    section("glyphs centred in their line");
+    auto st = typo::system::default_stack(typo::FontConfig{});
+    auto cg = typo::system::default_stack(typo::FontConfig::coregraphics());
+    if (!st || st->face_count() == 0) return;
+    const auto rows = [](std::shared_ptr<typo::FontStack> s, float px) {
+        RenderOptions ro; ro.background = rgb8(0xFA, 0xFA, 0xFA); ro.fonts = s; ro.dpi_scale = 1.0f;
+        const float lh = std::round(px * 1.4f);
+        auto ui = dsl::v(dsl::text_owned("HHHH") | dsl::font(px) | dsl::line_height(lh / px) | dsl::fg(rgb8(0x1C, 0x1F, 0x24)))
+                  | dsl::width(120) | dsl::height(lh);
+        const auto p = render_to_pixels(ui, Vec2{120, lh}, ro);
+        std::vector<double> cov(static_cast<std::size_t>(lh), 0.0);
+        for (std::size_t i = 0; i < p.size(); i += 4)
+            cov[(i / 4) / 120] += std::max(0.0, (250.0 - p[i]) / 222.0);
+        // the ink's centre of mass (an H: the cap band), against the band the
+        // font's metrics put it in (baseline - cap/2)
+        double m = 0, w = 0;
+        for (std::size_t y = 0; y < cov.size(); ++y) { m += cov[y] * (static_cast<double>(y) + 0.5); w += cov[y]; }
+        const auto fm = s->metrics(px, TextStyle{}.family);
+        const double base = std::round(typo::text_first_baseline(fm, lh));
+        const double cap = static_cast<double>(fm.cap_height);
+        return w > 0 ? m / w - (base - cap / 2.0) : 99.0;
+    };
+    double worst = 0, worst_cg = 0;
+    for (int px = 9; px <= 18; ++px) {
+        worst = std::max(worst, std::abs(rows(st, static_cast<float>(px))));
+        if (cg && cg->face_count() > 0) worst_cg = std::max(worst_cg, -rows(cg, static_cast<float>(px)));
+    }
+    std::printf("\n  cap band off its metric centre: default %.2f px worst, coregraphics() up to %.2f px high", worst, worst_cg);
+    check(worst <= 0.5, "9-18 px: capitals sit where the font's metrics put them (within half a pixel)");
+}
+
 // CoreText draws runs of 'connected language' faces as one bitmap run
 // (max-combined); others glyph by glyph.
 void test_merge_mode() {
@@ -1923,7 +1960,9 @@ void test_smoothing() {
               "coregraphics() and portable() presets select the two looks");
         check((dflt.smoothing > 0.0f) == typo::coregraphics_text_default &&
                   dflt.cg_flattening == typo::coregraphics_text_default,
-              "FontConfig{} follows MAYAG_COREGRAPHICS_TEXT (the macOS look by default)");
+              "FontConfig{} follows MAYAG_COREGRAPHICS_TEXT (the macOS weight by default)");
+        check(dflt.centred && !cg.centred && !dflt.native_raster,
+              "the default is the same on every platform: centred, mayag's rasteriser; coregraphics() is CoreText's quirks");
     }
     const std::uint16_t gid = stack->face_at(0)->glyph_for('l');
     if (gid == 0) return;
@@ -2376,6 +2415,7 @@ int main() {
     test_apple_cascade();
     test_coretext_parity();
     test_smoothing();
+    test_glyphs_centred();
     test_complex_text();
     test_uax14_wrapping();
     test_bidi_editing();

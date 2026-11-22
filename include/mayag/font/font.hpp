@@ -257,13 +257,19 @@ class Face {
 
     // ── metrics ─────────────────────────────────────────────────────────
 
-    /// Vertical metrics at `size_px`.
+    /// Vertical metrics at `size_px`. ONE rule on every platform, so a font
+    /// sits on the same baseline on Linux, macOS and Windows:
     ///
-    /// Which fields a font's line height should come from is a genuine mess:
-    /// `hhea` is what Apple uses, `OS/2.usWin*` is what old Windows used, and
-    /// `OS/2.sTypo*` is what the spec says — but only when the
-    /// USE_TYPO_METRICS bit is set. Following that rule exactly is why mayag's
-    /// line spacing matches the browser's.
+    ///   OS/2.sTypo*  when the font sets USE_TYPO_METRICS (the spec's rule)
+    ///   hhea         otherwise (what CoreText and every browser use)
+    ///   OS/2.usWin*  only when hhea is empty
+    ///
+    /// Windows used to read usWin* first, as DirectWrite does. usWin* is a
+    /// clipping box (it covers the tallest accent), not a line, so the same
+    /// face had a different ascent / descent split -- and so a different
+    /// baseline -- there than anywhere else. Placement is half-leading
+    /// (text_first_baseline: the extra space split above and below), so the
+    /// gap does not decide where text sits; only this split does.
     [[nodiscard]] FaceMetrics metrics(float size_px) const noexcept {
         const float s = scale_for(size_px);
         const auto& os2 = file_.os2();
@@ -275,22 +281,6 @@ class Face {
             m.descent  = -static_cast<float>(os2.typo_descender) * s;
             m.line_gap =  static_cast<float>(os2.typo_line_gap)  * s;
         }
-#if defined(_WIN32)
-        // Windows (DirectWrite, GDI, every native app) does NOT use hhea:
-        // without USE_TYPO_METRICS the line is usWinAscent + usWinDescent,
-        // and the gap is whatever hhea's line adds beyond that (usually 0).
-        // Taking hhea here put Consolas' baseline 2.3 px higher than any
-        // Windows app, with its 2.2 px hhea gap all under the text, so every
-        // line hugged the top of its row. Matches IDWriteFontFace::GetMetrics
-        // (test_win32_text: every installed face).
-        else if (os2.present && os2.win_ascent + os2.win_descent > 0) {
-            m.ascent  = static_cast<float>(os2.win_ascent)  * s;
-            m.descent = static_cast<float>(os2.win_descent) * s;
-            const float hhea_line = static_cast<float>(hhea.ascender - hhea.descender + hhea.line_gap);
-            const float win_line = static_cast<float>(os2.win_ascent + os2.win_descent);
-            m.line_gap = num::max(hhea_line - win_line, 0.0f) * s;
-        }
-#endif
         else if (hhea.ascender != 0) {
             m.ascent   =  static_cast<float>(hhea.ascender)  * s;
             m.descent  = -static_cast<float>(hhea.descender) * s;
@@ -898,29 +888,25 @@ enum class RenderMode : std::uint8_t {
     hybrid,
 };
 
-/// Whether glyphs default to the macOS look: CoreGraphics font smoothing
-/// (the stem weight macOS text has), its curve flattening, glyph merging for
-/// connected scripts and upright italic fallback, pixel-matched to CoreText.
+/// Text looks the same on every platform: ONE default look (TextLook::
+/// standard()), drawn by mayag's own rasteriser from the same metrics, so a
+/// frame is the same pixels on Linux, macOS and Windows. The weighted stems
+/// of macOS text (font smoothing, its curve flattening, glyph merging) with
+/// glyphs CENTRED in their line: hinted heights on the nearest pixel and
+/// the smoothing growth split evenly above and below.
 ///
-/// On by default on macOS and Linux. On Windows the default is the NATIVE
-/// look instead (TextLook::native(): DirectWrite's own glyph coverage, see
-/// dwrite_raster.hpp), because that is what every other Windows app draws
-/// and so what a Windows user's eye is calibrated to; macOS-weight stems
-/// read heavy and blurry there. Define MAYAG_COREGRAPHICS_TEXT=1 to force
-/// the macOS look on Windows too, or =0 for the FreeType look elsewhere.
+/// MAYAG_COREGRAPHICS_TEXT=0 makes the default the thin FreeType look
+/// (TextLook::portable()) instead -- still the same on every platform. The
+/// per-platform looks (coregraphics(): CoreText's pixels exactly, quirks
+/// included; native(): DirectWrite's coverage) are opt-ins, never defaults.
 #if !defined(MAYAG_COREGRAPHICS_TEXT)
-#  if defined(_WIN32)
-#    define MAYAG_COREGRAPHICS_TEXT 0
-#  else
-#    define MAYAG_COREGRAPHICS_TEXT 1   // the macOS look; 0 opts out
-#  endif
+#  define MAYAG_COREGRAPHICS_TEXT 1
 #endif
 inline constexpr bool coregraphics_text_default = MAYAG_COREGRAPHICS_TEXT != 0;
 
-/// A text look: the five settings that make text read as macOS or as
-/// FreeType/DirectWrite, defined ONCE here. FontConfig's defaults, its
-/// coregraphics()/portable() presets and the platform default all come from
-/// these two values.
+/// A text look: the settings that make text read as macOS or as
+/// FreeType/DirectWrite, defined ONCE here. FontConfig's defaults and its
+/// presets all come from these values.
 struct TextLook {
     float smoothing;          ///< outline growth, device px per side (CoreGraphics: 0.30)
     bool  cg_flattening;      ///< under-flatten curves as CoreGraphics does
@@ -928,14 +914,28 @@ struct TextLook {
     bool  oblique_fallback;   ///< shear fallback faces inside italic runs
     bool  merge_glyphs;       ///< dlng-driven glyph merging (CoreText)
     bool  native_raster = false;   ///< glyph coverage from the OS rasteriser (Windows: DirectWrite)
-    [[nodiscard]] static constexpr TextLook coregraphics() noexcept {
-        return {static_cast<float>(cg_autohint::kSmoothingMax), true, true, false, true, false};
+    /// Glyphs centred in their line: the autohinter's pixel targets are the
+    /// font's own heights rounded to the nearest pixel, and smoothing grows
+    /// the outline equally up and down. False is CoreGraphics exactly: it
+    /// rounds the GROWN heights (a 13 px cap of 9.49 px becomes 10, the extra
+    /// pixel on top) and grows only upwards, so every glyph sits ~1 px high
+    /// in its row -- measured against alacritty / kitty with the same face.
+    bool  centred = true;
+    /// The default everywhere: macOS's stem weight, centred.
+    [[nodiscard]] static constexpr TextLook standard() noexcept {
+        return {static_cast<float>(cg_autohint::kSmoothingMax), true, true, false, true, false, true};
     }
-    [[nodiscard]] static constexpr TextLook portable() noexcept { return {0.0f, false, true, true, false, false}; }
-    /// The platform's own text: DirectWrite coverage on Windows (natural
-    /// symmetric, the font's hinting, the user's contrast setting), with the
-    /// portable look as the fallback wherever the native rasteriser cannot
-    /// serve a glyph (and on other platforms).
+    /// CoreText's pixels exactly, vertical quirks included (an opt-in).
+    [[nodiscard]] static constexpr TextLook coregraphics() noexcept {
+        TextLook l = standard();
+        l.centred = false;
+        return l;
+    }
+    [[nodiscard]] static constexpr TextLook portable() noexcept { return {0.0f, false, true, true, false, false, true}; }
+    /// The platform's own text (an opt-in): DirectWrite coverage on Windows
+    /// (natural symmetric, the font's hinting, the user's contrast setting),
+    /// the portable look wherever the native rasteriser cannot serve a glyph
+    /// (and on other platforms).
     [[nodiscard]] static constexpr TextLook native() noexcept {
         TextLook l = portable();
 #if defined(_WIN32)
@@ -943,18 +943,17 @@ struct TextLook {
 #endif
         return l;
     }
+    /// What FontConfig{} uses: the same on every platform.
     [[nodiscard]] static constexpr TextLook platform() noexcept {
-#if defined(_WIN32)
-        return coregraphics_text_default ? coregraphics() : native();
-#else
-        return coregraphics_text_default ? coregraphics() : portable();
-#endif
+        return coregraphics_text_default ? standard() : portable();
     }
 };
 
 struct FontConfig {
-    /// The macOS look regardless of platform: CoreGraphics smoothing,
-    /// flattening and vertical autohinting, pixel-matched to CoreText.
+    /// The default look (every platform): macOS weight, glyphs centred.
+    [[nodiscard]] static constexpr FontConfig standard() noexcept { return with_look(TextLook::standard()); }
+    /// CoreText's pixels exactly: smoothing, flattening and the vertical
+    /// autohinter with CoreGraphics' rounding (glyphs ~1 px high).
     [[nodiscard]] static constexpr FontConfig coregraphics() noexcept { return with_look(TextLook::coregraphics()); }
     /// The FreeType/DirectWrite look regardless of platform: exact outlines
     /// (no smoothing growth, accurate flattening) with light vertical
@@ -968,6 +967,7 @@ struct FontConfig {
         c.smoothing = l.smoothing; c.cg_flattening = l.cg_flattening; c.cg_autohint = l.cg_autohint;
         c.oblique_fallback = l.oblique_fallback; c.merge_glyphs = l.merge_glyphs;
         c.native_raster = l.native_raster;
+        c.centred = l.centred;
         return c;
     }
 
@@ -1033,6 +1033,8 @@ struct FontConfig {
     /// each glyph's coverage changes. Faces the OS cannot open, variable
     /// faces, and synthetic bold/italic fall back to mayag's rasteriser.
     bool       native_raster = TextLook::platform().native_raster;
+    /// Glyphs centred in their line (TextLook::centred).
+    bool       centred = TextLook::platform().centred;
     /// Glyphs untouched for this many frames become eviction candidates.
     std::uint64_t glyph_ttl_frames = 600;
 };
@@ -1930,7 +1932,9 @@ class FontStack : public Shaper {
                         stem = std::round(static_cast<double>(hw) * 1000.0 / face.units_per_em());
                 hint = cg_autohint::create(static_cast<double>(size_px), face.units_per_em(), static_cast<double>(m->xh),
                                            static_cast<double>(m->cap), static_cast<double>(m->asc),
-                                           stem, static_cast<double>(smoothing_px(size_px, smoothing)));
+                                           stem, static_cast<double>(smoothing_px(size_px, smoothing)),
+                                           config_.centred ? cg_autohint::Targets::nearest
+                                                           : cg_autohint::Targets::coregraphics);
             }
         }
         if (hint) key.flags |= glyph_flags::cg_hinted;
@@ -2069,7 +2073,10 @@ class FontStack : public Shaper {
             const float baked = sdf_baked_growth_field(sdf_px);
             Outline fo = o;
             fo.transform(Affine{raster_scale, 0.0f, 0.0f, raster_scale, 0.0f, 0.0f});
-            if (baked > 0.0f) fo = cg_autohint::dilate(fo, baked, baked);
+            if (baked > 0.0f) {
+                fo = cg_autohint::dilate(fo, baked, baked);
+                if (config_.centred) fo.transform(Affine{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, -baked});   // grown evenly
+            }
             auto r = rasterize_sdf(fo, 1.0f, spread, 2, embolden_px, /*chebyshev=*/false, flat);
             return atlas_.insert(key, r.bitmap, r.offset, advance,
                                  raster_scale, spread, true);
@@ -2092,6 +2099,9 @@ class FontStack : public Shaper {
                 return Vec2{p.x, static_cast<float>(hint->apply(static_cast<double>(p.y)))};
             });
         }
+        // The dilation grew the outline by [0, 2g] in y: centred, the glyph
+        // moves back down by g so it grows equally above and below.
+        if (config_.centred && grow > 0.0f) o.transform(Affine{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, -grow});
         if (x_phase != 0) {
             // Bake the pen's fraction into the outline. rasterize() floors
             // the bounds, so the bitmap's offset stays integral and the shift
@@ -3029,7 +3039,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             const float baked_px = stack_->sdf_baked_growth_field(stack_->sdf_raster_px(st.size)) * k;
             const float grow_px = stack_->smoothing_px(st.size, FontStack::smoothing_level(st.color)) - baked_px;
             const float grow = grow_px * per_px;
-            dst.origin.y -= grow_px;
+            if (!stack_->config().centred) dst.origin.y -= grow_px;   // CoreGraphics: the growth goes up
             dl.glyph(dst, g.uv, st.color, true, edge, grow);
         } else if (g.is_native) {
 #if defined(_WIN32)

@@ -689,6 +689,12 @@ if(MAYAG_BUILD_TESTS)
         add_test(NAME mayag_layering
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/layering.cmake)
+        # Graphics are one source on every platform (no platform #ifs in
+        # fonts, layout, rendering, widgets but the granted opt-ins).
+        add_test(NAME mayag_one_look
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_one_look.txt
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_look.cmake)
         add_test(NAME mayag_runtime_banlist
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_include.txt
