@@ -327,6 +327,7 @@ struct Editor {
         Focus                    focus = Focus::editor;
         bool                     sidebar = true;
         float                    sidebar_w = 250.0f;
+        float                    sidebar_at_press = 250.0f, bottom_at_press = 220.0f;
         bool                     bottom = false;
         int                      bottom_tab = 0;   // 0 problems, 1 search
         float                    bottom_h = 220.0f;
@@ -390,10 +391,11 @@ struct Editor {
     struct PsRun     {};
     struct ProblemClick { int i; };
     struct BottomTab { int t; };
-    struct SplitDrag { float dx; };
-    struct BottomDrag { float dy; };
+    struct SplitDrag { DragTravel t; };
+    struct SplitGrab {};
+    struct BottomDrag { DragTravel t; };
     struct BarPress  { float y; };
-    struct BarDrag   { float dy; };
+    struct BarDrag   { DragTravel t; };
     struct CompKey   { KeyEvent k; };
     struct CompClick { int i; };
     struct Mouse     { Vec2 p; };
@@ -404,7 +406,7 @@ struct Editor {
 
     using Msg = std::variant<Do, EdKey, Typed, Press, Drag, Click, PressMods, Wheel, Fold, OpenTab, CloseTab,
                              TreeClick, TreeKey, TreeWheel, PickKey, PickClick, PickClose, FindKey, FindPart, PsKey,
-                             PsRun, ProblemClick, BottomTab, SplitDrag, BottomDrag, BarPress, BarDrag, CompKey,
+                             PsRun, ProblemClick, BottomTab, SplitDrag, SplitGrab, BottomDrag, BarPress, BarDrag, CompKey,
                              CompClick, Mouse, ToastClick, Blink, Tick, Quit>;
     using Cmd = mayag::Cmd<Msg, set_title, focus, write_clipboard>;
     using Sub = mayag::Sub<Msg>;
@@ -1049,10 +1051,11 @@ struct Editor {
         return {};
     }
     static Cmd update(Model& m, BottomTab e) { m.bottom_tab = e.t; m.problem_sel = -1; return {}; }
-    static Cmd update(Model& m, SplitDrag e) { m.sidebar_w = std::clamp(m.sidebar_w + e.dx, 160.0f, 520.0f); return {}; }
-    static Cmd update(Model& m, BottomDrag e) { m.bottom_h = std::clamp(m.bottom_h - e.dy, 100.0f, 600.0f); return {}; }
+    static Cmd update(Model& m, SplitGrab) { m.sidebar_at_press = m.sidebar_w; m.bottom_at_press = m.bottom_h; return {}; }
+    static Cmd update(Model& m, SplitDrag e) { m.sidebar_w = std::clamp(m.sidebar_at_press + e.t.x(), 160.0f, 520.0f); return {}; }
+    static Cmd update(Model& m, BottomDrag e) { m.bottom_h = std::clamp(m.bottom_at_press - e.t.y(), 100.0f, 600.0f); return {}; }
     static Cmd update(Model& m, BarPress e) { if (Buffer* b = cur(m)) scrollbar_press(b->ed.scroll, e.y); return {}; }
-    static Cmd update(Model& m, BarDrag e) { if (Buffer* b = cur(m)) scrollbar_drag(b->ed.scroll, e.dy); return {}; }
+    static Cmd update(Model& m, BarDrag e) { if (Buffer* b = cur(m)) scrollbar_drag(b->ed.scroll, e.t); return {}; }
     static Cmd update(Model& m, CompKey e) {
         const int n = static_cast<int>(rank_completions(m).order.size());
         switch (e.k.key) {
@@ -1416,13 +1419,14 @@ struct Editor {
     static std::optional<Msg> on(const Model&, const Pressed& p) {
         if (is(p, "editor")) return Press{p.local};
         if (is(p, "editor", part_bar)) return BarPress{p.local.y};
+        if (is(p, "split-side") || is(p, "split-bottom")) return SplitGrab{};
         return std::nullopt;
     }
     static std::optional<Msg> on(const Model&, const Dragged& d) {
         if (is(d, "editor")) return Drag{d.local};
-        if (is(d, "editor", part_bar)) return BarDrag{d.delta.y};
-        if (is(d, "split-side")) return SplitDrag{d.delta.x};
-        if (is(d, "split-bottom")) return BottomDrag{d.delta.y};
+        if (is(d, "editor", part_bar)) return BarDrag{d.travel};
+        if (is(d, "split-side")) return SplitDrag{d.travel};
+        if (is(d, "split-bottom")) return BottomDrag{d.travel};
         return std::nullopt;
     }
     static std::optional<Msg> on(const Model& m, const Clicked& c) {

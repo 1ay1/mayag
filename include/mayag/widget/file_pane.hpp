@@ -687,7 +687,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
                      | on_press([on_resize](const Pressed&) { return on_resize(FilePaneResize{.begin = true}); })
                      | on_release([on_resize](const Released&) { return on_resize(FilePaneResize{.end = true}); })
                      | on_drag([on_resize, left = p.left](const Dragged& dr) {
-                           return on_resize(FilePaneResize{.grow = left ? dr.total.x : -dr.total.x});
+                           return on_resize(FilePaneResize{.grow = left ? dr.travel.x() : -dr.travel.x()});
                        })).build();
         return (z(std::move(body), node(std::move(grip)) | absolute(p.left ? p.width - 5.0f : 0.0f, 0.0f) | height(pct(100)))
                 | width(p.width) | height(pct(100))).build();

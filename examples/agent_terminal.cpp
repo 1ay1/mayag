@@ -65,6 +65,7 @@ struct AgentTerminal {
         int    tab = 0;
         int    workspace = 0;
         float  ratio = 0.5f;
+        float  ratio_at_press = 0.5f;
         std::vector<AttentionItem> queue;
         std::vector<AgentNote>     notes;
         bool   overview = false;
@@ -90,11 +91,11 @@ struct AgentTerminal {
     struct Typed { std::string s; };    struct Key_ { KeyEvent k; };       struct Hosts {};
     struct HostPick { int k; };         struct HostKey { int a; };         struct Changes {};
     struct ChangeFile { int i; };       struct ChangeAction { int k; };    struct Reconnect {};
-    struct Fwd { int i; int k; };       struct SplitDrag { float dx; };    struct Close {};
+    struct Fwd { int i; int k; };       struct SplitDrag { DragTravel t; }; struct SplitGrab {};    struct Close {};
     struct Tick { double dt; };         struct Quit {};
 
     using Msg = std::variant<Tab, Workspace, Jump, Dismiss, Note, Overview, OverviewPick, Prompt, PromptSend, Typed, Key_,
-                             Hosts, HostPick, HostKey, Changes, ChangeFile, ChangeAction, Reconnect, Fwd, SplitDrag, Close, Tick, Quit>;
+                             Hosts, HostPick, HostKey, Changes, ChangeFile, ChangeAction, Reconnect, Fwd, SplitDrag, SplitGrab, Close, Tick, Quit>;
     using Cmd = mayag::Cmd<Msg, set_title>;
     using Sub = mayag::Sub<Msg>;
 
@@ -202,7 +203,8 @@ struct AgentTerminal {
         if (e.k == 2) m.fwd.erase(m.fwd.begin() + e.i);
         return {};
     }
-    static Cmd update(Model& m, SplitDrag e) { m.ratio = std::clamp(m.ratio + e.dx / 1000.0f, 0.2f, 0.8f); return {}; }
+    static Cmd update(Model& m, SplitGrab) { m.ratio_at_press = m.ratio; return {}; }
+    static Cmd update(Model& m, SplitDrag e) { m.ratio = std::clamp(m.ratio_at_press + e.t.x() / 1000.0f, 0.2f, 0.8f); return {}; }
     static Cmd update(Model& m, Close) { m.overview = m.prompt = m.hosts = m.changes = false; return {}; }
     static Cmd update(Model& m, Tick e) { m.time += e.dt; return {}; }
     static Cmd update(Model&, Quit) { return Cmd::quit(); }
@@ -414,8 +416,12 @@ struct AgentTerminal {
             for (std::size_t k = 0; k < 3; ++k) if (is(c, "fwd", i * 4 + k)) return Fwd{static_cast<int>(i), static_cast<int>(k)};
         return std::nullopt;
     }
+    static std::optional<Msg> on(const Model&, const Pressed& p) {
+        if (is(p, "split", part_bar)) return SplitGrab{};
+        return std::nullopt;
+    }
     static std::optional<Msg> on(const Model&, const Dragged& d) {
-        if (is(d, "split", part_bar)) return SplitDrag{d.delta.x};
+        if (is(d, "split", part_bar)) return SplitDrag{d.travel};
         return std::nullopt;
     }
     static std::optional<Msg> on(const Model& m, const Left& l) {

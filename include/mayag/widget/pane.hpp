@@ -11,7 +11,8 @@
 // footer that offers to restart.
 //
 // Interaction:
-//   Dragged on part_id(id, part_bar)       -> ratio += delta / extent
+//   Pressed on part_id(id, part_bar)       -> ratio_at_press = ratio
+//   Dragged on part_id(id, part_bar)       -> ratio = ratio_at_press + travel / extent
 //   Clicked on part_id(id, part_bar) x2    -> ratio = 0.5
 //   pane_frame: Pressed on node_id(id)      -> focus this pane
 //               Clicked on part_id(id, part_inc) -> restart (when exited)
@@ -77,7 +78,8 @@ template <ControlContext C>
 /// whole interaction can travel with it instead of living in on(Dragged):
 ///
 ///     pane_split(c, "s", axis, r, a, b,
-///                on_drag([](const Dragged& d) { return Nudge{d.delta.x}; }),
+///                on_press([](const Pressed&) { return Grab{}; }),
+///                on_drag([](const Dragged& d) { return Follow{d.travel}; }),
 ///                on_click([](const Clicked& k) { return k.count == 2 ? Even{} : ...; }))
 template <ControlContext C, Responder... Mods>
 [[nodiscard]] inline Node pane_split(const C& c, std::string_view id, Axis axis, float ratio, Node first, Node second,

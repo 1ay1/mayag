@@ -194,7 +194,7 @@ struct Studio {
     struct Preset { int i; }; struct Remix {}; struct Knob { int k; float f; }; struct Dark {};
     struct Nav { int i; }; struct Track { int i; }; struct Play {}; struct Prev {}; struct Next {};
     struct Shuffle {}; struct Seek { float f; }; struct Tick { double dt; };
-    struct Scroll { float dy; }; struct BarPress { float y; }; struct BarDrag { float dy; }; struct Quit {};
+    struct Scroll { float dy; }; struct BarPress { float y; }; struct BarDrag   { DragTravel t; }; struct Quit {};
     using Msg = std::variant<Preset, Remix, Knob, Dark, Nav, Track, Play, Prev, Next, Shuffle, Seek, Tick,
                              Scroll, BarPress, BarDrag, Quit>;
     using Cmd = mayag::Cmd<Msg, set_title>;
@@ -271,7 +271,7 @@ struct Studio {
     }
     static Cmd update(Model& m, Scroll e)   { m.page.scroll_by({0.0f, e.dy}); return {}; }
     static Cmd update(Model& m, BarPress e) { scrollbar_press(m.page, e.y); return {}; }
-    static Cmd update(Model& m, BarDrag e)  { scrollbar_drag(m.page, e.dy); return {}; }
+    static Cmd update(Model& m, BarDrag e)  { scrollbar_drag(m.page, e.t); return {}; }
     static Cmd update(Model&, Quit)         { return Cmd::quit(); }
 
     /// Frames only while music plays: a paused studio idles at 0% CPU, and a
@@ -542,7 +542,7 @@ struct Studio {
         return slide(p.node, p.local.x);
     }
     static std::optional<Msg> on(const Model&, const Dragged& d) {
-        if (is(d, "main", part_bar)) return BarDrag{d.delta.y};
+        if (is(d, "main", part_bar)) return BarDrag{d.travel};
         return slide(d.node, d.local.x);
     }
     static std::optional<Msg> on(const Model&, const Scrolled& s) {

@@ -9,8 +9,7 @@
 //
 // Interaction:
 //   Pressed on node_id(id) -> m.sidebar_at_press = m.sidebar_w
-//   Dragged on node_id(id) -> m.sidebar_w = clamp(m.sidebar_at_press + d.total.x, lo, hi)
-//   (by position from the press: summing d.delta drifts off the pointer at a clamp)
+//   Dragged on node_id(id) -> m.sidebar_w = clamp(m.sidebar_at_press + d.travel.x(), lo, hi)
 //   Clicked with count 2   -> reset to the default width
 
 #include "control.hpp"

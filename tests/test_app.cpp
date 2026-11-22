@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <optional>
 #include <stdexcept>
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <variant>
 #include <vector>
@@ -45,12 +47,13 @@ struct TestApp {
         bool        animating = false;
         double      phase    = 0.0;
         float       slider   = 0.5f;
+        DragTravel  travel{};   ///< the last drag's travel, as the host reported it
         bool        loaded   = false;
         int         hovers   = 0;
     };
 
     struct Inc {}; struct Dec {}; struct Animate {}; struct Tick { double dt; };
-    struct Typed { std::string s; }; struct Slide { float v; };
+    struct Typed { std::string s; }; struct Slide { float v; DragTravel t; };
     struct Load {}; struct Loaded { int value; };
     struct Hovered {}; struct Quit {};
 
@@ -69,7 +72,7 @@ struct TestApp {
         return {};
     }
     static Cmd update(Model& m, const Typed& t) { m.text += t.s; return {}; }
-    static Cmd update(Model& m, Slide s) { m.slider = s.v; return {}; }
+    static Cmd update(Model& m, Slide s) { m.slider = s.v; m.travel = s.t; return {}; }
     static Cmd update(Model&, Load) {
         return Cmd::perform<Loaded>([] { return 42; });
     }
@@ -101,7 +104,7 @@ struct TestApp {
     }
     static std::optional<Msg> on(const Model&, const Dragged& d) {
         if (d.node != node_id("slider")) return std::nullopt;
-        return Slide{num::clamp(d.local.x / 200.0f, 0.0f, 1.0f)};
+        return Slide{num::clamp(d.local.x / 200.0f, 0.0f, 1.0f), d.travel};
     }
     static std::optional<Msg> on(const Model&, const TextEvent& t) { return Typed{t.text}; }
     static std::optional<Msg> on(const Model&, const KeyEvent& k) {
@@ -339,6 +342,29 @@ void test_drag_capture() {
         rt.window().move_to({slider->left() + 5.0f, slider->center().y});
         rt.tick();
         check(rt.model().slider == held, "release ends the capture");
+
+        // A drag reports TRAVEL from the press, exact however the moves are
+        // batched and whatever deltas the platform attached to them: many
+        // moves per frame (coalesced to one by the host), wrong deltas,
+        // zero deltas. A control summing per-move deltas drifted off the
+        // pointer (313 px in hand's pane test); there is no delta to sum.
+        rt.window().push(MouseMove{start, {}, {}});
+        rt.window().push(MouseDown{start, MouseButton::left, {}, 1});
+        rt.tick();
+        float worst = 0.0f;
+        Vec2 p = start;
+        for (int f = 0; f < 30; ++f) {
+            for (int k = 0; k < 7; ++k) {   // 7 moves a frame, junk deltas
+                p = p + Vec2{(f % 10 < 5 ? 9.0f : -6.0f), (k % 2 ? 3.0f : -2.0f)};
+                rt.window().push(MouseMove{p, Vec2{k == 3 ? 500.0f : 0.0f, -1.0f}, {}});
+            }
+            rt.tick();
+            const Vec2 want = p - start, got = rt.model().travel.v;
+            worst = std::max(worst, std::max(std::fabs(got.x - want.x), std::fabs(got.y - want.y)));
+        }
+        rt.window().push(MouseUp{p, MouseButton::left, {}});
+        rt.tick();
+        check(worst < 1e-3f, "a drag's travel is exact: coalesced moves and junk deltas change nothing");
     });
 }
 

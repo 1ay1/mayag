@@ -206,7 +206,7 @@ struct Stylebook {
     struct ThemeToggle {}; struct PickLook { int i; }; struct SetVolume { float f; }; struct Wifi {};
     struct Click {}; struct SelectFile { int i; }; struct Flip { int i; };
     struct Faq { int i; }; struct Edit {}; struct Save {}; struct AddToast {}; struct ClearToasts {};
-    struct Scroll { float dy; }; struct BarPress { float y; }; struct BarDrag { float dy; };
+    struct Scroll { float dy; }; struct BarPress { float y; }; struct BarDrag   { DragTravel t; };
     struct Quit {};
     using Msg = std::variant<ThemeToggle, PickLook, SetVolume, Wifi, Click, SelectFile, Flip, Faq, Edit, Save, AddToast,
                              ClearToasts, Scroll, BarPress, BarDrag, Quit>;
@@ -240,7 +240,7 @@ struct Stylebook {
     static Cmd update(Model& m, ClearToasts) { m.toasts.clear(); return {}; }
     static Cmd update(Model& m, Scroll e)    { m.page.scroll_by({0.0f, e.dy}); return {}; }
     static Cmd update(Model& m, BarPress e)  { scrollbar_press(m.page, e.y); return {}; }
-    static Cmd update(Model& m, BarDrag e)   { scrollbar_drag(m.page, e.dy); return {}; }
+    static Cmd update(Model& m, BarDrag e)   { scrollbar_drag(m.page, e.t); return {}; }
     static Cmd update(Model&, Quit)          { return Cmd::quit(); }
 
     /// The theme is application state. Every var:: token follows it.
@@ -469,7 +469,7 @@ struct Stylebook {
         return std::nullopt;
     }
     static std::optional<Msg> on(const Model&, const Dragged& d) {
-        if (is(d, "page", part_bar)) return BarDrag{d.delta.y};
+        if (is(d, "page", part_bar)) return BarDrag{d.travel};
         return std::nullopt;
     }
     static std::optional<Msg> on(const Model&, const KeyEvent& k) {

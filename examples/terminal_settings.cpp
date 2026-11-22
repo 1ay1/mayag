@@ -298,7 +298,7 @@ struct TerminalSettings {
     struct Undo {}; struct Redo {}; struct Save {}; struct Revert {}; struct Defaults {};
     struct ScrollBy   { float dy; };
     struct BarPress   { float y; };
-    struct BarDrag    { float dy; };
+    struct BarDrag   { DragTravel t; };
     struct Tick       { double dt; };
     struct Quit       {};
 
@@ -823,7 +823,7 @@ struct TerminalSettings {
     static Cmd update(Model& m, Defaults) { settle(m); return run_command(m, "reset"); }
     static Cmd update(Model& m, ScrollBy e) { m.list.scroll_by(Vec2{0.0f, e.dy}); return {}; }
     static Cmd update(Model& m, BarPress e) { scrollbar_press(m.list, e.y); return {}; }
-    static Cmd update(Model& m, BarDrag e) { scrollbar_drag(m.list, e.dy); return {}; }
+    static Cmd update(Model& m, BarDrag e) { scrollbar_drag(m.list, e.t); return {}; }
     static Cmd update(Model&, Tick) { return {}; }
     static Cmd update(Model&, Quit) { return Cmd::quit(); }
 
@@ -1298,7 +1298,7 @@ struct TerminalSettings {
         return std::nullopt;
     }
     static std::optional<Msg> on(const Model& m, const Dragged& d) {
-        if (is(d, "list", part_bar)) return BarDrag{d.delta.y};
+        if (is(d, "list", part_bar)) return BarDrag{d.travel};
         if (const int si = slider_spec(m, d.node); si >= 0) return SetFrac{si, d.local.x / kSlider};
         return std::nullopt;
     }

@@ -105,6 +105,7 @@ struct TerminalWidgets {
         int   active_tab = 0;
         int   focus = 1;               // 0 left pane, 1 right pane
         float ratio = 0.42f;
+        float  ratio_at_press = 0.5f;
         int   selected_block = 1;
         bool  collapsed0 = false;
         bool  search = false;
@@ -123,7 +124,7 @@ struct TerminalWidgets {
     };
 
     struct TabClick { int i; };   struct TabClose { int i; };   struct NewTab {};
-    struct Focus { int p; };      struct SplitDrag { float dx; };
+    struct Focus { int p; };      struct SplitDrag { DragTravel t; }; struct SplitGrab {};
     struct BlockClick { int i; }; struct BlockAction { int i; int a; };
     struct OpenSearch {};         struct SearchKey { KeyEvent k; };  struct SearchPart { std::size_t p; };
     struct Typed { std::string s; };
@@ -132,7 +133,7 @@ struct TerminalWidgets {
     struct Hints {};              struct HintKey { std::string s; };
     struct Resize {};             struct Mouse { Vec2 p; };          struct Quit {};
 
-    using Msg = std::variant<TabClick, TabClose, NewTab, Focus, SplitDrag, BlockClick, BlockAction, OpenSearch,
+    using Msg = std::variant<TabClick, TabClose, NewTab, Focus, SplitDrag, SplitGrab, BlockClick, BlockAction, OpenSearch,
                              SearchKey, SearchPart, Typed, Menu, MenuPick, MenuClose, Paste, PasteAnswer, Hints,
                              HintKey, Resize, Mouse, Quit>;
     using Cmd = mayag::Cmd<Msg, set_title>;
@@ -210,7 +211,8 @@ struct TerminalWidgets {
     static Cmd update(Model& m, TabClose) { ++m.closed_tabs; return {}; }
     static Cmd update(Model& m, NewTab) { ++m.new_tabs; return {}; }
     static Cmd update(Model& m, Focus e) { m.focus = e.p; return {}; }
-    static Cmd update(Model& m, SplitDrag e) { m.ratio = std::clamp(m.ratio + e.dx / 1300.0f, 0.15f, 0.85f); return {}; }
+    static Cmd update(Model& m, SplitGrab) { m.ratio_at_press = m.ratio; return {}; }
+    static Cmd update(Model& m, SplitDrag e) { m.ratio = std::clamp(m.ratio_at_press + e.t.x() / 1300.0f, 0.15f, 0.85f); return {}; }
     static Cmd update(Model& m, BlockClick e) { m.selected_block = e.i; m.focus = 0; return {}; }
     static Cmd update(Model& m, BlockAction e) {
         m.selected_block = e.i;
@@ -375,8 +377,12 @@ struct TerminalWidgets {
         if (is(c, "term") || is(c, "pane-r")) return Focus{1};
         return std::nullopt;
     }
+    static std::optional<Msg> on(const Model&, const Pressed& p) {
+        if (is(p, "split", part_bar)) return SplitGrab{};
+        return std::nullopt;
+    }
     static std::optional<Msg> on(const Model&, const Dragged& d) {
-        if (is(d, "split", part_bar)) return SplitDrag{d.delta.x};
+        if (is(d, "split", part_bar)) return SplitDrag{d.travel};
         return std::nullopt;
     }
     static std::optional<Msg> on(const Model&, const Left& l) {
