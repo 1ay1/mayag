@@ -1770,6 +1770,12 @@ class window_host {
             startup::mark("first frame presented");
         }
         latency_.record(frame);
+        // MAYAG_SLOW_MS=N: every frame whose CPU work took over N ms, by stage.
+        static const double slow_ms = [] { const char* e = std::getenv("MAYAG_SLOW_MS"); return e ? std::atof(e) : 0.0; }();
+        if (slow_ms > 0.0 && frame.cpu_ms() > slow_ms)
+            std::fprintf(stderr, "mayag: slow frame %.2f ms: input %.2f update %.2f view %.2f cascade %.2f layout %.2f paint %.2f render %.2f\n",
+                         frame.cpu_ms(), frame.input_ms, frame.update_ms, frame.view_ms, frame.cascade_ms, frame.layout_ms,
+                         frame.paint_ms, frame.render_ms);
         if (framestats_) report_frames();
         // Frames nobody asked for. Frames the user is driving (moving the
         // pointer over a live view) don't count.

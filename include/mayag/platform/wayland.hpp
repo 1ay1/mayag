@@ -812,6 +812,12 @@ class WaylandWindow {
                 return;
             }
             request_feedback();   // before the commit vkQueuePresentKHR makes
+            {
+                static const bool commits = [] { const char* e = std::getenv("MAYAG_PHOTON"); return e && *e == '3'; }();
+                if (commits)
+                    std::fprintf(stderr, "commit %.3f%s\n", wldetail::monotonic_now(),
+                                 unshown_input_ >= 0.0 ? ("  +" + std::to_string((wldetail::monotonic_now() - unshown_input_) * 1e3) + " ms after input").c_str() : "");
+            }
             gpu_->submit(dl, clear);
             last_list_.assign_from(dl); last_clear_ = clear; last_had_frame_ = true;
             // Still ask for a frame callback, same as the shm path.
@@ -1778,7 +1784,7 @@ class WaylandWindow {
     static void on_fb_presented(void* data, wl::proxy*, std::uint32_t tv_sec_hi,
                                 std::uint32_t tv_sec_lo, std::uint32_t tv_nsec,
                                 std::uint32_t refresh_ns, std::uint32_t, std::uint32_t,
-                                std::uint32_t) {
+                                std::uint32_t pres_flags) {
         auto* fb = static_cast<Feedback*>(data);
         Impl* w = fb->w;
         const double secs = static_cast<double>((std::uint64_t{tv_sec_hi} << 32) | tv_sec_lo) +
@@ -1786,6 +1792,8 @@ class WaylandWindow {
         // CLOCK_MONOTONIC is the default presentation clock on Linux; a
         // compositor using another one says so in clock_id, which we read.
         if (w->pres_clock_monotonic_) {
+            static const bool all = [] { const char* e = std::getenv("MAYAG_PHOTON"); return e && *e == '3'; }();
+            if (all) std::fprintf(stderr, "present %.3f  commit %.3f  +%.2f ms\n", secs, fb->commit_at, (secs - fb->commit_at) * 1e3);
             w->vblank_s_ = secs;
             ++w->vblank_seq_;
             if (refresh_ns > 0) w->period_ns_ = refresh_ns;
@@ -1793,11 +1801,13 @@ class WaylandWindow {
                 w->shown_input_ = fb->input_at;
                 if (w->unshown_input_ == fb->input_at) w->unshown_input_ = -1.0;
                 w->record_photon((secs - fb->input_at) * 1000.0);
-                static const bool trace = [] { const char* e = std::getenv("MAYAG_PHOTON"); return e && *e == '2'; }();
+                static const bool trace = [] { const char* e = std::getenv("MAYAG_PHOTON"); return e && (*e == '2' || *e == '3'); }();
                 if (trace)
-                    std::fprintf(stderr, "photon %.3f  to-us %6.2f  in-us %6.2f  compositor %6.2f  = %6.2f ms  (period %.2f)\n", fb->input_at,
+                    std::fprintf(stderr, "photon %.3f  to-us %6.2f  in-us %6.2f  compositor %6.2f  = %6.2f ms  (period %.2f, flags %s%s%s%s)\n", fb->input_at,
                                  (fb->read_at - fb->input_at) * 1e3, (fb->commit_at - fb->read_at) * 1e3,
-                                 (secs - fb->commit_at) * 1e3, (secs - fb->input_at) * 1e3, w->period_ns_ / 1e6);
+                                 (secs - fb->commit_at) * 1e3, (secs - fb->input_at) * 1e3, w->period_ns_ / 1e6,
+                                 (pres_flags & 1u) ? "v" : "-", (pres_flags & 2u) ? "c" : "-", (pres_flags & 4u) ? "h" : "-",
+                                 (pres_flags & 8u) ? "z" : "-");
                 // where it went: to us, through us, through the compositor
                 w->stage_sum_[0] += (fb->read_at - fb->input_at) * 1000.0;
                 w->stage_sum_[1] += (fb->commit_at - fb->read_at) * 1000.0;

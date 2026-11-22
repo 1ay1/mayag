@@ -213,12 +213,17 @@ class VulkanDevice {
             full = true;
         }
         if (full || atlas.coverage_dirty) {
+            const auto ta = std::chrono::steady_clock::now();
             const std::size_t bytes = static_cast<std::size_t>(w) * h;
             ensure_staging(bytes);
             std::memcpy(staging_ptr_, atlas.coverage, bytes);
             upload_plane(atlas_image_, w, h, /*channels=*/1);
             atlas.ack_coverage();
             content_changed_ = true;
+            static const bool trace = [] { const char* e = std::getenv("MAYAG_GPU_TRACE"); return e && *e && *e != '0'; }();
+            if (trace)
+                std::fprintf(stderr, "gpu: atlas upload %dx%d%s %.2f ms\n", w, h, full ? " (new image)" : "",
+                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count());
         }
 
         // The colour plane (emoji) is uploaded the same way, into its own RGBA
@@ -2205,6 +2210,9 @@ class VulkanDevice {
                     if (m == vk::VK_PRESENT_MODE_IMMEDIATE_KHR) present_mode = m;
         }
         present_mode_ = present_mode;
+        if (const char* e = std::getenv("MAYAG_GPU_TRACE"); e && *e && *e != '0')
+            std::fprintf(stderr, "gpu: swapchain %ux%u, %u images (min %u max %u), present mode %d\n", swap_extent_.width,
+                         swap_extent_.height, images, caps.minImageCount, caps.maxImageCount, present_mode);
 
         vk::VkSwapchainCreateInfoKHR ci{};
         ci.sType = vk::VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
