@@ -1002,7 +1002,21 @@ class window_host {
     // ── input → gestures ────────────────────────────────────────────────
 
     template <class Cx>
-    void handle_event(Cx& cx, const Event& ev) {
+    void handle_event(Cx& cx, const Event& ev_in) {
+        // A press names the control under it (MouseDown::control), found on
+        // the layer that will take it: the topmost overlay there, else the
+        // main tree. The program reads it instead of remembering rects.
+        Event stamped;
+        const Event* evp = &ev_in;
+        if (const auto* md = std::get_if<MouseDown>(&ev_in); md && md->control == 0) {
+            MouseDown d = *md;
+            const Node* layer = &tree_;
+            if (const Overlay* over = overlays_.hit(d.position)) layer = &over->content;
+            d.control = Interaction::identify_control(*layer, d.position);
+            stamped = d;
+            evp = &stamped;
+        }
+        const Event& ev = *evp;
         const bool from_user = !std::holds_alternative<ResizeEvent>(ev) &&
                                !std::holds_alternative<FocusEvent>(ev) &&
                                !std::holds_alternative<CloseRequest>(ev) &&

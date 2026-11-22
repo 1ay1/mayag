@@ -114,7 +114,7 @@ struct read_clipboard {
 /// its effects. So update stays a pure function of (Model, Msg), and the
 /// world sees the effects in exactly the order they were asked for.
 ///
-///     using Cmd = mayag::Cmd<Msg, mayag::run>;
+///     using Cmd = mayag::Cmd<Msg, mayag::world>;
 ///     return Cmd::run([](std::string path, Config c) { save(path, c); }, path, m.cfg);
 ///     return Cmd::run([](std::string p) -> Msg { return Loaded{read(p)}; }, path);
 ///
@@ -123,7 +123,7 @@ struct read_clipboard {
 /// may have moved on by the time it runs. It returns void, a Msg, or
 /// std::optional<Msg> (the answer is folded next, like any message).
 template <class Msg> struct Run { std::function<std::optional<Msg>()> go; };
-struct run {
+struct world {   // the descriptor; mayag::run<P>() is the entry point
     static constexpr std::string_view name = "run";
     template <class Msg> using type = Run<Msg>;
     template <class F, class M>
@@ -146,20 +146,33 @@ struct run {
         template <class F, class... A>
             requires std::is_empty_v<F> && std::default_initializable<F> && std::invocable<const F&, A...>
         [[nodiscard]] static Self run(F, A... args) {
+            return make<F>(F{}, std::move(args)...);
+        }
+        /// A named function as the body (`Cmd::run(fx::save, path, cfg)`): a
+        /// function pointer captures nothing either, so the rule holds.
+        template <class R, class... P, class... A>
+            requires std::invocable<R (*)(P...), A...>
+        [[nodiscard]] static Self run(R (*f)(P...), A... args) {
+            return make<R (*)(P...)>(f, std::move(args)...);
+        }
+
+      private:
+        template <class F, class... A>
+        static Self make(F f, A... args) {
             static_assert((jaal::Sendable<A> && ...),
                           "mayag::run: an argument is not Sendable -- pass owned values (the body must not "
                           "reach the model or anything else update can see later)");
             using R = std::invoke_result_t<const F&, A...>;
             static_assert(std::is_void_v<R> || std::convertible_to<R, Msg> || std::same_as<R, std::optional<Msg>>,
                           "mayag::run: the body returns void, a Msg, or std::optional<Msg>");
-            return Self(Run<Msg>{[... a = std::move(args)]() mutable -> std::optional<Msg> {
+            return Self(Run<Msg>{[f, ... a = std::move(args)]() mutable -> std::optional<Msg> {
                 if constexpr (std::is_void_v<R>) {
-                    F{}(std::move(a)...);
+                    f(std::move(a)...);
                     return std::nullopt;
                 } else if constexpr (std::same_as<R, std::optional<Msg>>) {
-                    return F{}(std::move(a)...);
+                    return f(std::move(a)...);
                 } else {
-                    return Msg(F{}(std::move(a)...));
+                    return Msg(f(std::move(a)...));
                 }
             }});
         }
@@ -169,6 +182,6 @@ struct run {
 /// Every window effect, for a program that wants the whole set.
 template <class Msg>
 using window_cmd = jaal::Cmd<Msg, set_title, write_clipboard, set_fullscreen, set_cursor,
-                             focus, upload_image, release_image, patch_image, read_clipboard, window_action, run>;
+                             focus, upload_image, release_image, patch_image, read_clipboard, window_action, world>;
 
 }  // namespace mayag

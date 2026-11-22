@@ -146,7 +146,7 @@ template <ControlContext C>
     if (y <= -chip_h || y >= b.size.y) return Node{};
     if (placed) *placed = Rect{Vec2{x, y}, Vec2{chip_w, chip_h}};
     return (h(std::move(parts)) | align(Align::center) | height(chip_h)
-            | bg(mix(paper, ink, 0.07f)) | border(1.0f, mix(paper, t.accent, 0.55f)) | absolute(x, y)).build();
+            | bg(mix(paper, ink, 0.07f)) | border(1.0f, mix(paper, t.accent, 0.55f)) | absolute(x, y) | id_of(base)).build();
 }
 
 /// Hint mode's status line, bottom-left: what can be picked, what the keys do.

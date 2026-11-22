@@ -187,6 +187,14 @@ using Unlocked = jaal::unlocked;
 template <class T>
 using CoOwned = jaal::co_owned<T>;
 
+/// The clock a program reads time from. Declare it and the runtime passes
+/// the step's time to update() -- `using Clock = mayag::SteadyClock;` and
+/// `static Cmd update(Model&, Msg, SteadyClock::time_point now)` -- so a
+/// reducer never reads a clock itself, and every message one step folds
+/// agrees on when "now" was. (In run_headless the same timeline is driven
+/// by the test.)
+using SteadyClock = jaal::platform::steady_clock;
+
 // Sendable / Shareable / Sync live in core/sync.hpp (lower layers state
 // their own proofs with them).
 
@@ -270,6 +278,13 @@ inline constexpr bool jaal::loop_only<mayag::Edit<Model>> = true;
 /// The strongest claim of the three: say beside it why it holds.
 #define MAYAG_SYNC(...) \
     template <> inline constexpr bool jaal::sync_opt_in<__VA_ARGS__> = true
+/// Route a whole message group to ONE `update(Model&, Group)` instead of one
+/// per leaf: the program's own seam, e.g. a root that stamps the step time
+/// into the model and then dispatches. A design decision, so it is said by
+/// name, never inferred from how an overload happens to be written.
+///     MAYAG_HANDLED_AS_GROUP(app::Msg);
+#define MAYAG_HANDLED_AS_GROUP(...) \
+    template <> inline constexpr bool jaal::handled_as_group<__VA_ARGS__> = true
 
 template <>
 struct std::hash<mayag::fx::on_frame::key_type> {

@@ -143,6 +143,11 @@ struct MouseDown {
     /// uses the time it handles the event -- which a busy frame delays, so
     /// a backend that has the real timestamp should always pass it.
     double      time = -1.0;
+    /// The control under the press (its node id; 0 = none), filled in by the
+    /// runtime before the program sees the event -- so on(MouseDown) can tell
+    /// "a click on a chip" from "a click on the canvas under it" from the
+    /// tree it already drew, never from rects the view stashed in the model.
+    std::uint64_t control = 0;
     friend constexpr bool operator==(const MouseDown&, const MouseDown&) = default;
 };
 
