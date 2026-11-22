@@ -399,6 +399,17 @@ int main() {
             // same place with exactly the same colour, and differ by one
             // step on the final edge pixel.
             }, 200, 92},
+            // An open arc (the icons' eye, refresh, link, bell, power). Probed
+            // at the arc's CENTRE, which must stay background: an arc drawn
+            // as a filled disc there is the bug that hid icons on the Mac.
+            {"arc (centre empty)", [](DrawList& d) {
+                d.fill_rect(Rect{0, 0, 400, 300}, rgb<0x101418>);
+                d.arc(Vec2{200, 150}, 60.0f, 12.0f, 0.635f * 6.2831853f, 0.23f * 6.2831853f, rgb<0xE5E7EB>);
+            }, 200, 150},
+            {"arc (band)", [](DrawList& d) {
+                d.fill_rect(Rect{0, 0, 400, 300}, rgb<0x101418>);
+                d.arc(Vec2{200, 150}, 60.0f, 12.0f, 0.0f, 3.14159265f, rgb<0xE5E7EB>);
+            }, 200, 210},
             {"stroked rounded rect", [](DrawList& d) {
                 d.fill_rect(Rect{0, 0, 400, 300}, rgb<0x101418>);
                 d.stroke_rect(Rect{100, 80, 200, 140}, 6.0f, rgb<0xF59E0B>,

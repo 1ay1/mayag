@@ -60,6 +60,23 @@ inline float mg_segment(float2 p, float2 a, float2 b, float thickness) {
     return length(pa - ba * h) - thickness * 0.5;
 }
 
+// kernel::arc, verbatim: a partial ring with round caps. GLSL's mod (floor),
+// not MSL's fmod -- the angle must wrap to [0, 2pi) for negative values too.
+// It was missing here: KIND_ARC fell through to the rounded-box branch and
+// every arc (the eye, refresh, link, bell and power icons; spinners) drew as
+// a filled disc on the Mac.
+inline float mg_arc(float2 p, float r, float thickness, float start, float sweep) {
+    const float two_pi = 6.28318530718;
+    float ring_d = mg_ring(p, r, thickness);
+    if (sweep >= two_pi) return ring_d;
+    float a = atan2(p.y, p.x) - start;
+    a = a - two_pi * floor(a / two_pi);
+    if (a <= sweep) return ring_d;
+    float2 e0 = r * float2(cos(start), sin(start));
+    float2 e1 = r * float2(cos(start + sweep), sin(start + sweep));
+    return min(length(p - e0), length(p - e1)) - thickness * 0.5;
+}
+
 inline float mg_outline(float d, float w) { return abs(d) - w * 0.5; }
 
 inline float mg_coverage(float d, float px) {
@@ -291,6 +308,9 @@ fragment float4 mayag_fragment(Varyings v [[stage_in]],
         cov = mg_coverage(d, px);
     } else if (v.kind == KIND_RING) {
         cov = mg_coverage(mg_ring(v.local, min(v.half_size.x, v.half_size.y), v.params.x), px);
+    } else if (v.kind == KIND_ARC) {
+        cov = mg_coverage(mg_arc(v.local, min(v.half_size.x, v.half_size.y),
+                                 v.params.x, v.params.y, v.params.z), px);
     } else if (v.kind == KIND_LINE) {
         cov = mg_coverage(mg_segment(v.local + (v.axis.xy + v.axis.zw) * 0.5,
                                      v.axis.xy, v.axis.zw, v.params.x), px);
