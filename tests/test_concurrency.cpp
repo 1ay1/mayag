@@ -18,6 +18,7 @@
 #include <mayag/mayag.hpp>
 #include <mayag/widget/find_bar.hpp>
 #include <mayag/widget/scroll_view.hpp>
+#include <mayag/widget/sheet.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -330,7 +331,7 @@ struct Doppel {
         for (int i = 0; i < 12; ++i)
             rows.push_back((text_owned("row " + std::to_string(i + m.n)) | font(13)).build());
         return (v(text_owned("count " + std::to_string(m.n)) | font(16) | bold,
-                  themed(make_theme(Color<Srgb>{0.9f, 0.3f, 0.5f, 1.0f}, Mode::dark),   // the theme memo
+                  themed(looks::tuned(Seed{}, SheetKnobs{.glow = 0.1f * static_cast<float>(m.n % 4)}),   // process-wide sheets (sheets::tuned)
                          [&] { return (box() | width(px(60)) | height(px(14)) | bg(ctx().theme.accent)).build(); }),
                   scroll_view(ctx(), "list", m.scroll, node(v(std::move(rows))) | height(px(120))))   // the scroll-geometry flag
                 | pad(6) | bg(ctx().theme.surface)).build();
@@ -359,12 +360,18 @@ int main() {
 
     section("two runtimes on two threads");
     {
-        const auto alone = twin_run(40);
-        int differ_a = 0, differ_b = 0;   // each written by one thread
+        // Both threads start COLD (nothing process-wide is warmed by a run
+        // before them), so their first frames race to fill shared caches;
+        // the run alone comes after, as the reference.
+        std::vector<std::vector<std::uint8_t>> got_a, got_b;   // each written by one thread
         {
-            std::jthread a([&] { for (int r = 0; r < 6; ++r) differ_a += twin_run(40) != alone ? 1 : 0; });
-            std::jthread b([&] { for (int r = 0; r < 6; ++r) differ_b += twin_run(40) != alone ? 1 : 0; });
+            std::jthread a([&] { for (int r = 0; r < 6; ++r) got_a.push_back(twin_run(40)); });
+            std::jthread b([&] { for (int r = 0; r < 6; ++r) got_b.push_back(twin_run(40)); });
         }
+        const auto alone = twin_run(40);
+        int differ_a = 0, differ_b = 0;
+        for (const auto& p : got_a) differ_a += p != alone ? 1 : 0;
+        for (const auto& p : got_b) differ_b += p != alone ? 1 : 0;
         check(!alone.empty(), "a runtime renders");
         check(differ_a + differ_b == 0, "two runtimes rendering at once each get exactly their own pixels (" +
                                             std::to_string(differ_a + differ_b) + "/12 differed)");

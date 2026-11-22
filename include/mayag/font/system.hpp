@@ -610,7 +610,7 @@ class Database {
     /// Scan the platform font directories. Cheap enough to call at startup:
     /// a typical macOS system takes well under a second.
     static const Database& instance() {
-        static Database db = [] {
+        static const Database db = [] {
             Database d;
             d.scan();
             return d;

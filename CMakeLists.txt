@@ -681,6 +681,12 @@ if(MAYAG_BUILD_TESTS)
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_include.txt
                          -P ${_MAYAG_PRUNE})
+        # No hidden shared state: a mutable `static` is shared by every
+        # runtime and thread in the process. Const, a Cell, or a listed reason.
+        add_test(NAME mayag_shared_statics
+                 COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/statics.sh
+                         ${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_statics.txt)
         add_test(NAME mayag_examples_banlist
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/examples
                          -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_examples.txt

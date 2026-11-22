@@ -1,0 +1,22 @@
+# Mutable `static` variables in include/mayag/, and why each is safe.
+# A static that is not const is state every runtime and thread in the
+# process shares -- the classic hidden race. Read-only data is `static const`
+# (or constexpr); shared caches are `static Cell<T>`; per-thread frame state
+# is thread_local (banlist-gated). Anything else needs a line here.
+# Checked by tests/lint/statics.sh (ctest mayag_shared_statics); a line that
+# no longer matches anything fails the same test, so the list cannot rot.
+
+# Written only by static initialisers (each backend's `*_registered`), which
+# run before main; read-only after.
+backend/backend.hpp: static std::vector<Registration> r;
+# Same: set once by ot_shapers.hpp's static initialiser, read-only after.
+font/ot_shape.hpp: static ShaperSelector sel = nullptr;
+# The render pool: a magic static (initialisation is thread-safe), and the
+# pool itself is jaal's, safe to call from any thread.
+backend/thread_pool.hpp: static ThreadPool pool{[] {
+# Not built on Linux (Windows / macOS platform code).
+font/dwrite_raster.hpp: static Runtime r = [] {
+platform/macos_loop.hpp: static Class cls = [] {
+platform/macos_window.hpp: static Class cls = [] {
+platform/macos_window.hpp: static bool done = false;
+platform/win32_window.hpp: static Prestart p;

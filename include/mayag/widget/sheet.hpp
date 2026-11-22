@@ -30,6 +30,7 @@
 // is a pointer copy; the cascade applies it like any other class, and it
 // was built exactly once, when the sheet was made.
 
+#include "../core/sync.hpp"
 #include "../app/context.hpp"
 #include "../dsl/dsl.hpp"
 #include "../style/theme.hpp"
@@ -56,6 +57,15 @@ struct Look {
 
     [[nodiscard]] bool empty() const noexcept { return !base && !rules; }
 };
+
+}  // namespace mayag
+// A Look may be shared, frozen, by threads (sheets are process-wide): its
+// Style and Cascade are built whole by look() and its builders, then only ever
+// reached through shared_ptr<const> -- no code holds a non-const alias once
+// a Look is made -- and neither Style nor Cascade has a mutable member.
+template <> inline constexpr bool jaal::frozen_opt_in<mayag::Look>   = true;
+template <> inline constexpr bool jaal::sendable_opt_in<mayag::Look> = true;
+namespace mayag {
 
 namespace look_fields {
 inline constexpr std::uint64_t fill = 1u << 0, stroke = 1u << 1, corners = 1u << 2, shadows = 1u << 3,
@@ -597,14 +607,25 @@ namespace detail {
 }
 
 /// A Sheet built from knobs (see SheetKnobs). Stable address per knob set,
-/// so `Theme::sheet` may point at it. Called from view()/theme(), which jaal
-/// runs on the loop thread only -- so the cache needs no lock (and a widget
-/// holding a raw mutex is exactly what the runtime banlist forbids).
+/// so `Theme::sheet` may point at it.
+///
+/// Process-wide: two runtimes on two threads (a window, a headless test) may
+/// both ask. Each Sheet is built whole, then frozen and kept for the life of
+/// the process (a program uses a handful of knob sets), so its address is
+/// stable and readers never race; the table itself is a Cell.
 [[nodiscard]] inline const Sheet& tuned(const SheetKnobs& k) {
-    static std::unordered_map<std::uint64_t, std::unique_ptr<Sheet>> cache;
-    auto& slot = cache[k.key()];
-    if (!slot) slot = std::make_unique<Sheet>(detail::build_tuned(k));
-    return *slot;
+    using Table = std::unordered_map<std::uint64_t, Frozen<Sheet>>;
+    static Cell<Table> cache;
+    const std::uint64_t key = k.key();
+    if (auto hit = cache.read([](const Table& t, std::uint64_t key) -> std::optional<Frozen<Sheet>> {
+            if (auto it = t.find(key); it != t.end()) return it->second;
+            return std::nullopt;
+        }, key))
+        return **hit;   // kept alive by the table, forever
+    auto made = Frozen<Sheet>::make(detail::build_tuned(k));   // outside the lock: building is slow
+    return *cache.with([](Table& t, std::uint64_t key, Frozen<Sheet> f) {
+        return t.try_emplace(key, std::move(f)).first->second;   // the first one in wins
+    }, key, std::move(made));
 }
 
 [[nodiscard]] inline Sheet detail::build_tuned(const SheetKnobs& k) {

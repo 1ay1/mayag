@@ -244,10 +244,16 @@ class keymap {
 
 }  // namespace mayag
 
-/// An Edit owns its callable outright (cloned on copy), so moving one to
-/// another thread shares nothing: safe as a message.
+/// An Edit owns its callable (cloned on copy), but the callable's CAPTURES are
+/// invisible to jaal: built on a worker, `[&]` could point at the worker's
+/// stack. So an Edit may sit in a Msg and be folded on the loop that made it
+/// (an input gesture, a test), but it is LOOP-ONLY: no Sink carries one --
+/// sending it from a task or stream does not compile, and sending a Msg
+/// that holds one aborts on the spot. A task sends a plain message instead.
 template <class Model>
 inline constexpr bool jaal::sendable_opt_in<mayag::Edit<Model>> = true;
+template <class Model>
+inline constexpr bool jaal::loop_only<mayag::Edit<Model>> = true;
 
 
 // mayag's geometry and colour are plain values (floats, no pointers), so a

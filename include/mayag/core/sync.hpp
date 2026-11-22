@@ -22,6 +22,8 @@
 #include "color.hpp"
 #include "geometry.hpp"
 
+#include <jaal/core/frozen.hpp>
+#include <jaal/core/sendable.hpp>
 #include <jaal/core/shared.hpp>
 #include <jaal/kernel/cell.hpp>
 
@@ -35,13 +37,8 @@ using Frozen = jaal::shared<T>;
 
 }  // namespace mayag
 
-// mayag's geometry and colour are plain values (floats, no pointers), so they
-// may cross threads and be shared frozen. jaal can't see inside a class with
-// constructors, hence the claims -- here, beside the types, so every layer
-// that includes this header sees them.
-template <> inline constexpr bool jaal::sendable_opt_in<mayag::Vec2> = true;
-template <> inline constexpr bool jaal::frozen_opt_in<mayag::Vec2>   = true;
-template <> inline constexpr bool jaal::sendable_opt_in<mayag::Rect> = true;
-template <> inline constexpr bool jaal::frozen_opt_in<mayag::Rect>   = true;
-template <class S> inline constexpr bool jaal::sendable_opt_in<mayag::Color<S>> = true;
-template <class S> inline constexpr bool jaal::frozen_opt_in<mayag::Color<S>>   = true;
+// mayag's geometry and colour need no claim: their fields are public, so jaal
+// proves them Sendable and Frozen field by field. Checked here, at the door:
+static_assert(jaal::Sendable<mayag::Vec2> && jaal::Frozen<mayag::Vec2>);
+static_assert(jaal::Sendable<mayag::Rect> && jaal::Frozen<mayag::Rect>);
+static_assert(jaal::Sendable<mayag::Color<mayag::Srgb>> && jaal::Frozen<mayag::Color<mayag::Srgb>>);

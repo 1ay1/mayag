@@ -21,19 +21,29 @@ scroll-geometry flag, the theme memo, the `Style` free list) is per thread for
 that reason. `tests/test_concurrency.cpp` proves two runtimes rendering at once
 each get exactly their own pixels.
 
-## The four rules
+## The six rules
 
 1. **Messages are Sendable.** Anything crossing threads (a message, a task
    or stream argument) must hold nothing the sender can still reach. That
-   rules out pointers, views and `shared_ptr`. jaal checks it at compile time.
-   A type jaal can't see into opts in with `MAYAG_SENDABLE` / `MAYAG_FROZEN`
-   / `MAYAG_SYNC`, beside the type, with the reason.
+   rules out pointers, views and `shared_ptr`. jaal checks it at compile time
+   by walking every field; a value type with public fields (`Vec2`, `Rect`,
+   `Color`) is proven field by field, with no claim needed. A type jaal can't
+   see into opts in with `MAYAG_SENDABLE` / `MAYAG_FROZEN` / `MAYAG_SYNC`,
+   beside the type, with the reason.
 
-2. **Shared data is frozen or Sync.** A value many threads read is a
+2. **Messages with hidden captures are loop-only.** `mayag::Edit` carries a
+   callable whose captures jaal can't see. It may be built and folded on the
+   loop, but `jaal::loop_only` keeps it off every Sink:
+   - sending one from a task or stream does not compile;
+   - sending a Msg that holds one aborts on the spot.
+   
+   So a `[&]` built on a worker can never reach the model.
+
+3. **Shared data is frozen or Sync.** A value many threads read is a
    `Frozen<T>` (jaal::shared): built once, then const forever, never null.
    An object many threads call is a `CoOwned<T>` of a `Sync` T.
 
-3. **Every lock is a leaf `Cell<T>` or a ranked `Guarded<T, Rank>`.**
+4. **Every lock is a leaf `Cell<T>` or a ranked `Guarded<T, Rank>`.**
    - A `Cell` (jaal::cell) has a captureless body whose arguments and result
      are Sendable, so it can only reach its own value. Taking any other lock
      inside it aborts on the first attempt, every time.
@@ -45,12 +55,20 @@ each get exactly their own pixels.
    (`parallel_for`, `job_result::get_at_root`) abort if the caller holds a
    lock or is waiting on itself.
 
-4. **Raw primitives are banned.** jaal's banlist runs over
+5. **Raw primitives are banned.** jaal's banlist runs over
    `include/mayag` (`mayag_runtime_banlist`). `std::thread`, mutexes,
    atomics, `thread_local`, futures and `const_cast` are allowed only where
    `tests/lint/allow_include.txt` grants them with a reason. On Linux what is
    left is the per-thread frame state above and three `const_cast`s at C APIs.
    `mayag_runtime_allowlist_tight` fails when a grant stops being needed.
+
+6. **No hidden shared state.** A mutable `static` is shared by every runtime
+   and thread in the process. Read-only data is `static const`, a shared
+   cache is a `static Cell<T>` (the sheet cache is one: its sheets are
+   `Frozen`, built whole and kept). Anything else is listed in
+   `tests/lint/allow_statics.txt` with why. `mayag_shared_statics` fails on an
+   unlisted static and on a stale grant. Before this rule, `sheets::tuned`
+   kept an unguarded map that two runtimes raced on (56 TSan reports).
 
 ## Fonts, the one shared subsystem
 
@@ -74,8 +92,9 @@ A `FontStack` is shared by everything that measures and draws text.
 - `mayag_font_threads_tests`: two threads at two weights get exactly their own
   glyphs; renders through forks match a render alone; a second drawer aborts.
 - `mayag_concurrency_tests`: fan-in, ordering, stale stream messages, keyed
-  tasks, shutdown under load, two runtimes at once.
+  tasks, shutdown under load, and two runtimes rendering at once from a COLD
+  start (process-wide caches filled concurrently).
 - `mayag_*_tsan`: both of the above under ThreadSanitizer (on by default on
   Linux, `MAYAG_TSAN_TESTS`); any report fails the test.
-- jaal's own suite: the `cell` and `guarded` rules, each misuse pinned as a
-  compile failure or a deterministic abort.
+- jaal's own suite: the `cell`, `guarded` and `loop_only` rules, each misuse
+  pinned as a compile failure or a deterministic abort.
