@@ -41,7 +41,7 @@ struct Gesture {
     std::uint64_t node_id = 0;
     Vec2          position{};        ///< window coordinates
     Vec2          local{};           ///< relative to the node's frame origin
-    Vec2          delta{};           ///< drag/scroll amount
+    Vec2          delta{};           ///< drag/scroll amount (drag: since the last drag gesture, exact)
     MouseButton   button = MouseButton::left;
 
     /// How many clicks this one completes: 1 single, 2 double, 3 triple, ...
@@ -53,6 +53,8 @@ struct Gesture {
     int           click_count = 1;
     /// Modifiers held at the press (alt-click adds a caret, shift extends).
     Mods          mods{};
+    /// Drag: from the press to here (window px).
+    Vec2          total{};
 
     friend bool operator==(const Gesture&, const Gesture&) = default;
 };
@@ -137,9 +139,16 @@ class Interaction {
                     press_inside_ = identify_control(root, e.position) == pressed_;
                     if (dragged_) {
                         if (const Node* n = root.find(pressed_)) {
-                            out.push_back(Gesture{Gesture::Kind::drag, pressed_, e.position,
-                                                  e.position - n->frame().origin, e.delta,
-                                                  press_button_});
+                            // The motion comes from POSITIONS this layer saw,
+                            // not the event's delta: a host that coalesces
+                            // moves (one per frame) drops the deltas of the
+                            // moves it skips, and a drag summing them fell
+                            // further behind the pointer the faster it went.
+                            Gesture g{Gesture::Kind::drag, pressed_, e.position,
+                                      e.position - n->frame().origin, e.position - drag_last_, press_button_};
+                            g.total = e.position - press_origin_;
+                            out.push_back(g);
+                            drag_last_ = e.position;
                         }
                     }
                     return;
@@ -165,6 +174,7 @@ class Interaction {
                 pressed_           = hit;
                 press_inside_      = true;
                 press_origin_      = e.position;
+                drag_last_         = e.position;
                 press_button_      = e.button;
                 press_mods_        = e.mods;
                 // The multi-click COUNT is decided here, at the press: an
@@ -421,6 +431,7 @@ class Interaction {
     bool          press_inside_ = true;
     Vec2          cursor_{};
     Vec2          press_origin_{};
+    Vec2          drag_last_{};   // where the last drag gesture was (its delta's start)
     MouseButton   press_button_ = MouseButton::left;
     bool          dragged_ = false;
 

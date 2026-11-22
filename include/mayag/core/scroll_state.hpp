@@ -51,6 +51,9 @@ struct ScrollState {
     /// Current offset, in content pixels. Positive means the content has
     /// moved UP/LEFT — i.e. you are looking further down/right.
     Vec2 offset{};
+    /// The offset when the scrollbar was pressed: a thumb drag is this plus
+    /// the pointer's travel since the press, so it stays under the pointer.
+    Vec2 grab_offset{};
 
     // ── measurements, written by layout ─────────────────────────────────
     //

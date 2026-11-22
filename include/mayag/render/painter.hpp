@@ -13,6 +13,7 @@
 #include "../scene/node.hpp"
 #include "draw_list.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <string_view>
 #include <unordered_map>
@@ -119,28 +120,44 @@ class PaintCache {
     [[nodiscard]] std::uint64_t epoch() const noexcept { return atlas_epoch_; }
     struct Stats { std::uint64_t hits = 0, misses = 0; } stats;
 
-    [[nodiscard]] static std::uint64_t key_of(const Node& n, const DrawList& dl, float opacity, const detail::Frame2& xf,
-                                              float dpi) noexcept {
-        std::uint64_t h = n.memo_key();
-        const auto mix = [&](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); h = (h ^ u) * 0x100000001B3ull + 0x9E3779B97F4A7C15ull; };
-        const Rect& fr = n.frame();
-        mix(fr.origin.x); mix(fr.origin.y); mix(fr.size.x); mix(fr.size.y);
-        mix(opacity); mix(xf.sx); mix(xf.sy); mix(xf.tx); mix(xf.ty); mix(dpi);
-        const Rect& c = dl.clip();
-        mix(c.origin.x); mix(c.origin.y); mix(c.size.x); mix(c.size.y);
+    /// Paint `n` (a reused memo root) into `dl`, replaying or recording.
+    ///
+    /// The key is what the instances depend on EXCEPT where the subtree is
+    /// and the clip around it: its size, opacity, scale, text backdrop and
+    /// the sub-pixel phase of its origin (glyphs snap to device pixels).
+    /// Position: a whole-pixel move replays translated. The clip: instances
+    /// drawn under the clip that was current at the subtree's root (rather
+    /// than one of its own) take the CURRENT clip on replay -- valid while
+    /// the recorded content still lies wholly inside it, checked per hit. So
+    /// a terminal row beside a pane being dragged, under a terminal clip that
+    /// changes every frame, still replays.
+    void paint(const Node& n, DrawList& dl, const PaintOptions& opts, float opacity, detail::Frame2 xf) {
+        const Rect at = xf.map(n.frame().scale(opts.dpi_scale));
+        const Vec2 o = at.origin;
+        const Vec2 whole{std::floor(o.x), std::floor(o.y)};
+        std::uint64_t k = n.memo_key();
+        const auto mix = [&](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); k = (k ^ u) * 0x100000001B3ull + 0x9E3779B97F4A7C15ull; };
+        mix(at.size.x); mix(at.size.y); mix(o.x - whole.x); mix(o.y - whole.y);
+        mix(opacity); mix(xf.sx); mix(xf.sy); mix(opts.dpi_scale);
         const auto bd = dl.text_backdrop().colour;
         mix(bd.x); mix(bd.y); mix(bd.z); mix(bd.w);
-        return h;
-    }
-
-    /// Paint `n` (a reused memo root) into `dl`, replaying or recording.
-    void paint(const Node& n, DrawList& dl, const PaintOptions& opts, float opacity, detail::Frame2 xf) {
-        const std::uint64_t k = key_of(n, dl, opacity, xf, opts.dpi_scale);
+        const Rect cur = dl.clip();
+        const bool bounded = cur.size.x < 1e8f && cur.size.y < 1e8f;
         if (auto it = entries_.find(k); it != entries_.end()) {
-            it->second.frame = frame_;
-            dl.replay(it->second.rec);
-            ++stats.hits;
-            return;
+            Entry& e = it->second;
+            const Vec2 d{whole.x - e.origin.x, whole.y - e.origin.y};
+            const Rect moved{Vec2{e.bounds.origin.x + d.x, e.bounds.origin.y + d.y}, e.bounds.size};
+            if (!bounded || e.bounds.size.x <= 0.0f || cur.intersect(moved) == moved) {
+                e.frame = frame_;
+                scratch_ = e.rec;
+                for (auto& r : scratch_) {
+                    translate(r, d);
+                    if (r.outer) r.clip = cur;
+                }
+                dl.replay(scratch_);
+                ++stats.hits;
+                return;
+            }
         }
         ++stats.misses;
         const std::size_t first = dl.size();
@@ -149,14 +166,35 @@ class PaintCache {
         detail::paint_node(n, dl, inner, opacity, xf);
         Entry& e = entries_[k];
         e.frame = frame_;
+        e.origin = whole;
         dl.record_since(first, e.rec);
+        e.bounds = Rect{};
+        bool any = false;
+        for (auto& r : e.rec) {
+            r.outer = r.clip == cur;
+            const Rect ir{Vec2{r.inst.rect.x, r.inst.rect.y}, Vec2{r.inst.rect.z, r.inst.rect.w}};
+            e.bounds = any ? e.bounds.unite(ir) : ir;
+            any = true;
+        }
     }
 
   private:
-    struct Entry { std::vector<DrawList::Recorded> rec; std::uint64_t frame = 0; };
+    /// Move a recorded instance by whole device pixels: its rect, a line's
+    /// endpoints (the only absolute coordinates an Instance holds; gradient
+    /// axes are local), and the clip it was drawn under.
+    static void translate(DrawList::Recorded& r, Vec2 d) noexcept {
+        r.inst.rect.x += d.x; r.inst.rect.y += d.y;
+        if (r.inst.kind == static_cast<std::uint32_t>(ShapeKind::line)) {
+            r.inst.axis.x += d.x; r.inst.axis.y += d.y; r.inst.axis.z += d.x; r.inst.axis.w += d.y;
+        }
+        if (!r.outer && r.clip.size.x < 1e8f && r.clip.size.y < 1e8f) { r.clip.origin.x += d.x; r.clip.origin.y += d.y; }
+    }
+    struct Entry { std::vector<DrawList::Recorded> rec; Vec2 origin{}; Rect bounds{}; std::uint64_t frame = 0; };
     std::unordered_map<std::uint64_t, Entry> entries_;
+    std::vector<DrawList::Recorded> scratch_;
     std::uint64_t frame_ = 0, atlas_epoch_ = ~0ull;
 };
+
 
 namespace detail {
 

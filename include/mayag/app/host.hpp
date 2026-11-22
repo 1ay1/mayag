@@ -263,10 +263,13 @@ class window_host {
         std::size_t last_move = events.size();
         for (std::size_t i = events.size(); i-- > 0;)
             if (std::holds_alternative<MouseMove>(events[i])) { last_move = i; break; }
+        // ...but their MOTION is kept: the delivered move's delta is the sum
+        // of the batch's, so on(MouseMove) sees the whole motion.
+        Vec2 skipped{};
         for (std::size_t i = 0; i < events.size(); ++i) {
-            if (std::holds_alternative<MouseMove>(events[i]) && i != last_move) {
-                ++coalesced_moves_;
-                continue;
+            if (auto* mv = std::get_if<MouseMove>(&events[i])) {
+                if (i != last_move) { skipped = skipped + mv->delta; ++coalesced_moves_; continue; }
+                mv->delta = mv->delta + skipped;
             }
             handle_event(cx, events[i]);
         }
@@ -1235,7 +1238,7 @@ class window_host {
                 case K::release:  (void)emit(cx, Released{g.node_id, g.local, g.button}); break;
                 case K::enter:    (void)emit(cx, Entered{g.node_id}); break;
                 case K::leave:    (void)emit(cx, Left{g.node_id}); break;
-                case K::drag:     (void)emit(cx, Dragged{g.node_id, g.local, g.delta}); break;
+                case K::drag:     (void)emit(cx, Dragged{g.node_id, g.local, g.delta, g.total}); break;
                 case K::scroll:   (void)emit(cx, Scrolled{g.node_id, g.local, g.delta}); break;
             }
         }
@@ -1316,7 +1319,7 @@ class window_host {
                 case K::release:  run(Released{g.node_id, local, g.button}); break;
                 case K::enter:    run(Entered{g.node_id}); break;
                 case K::leave:    run(Left{g.node_id}); break;
-                case K::drag:     run(Dragged{g.node_id, local, g.delta}); break;
+                case K::drag:     run(Dragged{g.node_id, local, g.delta, g.total}); break;
                 case K::scroll:   run(Scrolled{g.node_id, local, g.delta}); break;
             }
             break;

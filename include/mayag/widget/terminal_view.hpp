@@ -332,6 +332,7 @@ template <ControlContext C>
         for (const auto& sp : g.matches) if (sp.row == r) k.add(sp.col).add(sp.len);
         return static_cast<std::uint64_t>(k);
     };
+    const Vec2 row_extent{ox + static_cast<float>(g.cols + 2) * cw + margin, row_y(nrows) + ch};
     std::vector<Node> all_layers = std::move(layers);
     for (int r = 0; r < nrows; ++r) {
         const auto& row = g.lines[static_cast<std::size_t>(r)];
@@ -488,7 +489,9 @@ template <ControlContext C>
             c0 = c1;
         }
         (void)runs;
-        return (z(h_list(std::move(layers))) | width(pct(100)) | height(pct(100)) | absolute(0.0f, 0.0f)).build();
+        // sized by the GRID, not the view: a view resized around an unchanged
+        // grid (a pane edge being dragged) keeps every row's layout and paint
+        return (z(h_list(std::move(layers))) | size(row_extent.x, row_extent.y) | absolute(0.0f, 0.0f)).build();
       }));
     }
     layers = std::move(all_layers);

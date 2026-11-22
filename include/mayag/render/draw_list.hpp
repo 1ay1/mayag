@@ -189,7 +189,7 @@ class DrawList {
 
     /// The instances pushed since `first`, with the texture and blend each
     /// was pushed with (a recording a PaintCache can replay).
-    struct Recorded { Instance inst; Rect clip; std::uint32_t texture; BlendMode blend; };
+    struct Recorded { Instance inst; Rect clip; std::uint32_t texture; BlendMode blend; bool outer = false; };
     void record_since(std::size_t first, std::vector<Recorded>& out) const {
         out.clear();
         for (const Batch& b : batches_) {

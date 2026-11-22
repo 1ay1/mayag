@@ -15,8 +15,8 @@
 // Interaction (all on part_id(id, part_bar)):
 //   Pressed  -> scrollbar_press(m.scroll, p.local.y)   click above/below the
 //               thumb jumps there; pressing ON the thumb grabs it in place
-//   Dragged  -> scrollbar_drag(m.scroll, d.delta.y)    the thumb follows the
-//               pointer 1:1
+//   Dragged  -> scrollbar_drag(m.scroll, d.total.y)    the thumb follows the
+//               pointer 1:1, by position
 // Wheel and trackpad scrolling arrive as Scrolled on node_id(id), as for any
 // `| scroll(state)` node.
 
@@ -45,16 +45,20 @@ inline constexpr float kBarInset = 3.0f;    // gap above/below the thumb's trave
 inline void scrollbar_press(ScrollState& s, float local_y) noexcept {
     const Rect track = detail::bar_track(s);
     const Rect thumb = s.thumb_v(track);
-    if (local_y >= thumb.top() && local_y <= thumb.bottom()) return;   // grabbed: drag moves it
-    s.drag_thumb_v(track.top(), track.height(), local_y);              // jump, centred on the click
+    if (!(local_y >= thumb.top() && local_y <= thumb.bottom()))
+        s.drag_thumb_v(track.top(), track.height(), local_y);          // jump, centred on the click
+    s.grab_offset = s.offset;                                          // ...and drags from here
 }
 
 /// The pointer moved `dy` px while holding the bar.
-inline void scrollbar_drag(ScrollState& s, float dy) noexcept {
+/// `total_dy`: the pointer's travel since the press (Dragged::total.y). The
+/// thumb lands where the pointer is, however many moves were coalesced and
+/// however far past either end the pointer went (no drift on the way back).
+inline void scrollbar_drag(ScrollState& s, float total_dy) noexcept {
     const Rect track = detail::bar_track(s);
     const float span = track.height() - s.thumb_v(track).height();
     if (span <= 0.0f || s.max_offset.y <= 0.0f) return;
-    s.scroll_to(Vec2{s.offset.x, s.offset.y + dy * (s.max_offset.y / span)});
+    s.scroll_to(Vec2{s.offset.x, s.grab_offset.y + total_dy * (s.max_offset.y / span)});
 }
 
 template <ControlContext C, Element Content>
@@ -112,7 +116,7 @@ template <ControlContext C, Element Content, class Bind>
               })
             | on_drag([bind, bar_id](const Dragged& d) -> std::optional<M> {
                   if (d.node != bar_id) return std::nullopt;
-                  return bind([dy = d.delta.y](ScrollState& st) { scrollbar_drag(st, dy); });
+                  return bind([dy = d.total.y](ScrollState& st) { scrollbar_drag(st, dy); });
               })).build();
 }
 

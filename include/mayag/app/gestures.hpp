@@ -35,7 +35,11 @@ struct Pressed  { std::uint64_t node = 0; Vec2 local{}; MouseButton button = Mou
 struct Released { std::uint64_t node = 0; Vec2 local{}; MouseButton button = MouseButton::left; };
 struct Entered  { std::uint64_t node = 0; };
 struct Left     { std::uint64_t node = 0; };
-struct Dragged  { std::uint64_t node = 0; Vec2 local{}; Vec2 delta{}; };
+/// A drag on `node`. `delta`: since the previous Dragged (exact, however
+/// many pointer moves were coalesced). `total`: from the press, in window px
+/// -- a control that follows the pointer computes from this and its value AT
+/// the press, so clamping and coalescing never let it drift off the pointer.
+struct Dragged  { std::uint64_t node = 0; Vec2 local{}; Vec2 delta{}; Vec2 total{}; };
 struct Scrolled { std::uint64_t node = 0; Vec2 local{}; Vec2 delta{}; };
 
 }  // namespace mayag

@@ -385,8 +385,13 @@ enum class Kind : std::uint8_t { dir, code, config, doc, image, archive, exec, o
     return FilePaneOp{[add](FilePaneState& s) { s.filter += add; s.sel = 0; s.scroll.offset.y = 0.0f; }};
 }
 
-/// `on_resize(grow)` (optional): the inner edge is a grip; grow is how many
-/// pixels wider the pane should be.
+/// Resizing by the grip. `begin`: the grip was pressed (remember the width
+/// now); then `grow` is how many pixels wider than THAT width the pane should
+/// be -- the pointer's travel since the press, so the edge stays under the
+/// pointer (no summed deltas to drift, nothing lost to clamping).
+struct FilePaneResize { bool begin = false; float grow = 0.0f; bool end = false; };
+
+/// `on_resize(FilePaneResize)` (optional): the inner edge is a grip.
 template <ControlContext C, class On, class OnResize = std::nullptr_t>
     requires std::invocable<const On&, FilePaneOp>
 [[nodiscard]] inline Node file_pane(const C& c, std::string_view id, const FilePaneState& st, const FilePaneProps& p, On on,
@@ -679,7 +684,11 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         Node inner = p.left ? h(spacer(), node(std::move(hair))).build() : h(node(std::move(hair))).build();
         Node grip = (node(std::move(inner)) | width(5.0f) | height(pct(100)) | cursor(CursorShape::resize_h) | role(a11y::Role::separator)
                      | label("resize files") | id_of_raw(gid)
-                     | on_drag([on_resize, left = p.left](const Dragged& dr) { return on_resize(left ? dr.delta.x : -dr.delta.x); })).build();
+                     | on_press([on_resize](const Pressed&) { return on_resize(FilePaneResize{.begin = true}); })
+                     | on_release([on_resize](const Released&) { return on_resize(FilePaneResize{.end = true}); })
+                     | on_drag([on_resize, left = p.left](const Dragged& dr) {
+                           return on_resize(FilePaneResize{.grow = left ? dr.total.x : -dr.total.x});
+                       })).build();
         return (z(std::move(body), node(std::move(grip)) | absolute(p.left ? p.width - 5.0f : 0.0f, 0.0f) | height(pct(100)))
                 | width(p.width) | height(pct(100))).build();
     }
