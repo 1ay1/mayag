@@ -1706,8 +1706,12 @@ class WaylandWindow {
                                              &wl::xdg().pres_feedback, wl::version_of(presentation_),
                                              surface_);
         if (p == nullptr) return;
-        auto* fb = new Feedback{this, p, std::exchange(unshown_input_, -1.0)};
-        wl::add_listener(p, &feedback_listener, fb);
+        // Owned by the window: a feedback still pending at teardown is freed
+        // there (the compositor will never answer a destroyed proxy), so no
+        // listener can outlive the window it points at.
+        auto fb = std::make_unique<Feedback>(Feedback{this, p, std::exchange(unshown_input_, -1.0)});
+        wl::add_listener(p, &feedback_listener, fb.get());
+        pending_feedback_.push_back(std::move(fb));
     }
 
     static void on_fb_sync_output(void*, wl::proxy*, wl::proxy*) {}
@@ -1727,16 +1731,19 @@ class WaylandWindow {
             if (refresh_ns > 0) w->period_ns_ = refresh_ns;
             if (fb->input_at >= 0.0) w->record_photon((secs - fb->input_at) * 1000.0);
         }
-        wl::destroy(fb->proxy);
-        delete fb;
+        w->retire_feedback(fb);
     }
     static void on_fb_discarded(void* data, wl::proxy*) {
         auto* fb = static_cast<Feedback*>(data);
         // The input it carried is still not on screen: the next frame owns it.
         if (fb->input_at >= 0.0 && fb->w->unshown_input_ < 0.0)
             fb->w->unshown_input_ = fb->input_at;
+        fb->w->retire_feedback(fb);
+    }
+    /// A feedback answered: destroy its proxy and free it.
+    void retire_feedback(Feedback* fb) {
         wl::destroy(fb->proxy);
-        delete fb;
+        std::erase_if(pending_feedback_, [fb](const std::unique_ptr<Feedback>& p) { return p.get() == fb; });
     }
     static inline const struct {
         void (*sync_output)(void*, wl::proxy*, wl::proxy*);
@@ -2431,6 +2438,8 @@ class WaylandWindow {
             xkb_.context_unref(xkb_context_);
         if (xkb_.handle != nullptr) ::dlclose(xkb_.handle);
 
+        for (auto& fb : pending_feedback_) wl::destroy(fb->proxy);   // never answered now
+        pending_feedback_.clear();
         wl::destroy(frame_callback_);
         wl::destroy(cursor_device_);
         wl::destroy(viewport_);
@@ -2452,6 +2461,8 @@ class WaylandWindow {
         if (tearing_ != nullptr) wl::request_destroy(tearing_, wl::tearing_control_destroy);
         if (tearing_mgr_ != nullptr) wl::request_destroy(tearing_mgr_, wl::tearing_mgr_destroy);
         tearing_ = tearing_mgr_ = nullptr;
+        if (presentation_ != nullptr) wl::request_destroy(presentation_, wl::presentation_destroy);
+        presentation_ = nullptr;
         wl::destroy(viewporter_);
         wl::destroy(frac_manager_);
         wl::destroy(deco_manager_);
@@ -2494,6 +2505,7 @@ class WaylandWindow {
     wl::proxy* tearing_mgr_    = nullptr;
     wl::proxy* tearing_        = nullptr;
     wl::proxy* presentation_   = nullptr;
+    std::vector<std::unique_ptr<Feedback>> pending_feedback_;   ///< presentation feedbacks not yet answered
     bool       pres_clock_monotonic_ = true;
     double     vblank_s_  = 0.0;          // last presented frame, monotonic s
     std::uint64_t vblank_seq_ = 0;

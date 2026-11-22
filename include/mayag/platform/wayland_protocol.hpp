@@ -173,6 +173,7 @@ enum : std::uint32_t {
     viewport_set_source         = 1,
     viewport_set_destination    = 2,
 
+    presentation_destroy        = 0,
     presentation_feedback       = 1,
 
     cursor_mgr_destroy          = 0,

@@ -107,6 +107,16 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────
 option(MAYAG_BUILD_EXAMPLES "Build the examples"           ON)
 option(MAYAG_BUILD_TESTS    "Build the test suite"         ON)
+# Memory safety: build everything with AddressSanitizer + UBSan, and run the
+# test suite under them (use-after-free, overflow, leaks, undefined behaviour).
+# Its own build tree:  cmake -B build-asan -DMAYAG_SANITIZE=ON && ctest.
+# Leaks inside system libraries (dbus, the Vulkan driver) are suppressed by
+# tests/lsan.supp, by library -- never a leak through mayag's own code.
+option(MAYAG_SANITIZE "Build and test under AddressSanitizer + UBSan" OFF)
+if(MAYAG_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
 # Vulkan is the default GPU backend everywhere except Apple (which uses Metal).
 # Like the Wayland backend it links NOTHING: libvulkan is dlopen'd at runtime
 # and the ABI is transcribed by hand, so there is no Vulkan SDK build
@@ -413,6 +423,12 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────
 if(MAYAG_BUILD_TESTS)
     enable_testing()
+    if(MAYAG_SANITIZE)
+        # Every test in this tree runs with these (set per test below).
+        set(MAYAG_SANITIZE_ENV "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
+            "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/lsan.supp"
+            "UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1")
+    endif()
 
     # Rendering: numeric kernels, layout arithmetic, and real pixels.
     add_executable(mayag_tests tests/test_mayag.cpp)
@@ -697,7 +713,12 @@ if(MAYAG_BUILD_TESTS)
     # a race which does not happen to fire today. On by default on Linux
     # (MAYAG_TSAN_TESTS=OFF to skip); each is its own ctest entry, labelled
     # `tsan`, failing on any report.
-    option(MAYAG_TSAN_TESTS "Build and run the threaded tests under ThreadSanitizer" ${CMAKE_HOST_UNIX})
+    if(MAYAG_SANITIZE)
+        set(_tsan_default OFF)   # TSan and ASan can't share a binary
+    else()
+        set(_tsan_default ${CMAKE_HOST_UNIX})
+    endif()
+    option(MAYAG_TSAN_TESTS "Build and run the threaded tests under ThreadSanitizer" ${_tsan_default})
     if(NOT MSVC AND NOT APPLE)
         add_executable(mayag_concurrency_tsan EXCLUDE_FROM_ALL
                        tests/test_concurrency.cpp)
@@ -989,3 +1010,12 @@ message(STATUS "  build type  ${CMAKE_BUILD_TYPE}")
 message(STATUS "  renderers   ${MAYAG_ENABLED_BACKENDS}")
 message(STATUS "  windowing   ${MAYAG_WINDOWING}")
 message(STATUS "")
+
+# MAYAG_SANITIZE: every test gets the sanitizer environment.
+if(MAYAG_SANITIZE AND MAYAG_BUILD_TESTS)
+    get_property(_mayag_tests DIRECTORY PROPERTY TESTS)
+    list(FILTER _mayag_tests EXCLUDE REGEX "_tsan$")
+    foreach(t ${_mayag_tests})
+        set_property(TEST ${t} APPEND PROPERTY ENVIRONMENT ${MAYAG_SANITIZE_ENV})
+    endforeach()
+endif()

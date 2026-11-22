@@ -167,7 +167,9 @@ class DrawList {
         static_assert(std::is_trivially_copyable_v<Instance>);
         if (instances_.size() != o.instances_.size() || batches_.size() != o.batches_.size()) return false;
         // Instances are value-initialised (padding zeroed), so bytes compare.
-        if (std::memcmp(instances_.data(), o.instances_.data(), instances_.size() * sizeof(Instance)) != 0)
+        // (Empty: data() may be null, and memcmp on null is UB even for 0 bytes.)
+        if (!instances_.empty() &&
+            std::memcmp(instances_.data(), o.instances_.data(), instances_.size() * sizeof(Instance)) != 0)
             return false;
         for (std::size_t i = 0; i < batches_.size(); ++i) {
             const Batch& a = batches_[i];

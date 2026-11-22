@@ -1,0 +1,15 @@
+# LeakSanitizer: allocations made and kept by SYSTEM libraries mayag loads
+# (they live until process exit by design, and mayag holds no handle to free
+# them). Only frames inside these libraries are suppressed; a leak that passes
+# through include/mayag/ or tests/ is still reported.
+leak:libdbus-1.so
+leak:_dbus_
+leak:libvulkan
+leak:libVkLayer
+leak:libnvidia
+leak:libEGL_nvidia
+leak:libGLX
+# The Vulkan driver (ICD) the loader unloads at vkDestroyInstance: its
+# allocations show as "<unknown module>" because it is gone by report time.
+# Confirmed driver-owned: the same tests on MAYAG_BACKEND=software leak 0.
+leak:<unknown module>

@@ -2251,7 +2251,7 @@ class FontStack : public Shaper {
         std::size_t i = 0;
         for (; i + 8 <= s.size(); i += 8) { std::uint64_t w; std::memcpy(&w, s.data() + i, 8); mix(w); }
         std::uint64_t tail = 0;
-        std::memcpy(&tail, s.data() + i, s.size() - i);
+        if (i < s.size()) std::memcpy(&tail, s.data() + i, s.size() - i);   // an empty view's data() may be null
         mix(tail ^ (static_cast<std::uint64_t>(s.size()) << 56));
         const auto bits = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return std::uint64_t{u}; };
         mix(bits(p.size_px) | bits(p.weight) << 32);

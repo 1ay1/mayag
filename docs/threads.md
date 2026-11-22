@@ -98,3 +98,26 @@ A `FontStack` is shared by everything that measures and draws text.
   Linux, `MAYAG_TSAN_TESTS`); any report fails the test.
 - jaal's own suite: the `cell`, `guarded` and `loop_only` rules, each misuse
   pinned as a compile failure or a deterministic abort.
+
+## Memory safety
+
+Races are one kind of undefined behaviour; the others are checked too:
+
+- **`MAYAG_SANITIZE=ON`** builds mayag and its whole test suite with
+  AddressSanitizer + UBSan: use-after-free, out-of-bounds, leaks and
+  undefined behaviour. Every test runs with the sanitizers halting on the
+  first report. Leaks are suppressed only inside system libraries that keep
+  their allocations to process exit (dbus, the Vulkan driver), by library, in
+  `tests/lsan.supp`. A leak through mayag's own code is always reported.
+- What it found, and is now fixed:
+  - `DrawList::same_as` called `memcmp` on two empty vectors with null
+    pointers. That is UB even for 0 bytes.
+  - The shape-cache hash called `memcpy` from an empty view's (possibly
+    null) data.
+  - The Wayland window leaked the `wp_presentation` global and any
+    presentation feedback still pending at teardown. Feedbacks are now
+    owned by the window, so a late reply can never reach a freed window.
+- hand runs the same check over its whole self-test, every screenshot scene,
+  the flood and the resize repros (`cmake --preset asan`). It found a
+  use-after-free in a screenshot script: a reference into a vector held
+  across a `push_back`.
