@@ -80,6 +80,58 @@ struct CodeTheme {
         c.error = t.danger; c.warning = t.warning; c.info = t.info; c.hint = t.text_secondary;
         return c;
     }
+
+    /// Code in a TERMINAL's colours: the 16 ANSI colours plus its ink, paper,
+    /// cursor and selection (0xRRGGBB). An editor beside a shell then reads as
+    /// the same surface in the same scheme -- any scheme, light or dark, since
+    /// every tint is a mix between the scheme's own ink and paper.
+    [[nodiscard]] static CodeTheme from_palette(const Theme& t, const std::array<std::uint32_t, 16>& ansi, std::uint32_t ink,
+                                                std::uint32_t paper, std::uint32_t caret, std::uint32_t selection) {
+        using editor::Tok;
+        const auto C = [](std::uint32_t v) {
+            return rgb8(static_cast<std::uint8_t>(v >> 16), static_cast<std::uint8_t>(v >> 8), static_cast<std::uint8_t>(v));
+        };
+        const auto A = [&](int i) { return C(ansi[static_cast<std::size_t>(i)]); };
+        CodeTheme c;
+        const Color<Srgb> fg = C(ink), bg = C(paper);
+        const auto set = [&](Tok k, Color<Srgb> v) { c.tok[static_cast<std::size_t>(k)] = v; };
+        set(Tok::text, fg);
+        set(Tok::keyword, A(5));                    // magenta
+        set(Tok::type, A(3));                       // yellow
+        set(Tok::function, A(4));                   // blue
+        set(Tok::string, A(2));                     // green
+        set(Tok::number, mix(A(1), A(3), 0.5f));    // orange: between red and yellow
+        set(Tok::constant, mix(A(1), A(3), 0.5f));
+        set(Tok::comment, mix(A(8), fg, 0.12f));    // bright black, lifted a touch
+        set(Tok::op, mix(fg, A(6), 0.6f));
+        set(Tok::punct, mix(fg, bg, 0.3f));
+        set(Tok::macro, A(1));
+        set(Tok::property, A(6));                   // cyan
+        set(Tok::special, A(1));
+        set(Tok::heading, A(4));
+        c.bg = bg;
+        c.gutter_bg = bg;
+        c.line_no = mix(fg, bg, 0.66f);
+        c.line_no_active = mix(fg, bg, 0.15f);
+        c.current_line = mix(bg, fg, 0.045f);
+        c.selection = C(selection);
+        c.selection_inactive = mix(bg, C(selection), 0.5f);
+        c.cursor = C(caret);
+        c.bracket = mix(bg, fg, 0.2f);
+        c.occurrence = mix(bg, fg, 0.11f);
+        c.find_match = mix(bg, A(3), 0.24f);
+        c.find_current = mix(bg, A(3), 0.55f);
+        c.indent_guide = mix(bg, fg, 0.07f);
+        c.indent_guide_active = mix(bg, fg, 0.18f);
+        c.ruler = mix(bg, fg, 0.05f);
+        c.whitespace = mix(bg, fg, 0.2f);
+        c.fold_marker = mix(fg, bg, 0.4f);
+        c.folded_bg = mix(bg, A(4), 0.12f);
+        c.git_added = A(2); c.git_modified = A(4); c.git_deleted = A(1);
+        c.error = A(1); c.warning = A(3); c.info = A(4); c.hint = mix(fg, bg, 0.4f);
+        (void)t;
+        return c;
+    }
 };
 
 struct CodeViewOptions {

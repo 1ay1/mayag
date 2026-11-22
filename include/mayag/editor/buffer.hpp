@@ -812,6 +812,11 @@ class EditorState {
 
     [[nodiscard]] bool dirty() const noexcept { return top_id() != saved_id_; }
     void mark_saved() noexcept { saved_id_ = top_id(); }
+    /// The state a save writes: hand it back to mark_saved(point) once the
+    /// write has landed. Edits made while the write was in flight stay dirty
+    /// -- the file on disk is the state at `point`, not the one now.
+    [[nodiscard]] std::uint64_t save_point() const noexcept { return top_id(); }
+    void mark_saved(std::uint64_t point) noexcept { saved_id_ = point; }
 
     // ── find ────────────────────────────────────────────────────────────
 

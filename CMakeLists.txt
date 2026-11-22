@@ -459,6 +459,13 @@ if(MAYAG_BUILD_TESTS)
     target_compile_definitions(mayag_type_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
     add_test(NAME mayag_type_tests COMMAND mayag_type_tests)
 
+    # The text editor widget: round trips, indentation, keymap, find.
+    add_executable(mayag_text_editor_tests tests/test_text_editor.cpp)
+    target_link_libraries(mayag_text_editor_tests PRIVATE mayag)
+    target_compile_options(mayag_text_editor_tests PRIVATE ${MAYAG_WARNINGS})
+    target_compile_definitions(mayag_text_editor_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
+    add_test(NAME mayag_text_editor_tests COMMAND mayag_text_editor_tests)
+
     # The widget boundary (mayag.hpp includes no widget; nothing outside
     # widget/ includes one; widget/all.hpp is complete) and the DSL's
     # dynamic children.

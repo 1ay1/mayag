@@ -80,6 +80,7 @@
 #include "term_search.hpp"
 #include "term_tabs.hpp"
 #include "terminal_view.hpp"
+#include "text_editor.hpp"
 #include "text_field.hpp"
 #include "toast.hpp"
 #include "toggle.hpp"
