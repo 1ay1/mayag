@@ -461,8 +461,10 @@ void log_photon(W& window) {
         const char* on = std::getenv("MAYAG_PHOTON");
         if (on == nullptr || *on == '\0' || *on == '0') return;
         const auto s = window.photon_stats();
-        std::fprintf(stderr, "mayag: input->photon  last %.2f ms  mean %.2f ms  worst %.2f ms  (%d frames)",
-                     s.last_ms, s.mean_ms, s.worst_ms, s.samples);
+        std::fprintf(stderr, "mayag: input->photon  best %.2f  p50 %.2f  mean %.2f  p95 %.2f  worst %.2f ms  (%d frames)",
+                     s.best_ms, s.p50_ms, s.mean_ms, s.p95_ms, s.worst_ms, s.samples);
+        std::fprintf(stderr, "\n  stages (mean): to us %.2f  in us %.2f  compositor %.2f ms",
+                     s.stage_ms[0], s.stage_ms[1], s.stage_ms[2]);
         if constexpr (requires { window.latch_misses(); window.latch_margin(); }) {
             const auto [missed, tried] = window.latch_misses();
             std::fprintf(stderr, "  latch margin %.2f ms, %llu/%llu late draws missed",

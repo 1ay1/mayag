@@ -172,6 +172,13 @@ void test_key_repeat() {
           wldetail::key_from_keysym(0xfe20) == Key::tab && wldetail::key_from_keysym(0xffc9) == Key::f12,
           "keysym -> named key");
     check(wldetail::key_from_keysym('a') == Key::unknown, "letters stay positional");
+    // resolve_key: position for real keyboards, the keymap for virtual ones
+    check(wldetail::resolve_key(16, 'a') == Key::q, "AZERTY's A is still the Q key (shortcuts keep their place)");
+    check(wldetail::resolve_key(30, 0) == Key::a, "no keymap: by position");
+    check(wldetail::resolve_key(58, 0xff1b) == Key::escape, "caps:escape is Escape");
+    check(wldetail::resolve_key(1, 'a') == Key::a, "a virtual keymap's `a` on code 1 is A, not Esc");
+    check(wldetail::resolve_key(28, 'Z') == Key::z, "...and its `Z` on code 28 is Z, not Enter");
+    check(wldetail::resolve_key(1, 0x6c1) == Key::escape, "a non-Latin keysym on a named key keeps the position");
 }
 
 // ── input methods: text-input-v3 state machine ──────────────────────────────

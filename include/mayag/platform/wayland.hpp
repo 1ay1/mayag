@@ -422,6 +422,52 @@ struct TextInputState {
     return Key::unknown;
 }
 
+/// The character key a Latin keysym is (letters either case, digits, space,
+/// the punctuation Key names); unknown for anything else.
+[[nodiscard]] constexpr Key char_key_from_keysym(std::uint32_t sym) noexcept {
+    if (sym >= 'a' && sym <= 'z') return static_cast<Key>(static_cast<int>(Key::a) + static_cast<int>(sym - 'a'));
+    if (sym >= 'A' && sym <= 'Z') return static_cast<Key>(static_cast<int>(Key::a) + static_cast<int>(sym - 'A'));
+    if (sym >= '0' && sym <= '9') return static_cast<Key>(static_cast<int>(Key::n0) + static_cast<int>(sym - '0'));
+    switch (sym) {
+        case ' ': return Key::space;
+        case '-': return Key::minus;
+        case '=': return Key::equal;
+        case '[': return Key::bracket_left;
+        case ']': return Key::bracket_right;
+        case '\\': return Key::backslash;
+        case ';': return Key::semicolon;
+        case '\'': return Key::quote;
+        case ',': return Key::comma;
+        case '.': return Key::period;
+        case '/': return Key::slash;
+        case '`': return Key::grave;
+        default: break;
+    }
+    return Key::unknown;
+}
+
+/// Is `k` a character key (a letter, digit, space or punctuation)?
+[[nodiscard]] constexpr bool is_char_key(Key k) noexcept {
+    return (k >= Key::a && k <= Key::grave) || k == Key::space;
+}
+
+/// The Key for evdev code `code` whose keymap gives keysym `sym` (0: no map).
+///
+/// Named keys come from the keysym (caps:escape, remapped Enter). Letters,
+/// digits and punctuation stay POSITIONAL (Key::a is the key left of the
+/// home row on every layout, so shortcuts keep their place) -- except when
+/// the keymap puts a character on a code that is not a character key: a
+/// virtual keyboard (wtype, an IME, a remote desktop) uploads its own map
+/// with `a` on code 1, which read by position is Esc and typed "\ea".
+[[nodiscard]] inline Key resolve_key(std::uint32_t code, std::uint32_t sym) noexcept {
+    const Key pos = key_from_evdev(code);
+    if (sym == 0) return pos;
+    if (const Key named = key_from_keysym(sym); named != Key::unknown) return named;
+    if (is_char_key(pos)) return pos;
+    if (const Key ch = char_key_from_keysym(sym); ch != Key::unknown) return ch;
+    return pos;
+}
+
 /// mayag cursor -> wp_cursor_shape_device_v1 shape.
 [[nodiscard]] inline std::uint32_t cursor_to_shape(CursorShape c) noexcept {
     switch (c) {
@@ -1158,6 +1204,7 @@ class WaylandWindow {
         return frames_presented_;
     }
     [[nodiscard]] std::uint64_t frames_skipped() const noexcept { return frames_skipped_; }
+    [[nodiscard]] bool replaces_queued_frames() const noexcept { return gpu_ != nullptr && gpu_->valid() && gpu_->replaces_queued(); }
 
     /// Frames skipped because the compositor still held every buffer.
     /// Nonzero in a tight present loop; should be zero in a frame-callback
@@ -1698,6 +1745,8 @@ class WaylandWindow {
         Impl*      w;
         wl::proxy* proxy;
         double     input_at;   // monotonic seconds of the newest input it shows; <0: none
+        double     read_at;    // when this process read that input
+        double     commit_at;  // when the frame went to the compositor
     };
 
     void request_feedback() {
@@ -1709,7 +1758,11 @@ class WaylandWindow {
         // Owned by the window: a feedback still pending at teardown is freed
         // there (the compositor will never answer a destroyed proxy), so no
         // listener can outlive the window it points at.
-        auto fb = std::make_unique<Feedback>(Feedback{this, p, std::exchange(unshown_input_, -1.0)});
+        // Every frame committed while an input is unshown carries it; the
+        // FIRST one presented shows it. (Under MAILBOX a frame is discarded
+        // when a newer one replaces it at the same vblank -- the newer one
+        // shows the input too, and its feedback is the one that answers.)
+        auto fb = std::make_unique<Feedback>(Feedback{this, p, unshown_input_, unshown_read_, wldetail::monotonic_now()});
         wl::add_listener(p, &feedback_listener, fb.get());
         pending_feedback_.push_back(std::move(fb));
     }
@@ -1729,15 +1782,28 @@ class WaylandWindow {
             w->vblank_s_ = secs;
             ++w->vblank_seq_;
             if (refresh_ns > 0) w->period_ns_ = refresh_ns;
-            if (fb->input_at >= 0.0) w->record_photon((secs - fb->input_at) * 1000.0);
+            if (fb->input_at >= 0.0 && fb->input_at > w->shown_input_) {
+                w->shown_input_ = fb->input_at;
+                if (w->unshown_input_ == fb->input_at) w->unshown_input_ = -1.0;
+                w->record_photon((secs - fb->input_at) * 1000.0);
+                static const bool trace = [] { const char* e = std::getenv("MAYAG_PHOTON"); return e && *e == '2'; }();
+                if (trace)
+                    std::fprintf(stderr, "photon %.3f  to-us %6.2f  in-us %6.2f  compositor %6.2f  = %6.2f ms  (period %.2f)\n", fb->input_at,
+                                 (fb->read_at - fb->input_at) * 1e3, (fb->commit_at - fb->read_at) * 1e3,
+                                 (secs - fb->commit_at) * 1e3, (secs - fb->input_at) * 1e3, w->period_ns_ / 1e6);
+                // where it went: to us, through us, through the compositor
+                w->stage_sum_[0] += (fb->read_at - fb->input_at) * 1000.0;
+                w->stage_sum_[1] += (fb->commit_at - fb->read_at) * 1000.0;
+                w->stage_sum_[2] += (secs - fb->commit_at) * 1000.0;
+                ++w->stage_n_;
+            }
         }
         w->retire_feedback(fb);
     }
     static void on_fb_discarded(void* data, wl::proxy*) {
         auto* fb = static_cast<Feedback*>(data);
-        // The input it carried is still not on screen: the next frame owns it.
-        if (fb->input_at >= 0.0 && fb->w->unshown_input_ < 0.0)
-            fb->w->unshown_input_ = fb->input_at;
+        // Replaced before scanout: the input it carried is still unshown, and
+        // the frames after it carry it (see request_feedback).
         fb->w->retire_feedback(fb);
     }
     /// A feedback answered: destroy its proxy and free it.
@@ -1773,7 +1839,10 @@ class WaylandWindow {
             if (age < 1000) t = now - static_cast<double>(age) / 1000.0;
             last_event_ms_ = 0;
         }
-        unshown_input_ = t;
+        if (unshown_input_ < 0.0) {   // the oldest input still waiting is the one to measure
+            unshown_input_ = t;
+            unshown_read_ = now;
+        }
     }
     void note_event_time(std::uint32_t ms) noexcept { if (ms != 0) last_event_ms_ = ms; }
 
@@ -1828,7 +1897,18 @@ class WaylandWindow {
             sum += photon_[i];
             s.worst_ms = std::max(s.worst_ms, photon_[i]);
         }
-        if (photon_count_ > 0) s.mean_ms = sum / static_cast<double>(photon_count_);
+        if (photon_count_ > 0) {
+            s.mean_ms = sum / static_cast<double>(photon_count_);
+            std::array<double, 120> v{};
+            std::copy_n(photon_.begin(), photon_count_, v.begin());
+            std::sort(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(photon_count_));
+            const auto at = [&](double q) { return v[static_cast<std::size_t>(q * static_cast<double>(photon_count_ - 1) + 0.5)]; };
+            s.best_ms = v[0];
+            s.p50_ms = at(0.50);
+            s.p95_ms = at(0.95);
+        }
+        if (stage_n_ > 0)
+            for (std::size_t i = 0; i < 3; ++i) s.stage_ms[i] = stage_sum_[i] / static_cast<double>(stage_n_);
         return s;
     }
 
@@ -2061,6 +2141,7 @@ class WaylandWindow {
                           std::uint32_t time_ms, std::uint32_t key, std::uint32_t state) {
         Impl* w = self(data);
         w->key_serial_ = serial;
+        if (state == wl::keyboard_key_pressed) w->note_event_time(time_ms);   // the photon clock starts at the press
         if (w->raw_) w->raw_(raw::Key{time_ms, key, state == wl::keyboard_key_pressed, w->resolve_key(key), w->mods_});
 
         // mayag's Event variant models key PRESSES only — a release carries no
@@ -2081,13 +2162,8 @@ class WaylandWindow {
     /// The mayag Key for an evdev code: positional, unless the keymap names
     /// a key mayag knows (so a remapped layout's Backspace is Backspace).
     [[nodiscard]] Key resolve_key(std::uint32_t key) const {
-        Key k = wldetail::key_from_evdev(key);
-        if (xkb_state_ != nullptr && xkb_.key_get_one_sym != nullptr) {
-            if (const Key named = wldetail::key_from_keysym(xkb_.key_get_one_sym(xkb_state_, key + 8u));
-                named != Key::unknown)
-                k = named;
-        }
-        return k;
+        return wldetail::resolve_key(key, xkb_state_ != nullptr && xkb_.key_get_one_sym != nullptr
+                                              ? xkb_.key_get_one_sym(xkb_state_, key + 8u) : 0u);
     }
 
     void emit_key(std::uint32_t key, bool repeat) {
@@ -2514,6 +2590,10 @@ class WaylandWindow {
     std::uint32_t last_event_ms_ = 0;     // newest input's wl timestamp this dispatch
     std::array<double, 120> photon_{};
     std::size_t photon_next_ = 0, photon_count_ = 0;
+    std::array<double, 3> stage_sum_{};   // event->read, read->commit, commit->scanout (ms, summed)
+    std::uint64_t stage_n_ = 0;
+    double unshown_read_ = -1.0;
+    double shown_input_ = -1.0;   // newest input a presented frame has shown
     double     photon_last_ = 0.0;
     bool       photon_manual_ = false;
     std::function<void(double)> photon_sink_;
@@ -2742,6 +2822,8 @@ class WaylandWindow {
         return p_->frames_presented();
     }
     [[nodiscard]] std::uint64_t frames_skipped() const noexcept { return p_->frames_skipped(); }
+    /// See window_host::next_draw_at: a draw never waits behind a queued one.
+    [[nodiscard]] bool replaces_queued_frames() const noexcept { return p_->replaces_queued_frames(); }
 
     [[nodiscard]] std::uint64_t frames_dropped() const noexcept {
         return p_->frames_dropped();

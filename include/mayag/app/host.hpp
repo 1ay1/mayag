@@ -177,6 +177,8 @@ inline constexpr std::chrono::nanoseconds kFramePeriod{16'666'667};
 /// How long before a vblank the late-latch draw starts. Covers view, layout,
 /// paint and the GPU submit (~0.5 ms measured) with room to spare.
 inline constexpr std::chrono::nanoseconds kLatchMargin{2'000'000};
+/// With a replacing swapchain: frames a refresh before changes wait for the next.
+inline constexpr int kFreshPerSlot = 4;
 
 template <Program P, class W, class Clock = jaal::platform::steady_clock>
 class window_host {
@@ -335,16 +337,51 @@ class window_host {
             }
         }
         const auto slot = slot_of(now);
+        const bool was_latched = latched_;
+        const auto was_slot = drawn_slot_;
+        const int was_draws = draws_in_slot_;
         latched_ = (slot == drawn_slot_);   // second draw of a slot: the late one
+        draws_in_slot_ = slot == drawn_slot_ ? draws_in_slot_ + 1 : 1;
         draw_owed_ = false;
         last_draw_ = now;
         drawn_slot_ = slot;
+        const std::uint64_t skipped_before = frames_skipped();
         draw(k.model(), [&](std::exception_ptr e) { k.view_faulted(std::move(e)); });
+        // The window found it pixel-identical to what is on screen and sent
+        // nothing: no frame reached the compositor, so this refresh's budget
+        // is untouched. Without this a keypress's own draw (the shell has not
+        // echoed yet: nothing changed) used up the slot, and the echo a moment
+        // later waited for the late-latch point -- ~8 ms of every keystroke.
+        if (frames_skipped() != skipped_before) {
+            latched_ = was_latched;
+            drawn_slot_ = was_slot;
+            draws_in_slot_ = was_draws;
+        }
     }
 
-    /// The earliest a non-tick draw may happen: now in a fresh slot; the
-    /// slot's late-latch point after its first draw; the next slot after its
-    /// late one. So at most two frames per refresh, the second carrying the
+    [[nodiscard]] bool window_replaces_queued() const noexcept {
+        if constexpr (requires { { window_.replaces_queued_frames() } -> std::convertible_to<bool>; })
+            return window_.replaces_queued_frames();
+        return false;
+    }
+
+    [[nodiscard]] std::uint64_t frames_skipped() const noexcept {
+        if constexpr (requires { window_.frames_skipped(); }) return window_.frames_skipped();
+        return 0;
+    }
+
+    /// The earliest a non-tick draw may happen.
+    ///
+    /// A swapchain that REPLACES a queued frame (MAILBOX) shows the newest
+    /// frame at the vblank whenever it was drawn, so a change is drawn the
+    /// moment it lands -- holding it for a latch point only adds latency
+    /// (measured: half of all keystrokes waited 10-25 ms for it, because the
+    /// cursor's frame tick had already drawn in that refresh). Bounded at
+    /// kFreshPerSlot frames a refresh, then the next refresh.
+    ///
+    /// Otherwise (FIFO: every frame queues): now in a fresh slot; the slot's
+    /// late-latch point after its first draw; the next slot after its late
+    /// one. So at most two frames per refresh, the second carrying the
     /// freshest input just before the vblank.
     [[nodiscard]] time_point next_draw_at() const noexcept { return next_draw_at(now_()); }
     [[nodiscard]] time_point next_draw_at(time_point now) const noexcept {
@@ -352,6 +389,7 @@ class window_host {
         // is submitted, so holding it for a vblank only adds latency.
         if (!cfg_.vsync) return now;
         if (slot_of(now) != drawn_slot_) return now;
+        if (window_replaces_queued()) return draws_in_slot_ < kFreshPerSlot ? now : slot_start(drawn_slot_ + 1);
         if (latched_) return slot_start(drawn_slot_ + 1);
         return std::max(now, latch_point(drawn_slot_));
     }
@@ -1765,6 +1803,7 @@ class window_host {
     time_point   start_{};
     bool                dirty_ = true;
     bool                draw_owed_ = false;     // a draw was held back for pacing
+    int                 draws_in_slot_ = 0;     // frames drawn in drawn_slot_
     bool                tick_pending_ = false;  // a frame tick was dispatched; draw it next
     time_point   last_draw_{};
     time_point   vblank_{};                 // a refresh boundary (set at start)

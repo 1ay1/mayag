@@ -7,6 +7,7 @@
 #include "../core/cursor.hpp"   // CursorShape: core vocabulary, re-exported here
 #include "../core/geometry.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -27,6 +28,12 @@ struct PhotonStats {
     double last_ms  = 0.0;
     double mean_ms  = 0.0;
     double worst_ms = 0.0;   ///< over the recent window
+    double p50_ms   = 0.0;   ///< median of the recent window
+    double p95_ms   = 0.0;
+    double best_ms  = 0.0;
+    /// Mean of each stage: the event reaching this process, this process
+    /// drawing and committing it, the compositor putting it on the display.
+    std::array<double, 3> stage_ms{};
     int    samples  = 0;
 };
 

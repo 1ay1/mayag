@@ -2818,6 +2818,11 @@ class VulkanDevice {
     vk::VkPhysicalDeviceMemoryProperties mem_props_{};
     char device_name_[256] = "vulkan";
     int  present_mode_ = 2;   // VK_PRESENT_MODE_FIFO_KHR until a swapchain exists
+  public:
+    /// A newer frame replaces one still queued (MAILBOX), or shows at once
+    /// (IMMEDIATE): drawing again never delays the screen.
+    [[nodiscard]] bool replaces_queued() const noexcept { return present_mode_ != vk::VK_PRESENT_MODE_FIFO_KHR; }
+  private:
     bool low_latency_ = false;   ///< prefer IMMEDIATE (the window's vsync = false)
     bool transparent_ = false;   ///< per-pixel alpha to the compositor
     int  composite_alpha_ = 1;   ///< what the swapchain was built with
