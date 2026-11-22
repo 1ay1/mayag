@@ -518,25 +518,44 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
                    | width(pct(100)) | pad(0, 8.0f, 6.0f, 8.0f) | inner_shadow(0.0f, line, {0.0f, -1.0f})).build();
     } else {
         std::vector<Node> tools;
+        // What fits decides what shows: the five actions are icons (26 px
+        // each), and the follow and sort chips drop their words, follow's
+        // first, when the pane is too narrow for them -- measured, so nothing
+        // ever spills out over the terminal. Their tooltips still say it all.
+        const std::string follow_word = p.following ? "follows the shell" : "follow the shell";
+        const std::string sort_word = file_sort_names[static_cast<int>(st.sort) & 3];
+        const float chip_pad = 7.0f * 2.0f + 11.0f + 5.0f;   // padding, icon, gap
+        const float follow_full = chip_pad + detail::text_advance(c, follow_word, fs * 0.8f);
+        const float sort_full = 6.0f * 2.0f + 11.0f + 4.0f + detail::text_advance(c, sort_word, fs * 0.74f);
+        const float icons = 5.0f * 26.0f, room = p.width - 14.0f - 8.0f;   // pads, the spacer's gap
+        const bool sort_words = icons + 26.0f + sort_full + 26.0f <= room;
+        const bool follow_words = sort_words && icons + follow_full + sort_full + 4.0f <= room;
         {
             const auto fid = node_id(base + ".follow");
             const bool hov = c.hovered(fid);
-            tools.push_back((h(node(icon_node(Icon::link, 11.0f, p.following ? t.accent : hov ? ink : muted)),
-                               text_owned(p.following ? "follows the shell" : "follow the shell") | font(fs * 0.8f)
-                                   | fg(p.following ? t.accent : hov ? ink : t.text_secondary))
-                             | gap(5.0f) | align(Align::center) | height(22.0f) | pad(0, 7.0f) | radius(t.rounded(5.0f))
+            std::vector<Node> bits;
+            bits.push_back(node(icon_node(Icon::link, follow_words ? 11.0f : 13.0f, p.following ? t.accent : hov ? ink : muted)).build());
+            if (follow_words)
+                bits.push_back((text_owned(follow_word) | font(fs * 0.8f) | fg(p.following ? t.accent : hov ? ink : t.text_secondary)).build());
+            tools.push_back((h_list(std::move(bits), 5.0f) | align(Align::center) | height(follow_words ? 22.0f : 24.0f)
+                             | pad(0, follow_words ? 7.0f : 5.5f)
+                             | radius(t.rounded(5.0f))
                              | bg(p.following ? t.accent.fade(0.1f) : hov ? mix(paper, ink, 0.07f) : paper.fade(0.0f))
-                             | pointer_cursor | tooltip(p.following ? "The list moves with the shell's cd" : "Back to the shell's directory (f)")
+                             | pointer_cursor | tooltip(p.following ? "Follows the shell: the list moves with its cd" : "Follow the shell's directory again (f)")
                              | id_of_raw(fid) | on_click([op, f = emit(A::Kind::follow, {})] { return op(f); })).build());
         }
         tools.push_back(spacer().build());
         {
             const auto sid = node_id(base + ".sort");
             const bool hov = c.hovered(sid);
-            tools.push_back((h(node(icon_node(Icon::list_tree, 11.0f, hov ? ink : muted)),
-                               text_owned(file_sort_names[static_cast<int>(st.sort) & 3]) | font(fs * 0.74f) | fg(hov ? ink : muted))
-                             | gap(4.0f) | align(Align::center) | height(24.0f) | pad(0, 6.0f) | radius(t.rounded(5.0f))
-                             | bg(hov ? mix(paper, ink, 0.09f) : paper.fade(0.0f)) | pointer_cursor | tooltip("Sort by (s)") | id_of_raw(sid)
+            std::vector<Node> bits;
+            bits.push_back(node(icon_node(Icon::list_tree, sort_words ? 11.0f : 13.0f, hov ? ink : muted)).build());
+            if (sort_words) bits.push_back((text_owned(sort_word) | font(fs * 0.74f) | fg(hov ? ink : muted)).build());
+            tools.push_back((h_list(std::move(bits), 4.0f) | align(Align::center) | height(24.0f)
+                             | pad(0, sort_words ? 6.0f : 5.5f)
+                             | radius(t.rounded(5.0f))
+                             | bg(hov ? mix(paper, ink, 0.09f) : paper.fade(0.0f)) | pointer_cursor
+                             | tooltip("Sorted by " + sort_word + " \u2014 click or s for the next") | id_of_raw(sid)
                              | on_click([op] {
                                    return op([](FilePaneState& s) { s.sort = static_cast<FileSort>((static_cast<int>(s.sort) + 1) % 4); s.sel = 0; });
                                })).build());
@@ -549,7 +568,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
                                  [](FilePaneState& s) { s.show_hidden = !s.show_hidden; s.sel = 0; }, st.show_hidden));
         if (remote) tools.push_back(icon_btn("upload", Icon::arrow_up, "Upload here (u)", emit(A::Kind::upload, p.path)));
         else tools.push_back(icon_btn("reveal", Icon::external, "Show in the file manager (o)", emit(A::Kind::reveal, p.path)));
-        toolbar = (h_list(std::move(tools), 2.0f) | align(Align::center) | width(pct(100)) | pad(0, 6.0f, 6.0f, 8.0f)
+        toolbar = (h_list(std::move(tools), 2.0f) | align(Align::center) | width(pct(100)) | pad(0, 6.0f, 6.0f, 8.0f) | clip
                    | inner_shadow(0.0f, line, {0.0f, -1.0f})).build();
     }
 
@@ -580,21 +599,53 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         if (p.git && e.git) name_col = mix(name_col, git_col(e.git), e.git == '?' ? 0.4f : 0.55f);
         const Icon ic = e.dir ? Icon::folder : e.link ? Icon::link : kind == d::Kind::code ? Icon::file_code : Icon::file;
 
-        std::vector<Node> cells;
-        cells.push_back(node(icon_node(ic, ri, e.link && !e.dir ? t.info : kind_col(kind))).build());
-        cells.push_back((h(vis[q].hits.empty() ? (cell(e.name, nf, name_col) | ellipsis | min_size(0, 0)).build()
-                                               : (fuzzy_text(e.name, vis[q].hits, nf, name_col, t.accent) | family(p.family) | min_size(0, 0)).build())
-                         | grow() | min_size(0, 0) | clip).build());
-        if (p.git && e.git) {
-            const auto gc = git_col(e.git);
-            if (e.dir) cells.push_back((box() | size(5.0f, 5.0f) | radius(2.5f) | bg(gc)).build());
-            else cells.push_back(cell(std::string(1, e.git == '?' ? 'U' : e.git == 'U' ? '!' : e.git), nf * 0.8f, gc).build());
-        }
-        if (p.age && e.mtime > 0) {
-            const bool recent = p.now - e.mtime < 3600;
-            cells.push_back(cell(d::age(p.now, e.mtime), nf * 0.78f, recent ? mix(t.accent, faint, 0.25f) : faint).build());
-        }
-        if (!e.dir) cells.push_back(cell(d::human(e.size), nf * 0.8f, faint).build());
+        // the cells right of the name: measured, so the name gets exactly the rest
+        const std::string age_full = p.age && e.mtime > 0 ? d::age(p.now, e.mtime) : std::string{};
+        const std::string size_full = e.dir ? std::string{} : d::human(e.size);
+        const std::string git_s = p.git && e.git && !e.dir ? std::string(1, e.git == '?' ? 'U' : e.git == 'U' ? '!' : e.git) : std::string{};
+        const float git_w = p.git && e.git ? (e.dir ? 5.0f : detail::text_advance(c, git_s, nf * 0.8f, p.family)) + 7.0f : 0.0f;
+        const float age_w = age_full.empty() ? 0.0f : detail::text_advance(c, age_full, nf * 0.78f, p.family) + 7.0f;
+        const float size_w = size_full.empty() ? 0.0f : detail::text_advance(c, size_full, nf * 0.8f, p.family) + 7.0f;
+        // the row's inner width: the pane, less the list's and the row's padding and the scrollbar's lane
+        const float inner = p.width - 12.0f - 16.0f - 10.0f - ri - 7.0f;
+        const float name_w = detail::text_advance(c, e.name, nf, p.family);
+        // The name is what the row is for: when it doesn't fit, the age goes
+        // first, then the size (the hover peek still shows both), and only
+        // then is the name shortened.
+        const bool keep_age = name_w <= inner - git_w - age_w - size_w;
+        const bool keep_size = keep_age || name_w <= inner - git_w - size_w;
+        const std::string age_s = keep_age ? age_full : std::string{};
+        const std::string size_s = keep_size ? size_full : std::string{};
+        const float meta = git_w + (keep_age ? age_w : 0.0f) + (keep_size ? size_w : 0.0f);
+        const float meta_full = git_w + age_w + size_w;
+        const float name_room = std::max(inner - meta, 24.0f);
+        const bool cut = name_w > name_room + 0.5f;
+        const bool hidden_meta = (!keep_age && age_w > 0.0f) || (!keep_size && size_w > 0.0f);
+        const auto row_cells = [&](std::string shown, bool fuzzy, bool whole = false) {
+            const std::string& ag = whole ? age_full : age_s;
+            const std::string& sz = whole ? size_full : size_s;
+            std::vector<Node> cells;
+            cells.push_back(node(icon_node(ic, ri, e.link && !e.dir ? t.info : kind_col(kind))).build());
+            cells.push_back((h(fuzzy ? (fuzzy_text(e.name, vis[q].hits, nf, name_col, t.accent) | family(p.family) | min_size(0, 0)).build()
+                                     : (cell(std::move(shown), nf, name_col) | ellipsis | min_size(0, 0)).build())
+                             | grow() | min_size(0, 0) | clip).build());
+            if (p.git && e.git) {
+                const auto gc = git_col(e.git);
+                if (e.dir) cells.push_back((box() | size(5.0f, 5.0f) | radius(2.5f) | bg(gc)).build());
+                else cells.push_back(cell(git_s, nf * 0.8f, gc).build());
+            }
+            if (!ag.empty()) {
+                const bool recent = p.now - e.mtime < 3600;
+                cells.push_back(cell(ag, nf * 0.78f, recent ? mix(t.accent, faint, 0.25f) : faint).build());
+            }
+            if (!sz.empty()) cells.push_back(cell(sz, nf * 0.8f, faint).build());
+            return cells;
+        };
+        // a name that doesn't fit is shortened in the middle -- "compile_comm…ands.json":
+        // what it is and its extension both stay readable (a filter's highlighted
+        // letters keep the plain end-ellipsis, so they stay where they match)
+        std::vector<Node> cells = row_cells(cut && vis[q].hits.empty() ? detail::fit_middle(c, e.name, name_room, nf, p.family) : e.name,
+                                            !vis[q].hits.empty());
         const bool bar = p.size_bars && !e.dir && biggest > 0 && e.size > 0;
         auto row_line = h_list(std::move(cells), 7.0f) | align(Align::center) | width(pct(100)) | height(bar ? rh - 3.0f : rh);
         Node content;
@@ -610,6 +661,26 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         }
         const auto row_bg = lit ? mix(paper, ink, 0.1f) : sel ? mix(paper, ink, 0.06f) : hov ? mix(paper, ink, 0.04f)
                           : e.fresh > 0.0f ? t.accent.fade(0.22f * e.fresh) : paper.fade(0.0f);
+        // Hovering a shortened row lifts it out whole, in place: the same row,
+        // its full name, grown past the pane's edge over the terminal (VS Code's
+        // tree does this). It never takes the pointer -- clicks, the drag, the
+        // wheel all still land on the row under it.
+        if (hov && (cut || hidden_meta) && vis[q].hits.empty()) {
+            const float need = 16.0f + ri + 7.0f + name_w + 7.0f + meta_full + 2.0f;
+            c.overlay(Overlay{
+                .content = (h_list(row_cells(e.name, false, true), 7.0f) | align(Align::center) | height(rh) | width(std::max(need, p.width - 22.0f))
+                            | pad(0, 8.0f) | radius(t.rounded(5.0f))
+                            | bg(mix(paper, ink, lit ? 0.1f : sel ? 0.07f : 0.05f))
+                            | border(t.stroke(1), mix(paper, ink, 0.14f)) | elevation(t.lift(8))
+                            | when(lit, inner_shadow(0.0f, t.accent, {2.0f, 0.0f}))).build(),
+                .id = part_id(base + ".peek", q),
+                .anchor_id = rid,
+                .placement = Placement::over_start,
+                .dismiss = Dismiss::never,
+                .offset = 0.0f,
+                .layer = 30,
+                .passthrough = true});
+        }
         rows.push_back((v(std::move(content)) | height(rh) | width(pct(100)) | pad(0, 8.0f) | radius(t.rounded(5.0f))
                         | bg(row_bg)
                         | when(lit, inner_shadow(0.0f, t.accent, {2.0f, 0.0f}))

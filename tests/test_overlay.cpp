@@ -54,6 +54,7 @@ int main() {
             Placement::above_start, Placement::above_end,
             Placement::right_start, Placement::left_start,
             Placement::centered,    Placement::cursor,
+            Placement::over_start,
         };
 
         int off_screen = 0, total = 0;

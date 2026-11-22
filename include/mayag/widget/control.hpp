@@ -77,12 +77,53 @@ namespace detail {
 /// measure (mayag::Ctx, or a wrapper exposing it as `.c`); a 0.6 em
 /// monospace estimate otherwise.
 template <class C>
-[[nodiscard]] float text_advance(const C& c, std::string_view s, float size) {
+[[nodiscard]] float text_advance(const C& c, std::string_view s, float size, FontFamily family = FontFamily::ui) {
     TextStyle st;
     st.size = size;
+    st.family = family;
     if constexpr (requires { c.c.measurer(); }) return c.c.measurer().advance(s, st);
     else if constexpr (requires { c.measurer(); }) return c.measurer().advance(s, st);
     else return static_cast<float>(s.size()) * size * 0.6f;
+}
+
+/// `name` as it fits in `room` px, shortened in the MIDDLE: the start (what
+/// it is) and the end (its extension, its number) both stay readable --
+/// "compile_comm…ands.json", not "compile_comma…". Whole UTF-8 characters
+/// only. Returns `name` itself when it fits.
+template <class C>
+[[nodiscard]] std::string fit_middle(const C& c, std::string_view name, float room, float size,
+                                     FontFamily family = FontFamily::ui) {
+    if (text_advance(c, name, size, family) <= room) return std::string{name};
+    // character boundaries
+    std::vector<std::size_t> at;
+    for (std::size_t i = 0; i < name.size(); ++i)
+        if ((static_cast<unsigned char>(name[i]) & 0xC0) != 0x80) at.push_back(i);
+    const std::size_t n = at.size();
+    if (n <= 2) return std::string{name};
+    // the tail keeps the extension (up to 8 chars of it) and a little before
+    const std::size_t dot = name.rfind('.');
+    const auto make = [&](std::size_t keep) {
+        // keep `keep` characters: ~60% head, the rest tail, tail >= the extension when it can
+        std::size_t tail = keep * 2 / 5;
+        if (dot != std::string_view::npos && dot > 0) {
+            std::size_t ext = 0;
+            for (std::size_t k = 0; k < n; ++k) if (at[k] >= dot) ++ext;
+            if (ext <= 8 && ext + 3 <= keep) tail = std::max(tail, ext + 2);
+        }
+        tail = std::clamp<std::size_t>(tail, 1, keep);
+        const std::size_t head = keep - tail;
+        std::string out{name.substr(0, at[head])};
+        out += "\u2026";
+        out += name.substr(at[n - tail]);
+        return out;
+    };
+    std::size_t lo = 1, hi = n - 1, best = 1;   // the most characters that fit
+    while (lo <= hi) {
+        const std::size_t mid = (lo + hi) / 2;
+        if (text_advance(c, make(mid), size, family) <= room) { best = mid; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+    return make(best);
 }
 
 /// Previews are pictures, not controls: strip node ids so a click lands on

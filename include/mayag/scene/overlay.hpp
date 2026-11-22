@@ -38,6 +38,7 @@ enum class Placement : std::uint8_t {
     left_start,
     centered,      ///< modal: centred in the viewport, anchor ignored
     cursor,        ///< context menu: at the pointer
+    over_start,    ///< ON the anchor, top-left aligned: a truncated row shown whole, in place
 };
 
 /// How an overlay interacts with input.
@@ -155,6 +156,7 @@ namespace overlay {
         case Placement::right_start: pos = {anchor.right() + gap, anchor.top()}; break;
         case Placement::left_start:  pos = {anchor.left() - size.x - gap, anchor.top()}; break;
         case Placement::cursor:      pos = cursor; break;
+        case Placement::over_start:  pos = anchor.origin; break;
         case Placement::centered:
             pos = {(viewport.x - size.x) * 0.5f, (viewport.y - size.y) * 0.5f};
             break;
