@@ -94,6 +94,11 @@ struct TermTheme {
     std::uint32_t mark_prompt = 0x565F89, mark_ok = 0x9ECE6A, mark_error = 0xF7768E, mark_running = 0x7AA2F7;
     std::uint32_t link = 0x7DCFFF;
     float         bold_brighten = 0.0f;   ///< >0: bold text is mixed this far toward white
+    /// >1: every glyph reaches at least this contrast against the colour
+    /// behind it (Ghostty's minimum-contrast). The hue stays; only its
+    /// lightness moves, and only as far as it must -- a program's yellow on
+    /// a white scheme stays yellow and becomes readable. 1 = off.
+    float         min_contrast = 1.0f;
 };
 
 struct TermViewOptions {
@@ -324,7 +329,7 @@ template <ControlContext C>
          .add(static_cast<int>(o.family)).add(g.hover_link).add(g.current_match).add(g.cols)
          .add(th.fg).add(th.bg).add(th.selection_bg).add(th.selection_fg).add(th.match_bg).add(th.match_current_bg)
          .add(th.match_current_fg).add(th.link).add(th.bold_brighten).add(th.mark_prompt).add(th.mark_ok)
-         .add(th.mark_error).add(th.mark_running);
+         .add(th.mark_error).add(th.mark_running).add(th.min_contrast);
         return static_cast<std::uint64_t>(k);
     }();
     const auto row_key = [&](int r, const TermRowView& row, float y) {
@@ -381,6 +386,7 @@ template <ControlContext C>
 
         // ── glyphs: merged runs of equal style ──
         std::vector<Node> runs;
+        Color<Srgb> mc_in_f{-1.0f, 0.0f, 0.0f, 0.0f}, mc_in_b{}, mc_out{};   // min_contrast: the last pair fixed
         int c0 = 0;
         while (c0 < ncols) {
             const TermCell& a = row.cells[static_cast<std::size_t>(c0)];
@@ -392,7 +398,15 @@ template <ControlContext C>
                 Color<Srgb> f = inv ? (cell.default_bg ? rgb_of(th.bg) : rgb_of(cell.bg))
                                     : (cell.default_fg ? rgb_of(th.fg) : rgb_of(cell.fg));
                 f = bright(f, (cell.flags & term_attr::bold) != 0);
-                if ((cell.flags & term_attr::dim) != 0) f = f.fade(0.6f);
+                if (th.min_contrast > 1.0f && (cell.flags & term_attr::hidden) == 0) {
+                    // against the cell's own background (inverse: its fg colour); the
+                    // last pair is remembered -- a run's cells share both colours
+                    const auto [has_bg, under] = cell_bg(col);
+                    const Color<Srgb> b = has_bg ? under : rgb_of(th.bg);
+                    if (!(f == mc_in_f) || !(b == mc_in_b)) { mc_in_f = f; mc_in_b = b; mc_out = legible(f, b, th.min_contrast); }
+                    f = mc_out;
+                }
+                if ((cell.flags & term_attr::dim) != 0) f = f.fade(0.6f);   // faint stays faint: it asked to be
                 if (cell.link != 0 && cell.link == g.hover_link) f = rgb_of(th.link);
                 return f;
             };
