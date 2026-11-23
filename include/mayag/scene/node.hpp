@@ -126,7 +126,18 @@ class Node {
         Node n{NodeKind::canvas};
         n.style_ = std::move(s);
         n.canvas_ = fn;
-        n.canvas_user_ = user;
+        n.canvas_data_ = std::shared_ptr<const void>(std::shared_ptr<const void>{}, user);   // not owned
+        return n;
+    }
+    /// A canvas that owns what it draws (a minimap's runs): the payload lives
+    /// as long as any copy of the node, so a retained or memoised tree can
+    /// repaint it without anything dangling. One allocation for the whole
+    /// payload instead of a node per mark.
+    [[nodiscard]] static Node make_canvas(CanvasFn fn, std::shared_ptr<const void> data, Style s) {
+        Node n{NodeKind::canvas};
+        n.style_ = std::move(s);
+        n.canvas_ = fn;
+        n.canvas_data_ = std::move(data);
         return n;
     }
 
@@ -148,7 +159,7 @@ class Node {
     [[nodiscard]] std::string_view text() const noexcept { return text_; }
     [[nodiscard]] std::uint32_t texture() const noexcept { return texture_; }
     [[nodiscard]] CanvasFn canvas() const noexcept { return canvas_; }
-    [[nodiscard]] const void* canvas_user() const noexcept { return canvas_user_; }
+    [[nodiscard]] const void* canvas_user() const noexcept { return canvas_data_.get(); }
     [[nodiscard]] const std::vector<Node>& children() const noexcept { return children_; }
     [[nodiscard]] std::vector<Node>& children() noexcept { return children_; }
 
@@ -275,7 +286,7 @@ class Node {
     std::string       text_{};
     std::uint32_t     texture_ = 0;
     CanvasFn          canvas_ = nullptr;
-    const void*       canvas_user_ = nullptr;
+    std::shared_ptr<const void> canvas_data_{};
     std::vector<Node> children_{};
     Rect              frame_{};
     std::shared_ptr<const Cascade> cascade_{};

@@ -22,6 +22,7 @@
 // to show is scrollback_line_at(info, local.y, height).
 
 #include "control.hpp"
+#include "../render/draw_list.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -119,16 +120,35 @@ template <ControlContext C>
         // a line is a thin bar however spread out the history is: text, not blocks
         const float row_h = std::clamp(bh - (bh >= 2.0f ? 0.6f : 0.0f), 0.7f, 2.5f);
         const int vis0 = static_cast<int>(vy / std::max(bh, 0.001f)), vis1 = static_cast<int>((vy + vh) / std::max(bh, 0.001f));
+        // One canvas node that owns its bars, not a box node per bar: while
+        // output streams the runs change every frame, and hundreds of nodes
+        // (each a style allocation, then cascade, layout and paint) were most
+        // of the view's cost. The bars are the same instances either way.
         const auto build_runs = [&] {
-            std::vector<Node> bars;
-            bars.reserve(s.runs.size());
+            struct Bars {
+                float w = 0, h = 0;                         // logical size the bars are laid out in
+                std::vector<std::pair<Rect, Color<Srgb>>> bars;
+            };
+            auto data = std::make_shared<Bars>();
+            data->w = w; data->h = height_px;
+            data->bars.reserve(s.runs.size());
             for (const auto& r : s.runs) {
                 const bool in_view = r.row >= vis0 && r.row <= vis1;
                 const float a = open ? (in_view ? 0.95f : 0.55f) : (in_view ? 0.55f : 0.22f);
                 const float x0 = x_l + r.x0 * (x_r - x_l), x1 = std::max(x_l + r.x1 * (x_r - x_l), x0 + 1.0f);
-                bars.push_back((box() | size(x1 - x0, row_h) | absolute(x0, static_cast<float>(r.row) * bh) | bg(rgb(r.rgb, a))).build());
+                data->bars.emplace_back(Rect{x0, static_cast<float>(r.row) * bh, x1 - x0, row_h}, rgb(r.rgb, a));
             }
-            return (z(std::move(bars)) | size(w, height_px) | absolute(0.0f, 0.0f)).build();
+            Style st;
+            st.layout.width = px(w);
+            st.layout.height = px(height_px);
+            const CanvasFn paint = [](DrawList& dl, const Rect& f, const void* u) {
+                const auto& d = *static_cast<const Bars*>(u);
+                const float sx = d.w > 0 ? f.width() / d.w : 1.0f, sy = d.h > 0 ? f.height() / d.h : 1.0f;
+                for (const auto& [r, col] : d.bars)
+                    dl.fill_rect(Rect{f.left() + r.left() * sx, f.top() + r.top() * sy, r.width() * sx, r.height() * sy}, col);
+            };
+            return (z(Node::make_canvas(paint, std::shared_ptr<const void>(std::move(data)), std::move(st)))
+                    | size(w, height_px) | absolute(0.0f, 0.0f)).build();
         };
         if constexpr (requires { c.memoize(std::uint64_t{}, std::uint64_t{}, build_runs); }) {
             if (s.runs_version != 0) {
