@@ -79,6 +79,16 @@ static void older_widgets_follow_and_stay_legible() {
 int main() {
     std::printf("-- tokens, themes, sheets, motion\n");
     older_widgets_follow_and_stay_legible();
+    {   // a colour made readable keeps its hue and moves only as far as it must
+        const auto white = rgb8(0xFA, 0xFA, 0xFA), black = rgb8(0x1E, 0x1E, 0x22);
+        const auto amber = rgb8(0xE5, 0xC0, 0x7B);   // a dark scheme's yellow
+        const auto on_white = legible(amber, white), on_black = legible(amber, black);
+        ok(contrast_ratio(on_white, white) >= 4.5f, "legible: a pale amber darkens to 4.5:1 on white");
+        ok(on_black == amber, "legible: and is left alone where it already reads");
+        const float dh = std::abs(on_white.to<Oklch>().c2 - amber.to<Oklch>().c2);
+        ok(dh < 6.0f, "legible: the hue survives (still amber, not brown-grey)");
+        ok(contrast_ratio(legible(rgb8(0x30, 0x30, 0x60), black), black) >= 4.5f, "legible: a dark navy lightens on near-black");
+    }
     // numeric tokens
     const Theme t = themes::midnight;
     Node a = v(box() | pad(var::space(2)) | radius(var::radius_md) | border(var::line, var::border)

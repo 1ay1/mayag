@@ -52,7 +52,7 @@ template <ControlContext C>
     const Theme& t = c.theme;
     // red when it needs you; amber while it is getting itself back
     const bool recovering = p.retry_in >= 0.0;
-    const auto red = recovering ? t.warning : t.danger, paper = t.background, ink = t.text_primary, dim = mix(ink, paper, 0.45f);
+    const auto red = t.readable(recovering ? t.warning : t.danger), paper = t.background, ink = t.text_primary, dim = mix(ink, paper, 0.45f);
     const float fs = t.type_at(b.font_size, Tier::body);
     const std::string base{id};
     const auto btn = [&](const char* part, std::string label_, std::string key, bool primary) {

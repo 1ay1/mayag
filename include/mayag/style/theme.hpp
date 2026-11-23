@@ -206,6 +206,13 @@ struct Theme {
     [[nodiscard]] constexpr Color<Srgb> tint(Color<Srgb> c, float amount) const noexcept {
         return mix(background, c, amount);
     }
+
+    /// `c` (a status colour: warning, success, danger...) used as TEXT on the
+    /// surface: the same hue, as dark or light as it takes to read (4.5:1).
+    /// A warning amber that glows on a dark theme is ~1.6:1 on a light one.
+    [[nodiscard]] constexpr Color<Srgb> readable(Color<Srgb> c, float target = 4.5f) const noexcept {
+        return legible(c, surface, target);
+    }
 };
 
 namespace detail {

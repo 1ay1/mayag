@@ -358,6 +358,24 @@ template <ColorSpace S>
     return luminance(bg) > 0.36f ? colors::black : colors::white;
 }
 
+/// `fg` as itself, or as near to itself as reaches `target` contrast on
+/// `bg`: the same hue and chroma, its Oklch lightness walked away from the
+/// background (darker on a light one, lighter on a dark one) only as far as
+/// it must. A scheme's yellow is a fine type colour on near-black and
+/// unreadable on white; this keeps it yellow in both and readable in both.
+[[nodiscard]] constexpr Color<Srgb> legible(Color<Srgb> fg, Color<Srgb> bg, float target = 4.5f) noexcept {
+    if (contrast_ratio(fg, bg) >= target) return fg;
+    const auto f = fg.to<Oklch>();
+    const bool darker = luminance(bg) > 0.18f;   // which way has more room
+    for (int i = 1; i <= 40; ++i) {
+        const float t = static_cast<float>(i) / 40.0f;
+        const float L = darker ? f.c0 * (1.0f - t) : f.c0 + (1.0f - f.c0) * t;
+        const auto c = Color<Oklch>{L, f.c1 * (1.0f - 0.35f * t), f.c2, fg.a}.to<Srgb>();   // ease chroma off near the extremes (gamut)
+        if (contrast_ratio(c, bg) >= target) return c;
+    }
+    return darker ? colors::black.fade(fg.a) : colors::white.fade(fg.a);
+}
+
 // ── packing for upload ──────────────────────────────────────────────────
 
 /// Pack to 0xAABBGGRR — the byte order every GPU API calls RGBA8_UNORM on a

@@ -504,9 +504,9 @@ template <ControlContext C>
         std::string glyph;
         Color<Srgb> gcol = dim;
         if (tb.running) gcol = t.info;   // drawn as a turning arc below, centred on the text
-        else if (tb.last_exit > 0 && tb.finished_ago < 30.0) { glyph = "\u2717" + std::to_string(tb.last_exit); gcol = t.danger; }
-        else if (tb.last_exit == 0 && tb.finished_ago < 4.0 && !on) { glyph = "\u2713"; gcol = t.success; }
-        else if (tb.bell && !on) { glyph = "!"; gcol = t.warning; }
+        else if (tb.last_exit > 0 && tb.finished_ago < 30.0) { glyph = "\u2717" + std::to_string(tb.last_exit); gcol = t.readable(t.danger); }
+        else if (tb.last_exit == 0 && tb.finished_ago < 4.0 && !on) { glyph = "\u2713"; gcol = t.readable(t.success, 3.0f); }
+        else if (tb.bell && !on) { glyph = "!"; gcol = t.readable(t.warning, 3.0f); }
         else if (tb.dirty || (tb.unread && !on)) { glyph = "\u25CF"; gcol = mix(tone, dim, 0.3f); }
         std::vector<Node> bits;
         if (o.show_numbers || i < 9) bits.push_back(mono(std::to_string(i + 1), num).build());

@@ -691,7 +691,7 @@ template <ControlContext C, class On>
     }
     const bool dirty = ed.dirty();
     Node state_mark = p.saving ? (text<"saving\u2026"> | font(t.type(Tier::small)) | fg(muted)).build()
-                    : dirty    ? (h(text<"\u25CF"> | font(t.type(Tier::small)) | fg(t.warning)) | tooltip("Unsaved changes \u2014 \u2318S saves")).build()
+                    : dirty    ? (h(text<"\u25CF"> | font(t.type(Tier::small)) | fg(t.readable(t.warning, 3.0f))) | tooltip("Unsaved changes \u2014 \u2318S saves")).build()
                                : Node{};
     Node host_chip;
     if (!p.host.empty()) {   // a file on another machine says so first, always
@@ -899,10 +899,10 @@ template <ControlContext C, class On>
     if (st.disk_changed) {
         const auto rid = node_id(base + ".reload");
         const bool hov = c.hovered(rid);
-        banner = (h(text<"\u21BB"> | font(t.type(Tier::body)) | fg(t.warning),
+        banner = (h(text<"\u21BB"> | font(t.type(Tier::body)) | fg(t.readable(t.warning, 3.0f)),
                     text<"This file changed on disk."> | font(t.type(Tier::body)) | semibold | fg(ink),
                     text<"Your edits are kept until you choose."> | font(t.type(Tier::small)) | fg(muted) | grow() | min_size(0, 0) | ellipsis,
-                    h(text<"Reload from disk"> | font(t.type(Tier::small)) | semibold | fg(t.warning),
+                    h(text<"Reload from disk"> | font(t.type(Tier::small)) | semibold | fg(t.readable(t.warning)),
                       text<"\u2318\u21E7R"> | font(t.type(Tier::fine)) | fg(muted))
                         | gap(t.spaced(6)) | align(Align::center) | pad(t.spaced(3), t.spaced(10)) | radius(t.rounded(5))
                         | bg(hov ? t.warning.fade(0.22f) : t.warning.fade(0.12f)) | pointer_cursor | id_of_raw(rid)

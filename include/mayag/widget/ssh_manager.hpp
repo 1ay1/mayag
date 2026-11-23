@@ -793,7 +793,7 @@ template <ControlContext C, class On>
             const bool hov = c.hovered(rid);
             const auto tone = env_tone(t, hst.env);
             std::vector<Node> top;
-            if (hst.pinned) top.push_back((text_owned("\u2605") | font(t.type(Tier::small)) | fg(t.warning)).build());
+            if (hst.pinned) top.push_back((text_owned("\u2605") | font(t.type(Tier::small)) | fg(t.readable(t.warning, 3.0f))).build());
             top.push_back((mono(hst.alias, t.type(Tier::body), ink) | (sel ? semibold : weight(FontWeight::regular)) | ellipsis | min_size(0, 0) | grow()).build());
             if (hst.env != SshHost::Env::none)
                 top.push_back((h(mono(env_name(hst.env), t.type(Tier::fine), tone) | bold | tracking(0.5f)) | height(15.0f) | pad(0, 5.0f) | center
@@ -804,7 +804,7 @@ template <ControlContext C, class On>
                 const auto up = std::count(hst.tunnel.begin(), hst.tunnel.end(), SshHost::Tunnel::up);
                 const bool bad = std::any_of(hst.tunnel.begin(), hst.tunnel.end(), [](SshHost::Tunnel x) { return x == SshHost::Tunnel::down || x == SshHost::Tunnel::conflict; });
                 if (up > 0 || bad)
-                    top.push_back((h(mono("\u21C4", t.type(Tier::fine), bad ? t.warning : t.success), mono(std::to_string(up), t.type(Tier::fine), bad ? t.warning : t.success))
+                    top.push_back((h(mono("\u21C4", t.type(Tier::fine), t.readable(bad ? t.warning : t.success)), mono(std::to_string(up), t.type(Tier::fine), t.readable(bad ? t.warning : t.success)))
                                    | gap(2.0f) | align(Align::center) | height(15.0f) | pad(0, 4.0f) | radius(3.0f)
                                    | bg((bad ? t.warning : t.success).fade(0.12f))
                                    | tooltip(bad ? "a tunnel is not running" : std::to_string(up) + (up == 1 ? " tunnel up" : " tunnels up"))).build());
@@ -1082,11 +1082,11 @@ template <ControlContext C, class On>
                              | radius(4.0f) | bg(tone.fade(0.15f)) | border(1.0f, tone.fade(0.35f))).build());
         if (hst.connected)
             title.push_back((h(box() | size(7.0f, 7.0f) | radius(3.5f) | bg(t.success),
-                               text_owned(std::to_string(hst.sessions) + " open") | font(t.type(Tier::small)) | fg(t.success))
+                               text_owned(std::to_string(hst.sessions) + " open") | font(t.type(Tier::small)) | fg(t.readable(t.success)))
                              | gap(5.0f) | align(Align::center)).build());
         const auto pin_id = node_id(base + ".pin");
         title.push_back(spacer().build());
-        title.push_back((h(hst.pinned ? (text_owned("\u2605") | font(t.type(Tier::large)) | fg(t.warning)).build()
+        title.push_back((h(hst.pinned ? (text_owned("\u2605") | font(t.type(Tier::large)) | fg(t.readable(t.warning, 3.0f))).build()
                                       : icon_node(Icon::star, 16.0f, c.hovered(pin_id) ? ink : faint, 1.5f))
                          | size(30.0f, 30.0f) | center | radius(t.rounded(7.0f)) | bg(c.hovered(pin_id) ? mix(paper, ink, 0.07f) : paper.fade(0.0f))
                          | pointer_cursor | tooltip(hst.pinned ? "Unpin (p)" : "Pin (p)") | id_of_raw(pin_id)

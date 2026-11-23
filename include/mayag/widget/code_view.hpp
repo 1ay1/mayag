@@ -112,6 +112,14 @@ struct CodeTheme {
         set(Tok::property, A(6));                   // cyan
         set(Tok::special, A(1));
         set(Tok::heading, A(4));
+        // a scheme's ANSI colours are tuned for its own paper -- or not at all:
+        // many light schemes keep a yellow that vanishes on white. Code is
+        // read, so every token reaches 4.5:1 (comments and punctuation, quiet
+        // by design, 3:1), each keeping its hue.
+        for (std::size_t k = 0; k < c.tok.size(); ++k) {
+            const auto kind = static_cast<Tok>(k);
+            c.tok[k] = legible(c.tok[k], bg, kind == Tok::comment || kind == Tok::punct ? 3.0f : 4.5f);
+        }
         c.bg = bg;
         c.gutter_bg = bg;
         c.line_no = mix(fg, bg, 0.66f);

@@ -54,10 +54,14 @@ struct SshHost {
 };
 
 [[nodiscard]] inline Color<Srgb> env_tone(const Theme& t, SshHost::Env e) {
+    // the tone is TEXT ("STAGING") on a faint tint of itself: it must read on
+    // the surface -- a warning amber that glows on a dark theme is ~1.6:1 on a
+    // light one. Same hue, darkened as far as it takes (4.5:1).
+    const auto on = [&](Color<Srgb> c) { return t.readable(c); };
     switch (e) {
-        case SshHost::Env::prod: return t.danger;
-        case SshHost::Env::staging: return t.warning;
-        case SshHost::Env::dev: return t.success;
+        case SshHost::Env::prod: return on(t.danger);
+        case SshHost::Env::staging: return on(t.warning);
+        case SshHost::Env::dev: return on(t.success);
         default: return t.text_secondary;
     }
 }
@@ -246,8 +250,8 @@ inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& quer
         for (std::size_t i = 0; i < std::min<std::size_t>(h_.tags.size(), 3); ++i) tags += (i ? " #" : "#") + h_.tags[i];
         if (!tags.empty()) line.push_back(mono(tags, t.type(Tier::fine), faint).build());
         if (h_.connected)
-            line.push_back((h(mono("\u25CF", t.type(Tier::fine), t.success),
-                              mono(h_.sessions > 1 ? std::to_string(h_.sessions) : "", t.type(Tier::fine), t.success))
+            line.push_back((h(mono("\u25CF", t.type(Tier::fine), t.readable(t.success, 3.0f)),
+                              mono(h_.sessions > 1 ? std::to_string(h_.sessions) : "", t.type(Tier::fine), t.readable(t.success)))
                             | gap(3.0f) | align(Align::center)).build());
         const std::string age = !h_.last.empty() ? h_.last : detail::host_age(h_.last_used, p.now);
         line.push_back((mono(age.empty() && !h_.source.empty() ? h_.source : age, t.type(Tier::fine), faint) | min_size(28, 0)
