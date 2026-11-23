@@ -24,6 +24,7 @@
 // Positions are (line, byte column). Display columns (tabs expanded) are
 // derived, for the view and for vertical motion.
 
+#include "lines.hpp"
 #include "syntax.hpp"
 #include "../core/event.hpp"
 #include "../core/scroll_state.hpp"
@@ -73,6 +74,10 @@ struct ViewMetrics {
     int   minimap_top = 0;       ///< the visual row at the minimap's top edge
     float minimap_line_px = 0;   ///< px per row in the minimap; 0: none drawn
     int   sticky_rows = 0;       ///< scope headers pinned at the top (sticky scroll)
+    /// The minimap's blocks, per visual row, as last drawn (code_view owns
+    /// it; shared so copying the state costs a pointer). Only rows whose
+    /// lines an edit touched are re-highlighted.
+    std::shared_ptr<void> minimap_cache;
 };
 
 struct FindOptions {
@@ -126,7 +131,7 @@ namespace detail {
 
 class EditorState {
   public:
-    std::vector<std::string> lines{std::string{}};
+    Lines                    lines{};          ///< chunked and shared: a copy of the state is cheap
     std::vector<Selection>   sels{Selection{}};
     int                      primary = 0;      ///< index into sels: the newest cursor
     int                      tab_width = 4;
@@ -159,17 +164,18 @@ class EditorState {
         syntax.reset();
     }
     void set_text(std::string_view text) {
-        lines.clear();
+        std::vector<std::string> all;
+        all.reserve(static_cast<std::size_t>(std::count(text.begin(), text.end(), '\n')) + 1);
         std::size_t start = 0;
         for (std::size_t i = 0; i <= text.size(); ++i) {
             if (i == text.size() || text[i] == '\n') {
                 std::string l{text.substr(start, i - start)};
                 if (!l.empty() && l.back() == '\r') l.pop_back();
-                lines.push_back(std::move(l));
+                all.push_back(std::move(l));
                 start = i + 1;
             }
         }
-        if (lines.empty()) lines.emplace_back();
+        lines.assign(std::move(all));
         sels = {Selection{}};
         primary = 0;
         undo_.clear(); redo_.clear();
@@ -1406,12 +1412,12 @@ class EditorState {
         bool lost_widest = false;
         if (!max_cols_rescan_)
             for (int l = a.line; l <= b.line && !lost_widest; ++l) lost_widest = display_col(l, line_len(l)) >= max_cols_;
-        lines.erase(lines.begin() + a.line, lines.begin() + b.line + 1);
-        lines.insert(lines.begin() + a.line, std::make_move_iterator(parts.begin()), std::make_move_iterator(parts.end()));
-        outline_splice(a.line, removed_lines, static_cast<int>(parts.size()));
+        const int added = static_cast<int>(parts.size());
+        lines.replace(static_cast<std::size_t>(a.line), static_cast<std::size_t>(removed_lines + 1), std::move(parts));
+        outline_splice(a.line, removed_lines, added);
         if (!max_cols_rescan_) {
             int widest_new = 0;
-            for (int l = a.line; l < a.line + static_cast<int>(parts.size()); ++l) widest_new = std::max(widest_new, display_col(l, line_len(l)));
+            for (int l = a.line; l < a.line + added; ++l) widest_new = std::max(widest_new, display_col(l, line_len(l)));
             if (lost_widest && widest_new < max_cols_) max_cols_rescan_ = true;
             else max_cols_ = std::max(max_cols_, widest_new);
         }

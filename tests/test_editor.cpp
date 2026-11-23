@@ -342,6 +342,35 @@ static void test_syntax() {
     check(nsyms.size() == 2 && nsyms[0].name == "hand" && nsyms[1].name == "Real",
           "C++ outline skips `using namespace` and forward declarations");
     check(outline(rs, std::vector<std::string>{"struct Unit;"}).size() == 1, "a Rust unit struct is a definition");
+    {   // Lines: chunked, shared; must behave exactly like a vector of lines
+        std::vector<std::string> model;
+        for (int i = 0; i < 3000; ++i) model.push_back("line " + std::to_string(i));
+        Lines ls;
+        ls.assign(model);
+        std::uint32_t seed = 777;
+        const auto rnd = [&](std::size_t n) { seed = seed * 1664525u + 1013904223u; return static_cast<std::size_t>((seed >> 8) % static_cast<std::uint32_t>(n)); };
+        bool same = true;
+        for (int step = 0; step < 3000 && same; ++step) {
+            const std::size_t at = rnd(model.size() + 1), count = std::min(rnd(step % 50 == 0 ? 900 : 4), model.size() - std::min(at, model.size()));
+            std::vector<std::string> with;
+            for (std::size_t k = 0, n = rnd(step % 70 == 0 ? 1200 : 4); k < n; ++k) with.push_back("s" + std::to_string(step) + "." + std::to_string(k));
+            model.erase(model.begin() + static_cast<std::ptrdiff_t>(std::min(at, model.size())),
+                        model.begin() + static_cast<std::ptrdiff_t>(std::min(at, model.size()) + count));
+            model.insert(model.begin() + static_cast<std::ptrdiff_t>(std::min(at, model.size())), with.begin(), with.end());
+            if (model.empty()) model.emplace_back();
+            ls.replace(at, count, with);
+            same = ls.size() == model.size() && ls.to_vector() == model;
+        }
+        check(same, "Lines matches a vector of lines across 3000 random replaces (inserts, deletes, big and small)");
+        bool chunks_ok = ls.chunk_count() >= model.size() / Lines::kMax;
+        std::size_t walked = 0;
+        for (const auto& l : ls) { chunks_ok = chunks_ok && l == model[walked]; ++walked; }
+        check(chunks_ok && walked == model.size(), "...iterates in order, chunks stay bounded");
+        const Lines copy = ls;
+        ls.replace(0, 1, {"edited"});
+        check(copy[0] == model[0] && ls[0] == "edited" && ls.shares_chunk_with(copy, ls.size() - 1) && !ls.shares_chunk_with(copy, 0),
+              "a copy keeps its text, and shares every chunk an edit did not touch");
+    }
     {   // the outline is kept across edits: it must always equal a fresh one
         auto e2 = ed("");
         e2.language = &cpp;

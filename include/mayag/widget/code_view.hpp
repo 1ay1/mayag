@@ -238,28 +238,48 @@ template <class C>
     return out;
 }
 
+namespace minimap_detail {
+struct Row { std::vector<std::pair<Rect, Color<Srgb>>> b; editor::LineState starts{}; };   ///< x/w in cells; the state it was lexed from
+struct Cache {
+    std::uint64_t version = 0, key = 0;   ///< what the rows were built for (text version; window + colours)
+    int top = -1;
+    std::vector<std::shared_ptr<const Row>> rows;   ///< rows[r]: visual row top + r (a frame's snapshot shares them)
+};
+}  // namespace minimap_detail
+
 /// The minimap: every visual row from `top` as blocks of its syntax colours,
 /// 2 px a row, a cell 1 px wide (VS Code's "render characters: false").
-/// Rebuilt only when the text, the window onto it or the colours change.
+/// Rows are cached across frames (ed.metrics.minimap_cache): a keystroke
+/// re-highlights only the rows of lines it changed, not the ~600 on screen.
 template <class Th>
-[[nodiscard]] inline Node minimap_rows(const editor::EditorState& ed, const Th& th, int top, int rows, float w, float row_px) {
-    // One canvas owning its blocks, not a box node per word: the minimap is
-    // rebuilt on every keystroke, and hundreds of nodes (a style each, then
-    // cascade, layout, paint) were most of a keystroke's view in a big file.
-    struct Blocks { float w = 0, h = 0; std::vector<std::pair<Rect, Color<Srgb>>> b; };
-    auto data = std::make_shared<Blocks>();
-    data->w = w; data->h = static_cast<float>(rows) * row_px;
+[[nodiscard]] inline Node minimap_rows(const editor::EditorState& ed, const Th& th, int top, int rows, float w, float row_px,
+                                       std::uint64_t look_key) {
+    using minimap_detail::Cache;
+    auto cache = std::static_pointer_cast<Cache>(ed.metrics.minimap_cache);
+    if (!cache) { cache = std::make_shared<Cache>(); ed.metrics.minimap_cache = cache; }
     const auto& vis = ed.visual_lines();
     const float cell = 1.0f;
     const int max_cols = static_cast<int>(w / cell);
+    // which rows must be rebuilt
+    const bool same_window = cache->key == look_key && cache->top == top && static_cast<int>(cache->rows.size()) == rows;
+    const auto [tlo, thi] = same_window ? ed.lines_touched_since(cache->version) : std::pair<int, int>{0, INT_MAX};
+    if (!same_window) { cache->rows.assign(static_cast<std::size_t>(rows), nullptr); cache->key = look_key; cache->top = top; }
     std::vector<editor::Span> spans;
-    for (int r = 0; r < rows && top + r < static_cast<int>(vis.size()); ++r) {
+    for (int r = 0; r < rows; ++r) {
+        auto& slot = cache->rows[static_cast<std::size_t>(r)];
+        if (top + r >= static_cast<int>(vis.size())) { slot = nullptr; continue; }
         const int l = vis[static_cast<std::size_t>(top + r)];
+        // untouched, and lexed from the same carried state (an edit above
+        // that opens a comment recolours lines it never touched)
+        const editor::LineState st0 = ed.syntax.state_at(*ed.language, ed.lines, l);
+        if (slot && (l < tlo || l > thi) && slot->starts == st0) continue;
+        auto row = std::make_shared<minimap_detail::Row>();
+        row->starts = st0;
+        slot = row;
         const std::string& s = ed.line(l);
         if (s.empty()) continue;
-        const float y = static_cast<float>(r) * row_px;
         spans.clear();
-        editor::highlight_line(*ed.language, s, ed.syntax.state_at(*ed.language, ed.lines, l), spans);
+        editor::highlight_line(*ed.language, s, st0, spans);
         // one block per run of non-space text, in its token's colour
         const auto run = [&](std::uint32_t a, std::uint32_t b, Color<Srgb> col) {
             std::uint32_t i = a;
@@ -270,9 +290,8 @@ template <class Th>
                 if (e > i) {
                     const int c0 = ed.display_col(l, static_cast<int>(i)), c1 = ed.display_col(l, static_cast<int>(e));
                     if (c0 >= max_cols) return;
-                    const float x = static_cast<float>(c0) * cell;
-                    const float bw = static_cast<float>(std::min(c1, max_cols) - c0) * cell;
-                    data->b.emplace_back(Rect{x, y, bw, std::max(row_px - 0.5f, 1.0f)}, col.fade(0.75f));
+                    row->b.emplace_back(Rect{static_cast<float>(c0) * cell, 0.0f, static_cast<float>(std::min(c1, max_cols) - c0) * cell, 0.0f},
+                                        col.fade(0.75f));
                 }
                 i = e;
             }
@@ -285,14 +304,27 @@ template <class Th>
         }
         if (at < s.size()) run(at, static_cast<std::uint32_t>(s.size()), th.of(editor::Tok::text));
     }
+    cache->version = ed.version();
+    // One canvas owning its blocks, not a box node per word: hundreds of
+    // nodes (a style each, then cascade, layout, paint) were most of a
+    // keystroke's view in a big file.
+    struct Blocks { float w = 0, h = 0, row_px = 2.0f; std::shared_ptr<const Cache> rows; };
+    auto data = std::make_shared<Blocks>();
+    data->w = w; data->h = static_cast<float>(rows) * row_px; data->row_px = row_px;
+    data->rows = std::make_shared<const Cache>(*cache);   // a snapshot: the cache moves on next frame
     Style st;
     st.layout.width = px(w);
     st.layout.height = px(data->h);
     const CanvasFn paint = [](DrawList& dl, const Rect& f, const void* u) {
         const auto& d = *static_cast<const Blocks*>(u);
         const float sx = d.w > 0 ? f.width() / d.w : 1.0f, sy = d.h > 0 ? f.height() / d.h : 1.0f;
-        for (const auto& [r, col] : d.b)
-            dl.fill_rect(Rect{f.left() + r.left() * sx, f.top() + r.top() * sy, r.width() * sx, r.height() * sy}, col);
+        const float bh = std::max(d.row_px - 0.5f, 1.0f) * sy;
+        for (std::size_t r = 0; r < d.rows->rows.size(); ++r) {
+            if (!d.rows->rows[r]) continue;
+            const float y = f.top() + static_cast<float>(r) * d.row_px * sy;
+            for (const auto& [rc, col] : d.rows->rows[r]->b)
+                dl.fill_rect(Rect{f.left() + rc.left() * sx, y, rc.width() * sx, bh}, col);
+        }
     };
     const float hgt = data->h;
     return (z(Node::make_canvas(paint, std::shared_ptr<const void>(std::move(data)), std::move(st))) | size(w, hgt)).build();
@@ -767,15 +799,17 @@ template <ControlContext C>
         const int top = rows <= fit ? 0 : static_cast<int>(std::round(frac * static_cast<float>(rows - fit)));
         ed.metrics.minimap_top = top;
         ed.metrics.minimap_line_px = kRowPx;
-        // the blocks: rebuilt only when the text, the window onto it or the colours change
+        // the blocks: cached per row across frames, re-highlighted only where
+        // an edit changed them (minimap_rows)
         const auto colour_key = [&] {
             std::uint64_t k = 0;
             for (const auto& cl : th.tok) { std::uint32_t u; const float f = cl.c0 + cl.c1 * 3.1f + cl.c2 * 7.3f; std::memcpy(&u, &f, 4); k = memo_mix(k, u); }
             return k;
         };
-        const std::uint64_t key = memo_mix(memo_mix(memo_mix(memo_mix(ed.version(), static_cast<std::uint64_t>(top)),
-                                                             static_cast<std::uint64_t>(fit)), ed.fold_version()), colour_key());
-        Node blocks = memo(key, [&] { return detail::minimap_rows(ed, th, top, fit, kW - 12.0f, kRowPx); });
+        const std::uint64_t look = memo_mix(memo_mix(memo_mix(colour_key(), static_cast<std::uint64_t>(fit)), ed.fold_version()),
+                                            reinterpret_cast<std::uintptr_t>(ed.language));
+        Node blocks = memo(memo_mix(memo_mix(look, ed.version()), static_cast<std::uint64_t>(top)),
+                           [&] { return detail::minimap_rows(ed, th, top, fit, kW - 12.0f, kRowPx, look); });
         const float slider_y = static_cast<float>(static_cast<int>(sy / lh) - top) * kRowPx;
         const bool mhov = c.hovered(part_id(id, part_minimap)) || c.pressed(part_id(id, part_minimap));
         std::vector<Node> m_layers;

@@ -559,7 +559,7 @@ class SyntaxCache {
 
     /// The state line `line` starts in, computing (and caching) every state
     /// above it that is stale.
-    LineState state_at(const Language& lang, std::span<const std::string> lines, int line) const {
+    LineState state_at(const Language& lang, const auto& lines, int line) const {
         if (lang_ != &lang) { lang_ = &lang; valid_ = 0; }
         line = std::clamp(line, 0, static_cast<int>(lines.size()));
         if (states_.size() < lines.size() + 1) states_.resize(lines.size() + 1);
@@ -575,7 +575,7 @@ class SyntaxCache {
     }
 
     /// Spans of one line.
-    std::vector<Span> spans(const Language& lang, std::span<const std::string> lines, int line) const {
+    std::vector<Span> spans(const Language& lang, const auto& lines, int line) const {
         std::vector<Span> out;
         if (line < 0 || line >= static_cast<int>(lines.size())) return out;
         highlight_line(lang, lines[static_cast<std::size_t>(line)], state_at(lang, lines, line), out);
@@ -606,7 +606,7 @@ inline LineState outline_line(const Language& lang, const std::string& s, LineSt
 /// keyword (`fn`, `class`, `def`, ...) or, in C++, a function defined at the
 /// start of a line. A heuristic; good enough for breadcrumbs and Go to
 /// Symbol, and costs one lex per line.
-[[nodiscard]] inline std::vector<Symbol> outline(const Language& lang, std::span<const std::string> lines,
+[[nodiscard]] inline std::vector<Symbol> outline(const Language& lang, const auto& lines,
                                                  int tab_width = 4) {
     std::vector<Symbol> out;
     LineState st{};

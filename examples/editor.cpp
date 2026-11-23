@@ -419,7 +419,7 @@ struct Editor {
     static const Buffer& refresh(const Buffer& b) {
         if (b.cache_version != b.ed.version()) {
             b.diags = lint(b.ed);
-            b.marks = change_marks(b.disk, b.ed.lines);
+            b.marks = change_marks(b.disk, b.ed.lines.to_vector());
             b.cache_version = b.ed.version();
         }
         return b;
@@ -452,7 +452,7 @@ struct Editor {
         Buffer b;
         b.path = path;
         b.ed = EditorState::from_text(it->text, &editor::language_for(path));
-        b.disk = b.ed.lines;
+        b.disk = b.ed.lines.to_vector();
         b.preview = preview;
         if (preview)
             for (std::size_t i = 0; i < m.bufs.size(); ++i)
@@ -748,7 +748,7 @@ struct Editor {
                     if (!f) { toast(m, "Could not save", b->path, Toast::Kind::error); return {}; }
                 }
                 for (auto& pf : m.project) if (pf.path == b->path) pf.text = b->ed.text() + "\n";
-                b->disk = b->ed.lines;
+                b->disk = b->ed.lines.to_vector();
                 b->ed.mark_saved();
                 b->preview = false;
                 b->cache_version = 0;

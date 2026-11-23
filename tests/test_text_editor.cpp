@@ -129,6 +129,37 @@ void motion_and_scopes() {
     s.ed.metrics.minimap_top = 0;
     text_editor_ops::minimap_seek(s, 200.0f, false);   // row 100
     ok(std::abs(s.ed.scroll.offset.y - (100 * 20.0f - 200.0f)) < 1.0f, "a minimap press centres the row under it");
+    {   // the minimap keeps its rows across edits: always what a fresh build draws
+        std::string src;
+        for (int i = 0; i < 400; ++i) src += i % 13 == 0 ? "int f" + std::to_string(i) + "() {\n" : "    x = \"s\" + 1; // c\n";
+        auto e = editor::EditorState::from_text(src, &editor::language_named("C++"));
+        const auto th = CodeTheme::dark(themes::midnight);
+        const auto draw = [&](const editor::EditorState& ed) {
+            Node n = mayag::dsl::detail::minimap_rows(ed, th, 0, 300, 84.0f, 2.0f, 7);
+            DrawList dl;
+            const auto walk = [&](auto&& self, const Node& x) -> void {
+                if (x.kind() == NodeKind::canvas && x.canvas()) x.canvas()(dl, Rect{0, 0, 84.0f, 600.0f}, x.canvas_user());
+                for (const auto& k : x.children()) self(self, k);
+            };
+            walk(walk, n);
+            return dl;
+        };
+        (void)draw(e);
+        std::uint32_t seed = 99;
+        const auto rnd = [&](int n) { seed = seed * 1664525u + 1013904223u; return static_cast<int>((seed >> 8) % static_cast<std::uint32_t>(n)); };
+        const char* bits[] = {"/*", "*/", "\n", "abc", "\"", "\n\n", "// q", "    "};
+        bool same = true;
+        for (int step = 0; step < 200 && same; ++step) {
+            const int l = rnd(std::min(e.line_count(), 320));
+            e.set_cursor({l, rnd(e.line_len(l) + 1)});
+            if (rnd(4) == 0) e.backspace(); else e.paste(bits[rnd(8)]);
+            const DrawList kept = draw(e);
+            auto fresh = e;
+            fresh.metrics.minimap_cache.reset();
+            same = kept.same_as(draw(fresh));
+        }
+        ok(same, "the minimap kept across 200 random edits draws what a fresh one does");
+    }
 }
 
 void completion_and_symbols() {
