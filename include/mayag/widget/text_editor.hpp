@@ -125,6 +125,8 @@ struct TextEditorProps {
     bool        cursor_on = true;         ///< blink phase, the app's clock
     bool        saving = false;           ///< a write is in flight
     std::string error;                    ///< the last save failed: why
+    std::string host;                     ///< the machine the file is on ("" = this one): a chip before the path
+    bool        host_danger = false;      ///< ...a production machine: the chip is red
     bool        minimap = true;           ///< the file at a glance, beside the code
     bool        sticky = true;            ///< enclosing scopes pinned at the top
     bool        motion = true;            ///< the caret glides, jumps slide (off: everything snaps)
@@ -691,7 +693,17 @@ template <ControlContext C, class On>
     Node state_mark = p.saving ? (text<"saving\u2026"> | font(t.type(Tier::small)) | fg(muted)).build()
                     : dirty    ? (h(text<"\u25CF"> | font(t.type(Tier::small)) | fg(t.warning)) | tooltip("Unsaved changes \u2014 \u2318S saves")).build()
                                : Node{};
-    Node head = (h(node(breadcrumbs(c, base + ".crumbs", crumbs)), spacer(), node(std::move(state_mark)))
+    Node host_chip;
+    if (!p.host.empty()) {   // a file on another machine says so first, always
+        const Color<Srgb> tone = p.host_danger ? t.danger : t.info;
+        host_chip = (h(text<"\u21C4"> | font(t.type(Tier::small)) | fg(tone),
+                       text_owned(p.host) | font(t.type(Tier::small)) | semibold | fg(p.host_danger ? tone : ink),
+                       node(p.host_danger ? (text<"PROD"> | font(t.type(Tier::fine)) | bold | tracking(0.6f) | fg(tone)).build() : Node{}))
+                     | gap(t.spaced(5)) | align(Align::center) | pad(t.spaced(2), t.spaced(8)) | radius(t.rounded(4))
+                     | bg(mix(chrome, tone, 0.14f)) | border(t.stroke(1), mix(chrome, tone, 0.35f))
+                     | tooltip(p.host_danger ? "A production machine: saves land on it" : "On " + p.host + ", over ssh")).build();
+    }
+    Node head = (h(node(std::move(host_chip)), node(breadcrumbs(c, base + ".crumbs", crumbs)), spacer(), node(std::move(state_mark)))
                  | align(Align::center) | gap(t.spaced(8)) | pad(t.spaced(5), t.spaced(12)) | width(pct(100))
                  | bg(chrome) | inner_shadow(0.0f, rule, {0.0f, -1.0f}) | tooltip(p.path)).build();
 

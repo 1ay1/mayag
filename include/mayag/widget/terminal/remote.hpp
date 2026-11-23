@@ -40,13 +40,19 @@ struct ConnectionLostProps {
     std::string command;    ///< "ssh prod-db"
     double      gone = 0.0; ///< seconds since it dropped
     bool        motion = true;
+    /// Reconnecting by itself: seconds until the next try (< 0: not
+    /// scheduled -- the card waits for enter), and which try that is.
+    double      retry_in = -1.0;
+    int         attempt = 0;
 };
 
 template <ControlContext C>
 [[nodiscard]] inline Node connection_lost(const C& c, std::string_view id, const TermBox& b, const ConnectionLostProps& p) {
     using term_detail::mono;
     const Theme& t = c.theme;
-    const auto red = t.danger, paper = t.background, ink = t.text_primary, dim = mix(ink, paper, 0.45f);
+    // red when it needs you; amber while it is getting itself back
+    const bool recovering = p.retry_in >= 0.0;
+    const auto red = recovering ? t.warning : t.danger, paper = t.background, ink = t.text_primary, dim = mix(ink, paper, 0.45f);
     const float fs = t.type_at(b.font_size, Tier::body);
     const std::string base{id};
     const auto btn = [&](const char* part, std::string label_, std::string key, bool primary) {
@@ -59,15 +65,21 @@ template <ControlContext C>
                 | border(1.0f, primary ? ink : mix(paper, ink, 0.3f)) | pointer_cursor | id_of(nid)).build();
     };
     const std::string when = p.gone < 60.0 ? "just now" : std::to_string(static_cast<int>(p.gone / 60.0)) + "m ago";
+    const int secs = static_cast<int>(std::ceil(std::max(p.retry_in, 0.0)));
+    const std::string status = !recovering ? p.command + " exited 255 \u00B7 the connection dropped or was refused"
+                             : secs <= 0  ? "reconnecting now\u2026"
+                                          : "reconnecting in " + std::to_string(secs) + "s" +
+                                                (p.attempt > 0 ? " \u00B7 try " + std::to_string(p.attempt + 1) : std::string{}) +
+                                                " \u00B7 enter: now";
     const float w = std::min(620.0f, b.size.x - 32.0f);
     const float e = std::clamp(static_cast<float>(p.gone) * 5.0f, 0.0f, 1.0f);
     const float ease = p.motion ? 1.0f - (1.0f - e) * (1.0f - e) * (1.0f - e) : 1.0f;
-    return (h(v(h(mono("\u2716", t.type_at(b.font_size, Tier::fine), red), mono("lost " + p.alias, fs, ink) | semibold, mono(when, t.type_at(b.font_size, Tier::fine), dim))
+    return (h(v(h(mono(recovering ? "\u21BB" : "\u2716", t.type_at(b.font_size, Tier::fine), red), mono("lost " + p.alias, fs, ink) | semibold, mono(when, t.type_at(b.font_size, Tier::fine), dim))
                     | gap(8.0f) | align(Align::center),
-                mono(p.command + " exited 255 \u00B7 the connection dropped or was refused", t.type_at(b.font_size, Tier::fine), dim) | ellipsis)
+                mono(status, t.type_at(b.font_size, Tier::fine), recovering ? mix(red, ink, 0.3f) : dim) | ellipsis)
                   | gap(4.0f) | grow() | min_size(0, 0),
               node(btn("close", "close", "esc", false)),
-              node(btn("reconnect", "reconnect", "\u23CE", true)))
+              node(btn("reconnect", recovering ? "now" : "reconnect", "\u23CE", true)))
             | gap(10.0f) | align(Align::center) | pad(10.0f, 14.0f) | width(w)
             | bg(mix(paper, ink, 0.04f)) | border(1.0f, mix(paper, red, 0.55f))
             | shadow(28.0f, colors::black.fade(0.45f), {0.0f, 10.0f}) | role(a11y::Role::dialog) | label("connection lost")
