@@ -99,6 +99,7 @@ struct FilePaneProps {
     std::string title;           ///< "~/src/hand", "deploy@prod-db:/srv"
     std::string path;            ///< the folder shown (absolute)
     std::string where;           ///< "" local, else the host ("deploy@prod-db")
+    bool        where_danger = false;   ///< the host is production: its chip is red, like its tab
     std::string home;            ///< shown as ~ in the crumbs ("" = none)
     std::vector<FileEntry> entries;
     bool        loading = false;
@@ -502,10 +503,12 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     }
     std::vector<Node> title_bits;
     title_bits.push_back((text_owned(leaf.empty() ? std::string{"files"} : leaf) | font(ui) | semibold | fg(ink) | ellipsis | min_size(0, 0)).build());
-    if (remote) title_bits.push_back((h(node(icon_node(Icon::server, 10.0f, t.info)), mono(p.where, ui2, t.info) | ellipsis | min_size(0, 0))
-                                      | gap(4.0f) | align(Align::center) | pad(1.0f, 5.0f) | radius(t.rounded(4.0f)) | bg(t.info.fade(0.1f))
+    // the machine, in the colour its tab wears: red for production
+    const auto host_tone = p.where_danger ? t.readable(t.danger) : t.info;
+    if (remote) title_bits.push_back((h(node(icon_node(Icon::server, 10.0f, host_tone)), mono(p.where, ui2, host_tone) | ellipsis | min_size(0, 0))
+                                      | gap(4.0f) | align(Align::center) | pad(1.0f, 5.0f) | radius(t.rounded(4.0f)) | bg(host_tone.fade(p.where_danger ? 0.16f : 0.1f))
                                       | min_size(0, 0)).build());
-    auto head = h(node(icon_node(remote ? Icon::server : Icon::folder_open, 14.0f, remote ? t.info : t.accent)),
+    auto head = h(node(icon_node(remote ? Icon::server : Icon::folder_open, 14.0f, remote ? host_tone : t.accent)),
                   v(h_list(std::move(title_bits), 6.0f) | align(Align::center) | min_size(0, 0),
                     h_list(std::move(crumb_nodes), 1.0f) | align(Align::center) | min_size(0, 0) | clip)
                       | gap(2.0f) | grow() | min_size(0, 0),
@@ -577,7 +580,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         tools.push_back(icon_btn("cd", Icon::terminal, "cd here in the shell (tab)", emit(A::Kind::cd, p.path)));
         tools.push_back(icon_btn("hidden", Icon::eye, st.show_hidden ? "Hide dotfiles (.)" : "Show dotfiles (.)",
                                  [](FilePaneState& s) { s.show_hidden = !s.show_hidden; s.sel = 0; }, st.show_hidden));
-        if (remote) tools.push_back(icon_btn("upload", Icon::arrow_up, "Upload here (u)", emit(A::Kind::upload, p.path)));
+        if (remote) tools.push_back(icon_btn("upload", Icon::git_push, "Upload here (u)", emit(A::Kind::upload, p.path)));
         else tools.push_back(icon_btn("reveal", Icon::external, "Show in the file manager (o)", emit(A::Kind::reveal, p.path)));
         toolbar = (h_list(std::move(tools), 2.0f) | align(Align::center) | width(pct(100)) | pad(0, 6.0f, 6.0f, 8.0f) | clip
                    | inner_shadow(0.0f, line, {0.0f, -1.0f})).build();
