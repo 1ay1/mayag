@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -157,7 +158,23 @@ struct CodeViewOptions {
     /// caret math assumes is the grid the glyphs actually sit on.
     FontFamily                             family = FontFamily::mono;
     bool                                   ligatures = false;             ///< -> != ===, when the face has them
+    /// The file at a glance, right of the code: every line as coloured
+    /// blocks, the visible part as a slider (press or drag to go there).
+    bool                                   minimap = false;
+    /// The scopes around the top line (function, class, block) pinned to
+    /// the top as you scroll through them; a click goes to that line.
+    bool                                   sticky = false;
+    /// Where the primary caret is DRAWN, in (display column, visual row):
+    /// the app eases it toward the real position so it glides between
+    /// places instead of jumping. < 0: drawn exactly where it is.
+    float                                  caret_col = -1.0f;
+    float                                  caret_row = -1.0f;
 };
+
+/// Parts under the code view's id (beside part_bar).
+inline constexpr std::size_t part_minimap = part_dec + 7;
+/// part_sticky_base + line: a pinned scope header (far above the fold ids).
+inline constexpr std::size_t part_sticky_base = part_dec + (std::size_t{1} << 26);
 
 inline constexpr std::size_t part_fold_base = part_dec + 1000;
 
@@ -177,6 +194,73 @@ template <class C>
         if (w > 0.0f) return w;
     }
     return size * 0.6f;
+}
+
+/// The lines that open the scopes enclosing line `l` (outermost first): each
+/// is the nearest line above with less indentation that has something nested
+/// under it -- a function, a class, an if. What sticky scroll pins.
+[[nodiscard]] inline std::vector<int> scopes_at(const editor::EditorState& ed, int l, int max_depth) {
+    std::vector<int> out;
+    if (l <= 0 || l >= ed.line_count()) return out;
+    int j = l;
+    while (j < ed.line_count() && ed.blank(j)) ++j;   // a blank line belongs to what follows
+    if (j >= ed.line_count()) return out;
+    int need = ed.display_col(j, ed.indent_of(j));
+    for (int k = l - 1; k >= 0 && need > 0; --k) {
+        if (ed.blank(k)) continue;
+        const int ind = ed.display_col(k, ed.indent_of(k));
+        if (ind >= need) continue;
+        // a closing line (`}`, `end`) is not a header
+        const char ch = ed.line(k)[static_cast<std::size_t>(ed.indent_of(k))];
+        if (ch != '}' && ch != ')' && ch != ']') out.push_back(k);
+        need = ind;
+    }
+    std::reverse(out.begin(), out.end());
+    if (static_cast<int>(out.size()) > max_depth) out.erase(out.begin(), out.end() - max_depth);
+    return out;
+}
+
+/// The minimap: every visual row from `top` as blocks of its syntax colours,
+/// 2 px a row, a cell 1 px wide (VS Code's "render characters: false").
+/// Rebuilt only when the text, the window onto it or the colours change.
+template <class Th>
+[[nodiscard]] inline Node minimap_rows(const editor::EditorState& ed, const Th& th, int top, int rows, float w, float row_px) {
+    std::vector<Node> blocks;
+    const auto& vis = ed.visual_lines();
+    const float cell = 1.0f;
+    const int max_cols = static_cast<int>(w / cell);
+    for (int r = 0; r < rows && top + r < static_cast<int>(vis.size()); ++r) {
+        const int l = vis[static_cast<std::size_t>(top + r)];
+        const std::string& s = ed.line(l);
+        if (s.empty()) continue;
+        const float y = static_cast<float>(r) * row_px;
+        const auto spans = ed.syntax.spans(*ed.language, ed.lines, l);
+        // one block per run of non-space text, in its token's colour
+        const auto run = [&](std::uint32_t a, std::uint32_t b, Color<Srgb> col) {
+            std::uint32_t i = a;
+            while (i < b) {
+                while (i < b && (s[i] == ' ' || s[i] == '\t')) ++i;
+                std::uint32_t e = i;
+                while (e < b && s[e] != ' ' && s[e] != '\t') ++e;
+                if (e > i) {
+                    const int c0 = ed.display_col(l, static_cast<int>(i)), c1 = ed.display_col(l, static_cast<int>(e));
+                    if (c0 >= max_cols) return;
+                    const float x = static_cast<float>(c0) * cell;
+                    const float bw = static_cast<float>(std::min(c1, max_cols) - c0) * cell;
+                    blocks.push_back((box() | size(bw, std::max(row_px - 0.5f, 1.0f)) | bg(col.fade(0.75f)) | absolute(x, y)).build());
+                }
+                i = e;
+            }
+        };
+        std::uint32_t at = 0;
+        for (const auto& sp : spans) {
+            if (sp.start > at) run(at, sp.start, th.of(editor::Tok::text));
+            run(sp.start, sp.end, th.of(sp.kind));
+            at = sp.end;
+        }
+        if (at < s.size()) run(at, static_cast<std::uint32_t>(s.size()), th.of(editor::Tok::text));
+    }
+    return (z(h_list(std::move(blocks))) | size(w, static_cast<float>(rows) * row_px)).build();
 }
 
 /// Expand tabs, so a run's text sits on the cell grid exactly.
@@ -414,17 +498,30 @@ template <ControlContext C>
         }
     }
 
-    // Carets, drawn last so they sit over everything.
+    // Carets, drawn last so they sit over everything. The primary one is
+    // drawn where the app's eased position says (it glides between places),
+    // with a soft halo -- the one thing on screen that moves as you type.
     for (std::size_t i = 0; i < ed.sels.size(); ++i) {
         const auto& s = ed.sels[i];
-        if (!o.cursor_on || !o.focused) break;
+        const bool prim = static_cast<int>(i) == ed.primary;
+        if (!o.focused || (!o.cursor_on && !(prim && o.caret_row >= 0.0f && std::abs(o.caret_row - static_cast<float>(vrow(s.head.line))) > 0.02f))) {
+            if (!o.focused) break;
+            continue;
+        }
         const Pos p = s.head;
         if (ed.hidden(p.line)) continue;
         const int vr = vrow(p.line);
         if (vr < first || vr >= last) continue;
-        const float x = col_x(p.line, p.col);
-        const float y = row_y(vr);
-        const Color<Srgb> col = static_cast<int>(i) == ed.primary ? th.cursor : th.cursor.fade(0.7f);
+        float x = col_x(p.line, p.col);
+        float y = row_y(vr);
+        if (prim && o.caret_row >= 0.0f) {   // the glide
+            x = text_x + o.caret_col * cw;
+            y = o.caret_row * lh - sy;
+        }
+        const Color<Srgb> col = prim ? th.cursor : th.cursor.fade(0.7f);
+        if (prim && o.cursor_style == 0)
+            layers.push_back((box() | size(2, lh - 4) | bg(col.fade(0.0f)) | radius(1.0f)
+                              | shadow(5.0f, col.fade(0.35f), Vec2{0.0f, 0.0f}) | absolute(x - 1, y + 2)).build());
         if (o.cursor_style == 1) rect(x, y + 1, cw, lh - 2, col.fade(0.55f), 1);
         else if (o.cursor_style == 2) rect(x, y + lh - 3, cw, 2, col);
         else rect(x - 1, y + 2, 2, lh - 4, col, 1);
@@ -490,38 +587,155 @@ template <ControlContext C>
         }
     }
 
-    // ── scrollbar with an overview ruler ────────────────────────────────
+    // ── sticky scroll: the scopes around the top line, pinned ───────────
+    // The function you are scrolling through stays named at the top; nested
+    // blocks stack under it (at most 4). Each header is its line, drawn as
+    // the line, so it reads as the code it is; a click goes there.
+    const Color<Srgb> ink = th.of(Tok::text);
+    ed.metrics.sticky_rows = 0;
+    if (o.sticky && rows > 0) {
+        const int top_row = std::clamp(static_cast<int>(sy / lh), 0, rows - 1);
+        // The headers cover rows: what they pin is the scope of the first
+        // row visible BELOW them. Grow n until it holds (at most 4 rounds).
+        std::vector<int> scopes;
+        for (int n = 0, round = 0; round < 5; ++round) {
+            const int probe = std::min(top_row + n, rows - 1);
+            auto all = detail::scopes_at(ed, vis[static_cast<std::size_t>(probe)], 4);
+            // header k sits in pinned slot k: it is pinned while its own row
+            // has scrolled to (or past) that slot
+            std::vector<int> s2;
+            for (const int l : all) if (vrow(l) <= top_row + static_cast<int>(s2.size())) s2.push_back(l);
+            scopes = std::move(s2);
+            if (static_cast<int>(scopes.size()) == n) break;
+            n = static_cast<int>(scopes.size());
+        }
+        const int n = static_cast<int>(scopes.size());
+        if (n > 0) {
+            ed.metrics.sticky_rows = n;
+            const Color<Srgb> paper = mix(th.bg, ink, 0.03f);
+            std::vector<Node> rows_n;
+            for (int k = 0; k < n; ++k) {
+                const int l = scopes[static_cast<std::size_t>(k)];
+                const std::string& s = ed.line(l);
+                const auto spans = ed.syntax.spans(lang, ed.lines, l);
+                std::vector<Node> runs;
+                int col = 0;
+                std::uint32_t at = 0;
+                const auto push = [&](std::uint32_t a, std::uint32_t b, Color<Srgb> cl) {
+                    if (b <= a) return;
+                    runs.push_back((text_owned(detail::expand_tabs(std::string_view{s}.substr(a, b - a), col, ed.tab_width, false))
+                                    | font(fs) | family(o.family) | fg(cl) | clip_text).build());
+                    col = ed.display_col(l, static_cast<int>(b));
+                };
+                for (const auto& sp : spans) { if (sp.start > at) push(at, sp.start, ink); push(sp.start, sp.end, th.of(sp.kind)); at = sp.end; }
+                if (at < s.size()) push(at, static_cast<std::uint32_t>(s.size()), ink);
+                const auto sid = part_id(id, part_sticky_base + static_cast<std::size_t>(l));
+                const bool hov = c.hovered(sid);
+                rows_n.push_back((z(box() | size(content_w + sx, lh) | bg(hov ? mix(paper, ink, 0.05f) : paper),
+                                    (h(text_owned(std::to_string(l + 1)) | font(fs) | family(o.family) | fg(th.line_no)
+                                           | text_align(TextAlign::right) | width(static_cast<float>(digits) * cw))
+                                     | height(lh) | align(Align::center) | absolute(12, 0)),
+                                    h(std::move(runs)) | height(lh) | align(Align::center) | absolute(text_x, 0))
+                                  | size(content_w + sx, lh) | absolute(0, static_cast<float>(k) * lh) | pointer_cursor | id_of(id, part_sticky_base + static_cast<std::size_t>(l))).build());
+            }
+            // a soft edge below, so the code slides under the pinned lines
+            rows_n.push_back((box() | size(content_w + sx, 6) | absolute(0, static_cast<float>(n) * lh)
+                              | shadow(6.0f, colors::black.fade(contrast_ratio(th.bg, colors::black) < 3.0f ? 0.35f : 0.12f), Vec2{0.0f, 1.0f})
+                              | bg(paper.fade(0.0f))).build());
+            rows_n.push_back((box() | size(content_w + sx, 1) | bg(mix(paper, ink, 0.1f)) | absolute(0, static_cast<float>(n) * lh - 1)).build());
+            for (auto& r : rows_n) layers.push_back(std::move(r));
+        }
+    }
+
+    // ── the scrollbar: a slim thumb over an overview of the file ────────
+    // Ink on the paper (never a hard-coded white), so it fits light schemes.
+    // At rest a 4 px capsule; under the pointer it widens and brightens.
+    // Behind it, the overview: git edits, find matches, diagnostics and the
+    // carets, each where it is in the file -- so the bar says where to go.
     const bool active_bar = c.hovered(part_id(id, part_bar)) || c.pressed(part_id(id, part_bar));
+    const bool near_bar = active_bar || c.hovered(node_id(id));
     const Rect track = detail::bar_track(ed.scroll);
     const Rect thumb = ed.scroll.thumb_v(track);
     std::vector<Node> marks;
     const float doc_h = std::max(content_h, 1.0f);
-    const auto mark = [&](int line, Color<Srgb> col, float x, float w) {
+    const auto mark = [&](int line, Color<Srgb> col, float x, float w, float h = 2.0f) {
         const float y = track.top() + static_cast<float>(vrow(line)) * lh / doc_h * track.height();
-        marks.push_back((box() | size(w, 2) | bg(col) | absolute(x, y)).build());
+        marks.push_back((box() | size(w, h) | bg(col) | radius(t.rounded(1)) | absolute(x, y)).build());
     };
-    if (o.git != nullptr) for (const auto& g : *o.git) mark(g.line, g.kind == editor::GitMark::Kind::added ? th.git_added : g.kind == editor::GitMark::Kind::deleted ? th.git_deleted : th.git_modified, 0, 3);
-    if (o.find_matches != nullptr) for (const auto& r : *o.find_matches) mark(r.start.line, th.find_current, 4, 5);
-    if (o.diagnostics != nullptr) for (const auto& d : *o.diagnostics) mark(d.range.start.line, d.severity == editor::Diagnostic::Severity::error ? th.error : th.warning, 8, 4);
-    for (const auto& s : ed.sels) mark(s.head.line, th.cursor, 0, detail::kBarWidth);
+    if (o.git != nullptr) for (const auto& g : *o.git) mark(g.line, g.kind == editor::GitMark::Kind::added ? th.git_added : g.kind == editor::GitMark::Kind::deleted ? th.git_deleted : th.git_modified, 0, 3, 3);
+    if (o.find_matches != nullptr)
+        for (std::size_t i = 0; i < o.find_matches->size(); ++i)
+            mark((*o.find_matches)[i].start.line, static_cast<int>(i) == o.find_current ? th.find_current : th.find_current.fade(0.7f), 3, 6, 2);
+    if (o.diagnostics != nullptr) for (const auto& d : *o.diagnostics) mark(d.range.start.line, d.severity == editor::Diagnostic::Severity::error ? th.error : th.warning, 8, 4, 3);
+    for (const auto& s : ed.sels) mark(s.head.line, th.cursor, 0, detail::kBarWidth, 2);
+    const float thumb_w = active_bar ? 8.0f : near_bar ? 6.0f : 4.0f;
+    const Color<Srgb> thumb_col = active_bar ? mix(th.bg, ink, c.pressed(part_id(id, part_bar)) ? 0.42f : 0.32f)
+                                             : mix(th.bg, ink, near_bar ? 0.22f : 0.14f);
     auto bar = z(z(h_list(std::move(marks))),
-                 box() | size(active_bar ? 8.0f : 6.0f, std::max(thumb.height(), 0.0f))
-                       | bg(ed.scroll.scrollable_y() ? (active_bar ? colors::white.fade(0.22f) : colors::white.fade(0.12f)) : colors::white.fade(0.0f))
-                       | radius(t.rounded(4)) | absolute(active_bar ? 2.0f : 3.0f, thumb.top()))
+                 box() | size(thumb_w, std::max(thumb.height(), 0.0f))
+                       | bg(ed.scroll.scrollable_y() ? thumb_col : thumb_col.fade(0.0f))
+                       | radius(thumb_w * 0.5f) | absolute((detail::kBarWidth - thumb_w) * 0.5f, thumb.top())
+                       | transition(transition_props::color | transition_props::shape))
              | width(detail::kBarWidth) | height(pct(100))
-             | bg(active_bar ? colors::white.fade(0.03f) : colors::white.fade(0.0f))
+             | bg(active_bar ? mix(th.bg, ink, 0.04f) : th.bg.fade(0.0f))
+             | inner_shadow(0.0f, active_bar ? mix(th.bg, ink, 0.08f) : th.bg.fade(0.0f), {1.0f, 0.0f})
              | id_of(id, part_bar);
 
-    // Horizontal scrollbar, only when there is something to scroll.
+    // Horizontal scrollbar: a hairline capsule, only when there is something to scroll.
     Node hbar;
     if (ed.scroll.max_offset.x > 0.5f) {
         const float tw = ed.scroll.viewport.x - gutter;
         const float frac = std::clamp(tw / std::max(content_w - gutter, 1.0f), 0.05f, 1.0f);
         const float len = std::max(tw * frac, 30.0f);
         const float x = gutter + (tw - len) * (ed.scroll.offset.x / ed.scroll.max_offset.x);
-        hbar = (box() | size(len, 5) | bg(colors::white.fade(0.12f)) | radius(t.rounded(3)) | absolute(x, std::max(ed.scroll.viewport.y - 8, 0.0f))).build();
+        hbar = (box() | size(len, 4) | bg(mix(th.bg, ink, 0.16f)) | radius(2.0f) | absolute(x, std::max(ed.scroll.viewport.y - 6, 0.0f))).build();
     }
     layers.push_back(std::move(hbar));
+
+    // ── the minimap: the whole file, small, beside the code ─────────────
+    // 2 px a row: up to a screenful of minimap; past that it scrolls with
+    // the code so the slider stays put relative to it (VS Code's model).
+    Node mini;
+    ed.metrics.minimap_line_px = 0.0f;
+    if (o.minimap && ed.scroll.viewport.y > 0.0f) {
+        constexpr float kRowPx = 2.0f, kW = 96.0f;
+        const float H = ed.scroll.viewport.y;
+        const int fit = std::max(1, static_cast<int>(H / kRowPx));
+        const int visible_rows = std::max(1, static_cast<int>(ed.scroll.viewport.y / lh));
+        const float frac = ed.scroll.max_offset.y > 0.0f ? std::clamp(sy / ed.scroll.max_offset.y, 0.0f, 1.0f) : 0.0f;
+        const int top = rows <= fit ? 0 : static_cast<int>(std::round(frac * static_cast<float>(rows - fit)));
+        ed.metrics.minimap_top = top;
+        ed.metrics.minimap_line_px = kRowPx;
+        // the blocks: rebuilt only when the text, the window onto it or the colours change
+        const auto colour_key = [&] {
+            std::uint64_t k = 0;
+            for (const auto& cl : th.tok) { std::uint32_t u; const float f = cl.c0 + cl.c1 * 3.1f + cl.c2 * 7.3f; std::memcpy(&u, &f, 4); k = memo_mix(k, u); }
+            return k;
+        };
+        const std::uint64_t key = memo_mix(memo_mix(memo_mix(memo_mix(ed.version(), static_cast<std::uint64_t>(top)),
+                                                             static_cast<std::uint64_t>(fit)), ed.fold_version()), colour_key());
+        Node blocks = memo(key, [&] { return detail::minimap_rows(ed, th, top, fit, kW - 12.0f, kRowPx); });
+        const float slider_y = static_cast<float>(static_cast<int>(sy / lh) - top) * kRowPx;
+        const bool mhov = c.hovered(part_id(id, part_minimap)) || c.pressed(part_id(id, part_minimap));
+        std::vector<Node> m_layers;
+        m_layers.push_back((node(std::move(blocks)) | absolute(8, 0)).build());
+        for (const auto& s : ed.sels) {   // the carets, as a line across
+            const float y = static_cast<float>(vrow(s.head.line) - top) * kRowPx;
+            if (y >= 0.0f && y < H) m_layers.push_back((box() | size(kW - 8.0f, 2) | bg(th.cursor.fade(0.8f)) | absolute(4, y)).build());
+        }
+        if (o.find_matches != nullptr)
+            for (const auto& r : *o.find_matches) {
+                const float y = static_cast<float>(vrow(r.start.line) - top) * kRowPx;
+                if (y >= 0.0f && y < H) m_layers.push_back((box() | size(kW - 8.0f, 2) | bg(th.find_current.fade(0.55f)) | absolute(4, y)).build());
+            }
+        m_layers.push_back((box() | size(kW, static_cast<float>(visible_rows) * kRowPx)
+                            | bg(mix(th.bg, ink, mhov ? 0.16f : 0.11f).fade(mhov ? 0.8f : 0.7f))
+                            | inner_shadow(0.0f, mix(th.bg, ink, mhov ? 0.2f : 0.1f), {0.0f, 0.0f})
+                            | absolute(0, slider_y) | transition(transition_props::color)).build());
+        mini = (z(std::move(m_layers)) | width(kW) | height(pct(100)) | clip
+                | bg(th.bg) | inner_shadow(0.0f, mix(th.bg, ink, 0.06f), {1.0f, 0.0f})
+                | pointer_cursor | id_of(id, part_minimap)).build();
+    }
 
     // The scroll node: an invisible spacer gives the content its real size
     // so ScrollState measures it; everything visible is absolute.
@@ -533,7 +747,7 @@ template <ControlContext C>
                  | role(a11y::Role::text_field) | label(id)
                  | id_of(id);
 
-    return (h(std::move(surface), std::move(bar)) | width(pct(100)) | grow() | min_size(0, 0) | bg(th.bg)).build();
+    return (h(std::move(surface), std::move(mini), std::move(bar)) | width(pct(100)) | grow() | min_size(0, 0) | bg(th.bg)).build();
 }
 
 }  // namespace mayag::dsl

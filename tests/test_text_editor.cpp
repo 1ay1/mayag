@@ -5,6 +5,7 @@
 #include <mayag/widget/text_editor.hpp>
 
 #include <cstdio>
+#include <cmath>
 #include <string>
 
 using namespace mayag;
@@ -99,6 +100,37 @@ void multi_cursor() {
     ok(!s.ed.primary_sel().empty() && s.ed.sels.size() == 1, "a double click selects the word");
 }
 
+void motion_and_scopes() {
+    std::string src = "int f() {\n";
+    for (int i = 0; i < 200; ++i) src += "    if (x) {\n        y();\n    }\n";
+    src += "}\n";
+    auto s = text_editor_ops::open(src, "a.cpp");
+    s.ed.metrics.line_h = 20.0f;
+    s.ed.scroll.viewport = {800, 400};
+    s.ed.scroll.max_offset = {0, 600 * 20.0f};
+    (void)text_editor_ops::step(s, 0.0);
+    ok(!text_editor_ops::animating(s), "at rest: nothing moves");
+    key(s, Key::down);
+    ok(text_editor_ops::animating(s), "a caret move glides");
+    for (int i = 0; i < 60; ++i) (void)text_editor_ops::step(s, 1.0 / 60.0);
+    ok(!text_editor_ops::animating(s) && s.caret_row == 1.0f, "...and settles exactly on its line");
+    key(s, Key::end, primary());   // the file's end: a jump
+    ok(s.scroll_goal_y >= 0.0f || s.ed.scroll.offset.y > 0.0f, "a jump to the end slides the view");
+    for (int i = 0; i < 120; ++i) (void)text_editor_ops::step(s, 1.0 / 60.0);
+    ok(s.scroll_goal_y < 0.0f, "...and arrives");
+    (void)text_editor_ops::step(s, 0.0, false);
+    ok(!text_editor_ops::animating(s), "motion off: everything snaps");
+    // sticky scroll's scopes: line 3 ("        y();") sits in f() and its if
+    const auto sc = mayag::dsl::detail::scopes_at(s.ed, 2, 4);
+    ok(sc.size() == 2 && sc[0] == 0 && sc[1] == 1, "a line's scopes: the function, then the if");
+    ok(mayag::dsl::detail::scopes_at(s.ed, 0, 4).empty(), "the first line has none");
+    // the minimap: a press centres that row
+    s.ed.metrics.minimap_line_px = 2.0f;
+    s.ed.metrics.minimap_top = 0;
+    text_editor_ops::minimap_seek(s, 200.0f, false);   // row 100
+    ok(std::abs(s.ed.scroll.offset.y - (100 * 20.0f - 200.0f)) < 1.0f, "a minimap press centres the row under it");
+}
+
 }  // namespace
 
 int main() {
@@ -108,6 +140,7 @@ int main() {
     editing_and_save();
     find_and_goto();
     multi_cursor();
+    motion_and_scopes();
     std::printf("%s  %d checks, %d failures\n", failures ? "FAIL" : "PASS", checks, failures);
     return failures ? 1 : 0;
 }

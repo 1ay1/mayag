@@ -69,6 +69,10 @@ struct ViewMetrics {
     float gutter_w = 48.0f;
     float text_dy = 0.0f;
     int   page_lines = 30;
+    // the minimap, as last drawn (for turning a press on it into a line)
+    int   minimap_top = 0;       ///< the visual row at the minimap's top edge
+    float minimap_line_px = 0;   ///< px per row in the minimap; 0: none drawn
+    int   sticky_rows = 0;       ///< scope headers pinned at the top (sticky scroll)
 };
 
 struct FindOptions {
@@ -928,6 +932,8 @@ class EditorState {
         if (folds.contains(l)) toggle_fold(l);
     }
     void unfold_all() { folds.clear(); ++fold_version_; }
+    /// Bumps when a fold opens or closes (what the visible rows depend on).
+    [[nodiscard]] std::uint64_t fold_version() const noexcept { return fold_version_; }
     [[nodiscard]] bool hidden(int l) const {
         for (int f : folds) {
             if (f >= l) break;

@@ -79,6 +79,11 @@ struct TextEditorState {
     // go to line
     bool goto_open = false;
     TextEditState goto_q;
+    // motion: what is DRAWN eases toward what is TRUE. The caret glides to
+    // where it went; the view slides to where it scrolled (a jump to a find
+    // match, a page, go-to-line) instead of cutting.
+    float caret_col = -1.0f, caret_row = -1.0f;   ///< drawn caret (display col, visual row); < 0: not yet placed
+    float scroll_goal_y = -1.0f;                  ///< where a jump is sliding to; < 0: none
     std::vector<TextEditorAction> out;    ///< for the app: drain after every op
 };
 
@@ -96,6 +101,9 @@ struct TextEditorProps {
     bool        cursor_on = true;         ///< blink phase, the app's clock
     bool        saving = false;           ///< a write is in flight
     std::string error;                    ///< the last save failed: why
+    bool        minimap = true;           ///< the file at a glance, beside the code
+    bool        sticky = true;            ///< enclosing scopes pinned at the top
+    bool        motion = true;            ///< the caret glides, jumps slide (off: everything snaps)
 };
 
 // ── the operations: pure functions of the state ─────────────────────────────
@@ -322,12 +330,91 @@ inline void press(TextEditorState& s, editor::Pos p, int count, Mods md) {
     else s.ed.set_cursor(p, md.shift);
 }
 
+/// A press on the minimap at `y` px from its top: the view centres there,
+/// sliding (a drag follows the pointer directly).
+inline void minimap_seek(TextEditorState& s, float y, bool slide) {
+    const auto& mt = s.ed.metrics;
+    if (mt.minimap_line_px <= 0.0f) return;
+    const int row = mt.minimap_top + static_cast<int>(y / mt.minimap_line_px);
+    const float goal = std::max(0.0f, static_cast<float>(row) * mt.line_h - s.ed.scroll.viewport.y * 0.5f);
+    if (slide) s.scroll_goal_y = std::min(goal, s.ed.scroll.max_offset.y);
+    else { s.scroll_goal_y = -1.0f; s.ed.scroll.scroll_to({s.ed.scroll.offset.x, goal}); }
+}
+
+/// A pinned scope header was clicked: go to its line, sliding.
+inline void go_to_scope(TextEditorState& s, int line) {
+    s.ed.set_cursor(editor::Pos{line, s.ed.indent_of(line)});
+    const float goal = std::max(0.0f, static_cast<float>(s.ed.visual_row_of(line)) * s.ed.metrics.line_h - s.ed.metrics.line_h * 2.0f);
+    s.scroll_goal_y = std::min(goal, std::max(s.ed.scroll.max_offset.y, goal));
+}
+
+/// Is anything still easing? (The app keeps frames coming while it is.)
+[[nodiscard]] inline bool animating(const TextEditorState& s) noexcept {
+    if (s.scroll_goal_y >= 0.0f) return true;
+    if (s.caret_row < 0.0f) return false;
+    const editor::Pos c = s.ed.cursor();
+    const float row = static_cast<float>(s.ed.visual_row_of(c.line)), col = static_cast<float>(s.ed.display_col(c.line, c.col));
+    return std::abs(row - s.caret_row) > 0.01f || std::abs(col - s.caret_col) > 0.01f;
+}
+
+/// Advance the motion by `dt` seconds (critically damped: fast, no overshoot).
+/// `motion` false: snap. Returns whether anything is still moving.
+inline bool step(TextEditorState& s, double dt, bool motion = true) {
+    const editor::Pos c = s.ed.cursor();
+    const float row = static_cast<float>(s.ed.visual_row_of(c.line)), col = static_cast<float>(s.ed.display_col(c.line, c.col));
+    const float k = motion ? 1.0f - std::exp(-static_cast<float>(dt) * 28.0f) : 1.0f;
+    if (s.caret_row < 0.0f || !motion) { s.caret_row = row; s.caret_col = col; }
+    else {
+        // a long jump (a page, a search hit) arrives fast: the glide is a
+        // flourish, never a wait
+        const float far = std::abs(row - s.caret_row) > 40.0f ? 0.7f : 0.0f;
+        const float kk = std::max(k, far);
+        s.caret_row += (row - s.caret_row) * kk;
+        s.caret_col += (col - s.caret_col) * kk;
+        if (std::abs(row - s.caret_row) < 0.01f) s.caret_row = row;
+        if (std::abs(col - s.caret_col) < 0.01f) s.caret_col = col;
+    }
+    if (s.scroll_goal_y >= 0.0f) {
+        const float y = s.ed.scroll.offset.y;
+        const float ks = motion ? 1.0f - std::exp(-static_cast<float>(dt) * 18.0f) : 1.0f;
+        float ny = y + (s.scroll_goal_y - y) * ks;
+        if (std::abs(s.scroll_goal_y - ny) < 0.5f) { ny = s.scroll_goal_y; s.scroll_goal_y = -1.0f; }
+        s.ed.scroll.scroll_to({s.ed.scroll.offset.x, ny});
+    }
+    return animating(s);
+}
+
+/// Turn an instant scroll the editor just made (reveal after a jump) into a
+/// slide from where the view was: call with the offset before the op.
+inline void slide_from(TextEditorState& s, float before_y, bool motion) {
+    const float after = s.ed.scroll.offset.y;
+    if (!motion || std::abs(after - before_y) < s.ed.metrics.line_h * 3.0f) return;   // a nudge: no slide
+    s.scroll_goal_y = after;
+    s.ed.scroll.scroll_to({s.ed.scroll.offset.x, before_y});
+}
+
 }  // namespace text_editor_ops
 
 /// A key, as an op (empty only for a bare modifier, which does nothing).
 [[nodiscard]] inline std::optional<TextEditorOp> text_editor_key(const TextEditorState&, Key k, Mods md) {
     if (k == Key::ctrl || k == Key::shift || k == Key::alt || k == Key::super || k == Key::caps_lock) return std::nullopt;
-    return TextEditorOp{[k, md](TextEditorState& s) { text_editor_ops::key(s, k, md); }};
+    return TextEditorOp{[k, md](TextEditorState& s) {
+        // a jump the keys made (find next, go to line, page, the file's ends)
+        // slides there; a step within the screen just scrolls
+        // mid-slide: the next jump slides on from where the view IS now;
+        // a key that doesn't move the view leaves the slide going
+        const float shown = s.ed.scroll.offset.y, going = s.scroll_goal_y;
+        if (going >= 0.0f) s.ed.scroll.scroll_to({s.ed.scroll.offset.x, going});   // reveal works against the destination
+        const float before = s.ed.scroll.offset.y;
+        s.scroll_goal_y = -1.0f;
+        text_editor_ops::key(s, k, md);
+        if (going >= 0.0f && std::abs(s.ed.scroll.offset.y - before) < 0.5f) {   // no new jump: keep sliding
+            s.scroll_goal_y = going;
+            s.ed.scroll.scroll_to({s.ed.scroll.offset.x, shown});
+            return;
+        }
+        text_editor_ops::slide_from(s, going >= 0.0f ? shown : before, true);
+    }};
 }
 
 [[nodiscard]] inline std::optional<TextEditorOp> text_editor_text(const TextEditorState&, std::string_view text) {
@@ -425,34 +512,41 @@ template <ControlContext C, class On>
     o.family = p.family;
     o.ligatures = p.ligatures;
     o.rulers = {};
-    const std::uint64_t surface = node_id(code_id), bar_id = part_id(code_id, part_bar);
+    o.minimap = p.minimap;
+    o.sticky = p.sticky;
+    if (p.motion) { o.caret_col = st.caret_col; o.caret_row = st.caret_row; }
+    const std::uint64_t surface = node_id(code_id), bar_id = part_id(code_id, part_bar), mini_id = part_id(code_id, part_minimap);
     // The pointer resolves against the state when the op is FOLDED, not when
     // the tree was built: the metrics the hit test reads are the ones on screen.
     Node code = (node(code_view(c, code_id, ed, th, o))
                  | grow() | min_size(0, 0) | width(pct(100))
-                 | on_press([op, surface, bar_id](const Pressed& pr) -> std::optional<R> {
+                 | on_press([op, surface, bar_id, mini_id](const Pressed& pr) -> std::optional<R> {
                        if (pr.button != MouseButton::left) return std::nullopt;
                        if (pr.node == bar_id) return op([y = pr.local.y](TextEditorState& s) { scrollbar_press(s.ed.scroll, y); });
+                       if (pr.node == mini_id) return op([y = pr.local.y](TextEditorState& s) { text_editor_ops::minimap_seek(s, y, true); });
                        if (pr.node != surface) return std::nullopt;
                        return op([at = pr.local, n = pr.count, md = pr.mods](TextEditorState& s) {
                            text_editor_ops::press(s, code_view_hit(s.ed, at), n, md);
                        });
                    })
-                 | on_drag([op, surface, bar_id](const Dragged& dr) -> std::optional<R> {
-                       if (dr.node == bar_id) return op([tr = dr.travel](TextEditorState& s) { scrollbar_drag(s.ed.scroll, tr); });
+                 | on_drag([op, surface, bar_id, mini_id](const Dragged& dr) -> std::optional<R> {
+                       if (dr.node == bar_id) return op([tr = dr.travel](TextEditorState& s) { s.scroll_goal_y = -1.0f; scrollbar_drag(s.ed.scroll, tr); });
+                       if (dr.node == mini_id) return op([y = dr.local.y](TextEditorState& s) { text_editor_ops::minimap_seek(s, y, false); });
                        if (dr.node != surface) return std::nullopt;
                        return op([at = dr.local](TextEditorState& s) { s.ed.drag_to(code_view_hit(s.ed, at)); });
                    })
-                 | on_click([op, code_id, surface, bar_id](const Clicked& ck) -> std::optional<R> {
-                       if (ck.node == surface || ck.node == bar_id) return std::nullopt;
-                       // a fold chevron: whichever line's it is
+                 | on_click([op, code_id, surface, bar_id, mini_id](const Clicked& ck) -> std::optional<R> {
+                       if (ck.node == surface || ck.node == bar_id || ck.node == mini_id) return std::nullopt;
+                       // a fold chevron or a pinned scope: whichever line's it is
                        return op([code_id, n = ck.node](TextEditorState& s) {
+                           for (int l = 0; l < s.ed.line_count(); ++l)
+                               if (n == part_id(code_id, part_sticky_base + static_cast<std::size_t>(l))) { text_editor_ops::go_to_scope(s, l); return; }
                            for (const int l : s.ed.visual_lines())
                                if (n == part_id(code_id, part_fold_base + static_cast<std::size_t>(l))) { s.ed.toggle_fold(l); return; }
                        });
                    })
                  | on_scroll([op](const Scrolled& sc) -> std::optional<R> {
-                       return op([d = sc.delta](TextEditorState& s) { s.ed.scroll.scroll_by(d); });
+                       return op([d = sc.delta](TextEditorState& s) { s.scroll_goal_y = -1.0f; s.ed.scroll.scroll_by(d); });
                    })).build();
 
     // ── the status line ────────────────────────────────────────────────────
