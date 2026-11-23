@@ -624,6 +624,15 @@ struct Symbol {
             if (spans[k].kind == Tok::keyword &&
                 std::find(introducers.begin(), introducers.end(), w) != introducers.end()) {
                 if (w == "const" && lang.name != "TypeScript") continue;
+                // `using namespace x;` and `struct Foo;` declare nothing you would jump to
+                const auto word_at = [&](std::size_t q) {
+                    return std::string_view{s}.substr(spans[q].start, spans[q].end - spans[q].start);
+                };
+                if (k > 0 && spans[k - 1].kind == Tok::keyword && word_at(k - 1) == "using") break;
+                if (lang.name == "C++" && w != "namespace") {   // `struct Foo;` (Rust's `struct Unit;` IS a definition)
+                    const auto tail = s.find_last_not_of(" \t");
+                    if (tail != std::string::npos && s[tail] == ';' && s.find('{') == std::string::npos) break;
+                }
                 for (std::size_t q = k + 1; q < spans.size(); ++q) {
                     const auto kind = spans[q].kind;
                     if (kind == Tok::text || kind == Tok::type || kind == Tok::function || kind == Tok::constant) {

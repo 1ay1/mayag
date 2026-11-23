@@ -913,8 +913,9 @@ template <ControlContext C, class On>
                 | bg(mix(paper, ink, 0.025f)) | border(1.0f, mix(paper, ink, 0.075f))).build();
     };
     const auto kv = [&](std::string k, std::string v_, bool last_row, Color<Srgb> col) {
+        const bool none = v_.empty();   // decided before v_ is moved into the cell
         return (h(text_owned(std::move(k)) | font(t.type(Tier::small)) | fg(muted) | width(110.0f),
-                  mono(v_.empty() ? std::string{"\u2014"} : std::move(v_), t.type(Tier::small), v_.empty() ? faint : col) | grow() | ellipsis | min_size(0, 0))
+                  mono(none ? std::string{"\u2014"} : std::move(v_), t.type(Tier::small), none ? faint : col) | grow() | ellipsis | min_size(0, 0))
                 | align(Align::center) | height(36.0f) | width(pct(100))
                 | inner_shadow(0.0f, last_row ? line.fade(0.0f) : line.fade(0.7f), {0.0f, -1.0f})).build();
     };
@@ -1025,8 +1026,9 @@ template <ControlContext C, class On>
                                        mono(pf ? pf->describe() : fw + "  \u2014  " + why, t.type(Tier::small), col) | ellipsis | min_size(0, 0))
                                      | gap(6.0f) | align(Align::center)).build());
                 }
+            const float under_pad = under.empty() ? 0.0f : 4.0f;   // decided before `under` is moved
             return (h(text_owned(d::field_label(f)) | font(t.type(Tier::small)) | fg(focused ? ink : t.text_secondary) | width(110.0f) | pad(8.0f, 0, 0, 0),
-                      v(node(std::move(ctl)), v(std::move(under)) | gap(3.0f) | pad(under.empty() ? 0.0f : 4.0f, 2.0f, 0, 2.0f)) | grow() | min_size(0, 0))
+                      v(node(std::move(ctl)), v(std::move(under)) | gap(3.0f) | pad(under_pad, 2.0f, 0, 2.0f)) | grow() | min_size(0, 0))
                     | align(Align::start) | width(pct(100)) | pad(7.0f, 0)
                     | inner_shadow(0.0f, last_row ? line.fade(0.0f) : line.fade(0.6f), {0.0f, -1.0f})).build();
         };

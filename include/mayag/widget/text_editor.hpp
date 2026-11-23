@@ -890,7 +890,8 @@ template <ControlContext C, class On>
         picker(c, base + ".symbols", st.sym_q, items, rk, st.sym_sel,
                PickerStyle{.placeholder = "Go to a symbol in this file", .prefix = "@", .width = 560.0f,
                            .empty_text = syms.empty() ? "No symbols found in this file" : "No matches",
-                           .footer = {{"\u23CE", "go"}, {"esc", "close"}}});
+                           .footer = {{"\u23CE", "go"}, {"\u2191\u2193", "choose"}, {"esc", "close"}},
+                           .noun = "symbols"});
     }
 
     // ── the file changed on disk ───────────────────────────────────────────

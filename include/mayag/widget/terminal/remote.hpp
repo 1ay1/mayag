@@ -69,8 +69,7 @@ template <ControlContext C>
     const std::string status = !recovering ? p.command + " exited 255 \u00B7 the connection dropped or was refused"
                              : secs <= 0  ? "reconnecting now\u2026"
                                           : "reconnecting in " + std::to_string(secs) + "s" +
-                                                (p.attempt > 0 ? " \u00B7 try " + std::to_string(p.attempt + 1) : std::string{}) +
-                                                " \u00B7 enter: now";
+                                                (p.attempt > 0 ? " \u00B7 try " + std::to_string(p.attempt + 1) : std::string{});
     const float w = std::min(620.0f, b.size.x - 32.0f);
     const float e = std::clamp(static_cast<float>(p.gone) * 5.0f, 0.0f, 1.0f);
     const float ease = p.motion ? 1.0f - (1.0f - e) * (1.0f - e) * (1.0f - e) : 1.0f;

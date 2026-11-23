@@ -92,6 +92,7 @@ struct FilePreview {
     std::string name;
     std::vector<std::string> lines;   ///< its first lines, tabs expanded (empty: binary / unreadable)
     std::string note;                 ///< "8.5 KB", "binary · 3.1 MB"
+    bool listing = false;             ///< a folder's entries ("name/" for folders), not lines of text
 };
 
 struct FilePaneProps {
@@ -722,11 +723,17 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
         const float lh = std::round(nf2 * 1.55f);
         const int n = std::min(static_cast<int>(pv.lines.size()), std::max(p.preview_lines, 0));
         std::vector<Node> ls;
-        for (int i = 0; i < n; ++i)
-            ls.push_back((h(cell(std::to_string(i + 1), nf2, faint.fade(0.55f)) | width(std::round(nf2 * 2.4f)),
-                            cell(pv.lines[static_cast<std::size_t>(i)].empty() ? std::string{" "} : pv.lines[static_cast<std::size_t>(i)], nf2, muted)
+        for (int i = 0; i < n; ++i) {
+            const std::string& ln = pv.lines[static_cast<std::size_t>(i)];
+            // a folder's entries: no line numbers (they are not lines), folders in the folder colour
+            const bool sub = pv.listing && !ln.empty() && ln.back() == '/';
+            Node lead = pv.listing ? node(icon_node(sub ? Icon::folder : Icon::file, std::round(nf2 * 0.95f), sub ? t.accent.fade(0.7f) : faint.fade(0.7f)))
+                                   : (cell(std::to_string(i + 1), nf2, faint.fade(0.55f)) | width(std::round(nf2 * 2.4f))).build();
+            ls.push_back((h(std::move(lead),
+                            cell(ln.empty() ? std::string{" "} : sub ? ln.substr(0, ln.size() - 1) : ln, nf2, sub ? t.text_secondary : muted)
                                 | ellipsis | grow() | min_size(0, 0))
-                          | gap(4.0f) | align(Align::center) | height(lh) | width(pct(100)) | clip).build());
+                          | gap(pv.listing ? 7.0f : 4.0f) | align(Align::center) | height(lh) | width(pct(100)) | clip).build());
+        }
         const float body_h = pv.lines.empty() ? 0.0f : lh * static_cast<float>(std::max(p.preview_lines, 1));
         preview = (v(h(node(icon_node(Icon::eye, 11.0f, t.accent.fade(0.8f))),
                        cell(pv.name, nf, t.text_secondary) | ellipsis | grow() | min_size(0, 0),

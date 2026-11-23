@@ -439,12 +439,16 @@ class MacWindow {
                 msg<void>(app_, sel("sendEvent:"), ev);
             }
         }
-        out.insert(out.end(), std::make_move_iterator(fed_.begin()), std::make_move_iterator(fed_.end()));
+        // a plain loop, not insert(make_move_iterator...): Apple clang 2100 at
+        // -O2 through a PCH mangles move_iterator's two constrained
+        // operator++(int) overloads alike and refuses the TU
+        out.reserve(out.size() + fed_.size());
+        for (auto& e : fed_) out.push_back(std::move(e));
         fed_.clear();
         // what the input method said outside a key press (a candidate picked
         // with the mouse, a composition ended because the input source changed)
         if (!ime_->out.empty()) {
-            out.insert(out.end(), std::make_move_iterator(ime_->out.begin()), std::make_move_iterator(ime_->out.end()));
+            for (auto& e : ime_->out) out.push_back(std::move(e));
             ime_->out.clear();
         }
 

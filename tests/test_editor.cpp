@@ -337,6 +337,11 @@ static void test_syntax() {
     const auto csyms = outline(cpp, std::vector<std::string>{"int main(int argc, char** argv) {", "    if (x) {",
                                                              "    return foo(1);", "}"});
     check(csyms.size() == 1 && csyms[0].name == "main", "C++ outline finds a function definition, not calls");
+    const auto nsyms = outline(cpp, std::vector<std::string>{"namespace hand {", "using namespace mayag;", "struct Fwd;",
+                                                             "struct Real {", "};", "}"});
+    check(nsyms.size() == 2 && nsyms[0].name == "hand" && nsyms[1].name == "Real",
+          "C++ outline skips `using namespace` and forward declarations");
+    check(outline(rs, std::vector<std::string>{"struct Unit;"}).size() == 1, "a Rust unit struct is a definition");
 }
 
 static void test_fuzzy_and_diff() {
