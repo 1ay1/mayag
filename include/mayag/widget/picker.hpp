@@ -72,6 +72,7 @@ struct PickerStyle {
     std::string empty_text = "No matches";
     std::vector<std::pair<std::string, std::string>> footer;   ///< key hints
     std::string noun;                ///< what the count counts ("files"): "4 of 126 files"
+    bool        mono = false;        ///< labels are code: set them in the monospace face
 };
 
 /// Fuzzy-rank `items` by `query` (stable for equal scores). Returns the item
@@ -115,10 +116,14 @@ inline void picker(const C& c, std::string_view id, const TextEditState& query,
         const bool on = k == sel;
         rows.push_back((h(box() | size(t.mark, 14) | with_look(sheet_of(t).mark, t),
                           node(it.icon_name.empty() ? Node{} : file_icon(t, it.icon_name, 12.0f).build()),
-                          node(fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.type(Tier::body),
-                                          t.text_primary, t.accent).build()),
-                          text_owned(it.detail) | font(t.type(Tier::small)) | fg(var::text_disabled) | ellipsis
-                              | grow() | min_size(0, 0),
+                          node(st.mono ? (node(fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.type(Tier::body),
+                                                          t.text_primary, t.accent).build()) | monospace | grow() | min_size(0, 0) | clip).build()
+                                       : fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.type(Tier::body),
+                                                    t.text_primary, t.accent).build()),
+                          st.mono ? (text_owned(it.detail) | font(t.type(Tier::small)) | fg(var::text_disabled) | ellipsis
+                                         | max_size(st.width * 0.32f, 1000.0f) | min_size(0, 0)).build()
+                                  : (text_owned(it.detail) | font(t.type(Tier::small)) | fg(var::text_disabled) | ellipsis
+                                         | grow() | min_size(0, 0)).build(),
                           node(it.hint.empty() ? Node{} : key_hint(t, it.hint, "", t.type(Tier::small)).build()))
                         | gap(t.spaced(9)) | align(Align::center) | pad(0, t.spaced(12), 0, t.spaced(6)) | height(30)
                         | width(pct(100)) | with_look(sheet_of(t).item, t) | group()

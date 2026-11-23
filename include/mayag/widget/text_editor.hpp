@@ -95,6 +95,7 @@ struct TextEditorState {
     // match, a page, go-to-line) instead of cutting.
     float caret_col = -1.0f, caret_row = -1.0f;   ///< drawn caret (display col, visual row); < 0: not yet placed
     float scroll_goal_y = -1.0f;                  ///< where a jump is sliding to; < 0: none
+    int   center_line = -1;                       ///< centre this line once the view is measured (a jump into a fresh file)
     // completion: the words of the file and its language, ranked against the
     // word being typed; Tab / Enter takes one, Esc puts it away
     bool comp_open = false;
@@ -542,7 +543,7 @@ inline void go_to_scope(TextEditorState& s, int line) {
 
 /// Is anything still easing? (The app keeps frames coming while it is.)
 [[nodiscard]] inline bool animating(const TextEditorState& s) noexcept {
-    if (s.scroll_goal_y >= 0.0f) return true;
+    if (s.scroll_goal_y >= 0.0f || s.center_line >= 0) return true;
     if (s.caret_row < 0.0f) return false;
     const editor::Pos c = s.ed.cursor();
     const float row = static_cast<float>(s.ed.visual_row_of(c.line)), col = static_cast<float>(s.ed.display_col(c.line, c.col));
@@ -552,6 +553,16 @@ inline void go_to_scope(TextEditorState& s, int line) {
 /// Advance the motion by `dt` seconds (critically damped: fast, no overshoot).
 /// `motion` false: snap. Returns whether anything is still moving.
 inline bool step(TextEditorState& s, double dt, bool motion = true) {
+    // a jump waiting for the view's size: centre it now (a fresh file snaps
+    // there; one already on screen slides)
+    if (s.center_line >= 0 && s.ed.scroll.viewport.y > 0.0f) {
+        const float lh = s.ed.metrics.line_h;
+        const float goal = std::clamp(static_cast<float>(s.ed.visual_row_of(s.center_line)) * lh - s.ed.scroll.viewport.y * 0.38f,
+                                      0.0f, s.ed.scroll.max_offset.y);
+        if (s.caret_row < 0.0f || !motion) { s.ed.scroll.scroll_to({0.0f, goal}); s.scroll_goal_y = -1.0f; }
+        else s.scroll_goal_y = goal;
+        s.center_line = -1;
+    }
     const editor::Pos c = s.ed.cursor();
     const float row = static_cast<float>(s.ed.visual_row_of(c.line)), col = static_cast<float>(s.ed.display_col(c.line, c.col));
     const float k = motion ? 1.0f - std::exp(-static_cast<float>(dt) * 28.0f) : 1.0f;
@@ -583,6 +594,21 @@ inline void slide_from(TextEditorState& s, float before_y, bool motion) {
     if (!motion || std::abs(after - before_y) < s.ed.metrics.line_h * 3.0f) return;   // a nudge: no slide
     s.scroll_goal_y = after;
     s.ed.scroll.scroll_to({s.ed.scroll.offset.x, before_y});
+}
+
+/// Go to `r` from outside the editor (a project search hit, a link): select
+/// it and bring its line to the upper middle of the view -- the reading
+/// position -- sliding there when the file is already showing.
+inline void jump_to(TextEditorState& s, editor::Range r) {
+    const auto keep = s.ed.scroll.offset;
+    r.start.line = std::clamp(r.start.line, 0, s.ed.line_count() - 1);
+    r.end.line = std::clamp(r.end.line, 0, s.ed.line_count() - 1);
+    r.start.col = std::clamp(r.start.col, 0, s.ed.line_len(r.start.line));
+    r.end.col = std::clamp(r.end.col, 0, s.ed.line_len(r.end.line));
+    s.ed.select_range(r);
+    s.ed.scroll.scroll_to(keep);   // the centring decides where the view goes
+    s.center_line = r.start.line;
+    s.comp_open = s.sym_open = s.goto_open = s.find_focused = false;
 }
 
 }  // namespace text_editor_ops
