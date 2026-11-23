@@ -159,6 +159,7 @@ class MacWindow {
         // without setActivationPolicy the window opens behind everything and
         // never takes keyboard focus, which looks exactly like a hang.
         id app = msg_cls<id>(objc_getClass("NSApplication"), sel("sharedApplication"));
+        startup::mark("  mac: NSApplication");
         if (app == nullptr) return std::nullopt;
         if (!cfg.child) {
         msg<BOOL>(app, sel("setActivationPolicy:"), static_cast<long>(0));  // Regular
@@ -169,6 +170,7 @@ class MacWindow {
         // never mapped by the window server — the process sits there alive,
         // consuming events, showing nothing. Costly to diagnose, one line to fix.
         msg<void>(app, sel("finishLaunching"));
+        startup::mark("  mac: app launched");
         }
 
         // Undecorated: no title bar, no buttons, square corners -- the app draws
@@ -184,6 +186,7 @@ class MacWindow {
                       frame, style, static_cast<unsigned long>(2) /* Buffered */,
                       static_cast<BOOL>(NO));
         if (win == nullptr) return std::nullopt;
+        startup::mark("  mac: window created");
 
         msg<void>(win, sel("setTitle:"), nsstring(cfg.title));
         if (!cfg.decorated) msg<void>(win, sel("setHasShadow:"), static_cast<BOOL>(YES));
@@ -209,6 +212,7 @@ class MacWindow {
         msg<void>(win, sel("setAcceptsMouseMovedEvents:"), static_cast<BOOL>(YES));
         msg<void>(win, sel("makeKeyAndOrderFront:"), nullptr);
         if (!cfg.child) msg<void>(app, sel("activateIgnoringOtherApps:"), static_cast<BOOL>(YES));
+        startup::mark("  mac: ordered front");
 
         // A layer-backed content view is what we blit the framebuffer into.
         // It is mayag's own NSView: the window's first responder and an
@@ -342,6 +346,7 @@ class MacWindow {
         // the two comparable on the same machine: the whole point of the GPU
         // claim is a measured A/B, and that needs a switch.
         w.gpu_enabled_ = w.init_gpu();
+        startup::mark("  mac: gpu");
 
         return w;
     }
