@@ -322,8 +322,11 @@ class MacWindow {
             if (v > 0.0 && v <= 480.0) w.frame_interval_ = 1.0 / v;
         }
 
-        w.fb_    = backend::Framebuffer{static_cast<int>(cfg.size.x * w.dpi_),
-                                        static_cast<int>(cfg.size.y * w.dpi_)};
+        // The software framebuffer is made by the first software present()
+        // (it resizes to the surface), never up front: with Metal drawing,
+        // a full-size float framebuffer here was ~37 MB at 1920x1200 that
+        // nothing ever rendered into.
+        w.fb_ = backend::Framebuffer{1, 1};
 
         // ── GPU, when it is both compiled in and actually available ──────
         //
