@@ -1109,18 +1109,14 @@ class EditorState {
 
     // ── keymap ──────────────────────────────────────────────────────────
 
-    /// The standard editing keymap (macOS: alt=word, cmd=line/document;
-    /// elsewhere: ctrl=word, home/end). Returns true when the key was used.
-    /// Clipboard keys are NOT handled here: the app owns the clipboard.
+    /// The standard editing keymap (the Mac's: alt=word, cmd=line/document;
+    /// the PC's: ctrl=word, home/end), as the key's Mods.keymap says. Returns
+    /// true when the key was used. Clipboard keys are NOT handled here: the
+    /// app owns the clipboard.
     bool handle_key(Key k, Mods m) {
         const bool sh = m.shift;
-#if defined(__APPLE__)
-        const bool word = m.alt && !m.super && !m.ctrl;
-        const bool linewise = m.super;
-#else
-        const bool word = m.ctrl && !m.alt;
-        const bool linewise = false;
-#endif
+        const bool word = m.mac() ? (m.alt && !m.super && !m.ctrl) : (m.ctrl && !m.alt);
+        const bool linewise = m.mac() && m.super;
         const bool cmd = m.primary();
         switch (k) {
             case Key::left:

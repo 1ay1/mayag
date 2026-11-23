@@ -44,6 +44,7 @@
 #include "completion_menu.hpp"
 #include "find_bar.hpp"
 #include "fuzzy.hpp"
+#include "keybind.hpp"   // chord_text: hints from the chords they describe
 #include "picker.hpp"
 #include "status_bar.hpp"
 #include "text_field.hpp"
@@ -132,6 +133,7 @@ using TextEditorOp = Edit<TextEditorState>;
 struct TextEditorProps {
     std::string path;                     ///< where it lives ("" = untitled)
     std::string shown_path;               ///< how to show it ("~/src/app/pane.cpp")
+    Keymap      keymap = native_keymap(); ///< the conventions its key hints are written in
     float       font_size = 13.0f;        ///< the code's size (exact: it is a cell grid)
     float       line_height = 1.45f;
     FontFamily  family = FontFamily::mono;
@@ -745,7 +747,8 @@ template <ControlContext C, class On>
     }
     const bool dirty = ed.dirty();
     Node state_mark = p.saving ? (text<"saving\u2026"> | font(t.type(Tier::small)) | fg(muted)).build()
-                    : dirty    ? (h(text<"\u25CF"> | font(t.type(Tier::small)) | fg(t.readable(t.warning, 3.0f))) | tooltip("Unsaved changes \u2014 \u2318S saves")).build()
+                    : dirty    ? (h(text<"\u25CF"> | font(t.type(Tier::small)) | fg(t.readable(t.warning, 3.0f)))
+                                  | tooltip("Unsaved changes \u2014 " + chord_text({Key::s, Mods::cmd(false, p.keymap)}) + " saves")).build()
                                : Node{};
     Node host_chip;
     if (!p.host.empty()) {   // a file on another machine says so first, always
@@ -957,7 +960,7 @@ template <ControlContext C, class On>
                     text<"This file changed on disk."> | font(t.type(Tier::body)) | semibold | fg(ink),
                     text<"Your edits are kept until you choose."> | font(t.type(Tier::small)) | fg(muted) | grow() | min_size(0, 0) | ellipsis,
                     h(text<"Reload from disk"> | font(t.type(Tier::small)) | semibold | fg(t.readable(t.warning)),
-                      text<"\u2318\u21E7R"> | font(t.type(Tier::fine)) | fg(muted))
+                      text_owned(chord_text({Key::r, Mods::cmd(true, p.keymap)})) | font(t.type(Tier::fine)) | fg(muted))
                         | gap(t.spaced(6)) | align(Align::center) | pad(t.spaced(3), t.spaced(10)) | radius(t.rounded(5))
                         | bg(hov ? t.warning.fade(0.22f) : t.warning.fade(0.12f)) | pointer_cursor | id_of_raw(rid)
                         | on_click([op](const Clicked&) -> std::optional<R> {

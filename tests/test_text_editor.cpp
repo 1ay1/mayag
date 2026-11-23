@@ -21,12 +21,25 @@ void ok(bool c, const std::string& what) {
 
 void key(TextEditorState& s, Key k, Mods m = {}) { if (auto op = text_editor_key(s, k, m)) (*op)(s); }
 void type(TextEditorState& s, std::string_view t) { if (auto op = text_editor_text(s, t)) (*op)(s); }
-Mods primary() {
-#if defined(__APPLE__)
-    return Mods{.super = true};
-#else
-    return Mods{.ctrl = true};
-#endif
+Mods primary() { return Mods::cmd(); }
+
+// Both keyboards' editing conventions, on whatever machine runs the test: the
+// keymap is data on the key event, not a compile-time branch.
+void both_keymaps() {
+    using editor::EditorState;
+    auto e = EditorState::from_text("alpha beta gamma", &editor::language_named("Plain Text"));
+    e.set_cursor({0, 16});
+    (void)e.handle_key(Key::left, Mods{.alt = true, .keymap = Keymap::mac});   // ⌥←: a word
+    ok(e.cursor().col == 11, "the Mac: option+left moves a word");
+    (void)e.handle_key(Key::left, Mods{.super = true, .keymap = Keymap::mac});   // ⌘←: the line's start
+    ok(e.cursor().col == 0, "the Mac: cmd+left goes to the line's start");
+    e.set_cursor({0, 16});
+    (void)e.handle_key(Key::left, Mods{.ctrl = true, .keymap = Keymap::pc});     // ctrl+←: a word
+    ok(e.cursor().col == 11, "the PC: ctrl+left moves a word");
+    ok(!Mods{.super = true, .keymap = Keymap::pc}.primary() && Mods{.ctrl = true, .keymap = Keymap::pc}.primary() &&
+       Mods{.super = true, .keymap = Keymap::mac}.primary(), "the accelerator is cmd on the Mac, ctrl on the PC");
+    ok(chord_text({Key::s, Mods::cmd(false, Keymap::mac)}) == "\u2318S" && chord_text({Key::s, Mods::cmd(false, Keymap::pc)}) == "Ctrl+S",
+       "a chord is written each keyboard's way");
 }
 
 void round_trip() {
@@ -220,6 +233,7 @@ void completion_and_symbols() {
 
 int main() {
     std::printf("-- text_editor\n");
+    both_keymaps();
     round_trip();
     indentation();
     editing_and_save();

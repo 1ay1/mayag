@@ -7,12 +7,7 @@
 # and the native glyph emit.
 font/font.hpp: 6
 
-# Keycap labels: "⌃3" / "⌘K" on macOS, "Alt+3" / "Ctrl+K" elsewhere. Text
-# content (what the key IS called there), drawn identically.
-widget/keybind.hpp: 1
-widget/workspace_rail.hpp: 1
-core/event.hpp: 2
-
-# Editing keys: word / line motion is alt / cmd on macOS, ctrl elsewhere
-# (behaviour, not pixels).
-editor/buffer.hpp: 1
+# Keyboard conventions: native_keymap() -- the one place mayag decides
+# whether keys follow the Mac's or the PC's. Everything else (editing keys,
+# keycap labels, shortcut hints) reads Mods.keymap: data, testable anywhere.
+core/event.hpp: 1

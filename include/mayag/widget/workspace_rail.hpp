@@ -34,13 +34,9 @@
 
 namespace mayag::dsl {
 
-/// "⌃3" on macOS, "Alt+3" elsewhere: the workspace switch key for n.
-[[nodiscard]] inline std::string workspace_key_label(int n) {
-#if defined(__APPLE__)
-    return "\u2303" + std::to_string(n);
-#else
-    return "Alt+" + std::to_string(n);
-#endif
+/// "⌃3" on the Mac, "Alt+3" on the PC: the workspace switch key for n.
+[[nodiscard]] inline std::string workspace_key_label(int n, Keymap k = native_keymap()) {
+    return (k == Keymap::mac ? "\u2303" : "Alt+") + std::to_string(n);
 }
 
 struct WorkspaceInfo {

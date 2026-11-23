@@ -13,6 +13,7 @@
 #include "agent_state.hpp"     // spinner_frame
 #include "fuzzy.hpp"
 #include "key_hint.hpp"
+#include "keybind.hpp"         // chord_text
 #include "text_field.hpp"
 #include "../scene/overlay.hpp"
 
@@ -128,6 +129,7 @@ struct SshHostsProps {
     std::string  action = "new tab";       ///< what enter does
     float        width = 680.0f;
     int          max_rows = 9;
+    Keymap       keymap = native_keymap();  ///< the conventions its key hints are written in
 };
 
 namespace detail {
@@ -287,10 +289,10 @@ inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& quer
                       box() | height(1) | width(pct(100)) | bg(var::border),
                       v(v_list(std::move(rows), 1.0f)) | pad(t.spaced(4), t.spaced(6)) | width(pct(100)),
                       h(node(key_hint(t, "\u23CE", p.action, t.type(Tier::small)).build()),
-                        node(key_hint(t, "\u2303S", "pin", t.type(Tier::small)).build()),
-                        node(key_hint(t, "\u2303Y", "copy cmd", t.type(Tier::small)).build()),
-                        node(key_hint(t, "\u2303E", "edit config", t.type(Tier::small)).build()),
-                        node(key_hint(t, "\u2303\u21E7H", "manage hosts", t.type(Tier::small)).build()),
+                        node(key_hint(t, chord_text({Key::s, Mods{.ctrl = true, .keymap = p.keymap}}), "pin", t.type(Tier::small)).build()),
+                        node(key_hint(t, chord_text({Key::y, Mods{.ctrl = true, .keymap = p.keymap}}), "copy cmd", t.type(Tier::small)).build()),
+                        node(key_hint(t, chord_text({Key::e, Mods{.ctrl = true, .keymap = p.keymap}}), "edit config", t.type(Tier::small)).build()),
+                        node(key_hint(t, chord_text({Key::h, Mods{.shift = true, .ctrl = true, .keymap = p.keymap}}), "manage hosts", t.type(Tier::small)).build()),
                         spacer(),
                         mono(p.source, t.type(Tier::fine), faint) | ellipsis)
                         | gap(t.spaced(12)) | align(Align::center) | pad(t.spaced(6), t.spaced(14)) | width(pct(100))

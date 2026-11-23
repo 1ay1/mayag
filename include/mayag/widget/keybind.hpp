@@ -57,22 +57,31 @@ struct Chord {
            k == Key::caps_lock;
 }
 
-/// The keycaps of a chord, in the platform's conventional modifier order.
+/// The keycaps of a chord, in its keymap's conventional modifier order:
+/// ⌃⌥⇧⌘ on the Mac, Ctrl Alt Shift Super on the PC.
 [[nodiscard]] inline std::vector<std::string> chord_caps(Chord ch) {
     std::vector<std::string> caps_;
-#if defined(__APPLE__)
-    if (ch.mods.ctrl)  caps_.push_back("\u2303");
-    if (ch.mods.alt)   caps_.push_back("\u2325");
-    if (ch.mods.shift) caps_.push_back("\u21E7");
-    if (ch.mods.super) caps_.push_back("\u2318");
-#else
-    if (ch.mods.ctrl)  caps_.push_back("Ctrl");
-    if (ch.mods.alt)   caps_.push_back("Alt");
-    if (ch.mods.shift) caps_.push_back("Shift");
-    if (ch.mods.super) caps_.push_back("Super");
-#endif
+    const bool mac = ch.mods.mac();
+    if (ch.mods.ctrl)  caps_.push_back(mac ? "\u2303" : "Ctrl");
+    if (ch.mods.alt)   caps_.push_back(mac ? "\u2325" : "Alt");
+    if (ch.mods.shift) caps_.push_back(mac ? "\u21E7" : "Shift");
+    if (ch.mods.super) caps_.push_back(mac ? "\u2318" : "Super");
     if (!ch.empty()) caps_.push_back(key_label(ch.key));
     return caps_;
+}
+
+/// A chord as one string, the way its platform writes shortcuts in menus
+/// and hints: "⌘⇧P" on the Mac (glyphs run together), "Ctrl+Shift+P"
+/// on the PC. Every shortcut hint is made from the binding it describes, so
+/// a hint can never disagree with the key that works.
+[[nodiscard]] inline std::string chord_text(Chord ch) {
+    const auto caps_ = chord_caps(ch);
+    std::string s;
+    for (std::size_t i = 0; i < caps_.size(); ++i) {
+        if (i > 0 && !ch.mods.mac()) s += '+';
+        s += caps_[i];
+    }
+    return s;
 }
 
 template <ControlContext C>

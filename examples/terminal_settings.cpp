@@ -111,7 +111,7 @@ const std::array<Action, 14> kActions{{
     {"zoom_reset",  {Key::n0, primary_mods()}},
 }};
 
-[[nodiscard]] std::string chord_text(Chord ch) {
+[[nodiscard]] std::string chord_config(Chord ch) {
     if (ch.empty()) return "none";
     std::string s;
     if (ch.mods.ctrl)  s += "ctrl+";
@@ -352,7 +352,7 @@ struct TerminalSettings {
             case Kind::number:
             case Kind::fraction: return fmt_num(sp, v);
             case Kind::text:     return s.shell;
-            case Kind::chord:    return chord_text(s.keys[static_cast<std::size_t>(sp.slot)]);
+            case Kind::chord:    return chord_config(s.keys[static_cast<std::size_t>(sp.slot)]);
         }
         return {};
     }
@@ -790,7 +790,7 @@ struct TerminalSettings {
         const Chord ch = (k.key == Key::backspace && k.mods.none()) ? Chord{} : Chord{k.key, k.mods};
         const auto slot = static_cast<std::size_t>(spec(m, si).slot);
         if (m.s->keys[slot] != ch) m.s.edit([&](Settings& s) { s.keys[slot] = ch; });
-        say(m, spec(m, si).key + " = \"" + chord_text(ch) + "\"" +
+        say(m, spec(m, si).key + " = \"" + chord_config(ch) + "\"" +
                    (conflicts(*m.s)[slot] ? "  (conflicts with another binding)" : ""),
             conflicts(*m.s)[slot]);
         return {};

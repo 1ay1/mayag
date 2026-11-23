@@ -43,33 +43,48 @@ enum class Key : std::uint16_t {
     semicolon, quote, comma, period, slash, grave,
 };
 
+/// Which keyboard conventions a key press follows. The Mac's: Cmd is the
+/// accelerator, Option moves by word, Cmd by line. Everyone else's (the PC):
+/// Ctrl is the accelerator and moves by word, Home/End by line. This is
+/// DATA carried by every key event, not a compile-time branch: one
+/// implementation serves both, and a test on any machine can press keys the
+/// other way (mayag's single platform decision is native_keymap()).
+enum class Keymap : std::uint8_t { pc, mac };
+
+/// The convention of the machine this build runs on. The ONLY platform
+/// conditional about keys in mayag.
+[[nodiscard]] constexpr Keymap native_keymap() noexcept {
+#if defined(__APPLE__)
+    return Keymap::mac;
+#else
+    return Keymap::pc;
+#endif
+}
+
 /// Modifier state as a bitmask. `super` is Cmd on macOS, Win on Windows.
 struct Mods {
     bool shift = false;
     bool ctrl  = false;
     bool alt   = false;
     bool super = false;
+    /// The conventions the keyboard follows (not part of which keys are
+    /// held: == compares the four modifiers only).
+    Keymap keymap = native_keymap();
 
-    friend constexpr bool operator==(Mods, Mods) = default;
-
-    /// The platform-correct "primary" accelerator: Cmd on macOS, Ctrl
-    /// elsewhere. Writing `m.primary()` instead of `m.ctrl` is the difference
-    /// between an app that feels native on macOS and one that does not.
-    [[nodiscard]] constexpr bool primary() const noexcept {
-#if defined(__APPLE__)
-        return super;
-#else
-        return ctrl;
-#endif
+    friend constexpr bool operator==(Mods a, Mods b) noexcept {
+        return a.shift == b.shift && a.ctrl == b.ctrl && a.alt == b.alt && a.super == b.super;
     }
-    /// The primary accelerator held (plus shift if asked): what a test or
-    /// script should send for "cmd-s" so it means the same on every platform.
-    [[nodiscard]] static constexpr Mods cmd(bool with_shift = false) noexcept {
-#if defined(__APPLE__)
-        return Mods{.shift = with_shift, .super = true};
-#else
-        return Mods{.shift = with_shift, .ctrl = true};
-#endif
+
+    [[nodiscard]] constexpr bool mac() const noexcept { return keymap == Keymap::mac; }
+    /// The "primary" accelerator held: Cmd on the Mac, Ctrl elsewhere.
+    /// Writing `m.primary()` instead of `m.ctrl` is the difference between an
+    /// app that feels native on macOS and one that does not.
+    [[nodiscard]] constexpr bool primary() const noexcept { return mac() ? super : ctrl; }
+    /// The primary accelerator (plus shift if asked) in a keymap: what a test
+    /// or script sends for "cmd-s" so it means the same on every platform.
+    [[nodiscard]] static constexpr Mods cmd(bool with_shift = false, Keymap k = native_keymap()) noexcept {
+        return k == Keymap::mac ? Mods{.shift = with_shift, .super = true, .keymap = k}
+                                : Mods{.shift = with_shift, .ctrl = true, .keymap = k};
     }
     [[nodiscard]] constexpr bool none() const noexcept {
         return !shift && !ctrl && !alt && !super;
