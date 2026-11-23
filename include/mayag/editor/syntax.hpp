@@ -252,6 +252,35 @@ inline Language sorted(Language l) {
         v.push_back(sorted(Language{
             .name = "Markdown", .extensions = {"md", "markdown"},
             .quotes = "", .capitalized_types = false, .markdown = true}));
+        // what you edit on a server: config of every dialect
+        v.push_back(sorted(Language{
+            .name = "YAML", .extensions = {"yml", "yaml"},
+            .constants = {"true", "false", "null", "yes", "no", "on", "off", "True", "False", "~"},
+            .line_comment = "#", .quotes = "\"'", .capitalized_types = false, .ini_like = true}));
+        v.push_back(sorted(Language{
+            .name = "Config",
+            .extensions = {"conf", "cfg", "ini", "cnf", "env", "properties", "service", "socket", "timer",
+                           "mount", "target", "desktop", "gitconfig", "editorconfig", ".env", "config",
+                           "sshd_config", "ssh_config", "hosts", "fstab", "crontab"},
+            .constants = {"true", "false", "yes", "no", "on", "off"},
+            .line_comment = "#", .quotes = "\"'", .capitalized_types = false, .ini_like = true}));
+        v.push_back(sorted(Language{
+            .name = "Dockerfile", .extensions = {"Dockerfile", "Containerfile", "dockerfile"},
+            .keywords = {"FROM", "RUN", "CMD", "LABEL", "EXPOSE", "ENV", "ADD", "COPY", "ENTRYPOINT",
+                         "VOLUME", "USER", "WORKDIR", "ARG", "ONBUILD", "STOPSIGNAL", "HEALTHCHECK",
+                         "SHELL", "AS"},
+            .line_comment = "#", .quotes = "\"'", .capitalized_types = false, .dollar_vars = true}));
+        v.push_back(sorted(Language{
+            .name = "Makefile", .extensions = {"Makefile", "makefile", "GNUmakefile", "mk", "mak"},
+            .keywords = {"ifeq", "ifneq", "ifdef", "ifndef", "else", "endif", "include", "define",
+                         "endef", "export", "override", "PHONY"},
+            .line_comment = "#", .quotes = "\"'", .capitalized_types = false, .dollar_vars = true}));
+        v.push_back(sorted(Language{
+            .name = "CMake", .extensions = {"cmake", "CMakeLists.txt"},
+            .keywords = {"if", "elseif", "else", "endif", "foreach", "endforeach", "while", "endwhile",
+                         "function", "endfunction", "macro", "endmacro", "return"},
+            .constants = {"ON", "OFF", "TRUE", "FALSE", "YES", "NO", "PUBLIC", "PRIVATE", "INTERFACE"},
+            .line_comment = "#", .quotes = "\"", .capitalized_types = false, .dollar_vars = true}));
         v.push_back(sorted(Language{.name = "Plain Text", .extensions = {"txt"}, .quotes = "",
                                     .capitalized_types = false}));
         return v;
@@ -259,14 +288,26 @@ inline Language sorted(Language l) {
     return all;
 }
 
-/// The language for a file name, or Plain Text.
+/// The language for a file name, or Plain Text. The whole name wins over the
+/// extension (`CMakeLists.txt`, `Dockerfile`, `.env`), then the extension.
 [[nodiscard]] inline const Language& language_for(std::string_view path) {
     const auto& all = languages();
-    const auto dot = path.rfind('.');
-    const std::string_view ext = dot == std::string_view::npos ? std::string_view{} : path.substr(dot + 1);
+    const auto slash = path.find_last_of("/\\");
+    const std::string_view base = slash == std::string_view::npos ? path : path.substr(slash + 1);
     for (const auto& l : all)
         for (auto e : l.extensions)
-            if (e == ext) return l;
+            if (e == base) return l;
+    const auto dot = base.rfind('.');
+    const std::string_view ext = dot == std::string_view::npos ? std::string_view{} : base.substr(dot + 1);
+    if (!ext.empty())
+        for (const auto& l : all)
+            for (auto e : l.extensions)
+                if (e == ext) return l;
+    // Dockerfile.dev, Makefile.inc
+    const std::string_view stem = dot == std::string_view::npos ? base : base.substr(0, dot);
+    for (const auto& l : all)
+        for (auto e : l.extensions)
+            if (e.size() > 4 && e == stem) return l;
     return all.back();
 }
 [[nodiscard]] inline const Language& language_named(std::string_view name) {
@@ -375,17 +416,21 @@ inline LineState highlight_line(const Language& lang, std::string_view s, LineSt
         }
     }
 
-    // TOML [section]
+    // TOML/INI [section], key = value; YAML key: value, - key: value
     if (lang.ini_like) {
         std::size_t lead = 0;
         while (lead < n && s[lead] == ' ') ++lead;
+        if (lead + 1 < n && s[lead] == '-' && s[lead + 1] == ' ') { lead += 2; while (lead < n && s[lead] == ' ') ++lead; i = lead; }
         if (lead < n && s[lead] == '[') {
             const auto e = s.find(']', lead);
             if (e != std::string_view::npos) { emit(lead, e + 1, Tok::type); i = e + 1; }
         } else if (lead < n && ident_start(static_cast<unsigned char>(s[lead]))) {
             std::size_t j = lead;
             while (j < n && (ident_char(static_cast<unsigned char>(s[j])) || s[j] == '-' || s[j] == '.')) ++j;
-            if (next_non_space(j) == '=') { emit(lead, j, Tok::property); i = j; }
+            std::size_t k = j;
+            while (k < n && (s[k] == ' ' || s[k] == '\t')) ++k;
+            const bool colon = k < n && s[k] == ':' && (k + 1 == n || s[k + 1] == ' ' || s[k + 1] == '\t');   // not a URL's "http://"
+            if ((k < n && s[k] == '=') || colon) { emit(lead, j, Tok::property); i = j; }
         }
     }
 

@@ -311,6 +311,17 @@ static void test_syntax() {
 
     check(language_for("src/main.rs").name == "Rust" && language_for("a.tsx").name == "TypeScript" &&
           language_for("README").name == "Plain Text", "language from file extension");
+    check(language_for("/etc/nginx/nginx.conf").name == "Config" && language_for("deploy/k8s.yaml").name == "YAML" &&
+          language_for("x/CMakeLists.txt").name == "CMake" && language_for("Dockerfile.dev").name == "Dockerfile" &&
+          language_for("Makefile").name == "Makefile" && language_for(".env").name == "Config" &&
+          language_for("notes.txt").name == "Plain Text", "config dialects by whole name, extension, then stem");
+    {
+        const auto& y = language_named("YAML");
+        bool key = false, url_key = false;
+        for (const auto& x : kinds(y, "  - name: web  # svc").first) key = key || (x.kind == Tok::property && x.end - x.start == 4);
+        for (const auto& x : kinds(y, "http://x").first) url_key = url_key || x.kind == Tok::property;
+        check(key && !url_key, "yaml: `- key:` is a property, a URL is not");
+    }
 
     // Incremental cache: an edit far down does not need the top relexed.
     auto e = ed("/*\nx\n*/\nint y;");

@@ -162,6 +162,17 @@ int main() {
               "and near a corner it slides back on screen");
     }
 
+    {
+        // Kept inside an editor's code area: a caret near the area's bottom
+        // (with a status bar below it, still in the window) flips above.
+        const Rect area{100, 50, 600, 400};                 // bottom at 450; the window goes on to 800
+        const Rect caret{300, 420, 2, 18};
+        const Vec2 menu{200, 90};
+        const Rect r = overlay::resolve_within(Placement::below_start, caret, menu, area, 2.0f);
+        check(r.bottom() <= caret.top() && r.top() >= area.top() && r.left() >= area.left() && r.right() <= area.right(),
+              "within a node: it flips above the caret instead of covering what is below the node");
+    }
+
     std::printf("\n%s  %d checks, %d failures\n",
                 failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;

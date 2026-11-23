@@ -84,6 +84,11 @@ struct Overlay {
     /// it to what is underneath (a tooltip must not eat the click it is
     /// describing).
     bool passthrough = false;
+
+    /// Keep it inside this node's rect instead of the window: a completion
+    /// popup stays in its editor and flips above the caret rather than
+    /// covering the status bar below. 0 means the window.
+    std::uint64_t within_id = 0;
 };
 
 /// The overlay layer for one frame.
@@ -210,6 +215,16 @@ namespace overlay {
     }
 
     return Rect{pos, size};
+}
+
+/// The same, kept inside `bounds` (an editor's code area, say) rather than
+/// the window: placement, flipping and clamping all happen in that rect.
+[[nodiscard]] inline Rect resolve_within(Placement placement, const Rect& anchor, Vec2 size, const Rect& bounds,
+                                         float gap, Vec2 cursor = {}) {
+    const Vec2 o = bounds.origin;
+    Rect r = resolve(placement, Rect{anchor.origin - o, anchor.size}, size, bounds.size, gap, cursor - o);
+    r.origin = r.origin + o;
+    return r;
 }
 
 }  // namespace overlay

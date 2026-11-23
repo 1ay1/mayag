@@ -663,7 +663,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
             const float f = std::sqrt(static_cast<float>(static_cast<double>(e.size) / static_cast<double>(biggest)));
             content = (v(std::move(row_line),
                          h(box() | width(ri + 7.0f) | height(2.0f),
-                           box() | width(pct(std::max(f, 0.02f) * 80.0f)) | height(2.0f) | radius(1.0f) | bg(kind_col(kind).fade(0.5f)))
+                           box() | width(pct(std::max(f, 0.02f) * 80.0f)) | height(2.0f) | radius(1.0f) | bg(kind_col(kind).fade(sel || hov ? 0.45f : 0.24f)))
                              | height(3.0f) | width(pct(100)))
                        | width(pct(100))).build();
         } else {

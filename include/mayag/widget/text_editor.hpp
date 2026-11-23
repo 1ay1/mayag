@@ -823,7 +823,7 @@ template <ControlContext C, class On>
         std::vector<Node> rows;
         for (int k = top; k < std::min(n, top + kRows); ++k) {
             const EditorCompletion& it = st.comp[static_cast<std::size_t>(k)];
-            const bool on = k == sel;
+            const bool picked = k == sel;
             using F = EditorCompletion::From;
             // a kind mark in the colour its kind has in the code
             const Color<Srgb> kc = it.from == F::keyword ? th.of(editor::Tok::keyword)
@@ -851,13 +851,13 @@ template <ControlContext C, class On>
                               text_owned(it.from == F::file ? (it.uses > 1 ? std::to_string(it.uses) + "\u00D7" : std::string{}) : it.detail)
                                   | font(t.type_at(px, Tier::small)) | fg(faint))
                             | gap(t.spaced(8)) | align(Align::center) | pad(0, t.spaced(8)) | height(row_h) | width(pct(100))
-                            | radius(t.rounded(4)) | bg(on ? mix(pop, th.cursor, 0.2f) : pop.fade(0.0f))
+                            | radius(t.rounded(4)) | bg(picked ? mix(pop, th.cursor, 0.2f) : pop.fade(0.0f))
                             | pointer_cursor | id_of_raw(rid)
                             | on_click([op, k](const Clicked&) -> std::optional<R> {
                                   return op([k](TextEditorState& s) { text_editor_ops::accept_completion(s, k); });
                               })).build());
         }
-        rows.push_back((h(text<"\u21E5 / \u23CE accept  \u00B7  \u2191\u2193 choose  \u00B7  esc"> | font(t.type(Tier::fine)) | fg(faint))
+        rows.push_back((h(text<"tab accept  \u00B7  \u2191\u2193 choose  \u00B7  esc close"> | font(t.type(Tier::fine)) | fg(faint))
                         | pad(t.spaced(4), t.spaced(9)) | width(pct(100)) | inner_shadow(0.0f, edge, {0.0f, 1.0f})).build());
         c.overlay(Overlay{
             .content = (v(std::move(rows)) | gap(1.0f) | pad(t.spaced(4), t.spaced(4), 0.0f, t.spaced(4)) | width(std::max(260.0f, px * 24.0f))
@@ -870,6 +870,7 @@ template <ControlContext C, class On>
             .offset = 2.0f,
             .shift = Vec2{-30.0f, 0.0f},   // the word column lines up with the typed word
             .layer = 8,
+            .within_id = surface,   // flips above the caret rather than covering the status bar
         });
     }
 

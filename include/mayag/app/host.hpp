@@ -806,7 +806,9 @@ class window_host {
                     for (std::size_t k = 0; a == nullptr && o.anchor_id != 0 && k < placed.size(); ++k) a = placed[k]->find(o.anchor_id);
                     const Rect anchor = o.anchor_id != 0 ? (a ? a->frame() : Rect{}) : Rect{Vec2{}, s.size};
                     const Vec2 natural = layout::measure(o.content, layout::Constraints{s.size.x, s.size.y}, measurer);
-                    Rect placed_r = overlay::resolve(o.placement, anchor, natural, s.size, o.offset, o.at.value_or(s.input.cursor()));
+                    const Node* w = o.within_id != 0 ? s.tree.find(o.within_id) : nullptr;
+                    Rect placed_r = w ? overlay::resolve_within(o.placement, anchor, natural, w->frame(), o.offset, o.at.value_or(s.input.cursor()))
+                                      : overlay::resolve(o.placement, anchor, natural, s.size, o.offset, o.at.value_or(s.input.cursor()));
                     placed_r.origin = placed_r.origin + o.shift;
                     layout::arrange(o.content, placed_r, measurer);
                     placed.push_back(&o.content);
@@ -1648,8 +1650,10 @@ class window_host {
                 a = placed_roots[k]->find(o.anchor_id);
             const Rect anchor = o.anchor_id != 0 ? (a ? a->frame() : Rect{}) : Rect{Vec2{}, size_};
             const Vec2 natural = layout::measure(o.content, layout::Constraints{size_.x, size_.y}, measurer);
-            Rect placed = overlay::resolve(o.placement, anchor, natural, size_,
-                                           o.offset, o.at.value_or(input_.cursor()));
+            const Node* w = o.within_id != 0 ? tree_.find(o.within_id) : nullptr;
+            Rect placed = w ? overlay::resolve_within(o.placement, anchor, natural, w->frame(), o.offset, o.at.value_or(input_.cursor()))
+                            : overlay::resolve(o.placement, anchor, natural, size_,
+                                               o.offset, o.at.value_or(input_.cursor()));
             placed.origin = placed.origin + o.shift;
             layout::arrange(o.content, placed, measurer);
             placed_roots.push_back(&o.content);

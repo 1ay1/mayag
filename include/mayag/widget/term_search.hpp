@@ -38,15 +38,20 @@ inline void term_search(const C& c, std::string_view id, std::uint64_t anchor, c
     auto chip = hud_chip(c, {{"/" + q + "\u258F", none ? t.danger : t.text_primary},
                              {pos, none ? t.danger : dim}},
                          {.tag = "FIND", .tone = none ? t.danger : t.warning, .size = fs});
+    // one bar: the chip's hairline goes round the controls too, so they read
+    // as part of the find field and not as loose glyphs beside it
+    const auto tone = none ? t.danger : t.warning;
+    const auto edge = mix(t.background, tone, 0.5f);
     c.overlay(Overlay{
-        .content = (h(std::move(chip) | min_size(240.0f, 0.0f),
+        .content = (h(std::move(chip) | min_size(240.0f, 0.0f) | border(0.0f, edge.fade(0.0f)) | grow(),
+                      box() | width(1.0f) | height(pct(60)) | bg(mix(t.background, t.text_primary, 0.14f)),
                       node(btn(2, "Aa", case_sensitive, "match case")),
                       node(btn(4, ".*", regex, "regex")),
                       node(btn(5, "\u2191", false, "previous")),
                       node(btn(6, "\u2193", false, "next")),
                       node(btn(9, "\u00D7", false, "close")))
                     | align(Align::center) | height(std::round(fs * 1.75f))
-                    | bg(mix(t.background, t.text_primary, 0.06f))).build(),
+                    | bg(mix(t.background, t.text_primary, 0.06f)) | border(1.0f, edge) | radius(0.0f)).build(),
         .id = part_id(id, part_menu),
         .anchor_id = anchor,
         // bottom-left, inside the terminal: clear of a scrollbar / minimap on

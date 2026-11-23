@@ -503,7 +503,7 @@ template <ControlContext C>
         // the status glyph
         std::string glyph;
         Color<Srgb> gcol = dim;
-        if (tb.running) { glyph = spinner_frame(time); gcol = t.info; }
+        if (tb.running) gcol = t.info;   // drawn as a turning arc below, centred on the text
         else if (tb.last_exit > 0 && tb.finished_ago < 30.0) { glyph = "\u2717" + std::to_string(tb.last_exit); gcol = t.danger; }
         else if (tb.last_exit == 0 && tb.finished_ago < 4.0 && !on) { glyph = "\u2713"; gcol = t.success; }
         else if (tb.bell && !on) { glyph = "!"; gcol = t.warning; }
@@ -515,8 +515,11 @@ template <ControlContext C>
         bits.push_back((mono(std::move(title), fg_) | (on ? semibold : weight(FontWeight::regular))).build());
         const bool can_close = o.close != TabClose::never;
         const bool show_x = can_close && (hov || o.close == TabClose::always);
-        if (can_close || !glyph.empty())
-            bits.push_back(tab_close_slot(c, id, i, glyph.empty() ? Node{} : mono(glyph, gcol).build(), can_close, show_x,
+        const float ring_d = std::round(fs * 0.72f);
+        Node mark = tb.running ? detail::arc_ring(gcol, mix(on ? cell : bar, ink, 0.10f), static_cast<float>(time * 0.85), 0.30f, ring_d)
+                  : glyph.empty() ? Node{} : mono(glyph, gcol).build();
+        if (can_close || tb.running || !glyph.empty())
+            bits.push_back(tab_close_slot(c, id, i, std::move(mark), can_close, show_x,
                                           0.0f, fs, mix(on ? cell : bar, ink, 0.14f), std::round(hgt * 0.62f)));
         cells.push_back((h_list(std::move(bits), fs * 0.5f) | align(Align::center) | height(hgt) | pad(0, fs * 0.75f)
                          | bg(on ? cell : hov ? mix(bar, ink, 0.08f) : bar.fade(0.0f))

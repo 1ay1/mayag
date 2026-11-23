@@ -199,18 +199,22 @@ inline void ssh_hosts(const C& c, std::string_view id, const TextEditState& quer
 
     std::vector<Node> rows;
     int last_group = -1;
-    // the alias column fits the longest alias on screen (bounded), measured in
-    // monospace cells; the env column fits STAGING when any row has an env
-    std::size_t longest = 6;
-    bool any_env = false;
+    // the alias column fits the longest alias on screen (bounded to 22 cells),
+    // the env column the widest badge on screen -- both measured in the real
+    // font, so a badge never runs into the address beside it
+    const float cell = detail::text_advance(c, "M", fs, FontFamily::mono);
+    const float fine = t.type(Tier::fine);
+    float alias_w = cell * 6.0f, env_w = 0.0f;
     for (int k = top; k < std::min(n, top + p.max_rows); ++k) {
         const SshHost& h_ = hosts[static_cast<std::size_t>(ranked[static_cast<std::size_t>(k)])];
-        longest = std::max(longest, h_.alias.size());
-        any_env = any_env || h_.env != SshHost::Env::none;
+        alias_w = std::max(alias_w, detail::text_advance(c, h_.alias, fs, FontFamily::mono));
+        if (h_.env == SshHost::Env::none) continue;
+        const std::string_view e = env_name(h_.env);
+        // the text, its tracking, the badge's padding, and a gap before the address
+        env_w = std::max(env_w, detail::text_advance(c, e, fine, FontFamily::mono) + 0.8f * static_cast<float>(e.size()) + 10.0f + t.spaced(10));
     }
-    const float cell = t.type(Tier::fine);   // a monospace advance at fs
-    const float alias_w = std::round(cell * static_cast<float>(std::min<std::size_t>(longest, 22)) + 4.0f);
-    const float env_w = any_env ? std::round(fs * 0.62f * 0.66f * 7.0f + 14.0f) : 0.0f;
+    alias_w = std::round(std::min(alias_w, cell * 22.0f) + t.spaced(8));
+    env_w = std::round(env_w);
     for (int k = top; k < std::min(n, top + p.max_rows); ++k) {
         const SshHost& h_ = hosts[static_cast<std::size_t>(ranked[static_cast<std::size_t>(k)])];
         const auto pid = part_id(id, static_cast<std::size_t>(k));
