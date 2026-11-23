@@ -71,6 +71,7 @@ struct PickerStyle {
     int         max_rows = 12;
     std::string empty_text = "No matches";
     std::vector<std::pair<std::string, std::string>> footer;   ///< key hints
+    std::string noun;                ///< what the count counts ("files"): "4 of 126 files"
 };
 
 /// Fuzzy-rank `items` by `query` (stable for equal scores). Returns the item
@@ -130,7 +131,8 @@ inline void picker(const C& c, std::string_view id, const TextEditState& query,
     std::vector<Node> foot;
     for (const auto& [k, a] : st.footer) foot.push_back(key_hint(t, k, a, t.type(Tier::small)).build());
     foot.push_back((spacer()).build());
-    foot.push_back((text_owned(std::to_string(n) + (n == static_cast<int>(items.size()) ? "" : " of " + std::to_string(items.size())))
+    foot.push_back((text_owned(std::to_string(n) + (n == static_cast<int>(items.size()) ? "" : " of " + std::to_string(items.size()))
+                               + (st.noun.empty() ? std::string{} : " " + st.noun))
                     | font(t.type(Tier::small)) | fg(var::text_disabled)).build());
 
     const float qsize = t.type(Tier::body);

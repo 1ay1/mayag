@@ -41,7 +41,10 @@
 #include "breadcrumbs.hpp"
 #include "code_view.hpp"
 #include "control.hpp"
+#include "completion_menu.hpp"
 #include "find_bar.hpp"
+#include "fuzzy.hpp"
+#include "picker.hpp"
 #include "status_bar.hpp"
 #include "text_field.hpp"
 #include "../app/handlers.hpp"
@@ -59,9 +62,17 @@ namespace mayag::dsl {
 
 /// What the app must do for the editor (it can't touch the world itself).
 struct TextEditorAction {
-    enum class Kind : std::uint8_t { save, copy, paste };
+    enum class Kind : std::uint8_t { save, copy, paste, reload };   ///< reload: read the file from disk again
     Kind        kind = Kind::save;
     std::string text;   ///< copy: what to put on the clipboard
+};
+
+/// One completion: a word the file already uses, or the language's.
+struct EditorCompletion {
+    std::string word;
+    enum class From : std::uint8_t { file, keyword, type, symbol } from = From::file;
+    int uses = 0;                  ///< how often the file uses it (ranks ties)
+    std::string detail;            ///< "fn", "struct", ... for a symbol; "kw" ...
 };
 
 struct TextEditorState {
@@ -84,6 +95,18 @@ struct TextEditorState {
     // match, a page, go-to-line) instead of cutting.
     float caret_col = -1.0f, caret_row = -1.0f;   ///< drawn caret (display col, visual row); < 0: not yet placed
     float scroll_goal_y = -1.0f;                  ///< where a jump is sliding to; < 0: none
+    // completion: the words of the file and its language, ranked against the
+    // word being typed; Tab / Enter takes one, Esc puts it away
+    bool comp_open = false;
+    int  comp_sel = 0;
+    std::vector<EditorCompletion> comp;           ///< ranked, best first
+    std::vector<std::vector<std::uint16_t>> comp_hits;   ///< matched chars, per entry
+    // go to symbol (⌘⇧O): the file's functions, types, ... as a picker
+    bool sym_open = false;
+    TextEditState sym_q;
+    int  sym_sel = 0;
+    // the file changed on disk while open
+    bool disk_changed = false;
     std::vector<TextEditorAction> out;    ///< for the app: drain after every op
 };
 
@@ -244,12 +267,173 @@ inline void paste(TextEditorState& s, std::string_view text) {
 /// A save of the state at `point` landed.
 inline void saved(TextEditorState& s, std::uint64_t point) { s.ed.mark_saved(point); }
 
+// ── completion: the file's words and its language's ───────────────────────
+
+/// The word being typed: [start, caret) on the caret's line, or empty.
+[[nodiscard]] inline std::string word_before_caret(const TextEditorState& s, int* start = nullptr) {
+    const editor::Pos c = s.ed.cursor();
+    const std::string& l = s.ed.line(c.line);
+    int a = c.col;
+    while (a > 0 && editor::detail::is_word(static_cast<unsigned char>(l[static_cast<std::size_t>(a - 1)]))) --a;
+    if (start) *start = a;
+    return l.substr(static_cast<std::size_t>(a), static_cast<std::size_t>(c.col - a));
+}
+
+/// Rank completions for the word at the caret. Opens the popup when the word
+/// is 2+ characters and something other than the word itself matches.
+inline void complete(TextEditorState& s, bool force = false) {
+    int start = 0;
+    const std::string pre = word_before_caret(s, &start);
+    const editor::Pos c = s.ed.cursor();
+    if ((!force && pre.size() < 2) || s.ed.sels.size() > 1 || !s.ed.primary_sel().empty()) { s.comp_open = false; return; }
+    // the file's words, counted (the one being typed excluded)
+    std::vector<EditorCompletion> pool;
+    {
+        std::vector<std::pair<std::string, int>> words;
+        const int lo = std::max(0, c.line - 4000), hi = std::min(s.ed.line_count(), c.line + 4000);   // bounded on huge files
+        for (int l = lo; l < hi; ++l) {
+            const std::string& t = s.ed.line(l);
+            for (std::size_t i = 0; i < t.size();) {
+                if (!editor::detail::is_word(static_cast<unsigned char>(t[i])) || (t[i] >= '0' && t[i] <= '9')) { ++i; continue; }
+                std::size_t j = i;
+                while (j < t.size() && editor::detail::is_word(static_cast<unsigned char>(t[j]))) ++j;
+                if (j - i >= 3 && !(l == c.line && static_cast<int>(i) == start)) {
+                    std::string w = t.substr(i, j - i);
+                    auto it = std::find_if(words.begin(), words.end(), [&](const auto& p) { return p.first == w; });
+                    if (it == words.end()) words.emplace_back(std::move(w), 1); else ++it->second;
+                }
+                i = j;
+                if (words.size() > 6000) break;
+            }
+        }
+        for (auto& [w, n] : words) pool.push_back({std::move(w), EditorCompletion::From::file, n, {}});
+    }
+    for (const auto& sym : s.ed.symbols())
+        for (auto& p : pool) if (p.word == sym.name) { p.from = EditorCompletion::From::symbol; p.detail = sym.kind; }
+    const auto add_lang = [&](const std::vector<std::string_view>& v, EditorCompletion::From from, const char* d) {
+        for (auto w : v)
+            if (std::none_of(pool.begin(), pool.end(), [&](const auto& p) { return p.word == w; }))
+                pool.push_back({std::string{w}, from, 0, d});
+    };
+    add_lang(s.ed.language->keywords, EditorCompletion::From::keyword, "keyword");
+    add_lang(s.ed.language->types, EditorCompletion::From::type, "type");
+    // rank: fuzzy score, then a prefix match, then how often the file uses it
+    struct Ranked { int score; std::size_t i; std::vector<std::uint16_t> hits; };
+    std::vector<Ranked> r;
+    for (std::size_t i = 0; i < pool.size(); ++i) {
+        if (pool[i].word == pre) continue;
+        auto m = fuzzy_match(pre, pool[i].word);
+        if (!m.ok) continue;
+        const bool prefix = pool[i].word.size() >= pre.size() &&
+            std::equal(pre.begin(), pre.end(), pool[i].word.begin(), [](char a, char b) { return detail::fold(a) == detail::fold(b); });
+        int score = m.score + (prefix ? 30 : 0) + std::min(pool[i].uses, 12) +
+                    (pool[i].from == EditorCompletion::From::symbol ? 6 : 0);
+        r.push_back({score, i, std::move(m.positions)});
+    }
+    std::stable_sort(r.begin(), r.end(), [](const Ranked& a, const Ranked& b) { return a.score > b.score; });
+    // A scattered match ("up" in nullptr) is noise beside real ones: keep it
+    // only when nothing starts with the typed word or meets it at a word start.
+    const auto strong = [&](const Ranked& x) {
+        const auto& w = pool[x.i].word;
+        if (x.hits.empty() || x.hits.size() != pre.size()) return false;
+        if (x.hits[0] == 0) return true;   // a prefix (or one that starts there)
+        const unsigned char before = static_cast<unsigned char>(w[x.hits[0] - 1]);
+        const bool camel = w[x.hits[0]] >= 'A' && w[x.hits[0]] <= 'Z' && !(before >= 'A' && before <= 'Z');
+        return before == '_' || camel;   // at a word inside it: snake_case or camelCase
+    };
+    if (std::any_of(r.begin(), r.end(), strong)) std::erase_if(r, [&](const Ranked& x) { return !strong(x); });
+    if (r.size() > 40) r.resize(40);
+    s.comp.clear(); s.comp_hits.clear();
+    for (auto& x : r) { s.comp.push_back(pool[x.i]); s.comp_hits.push_back(std::move(x.hits)); }
+    s.comp_open = !s.comp.empty();
+    s.comp_sel = 0;
+}
+
+/// Take completion `i`: it replaces the word being typed.
+inline void accept_completion(TextEditorState& s, int i) {
+    if (!s.comp_open || i < 0 || i >= static_cast<int>(s.comp.size())) return;
+    int start = 0;
+    (void)word_before_caret(s, &start);
+    const editor::Pos c = s.ed.cursor();
+    s.ed.select_range(editor::Range{{c.line, start}, c});
+    s.ed.insert_text(s.comp[static_cast<std::size_t>(i)].word);
+    s.comp_open = false;
+    refind(s);
+}
+
+// ── go to symbol ───────────────────────────────────────────────────────────
+
+/// The file's symbols matching the query, ranked: (symbol index, hits).
+[[nodiscard]] inline std::vector<std::pair<int, FuzzyMatch>> symbols_matching(const TextEditorState& s) {
+    std::vector<std::pair<int, FuzzyMatch>> out;
+    const auto& syms = s.ed.symbols();
+    for (std::size_t i = 0; i < syms.size(); ++i) {
+        auto m = fuzzy_match(s.sym_q.text, syms[i].name);
+        if (m.ok) out.emplace_back(static_cast<int>(i), std::move(m));
+    }
+    if (!s.sym_q.text.empty())
+        std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second.score > b.second.score; });
+    return out;
+}
+
+inline void open_symbols(TextEditorState& s) {
+    s.sym_open = true; s.sym_q.set({}); s.sym_sel = 0;
+    s.find_focused = false; s.goto_open = false; s.comp_open = false;
+    // start on the symbol the caret is in
+    const auto& syms = s.ed.symbols();
+    for (std::size_t i = 0; i < syms.size(); ++i) if (syms[i].line <= s.ed.cursor().line) s.sym_sel = static_cast<int>(i);
+}
+
+inline void go_to_symbol(TextEditorState& s, int ranked_index) {
+    const auto r = symbols_matching(s);
+    s.sym_open = false;
+    if (ranked_index < 0 || ranked_index >= static_cast<int>(r.size())) return;
+    const auto& sym = s.ed.symbols()[static_cast<std::size_t>(r[static_cast<std::size_t>(ranked_index)].first)];
+    const int col = static_cast<int>(s.ed.line(sym.line).find(sym.name));
+    s.ed.select_range(editor::Range{{sym.line, std::max(col, 0)}, {sym.line, std::max(col, 0) + static_cast<int>(sym.name.size())}});
+}
+
+// ── the file on disk ───────────────────────────────────────────────────────
+
+/// The file changed on disk. Unedited: take the new text quietly (the caret
+/// and scroll stay where they were). Edited: say so, and let the user choose.
+inline void disk_text(TextEditorState& s, std::string_view text) {
+    s.disk_changed = false;
+    const editor::Pos c = s.ed.cursor();
+    const auto scroll = s.ed.scroll.offset;
+    const bool crlf = text.find("\r\n") != std::string_view::npos;
+    s.ed.set_text(text);
+    s.crlf = crlf;
+    s.ed.set_cursor({std::min(c.line, s.ed.line_count() - 1), 0});
+    s.ed.set_cursor({s.ed.cursor().line, std::min(c.col, s.ed.line_len(s.ed.cursor().line))});
+    s.ed.scroll.scroll_to(scroll);
+    s.caret_row = -1.0f;
+    refind(s);
+}
+
 /// One key. Every key is the editor's: nothing it doesn't use reaches anyone.
 inline void key(TextEditorState& s, Key k, Mods md) {
     const bool cmd = md.primary(), sh = md.shift, alt = md.alt;
     const bool copy_key  = (cmd && !sh && !alt && k == Key::c) || (md.ctrl && sh && !alt && k == Key::c);
     const bool paste_key = (cmd && !sh && !alt && k == Key::v) || (md.ctrl && sh && !alt && k == Key::v) || (sh && k == Key::insert);
     const bool goto_key  = md.ctrl && !md.super && !alt && !sh && k == Key::g;   // ctrl+G everywhere (⌘G is find next)
+
+    if (s.sym_open) {   // go to symbol has the keyboard
+        const int n = static_cast<int>(symbols_matching(s).size());
+        const auto in = picker_key(s.sym_q, k, md, s.sym_sel, n);
+        if (in.act == PickerIntent::Act::close) s.sym_open = false;
+        else if (in.act == PickerIntent::Act::choose) go_to_symbol(s, in.index);
+        return;
+    }
+    if (s.comp_open) {   // the popup takes the keys that steer it; the rest edit and re-rank
+        if (k == Key::escape) { s.comp_open = false; return; }
+        if (k == Key::down || (md.ctrl && k == Key::n)) { s.comp_sel = (s.comp_sel + 1) % static_cast<int>(s.comp.size()); return; }
+        if (k == Key::up || (md.ctrl && k == Key::p)) { s.comp_sel = (s.comp_sel + static_cast<int>(s.comp.size()) - 1) % static_cast<int>(s.comp.size()); return; }
+        if ((k == Key::tab || k == Key::enter) && md.none()) { accept_completion(s, s.comp_sel); return; }
+    }
+    if (s.disk_changed && k == Key::r && cmd && sh) { s.out.push_back({TextEditorAction::Kind::reload, {}}); return; }
+    if (cmd && sh && !alt && k == Key::o) { open_symbols(s); return; }
+    if (md.ctrl && !md.super && !alt && k == Key::space) { complete(s, true); return; }   // ask for completions
 
     if (s.goto_open) {
         if (k == Key::escape) { s.goto_open = false; return; }
@@ -305,10 +489,13 @@ inline void key(TextEditorState& s, Key k, Mods md) {
     const std::uint64_t v0 = s.ed.version();
     (void)s.ed.handle_key(k, md);
     if (s.ed.version() != v0) refind(s);
+    // backspace keeps the popup current; a move away puts it away
+    if (s.comp_open) { if (k == Key::backspace) complete(s); else s.comp_open = false; }
 }
 
 /// Typed text (after the input method).
 inline void text(TextEditorState& s, std::string_view t) {
+    if (s.sym_open) { s.sym_q.insert(t); s.sym_sel = 0; return; }
     if (s.goto_open) { for (char ch : t) if (ch >= '0' && ch <= '9') s.goto_q.insert(std::string(1, ch)); return; }
     if (s.find_open && s.find_focused) {
         (s.find_field == 0 ? s.find_q : s.find_r).insert(t);
@@ -317,6 +504,9 @@ inline void text(TextEditorState& s, std::string_view t) {
     }
     s.ed.insert_text(t);
     refind(s);
+    // a word character keeps completing; anything else ends the word
+    if (!t.empty() && editor::detail::is_word(static_cast<unsigned char>(t.back()))) complete(s);
+    else s.comp_open = false;
 }
 
 /// A press on the code at `p`: `count` 2 a word, 3 the line; alt adds a
@@ -324,6 +514,8 @@ inline void text(TextEditorState& s, std::string_view t) {
 inline void press(TextEditorState& s, editor::Pos p, int count, Mods md) {
     s.find_focused = false;
     s.goto_open = false;
+    s.comp_open = false;
+    s.sym_open = false;
     if (count == 2) s.ed.select_word_at(p);
     else if (count >= 3) s.ed.select_line_at(p.line);
     else if (md.alt) s.ed.add_cursor_at(p);
@@ -423,6 +615,20 @@ inline void slide_from(TextEditorState& s, float before_y, bool motion) {
 }
 
 // ── the widget ──────────────────────────────────────────────────────────────
+
+/// A click on one of the editor's OVERLAYS (they float outside its tree, so
+/// its handlers can't see them): the symbol picker's rows, or a click outside
+/// it. Call from the app's on(Clicked) / on(Left) with the editor's id.
+[[nodiscard]] inline std::optional<TextEditorOp> text_editor_clicked(const TextEditorState& st, std::string_view id, std::uint64_t node) {
+    if (!st.sym_open) return std::nullopt;
+    const std::string sid = std::string{id} + ".symbols";
+    if (node == part_id(sid, part_menu)) return TextEditorOp{[](TextEditorState& s) { s.sym_open = false; }};
+    const int n = static_cast<int>(text_editor_ops::symbols_matching(st).size());
+    for (int k = 0; k < n; ++k)
+        if (node == part_id(sid, static_cast<std::size_t>(k)))
+            return TextEditorOp{[k](TextEditorState& s) { text_editor_ops::go_to_symbol(s, k); }};
+    return std::nullopt;
+}
 
 template <ControlContext C, class On>
     requires std::invocable<const On&, TextEditorOp>
@@ -567,8 +773,109 @@ template <ControlContext C, class On>
     right.push_back({"UTF-8", "", T::dim, false, false, ""});
     Node status = (node(status_bar(c, base + ".status", left, right)) | width(pct(100))).build();
 
+    // ── completion: a popup at the caret, in the code's own colours ────────
+    if (st.comp_open && p.focused && !st.comp.empty()) {
+        const float px = p.font_size;
+        const float row_h = std::round(px * 1.7f);
+        const Color<Srgb> pop = mix(paper, ink, 0.06f), edge = mix(paper, ink, 0.16f);
+        constexpr int kRows = 8;
+        const int n = static_cast<int>(st.comp.size());
+        const int sel = std::clamp(st.comp_sel, 0, n - 1);
+        const int top = std::clamp(sel - kRows + 2, 0, std::max(0, n - kRows));
+        std::vector<Node> rows;
+        for (int k = top; k < std::min(n, top + kRows); ++k) {
+            const EditorCompletion& it = st.comp[static_cast<std::size_t>(k)];
+            const bool on = k == sel;
+            using F = EditorCompletion::From;
+            // a kind mark in the colour its kind has in the code
+            const Color<Srgb> kc = it.from == F::keyword ? th.of(editor::Tok::keyword)
+                                 : it.from == F::type ? th.of(editor::Tok::type)
+                                 : it.from == F::symbol ? th.of(editor::Tok::function) : muted;
+            const char* mark = it.from == F::keyword ? "kw" : it.from == F::type ? "T" : it.from == F::symbol ? "\u0192" : "ab";
+            const auto hits = st.comp_hits[static_cast<std::size_t>(k)];
+            std::vector<Node> word;
+            {   // the word, typed letters bright
+                std::size_t i = 0, h = 0;
+                while (i < it.word.size()) {
+                    const bool hit = h < hits.size() && hits[h] == i;
+                    std::size_t j = i;
+                    if (hit) { while (j < it.word.size() && h < hits.size() && hits[h] == j) { ++j; ++h; } }
+                    else j = h < hits.size() ? hits[h] : it.word.size();
+                    word.push_back((text_owned(it.word.substr(i, j - i)) | font(px) | family(p.family)
+                                    | fg(hit ? ink : mix(ink, paper, 0.25f)) | (hit ? semibold : weight(FontWeight::regular))).build());
+                    i = j;
+                }
+            }
+            const auto rid = part_id(base + ".comp", static_cast<std::size_t>(k));
+            rows.push_back((h(h(text_owned(mark) | font(t.type_at(px, Tier::small)) | semibold | fg(kc))
+                                  | size(22, 16) | center | radius(t.rounded(3)) | bg(mix(pop, kc, 0.16f)),
+                              h(std::move(word)) | grow() | min_size(0, 0) | clip,
+                              text_owned(it.from == F::file ? (it.uses > 1 ? std::to_string(it.uses) + "\u00D7" : std::string{}) : it.detail)
+                                  | font(t.type_at(px, Tier::small)) | fg(faint))
+                            | gap(t.spaced(8)) | align(Align::center) | pad(0, t.spaced(8)) | height(row_h) | width(pct(100))
+                            | radius(t.rounded(4)) | bg(on ? mix(pop, th.cursor, 0.2f) : pop.fade(0.0f))
+                            | pointer_cursor | id_of_raw(rid)
+                            | on_click([op, k](const Clicked&) -> std::optional<R> {
+                                  return op([k](TextEditorState& s) { text_editor_ops::accept_completion(s, k); });
+                              })).build());
+        }
+        rows.push_back((h(text<"\u21E5 / \u23CE accept  \u00B7  \u2191\u2193 choose  \u00B7  esc"> | font(t.type(Tier::fine)) | fg(faint))
+                        | pad(t.spaced(4), t.spaced(9)) | width(pct(100)) | inner_shadow(0.0f, edge, {0.0f, 1.0f})).build());
+        c.overlay(Overlay{
+            .content = (v(std::move(rows)) | gap(1.0f) | pad(t.spaced(4), t.spaced(4), 0.0f, t.spaced(4)) | width(std::max(260.0f, px * 24.0f))
+                        | bg(pop) | border(t.stroke(1), edge) | radius(t.rounded(7)) | elevation(var::depth(10))
+                        | role(a11y::Role::menu) | label("completions")).build(),
+            .id = part_id(base + ".comp", part_menu),
+            .anchor_id = part_id(code_id, part_caret),
+            .placement = Placement::below_start,
+            .dismiss = Dismiss::never,   // typing goes on in the editor
+            .offset = 2.0f,
+            .shift = Vec2{-30.0f, 0.0f},   // the word column lines up with the typed word
+            .layer = 8,
+        });
+    }
+
+    // ── go to symbol: the file's outline as a picker ───────────────────────
+    if (st.sym_open) {
+        const auto ranked = text_editor_ops::symbols_matching(st);
+        std::vector<PickerItem> items;
+        Ranked rk;
+        const auto& syms = ed.symbols();
+        for (const auto& [i, m] : ranked) {
+            const auto& sym = syms[static_cast<std::size_t>(i)];
+            rk.order.push_back(static_cast<int>(items.size()));
+            items.push_back({.label = sym.name, .detail = std::string(static_cast<std::size_t>(sym.depth) * 2, ' ') + sym.kind,
+                             .hint = std::to_string(sym.line + 1)});
+            rk.matches.push_back(m);
+        }
+        picker(c, base + ".symbols", st.sym_q, items, rk, st.sym_sel,
+               PickerStyle{.placeholder = "Go to a symbol in this file", .prefix = "@", .width = 560.0f,
+                           .empty_text = syms.empty() ? "No symbols found in this file" : "No matches",
+                           .footer = {{"\u23CE", "go"}, {"esc", "close"}}});
+    }
+
+    // ── the file changed on disk ───────────────────────────────────────────
+    Node banner;
+    if (st.disk_changed) {
+        const auto rid = node_id(base + ".reload");
+        const bool hov = c.hovered(rid);
+        banner = (h(text<"\u21BB"> | font(t.type(Tier::body)) | fg(t.warning),
+                    text<"This file changed on disk."> | font(t.type(Tier::body)) | semibold | fg(ink),
+                    text<"Your edits are kept until you choose."> | font(t.type(Tier::small)) | fg(muted) | grow() | min_size(0, 0) | ellipsis,
+                    h(text<"Reload from disk"> | font(t.type(Tier::small)) | semibold | fg(t.warning),
+                      text<"\u2318\u21E7R"> | font(t.type(Tier::fine)) | fg(muted))
+                        | gap(t.spaced(6)) | align(Align::center) | pad(t.spaced(3), t.spaced(10)) | radius(t.rounded(5))
+                        | bg(hov ? t.warning.fade(0.22f) : t.warning.fade(0.12f)) | pointer_cursor | id_of_raw(rid)
+                        | on_click([op](const Clicked&) -> std::optional<R> {
+                              return op([](TextEditorState& s) { s.out.push_back({TextEditorAction::Kind::reload, {}}); });
+                          }))
+                  | gap(t.spaced(8)) | align(Align::center) | pad(t.spaced(6), t.spaced(12)) | width(pct(100))
+                  | bg(mix(paper, t.warning, 0.08f)) | inner_shadow(0.0f, mix(paper, t.warning, 0.3f), {0.0f, -1.0f})).build();
+    }
+
     std::vector<Node> parts;
     parts.push_back(std::move(head));
+    if (st.disk_changed) parts.push_back(std::move(banner));
     if (st.find_open || st.goto_open) parts.push_back(std::move(bar));
     parts.push_back(std::move(code));
     parts.push_back(std::move(status));

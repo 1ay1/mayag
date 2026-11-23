@@ -131,6 +131,36 @@ void motion_and_scopes() {
     ok(std::abs(s.ed.scroll.offset.y - (100 * 20.0f - 200.0f)) < 1.0f, "a minimap press centres the row under it");
 }
 
+void completion_and_symbols() {
+    auto s = text_editor_ops::open("int render_frame(int x) {\n    return x;\n}\nint main() {\n    \n}\n", "a.cpp");
+    text_editor_ops::press(s, {4, 4}, 1, {});
+    type(s, "re");
+    ok(s.comp_open && !s.comp.empty(), "typing a word offers completions");
+    bool has_fn = false, has_kw = false;
+    for (const auto& c : s.comp) { has_fn = has_fn || c.word == "render_frame"; has_kw = has_kw || c.word == "return"; }
+    ok(has_fn && has_kw, "...from the file's words and the language's keywords");
+    type(s, "nd");
+    ok(s.comp_open && s.comp[0].word == "render_frame", "narrowing ranks the file's function first");
+    key(s, Key::tab);
+    ok(s.ed.line(4) == "    render_frame" && !s.comp_open, "tab takes it, replacing the typed prefix");
+    type(s, "(");
+    ok(!s.comp_open, "a non-word character ends the word");
+    // go to symbol
+    key(s, Key::o, Mods{.shift = true, .super = true});
+    key(s, Key::o, Mods{.shift = true, .ctrl = true});
+    ok(s.sym_open, "the symbol key opens go-to-symbol");
+    type(s, "main");
+    key(s, Key::enter);
+    ok(!s.sym_open && s.ed.cursor().line == 3, "choosing a symbol goes to its line");
+    // rainbow brackets: depth at each line's start, strings ignored
+    auto b = text_editor_ops::open("f(a, \"(\") {\n  g([1]);\n}\n", "a.c");
+    ok(b.ed.bracket_depth_at(1) == 1 && b.ed.bracket_depth_at(2) == 1 && b.ed.bracket_depth_at(3) == 0,
+       "bracket depth counts code brackets, not ones in strings");
+    // the file changed on disk
+    text_editor_ops::disk_text(b, "g();\n");
+    ok(b.ed.line(0) == "g();" && !b.disk_changed, "an unedited file takes the new text");
+}
+
 }  // namespace
 
 int main() {
@@ -141,6 +171,7 @@ int main() {
     find_and_goto();
     multi_cursor();
     motion_and_scopes();
+    completion_and_symbols();
     std::printf("%s  %d checks, %d failures\n", failures ? "FAIL" : "PASS", checks, failures);
     return failures ? 1 : 0;
 }

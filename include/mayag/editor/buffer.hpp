@@ -139,6 +139,11 @@ class EditorState {
 
     mutable ViewMetrics      metrics{};
     mutable SyntaxCache      syntax{};
+  private:
+    mutable std::vector<int> depth_;
+    mutable int              depth_valid_ = 0;
+    mutable const Language*  depth_lang_ = nullptr;
+  public:
 
     // ── construction ────────────────────────────────────────────────────
 
@@ -172,6 +177,7 @@ class EditorState {
         saved_id_ = 0;
         ++version_;
         syntax.reset();
+        depth_valid_ = 0;
     }
     [[nodiscard]] std::string text() const {
         std::string s;
@@ -973,6 +979,37 @@ class EditorState {
 
     // ── brackets ────────────────────────────────────────────────────────
 
+    /// The bracket nesting depth at the START of line `l`, counting only
+    /// brackets that are code (not in strings or comments). Rainbow brackets
+    /// colour each pair by it. Cached; recomputed from the first stale line.
+    [[nodiscard]] int bracket_depth_at(int l) const {
+        l = std::clamp(l, 0, line_count());
+        if (depth_lang_ != language) { depth_valid_ = 0; depth_lang_ = language; }
+        if (depth_.size() < lines.size() + 1) depth_.resize(lines.size() + 1);
+        if (depth_valid_ == 0) depth_[0] = 0;
+        while (depth_valid_ < l) {
+            int d = depth_[static_cast<std::size_t>(depth_valid_)];
+            for (const auto& b : code_brackets(depth_valid_)) d = std::max(0, d + (b.second ? 1 : -1));
+            depth_[static_cast<std::size_t>(++depth_valid_)] = d;
+        }
+        return depth_[static_cast<std::size_t>(l)];
+    }
+    /// The brackets on line `l` that are code: (byte, opens?).
+    [[nodiscard]] std::vector<std::pair<int, bool>> code_brackets(int l) const {
+        std::vector<std::pair<int, bool>> out;
+        const std::string& s = line(l);
+        const auto spans = syntax.spans(*language, lines, l);
+        std::size_t k = 0;
+        for (std::size_t i = 0; i < s.size(); ++i) {
+            const char c = s[i];
+            if (c != '(' && c != '[' && c != '{' && c != ')' && c != ']' && c != '}') continue;
+            while (k < spans.size() && spans[k].end <= i) ++k;
+            const bool inside = k < spans.size() && spans[k].start <= i &&
+                                (spans[k].kind == Tok::string || spans[k].kind == Tok::comment);
+            if (!inside) out.emplace_back(static_cast<int>(i), c == '(' || c == '[' || c == '{');
+        }
+        return out;
+    }
     /// The bracket matching the one at or just before `p`.
     [[nodiscard]] std::optional<std::pair<Pos, Pos>> match_bracket(Pos p) const {
         const auto try_at = [&](Pos at) -> std::optional<std::pair<Pos, Pos>> {
@@ -1281,6 +1318,7 @@ class EditorState {
             if (moved != folds) { folds = std::move(moved); ++fold_version_; }
         }
         syntax.invalidate_from(a.line);
+        depth_valid_ = std::min(depth_valid_, a.line);
         ++version_;
         return e;
     }

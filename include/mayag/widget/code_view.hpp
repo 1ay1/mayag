@@ -43,6 +43,8 @@ struct CodeTheme {
                 cursor, bracket, occurrence, find_match, find_current, indent_guide,
                 indent_guide_active, ruler, whitespace, fold_marker, folded_bg,
                 git_added, git_modified, git_deleted, error, warning, info, hint;
+    /// Bracket colours by depth (rainbow brackets); empty: brackets are punctuation.
+    std::vector<Color<Srgb>> rainbow;
 
     [[nodiscard]] Color<Srgb> of(editor::Tok k) const { return tok[static_cast<std::size_t>(k)]; }
 
@@ -130,6 +132,9 @@ struct CodeTheme {
         c.folded_bg = mix(bg, A(4), 0.12f);
         c.git_added = A(2); c.git_modified = A(4); c.git_deleted = A(1);
         c.error = A(1); c.warning = A(3); c.info = A(4); c.hint = mix(fg, bg, 0.4f);
+        // gold, magenta, blue: the three most distinct of the scheme's own
+        // hues, softened toward the ink so brackets never shout over code
+        c.rainbow = {mix(A(3), fg, 0.15f), mix(A(5), fg, 0.15f), mix(A(4), fg, 0.15f)};
         (void)t;
         return c;
     }
@@ -169,10 +174,13 @@ struct CodeViewOptions {
     /// places instead of jumping. < 0: drawn exactly where it is.
     float                                  caret_col = -1.0f;
     float                                  caret_row = -1.0f;
+    bool                                   rainbow = true;    ///< brackets coloured by depth (when the theme has colours)
 };
 
 /// Parts under the code view's id (beside part_bar).
 inline constexpr std::size_t part_minimap = part_dec + 7;
+/// The primary caret's box (invisible): anchor a popup to part_id(id, part_caret).
+inline constexpr std::size_t part_caret = part_dec + 8;
 /// part_sticky_base + line: a pinned scope header (far above the fold ids).
 inline constexpr std::size_t part_sticky_base = part_dec + (std::size_t{1} << 26);
 
@@ -445,12 +453,31 @@ template <ControlContext C>
             if (italic_) n.style().text.italic = true;
             runs.push_back(std::move(n));
         };
+        // rainbow brackets: each code bracket in the colour of its depth, so
+        // a pair is the same colour and nesting reads at a glance
+        std::vector<std::pair<int, bool>> brk;
+        int depth = 0;
+        std::size_t bi = 0;
+        if (o.rainbow && !th.rainbow.empty()) { brk = ed.code_brackets(l); depth = ed.bracket_depth_at(l); }
+        const auto emit = [&](std::uint32_t a, std::uint32_t b, Color<Srgb> col_, bool italic_) {
+            while (a < b) {
+                while (bi < brk.size() && static_cast<std::uint32_t>(brk[bi].first) < a) ++bi;
+                if (bi >= brk.size() || static_cast<std::uint32_t>(brk[bi].first) >= b) { push_run(a, b, col_, italic_); return; }
+                const auto p = static_cast<std::uint32_t>(brk[bi].first);
+                push_run(a, p, col_, italic_);
+                if (!brk[bi].second) depth = std::max(0, depth - 1);
+                push_run(p, p + 1, th.rainbow[static_cast<std::size_t>(depth) % th.rainbow.size()]);
+                if (brk[bi].second) ++depth;
+                ++bi;
+                a = p + 1;
+            }
+        };
         for (const auto& sp : spans) {
-            if (sp.start > at) push_run(at, sp.start, th.of(Tok::text));
-            push_run(sp.start, sp.end, th.of(sp.kind), sp.kind == Tok::comment);
+            if (sp.start > at) emit(at, sp.start, th.of(Tok::text), false);
+            emit(sp.start, sp.end, th.of(sp.kind), sp.kind == Tok::comment);
             at = sp.end;
         }
-        if (at < s.size()) push_run(at, static_cast<std::uint32_t>(s.size()), th.of(Tok::text));
+        if (at < s.size()) emit(at, static_cast<std::uint32_t>(s.size()), th.of(Tok::text), false);
         if (ed.folds.contains(l)) {
             const int hidden_n = ed.fold_end(l).value_or(l) - l;
             runs.push_back((h(text_owned(" \u22EF " + std::to_string(hidden_n) + " lines ") | font(t.type_at(o.font_size, Tier::small)) | family(o.family) | fg(th.fold_marker))
@@ -501,6 +528,13 @@ template <ControlContext C>
     // Carets, drawn last so they sit over everything. The primary one is
     // drawn where the app's eased position says (it glides between places),
     // with a soft halo -- the one thing on screen that moves as you type.
+    {   // where popups at the caret attach (completion), blink or not; at the
+        // true caret, so a popup never chases the glide
+        const Pos p = cur;
+        const int vr = vrow(p.line);
+        if (!ed.hidden(p.line) && vr >= first && vr < last)
+            layers.push_back((box() | size(1, lh) | absolute(col_x(p.line, p.col), row_y(vr)) | id_of(id, part_caret)).build());
+    }
     for (std::size_t i = 0; i < ed.sels.size(); ++i) {
         const auto& s = ed.sels[i];
         const bool prim = static_cast<int>(i) == ed.primary;
