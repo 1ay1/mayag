@@ -297,8 +297,12 @@ class Atlas {
     /// given away (reallocation, repack, eviction). Recorded glyph quads are
     /// valid exactly while this holds (render::PaintCache).
     [[nodiscard]] std::uint64_t layout_epoch() const noexcept { return layout_epoch_; }
-    /// Bumped on EVERY texel write (a glyph added, a repack): what a software
-    /// renderer that reuses unchanged pixels between frames keys on.
+    /// Bumped when texels a glyph ALREADY had change -- a repack, a resize --
+    /// not when a new glyph is added: the skyline packer never hands out space
+    /// twice, so an append writes texels no earlier frame sampled. What a
+    /// software renderer that reuses unchanged pixels between frames keys on
+    /// (bumping it on every append re-shaded the whole window whenever one new
+    /// glyph appeared -- typing a character not yet on screen).
     [[nodiscard]] std::uint64_t content_version() const noexcept { return content_; }
 
     /// Region changed since the last `clear_dirty()`. Empty when nothing moved.
@@ -423,7 +427,7 @@ class Atlas {
         const Rect touched{static_cast<float>(x), static_cast<float>(y),
                            static_cast<float>(w), static_cast<float>(h)};
         color_dirty_ = color_dirty_.empty() ? touched : color_dirty_.unite(touched);
-        ++content_;
+        // fresh space (see content_version): earlier frames never sampled it
         auto [it, _] = entries_.insert_or_assign(key, g);
         return &it->second;
     }
@@ -541,7 +545,7 @@ class Atlas {
         const Rect touched{static_cast<float>(dx), static_cast<float>(dy),
                            static_cast<float>(bmp.width), static_cast<float>(bmp.height)};
         dirty_ = dirty_.empty() ? touched : dirty_.unite(touched);
-        ++content_;
+        // fresh space (see content_version): earlier frames never sampled it
     }
 
     /// Mid-frame, the atlas is full: compact to what this and the previous
@@ -632,7 +636,7 @@ class Atlas {
     std::uint64_t             frame_ = 0;
     std::uint32_t             generation_ = 0;
     std::uint64_t layout_epoch_ = 0;
-    std::uint64_t             content_ = 0;     ///< bumped on every texel write (see content_version)
+    std::uint64_t             content_ = 0;     ///< bumped when existing texels change (see content_version)
     bool                      moved_ = false;   ///< glyphs moved since take_moved()
     std::uint64_t             last_repack_frame_ = 0;
 };

@@ -29,7 +29,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace mayag::backend {
@@ -286,6 +289,20 @@ class Tiled {
         for (const long c : culled) stats.instances_culled += c;
         for (const int r : reused) stats.tiles_reused += r;
         mem.valid = true;
+        // MAYAG_DAMAGE_MAP=1: the re-shaded tiles of every frame as a text map
+        // on stderr (# re-shaded, . reused, space empty) -- where damage leaks.
+        static const bool map = [] { const char* e = std::getenv("MAYAG_DAMAGE_MAP"); return e && *e && *e != '0'; }();
+        if (map) {
+            std::string s;
+            for (int y = 0; y < tiles_y; ++y) {
+                for (int x = 0; x < tiles_x; ++x) {
+                    const auto i = static_cast<std::size_t>(y * tiles_x + x);
+                    s += bins[i].empty() ? ' ' : reused[i] ? '.' : '#';
+                }
+                s += '\n';
+            }
+            std::fprintf(stderr, "damage %d/%d\n%s", n_tiles - stats.tiles_reused, n_tiles, s.c_str());
+        }
         return stats;
     }
 

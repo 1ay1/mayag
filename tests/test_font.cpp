@@ -2178,6 +2178,22 @@ void test_atlas_churn() {
     }
     check(inserted == 8 && tiny.take_moved(), "a mid-frame overflow grows the atlas and flags a repaint");
     (void)frames;
+
+    // A new glyph lands in space no earlier frame sampled: the tiled
+    // rasteriser may keep every unchanged tile. Only moving glyphs (a repack,
+    // a resize) changes texels an existing tile shows.
+    typo::Atlas roomy{512};
+    roomy.set_frame(1);
+    const auto v0 = roomy.content_version();
+    for (std::uint16_t g = 1; g <= 20; ++g) {
+        typo::GlyphKey key;
+        key.face_id = 3;
+        key.glyph_id = g;
+        (void)roomy.insert(key, bmp, {}, 10.0f, 1.0f, 0.0f, false);
+    }
+    check(roomy.content_version() == v0, "appending glyphs keeps the content version (no full repaint per new glyph)");
+    roomy.resize(1024, 1024);
+    check(roomy.content_version() != v0, "a resize bumps it");
 }
 
 /// Wrapping uses UAX #14: no break before closing punctuation or inside a
