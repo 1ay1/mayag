@@ -228,6 +228,9 @@ class headless_app {
     [[nodiscard]] const Node& tree() const noexcept { return host_.tree(); }
     [[nodiscard]] const LatencyStats& latency() const noexcept { return host_.latency(); }
     [[nodiscard]] bool busy_loop_detected() const noexcept { return host_.busy_loop_detected(); }
+    /// Updates that ran over jaal's fold budget (options::fold_budget_time):
+    /// each one was a frame the user waited for. A self-test asserts 0.
+    [[nodiscard]] std::uint64_t slow_folds() const noexcept { return kernel_.slow_folds(); }
     [[nodiscard]] bool finished() const noexcept { return kernel_.quitting() || !window_.is_open(); }
     [[nodiscard]] std::optional<Rect> node_rect(std::uint64_t id) const { return host_.node_rect(id); }
     [[nodiscard]] std::optional<Rect> node_rect(std::string_view n) const { return host_.node_rect(n); }
