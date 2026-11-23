@@ -56,6 +56,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 namespace mayag::dsl {
@@ -289,34 +290,37 @@ inline void complete(TextEditorState& s, bool force = false) {
     const std::string pre = word_before_caret(s, &start);
     const editor::Pos c = s.ed.cursor();
     if ((!force && pre.size() < 2) || s.ed.sels.size() > 1 || !s.ed.primary_sel().empty()) { s.comp_open = false; return; }
-    // the file's words, counted (the one being typed excluded)
+    // the file's words, counted (the one being typed excluded). Hashed: a
+    // linear find per word was quadratic in the distinct words (up to 6000)
+    // and most of a keystroke's cost in a big file.
     std::vector<EditorCompletion> pool;
+    std::unordered_map<std::string_view, std::size_t> at;   // word -> index in pool
     {
-        std::vector<std::pair<std::string, int>> words;
-        const int lo = std::max(0, c.line - 4000), hi = std::min(s.ed.line_count(), c.line + 4000);   // bounded on huge files
-        for (int l = lo; l < hi; ++l) {
+        // the words near the caret (where what you are writing lives): ±1500
+        // lines, ~1 ms on any file; the symbols below cover the whole file
+        const int lo = std::max(0, c.line - 1500), hi = std::min(s.ed.line_count(), c.line + 1500);
+        for (int l = lo; l < hi && pool.size() <= 6000; ++l) {
             const std::string& t = s.ed.line(l);
             for (std::size_t i = 0; i < t.size();) {
                 if (!editor::detail::is_word(static_cast<unsigned char>(t[i])) || (t[i] >= '0' && t[i] <= '9')) { ++i; continue; }
                 std::size_t j = i;
                 while (j < t.size() && editor::detail::is_word(static_cast<unsigned char>(t[j]))) ++j;
                 if (j - i >= 3 && !(l == c.line && static_cast<int>(i) == start)) {
-                    std::string w = t.substr(i, j - i);
-                    auto it = std::find_if(words.begin(), words.end(), [&](const auto& p) { return p.first == w; });
-                    if (it == words.end()) words.emplace_back(std::move(w), 1); else ++it->second;
+                    const std::string_view w{t.data() + i, j - i};   // the buffer's own bytes: stable for this call
+                    if (const auto it = at.find(w); it != at.end()) ++pool[it->second].uses;
+                    else { at.emplace(w, pool.size()); pool.push_back({std::string{w}, EditorCompletion::From::file, 1, {}}); }
                 }
                 i = j;
-                if (words.size() > 6000) break;
             }
         }
-        for (auto& [w, n] : words) pool.push_back({std::move(w), EditorCompletion::From::file, n, {}});
     }
-    for (const auto& sym : s.ed.symbols())
-        for (auto& p : pool) if (p.word == sym.name) { p.from = EditorCompletion::From::symbol; p.detail = sym.kind; }
+    for (const auto& sym : s.ed.symbols()) {
+        if (const auto it = at.find(sym.name); it != at.end()) { pool[it->second].from = EditorCompletion::From::symbol; pool[it->second].detail = sym.kind; }
+        else if (pool.size() < 9000 && sym.name.size() >= 3 && sym.name != pre) { at.emplace(sym.name, pool.size()); pool.push_back({sym.name, EditorCompletion::From::symbol, 1, sym.kind}); }
+    }
     const auto add_lang = [&](const std::vector<std::string_view>& v, EditorCompletion::From from, const char* d) {
         for (auto w : v)
-            if (std::none_of(pool.begin(), pool.end(), [&](const auto& p) { return p.word == w; }))
-                pool.push_back({std::string{w}, from, 0, d});
+            if (!at.contains(w)) pool.push_back({std::string{w}, from, 0, d});
     };
     add_lang(s.ed.language->keywords, EditorCompletion::From::keyword, "keyword");
     add_lang(s.ed.language->types, EditorCompletion::From::type, "type");

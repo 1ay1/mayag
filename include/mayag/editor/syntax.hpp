@@ -597,28 +597,38 @@ struct Symbol {
     int         depth = 0;
 };
 
+/// One line of the outline: lexes `s` starting in `st`, appends its symbol
+/// (at most one) to `out`, returns the state the next line starts in.
+inline LineState outline_line(const Language& lang, const std::string& s, LineState st, std::vector<Span>& spans,
+                              std::size_t li, int tab_width, std::vector<Symbol>& out);
+
 /// Top-level-ish symbols, by lexing each line and looking for an introducing
 /// keyword (`fn`, `class`, `def`, ...) or, in C++, a function defined at the
 /// start of a line. A heuristic; good enough for breadcrumbs and Go to
 /// Symbol, and costs one lex per line.
 [[nodiscard]] inline std::vector<Symbol> outline(const Language& lang, std::span<const std::string> lines,
                                                  int tab_width = 4) {
-    static constexpr std::array<std::string_view, 19> introducers{
-        "fn", "struct", "enum", "trait", "impl", "mod", "class", "def", "function", "interface",
-        "type", "namespace", "union", "func", "concept", "module", "package", "const", "macro"};
     std::vector<Symbol> out;
     LineState st{};
     std::vector<Span> spans;
-    for (std::size_t li = 0; li < lines.size(); ++li) {
-        const std::string& s = lines[li];
+    for (std::size_t li = 0; li < lines.size(); ++li) st = outline_line(lang, lines[li], st, spans, li, tab_width, out);
+    return out;
+}
+
+inline LineState outline_line(const Language& lang, const std::string& s, LineState st, std::vector<Span>& spans,
+                              std::size_t li, int tab_width, std::vector<Symbol>& out) {
+    static constexpr std::array<std::string_view, 19> introducers{
+        "fn", "struct", "enum", "trait", "impl", "mod", "class", "def", "function", "interface",
+        "type", "namespace", "union", "func", "concept", "module", "package", "const", "macro"};
+    {
         spans.clear();
         const LineState before = st;
         st = highlight_line(lang, s, st, spans);
-        if (before.block_comment || before.string || spans.empty()) continue;
+        if (before.block_comment || before.string || spans.empty()) return st;
         int indent = 0;
         for (char ch : s) { if (ch == ' ') ++indent; else if (ch == '\t') indent += tab_width; else break; }
         const int depth = indent / std::max(tab_width, 1);
-        if (depth > 2) continue;
+        if (depth > 2) return st;
         for (std::size_t k = 0; k < spans.size(); ++k) {
             const auto w = std::string_view{s}.substr(spans[k].start, spans[k].end - spans[k].start);
             if (spans[k].kind == Tok::keyword &&
@@ -660,7 +670,7 @@ struct Symbol {
             }
         }
     }
-    return out;
+    return st;
 }
 
 }  // namespace mayag::editor

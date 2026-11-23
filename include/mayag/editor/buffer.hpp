@@ -176,6 +176,8 @@ class EditorState {
         folds.clear();
         saved_id_ = 0;
         ++version_;
+        max_cols_rescan_ = true; visual_identity_ = false;
+        ol_state_.clear(); ol_sym_.clear(); ol_pool_.clear(); ol_valid_ = 0; ol_dirty_to_ = 0;
         syntax.reset();
         depth_valid_ = 0;
     }
@@ -195,18 +197,51 @@ class EditorState {
     [[nodiscard]] Pos cursor() const { return primary_sel().head; }
     [[nodiscard]] std::uint64_t version() const noexcept { return version_; }
 
-    /// The buffer's symbol outline. Cached until the text or language changes,
-    /// since views ask for it every frame (breadcrumbs, go to symbol). Edits
-    /// go through version_; `lines` is public, so its shape is checked too.
+    /// The buffer's symbol outline, kept across edits: an edit relexes from
+    /// its own line only until the lexer's carried state agrees with what it
+    /// was before (a closed comment, a string that ended), then the rest of
+    /// the file is reused, shifted by the lines it gained or lost. Typing in a
+    /// 100k-line file cost a whole-file lex per key (~45 ms) before.
     [[nodiscard]] const std::vector<Symbol>& symbols() const {
-        if (symbols_version_ != version_ || symbols_lang_ != language || symbols_tab_ != tab_width ||
-            symbols_lines_ != lines.data() || symbols_count_ != lines.size()) {
-            symbols_ = outline(*language, lines, tab_width);
-            symbols_version_ = version_;
+        if (symbols_lang_ != language || symbols_tab_ != tab_width || ol_state_.size() != lines.size() + 1) {
+            // a new text, language or indent: from scratch
+            ol_state_.assign(lines.size() + 1, LineState{});
+            ol_sym_.assign(lines.size(), -1);
+            ol_pool_.clear();
+            ol_valid_ = 0;
+            ol_dirty_to_ = static_cast<int>(lines.size());   // every line, no early stop
             symbols_lang_ = language;
             symbols_tab_ = tab_width;
-            symbols_lines_ = lines.data();
-            symbols_count_ = lines.size();
+        }
+        if (ol_valid_ < static_cast<int>(lines.size()) || symbols_version_ != version_) {
+            std::vector<Span> spans;
+            std::vector<Symbol> one;
+            int l = ol_valid_;
+            const int n = static_cast<int>(lines.size());
+            for (; l < n; ++l) {
+                one.clear();
+                const LineState next = outline_line(*language, lines[static_cast<std::size_t>(l)], ol_state_[static_cast<std::size_t>(l)],
+                                                    spans, static_cast<std::size_t>(l), tab_width, one);
+                ol_sym_[static_cast<std::size_t>(l)] = -1;
+                if (!one.empty()) { ol_sym_[static_cast<std::size_t>(l)] = static_cast<int>(ol_pool_.size()); ol_pool_.push_back(std::move(one.front())); }
+                // past the edit and back in step: everything below is as it was
+                if (l >= ol_dirty_to_ && ol_state_[static_cast<std::size_t>(l) + 1] == next) { ++l; break; }
+                ol_state_[static_cast<std::size_t>(l) + 1] = next;
+            }
+            ol_valid_ = n;
+            ol_dirty_to_ = 0;
+            symbols_.clear();
+            for (int k = 0; k < n; ++k)
+                if (const int s = ol_sym_[static_cast<std::size_t>(k)]; s >= 0) {
+                    symbols_.push_back(ol_pool_[static_cast<std::size_t>(s)]);
+                    symbols_.back().line = k;
+                }
+            // the pool only grows with relexed lines: compact it now and then
+            if (ol_pool_.size() > symbols_.size() * 2 + 1024) {
+                ol_pool_ = symbols_;
+                for (int k = 0, s = 0; k < n; ++k) if (ol_sym_[static_cast<std::size_t>(k)] >= 0) ol_sym_[static_cast<std::size_t>(k)] = s++;
+            }
+            symbols_version_ = version_;
         }
         return symbols_;
     }
@@ -270,12 +305,17 @@ class EditorState {
     [[nodiscard]] std::string indent_unit() const {
         return soft_tabs ? std::string(static_cast<std::size_t>(tab_width), ' ') : std::string{"\t"};
     }
-    /// Widest line in display columns, for horizontal scrolling. Cached.
+    /// Widest line in display columns, for horizontal scrolling. Kept up to
+    /// date by each edit (a line can only widen it, or narrow the widest --
+    /// then one rescan), never a full pass per keystroke.
     [[nodiscard]] int max_display_cols() const {
         if (max_cols_version_ != version_) {
-            int m = 0;
-            for (int l = 0; l < line_count(); ++l) m = std::max(m, display_col(l, line_len(l)));
-            max_cols_ = m;
+            if (max_cols_rescan_ || max_cols_version_ == 0) {
+                int m = 0;
+                for (int l = 0; l < line_count(); ++l) m = std::max(m, display_col(l, line_len(l)));
+                max_cols_ = m;
+                max_cols_rescan_ = false;
+            }
             max_cols_version_ = version_;
         }
         return max_cols_;
@@ -959,6 +999,15 @@ class EditorState {
     }
     /// Buffer lines in display order (folded blocks skipped). Cached.
     [[nodiscard]] const std::vector<int>& visual_lines() const {
+        // With no folds it is 0..n-1 whatever the text says: a keystroke in a
+        // 100k-line file must not rebuild it (it did, every frame after an
+        // edit). Only the line count, or the folds, can change it.
+        if (folds.empty() && visual_fold_version_ == fold_version_ && visual_identity_) {
+            const std::size_t n = lines.size(), had = visual_.size();
+            if (had > n) visual_.resize(n);
+            else for (std::size_t l = had; l < n; ++l) visual_.push_back(static_cast<int>(l));
+            return visual_;
+        }
         if (visual_version_ != version_ || visual_fold_version_ != fold_version_ || visual_.empty()) {
             visual_.clear();
             visual_.reserve(lines.size());
@@ -968,6 +1017,7 @@ class EditorState {
             }
             visual_version_ = version_;
             visual_fold_version_ = fold_version_;
+            visual_identity_ = folds.empty();
         }
         return visual_;
     }
@@ -1162,8 +1212,10 @@ class EditorState {
     mutable bool             whole_line_clip_ = false;
     mutable int              max_cols_ = 0;
     mutable std::uint64_t    max_cols_version_ = 0;
+    mutable bool             max_cols_rescan_ = true;
     mutable std::vector<int> visual_;
     mutable std::uint64_t    visual_version_ = 0, visual_fold_version_ = 0;
+    mutable bool             visual_identity_ = false;
     mutable std::vector<Symbol> symbols_;
     mutable std::uint64_t    symbols_version_ = ~std::uint64_t{0};
     mutable const Language*  symbols_lang_ = nullptr;
@@ -1171,8 +1223,31 @@ class EditorState {
     DragUnit drag_unit_ = DragUnit::character;
     Range    drag_origin_{};
     mutable int              symbols_tab_ = 0;
-    mutable const std::string* symbols_lines_ = nullptr;
-    mutable std::size_t      symbols_count_ = 0;
+    // the incremental outline (symbols()): per line, the lexer state it
+    // starts in (one more entry: the state after the last line) and its
+    // symbol (an index into ol_pool_, -1 none); lines [ol_valid_, ...) and
+    // up to ol_dirty_to_ must be relexed
+    mutable std::vector<LineState> ol_state_;
+    mutable std::vector<int>       ol_sym_;
+    mutable std::vector<Symbol>    ol_pool_;
+    mutable int                    ol_valid_ = 0, ol_dirty_to_ = 0;
+    /// An edit replaced lines [a, a+removed] with `added` lines (lines
+    /// already updated): splice the outline's per-line tables to match and
+    /// mark the new lines for a relex.
+    void outline_splice(int a, int removed, int added) {
+        const std::size_t before = lines.size() + static_cast<std::size_t>(removed + 1) - static_cast<std::size_t>(added);
+        if (ol_sym_.size() != before || ol_state_.size() != before + 1) {
+            ol_state_.clear(); ol_sym_.clear(); ol_valid_ = 0; ol_dirty_to_ = 0; return;   // never built, or out of step: rebuild
+        }
+        const auto A = static_cast<std::ptrdiff_t>(a);
+        // states: the one line a starts in stays; the removed+1 after it go, `added` after it come
+        ol_state_.erase(ol_state_.begin() + A + 1, ol_state_.begin() + A + 1 + removed + 1);
+        ol_state_.insert(ol_state_.begin() + A + 1, static_cast<std::size_t>(added), LineState{0xFF, 0xFF, 0xFF});   // unknown: never equal
+        ol_sym_.erase(ol_sym_.begin() + A, ol_sym_.begin() + A + removed + 1);
+        ol_sym_.insert(ol_sym_.begin() + A, static_cast<std::size_t>(added), -1);
+        ol_valid_ = std::min(ol_valid_, a);
+        ol_dirty_to_ = std::max(ol_dirty_to_, a + added - 1);
+    }
 
     [[nodiscard]] std::uint64_t top_id() const noexcept { return undo_.empty() ? 0 : undo_.back().id; }
 
@@ -1306,8 +1381,20 @@ class EditorState {
         parts.back() += tail;
         const int removed_lines = b.line - a.line;
         const int delta = static_cast<int>(parts.size()) - 1 - removed_lines;
+        // the widest-line cache: it only needs a rescan when the widest line
+        // was replaced by something narrower (typing never narrows a line)
+        bool lost_widest = false;
+        if (!max_cols_rescan_)
+            for (int l = a.line; l <= b.line && !lost_widest; ++l) lost_widest = display_col(l, line_len(l)) >= max_cols_;
         lines.erase(lines.begin() + a.line, lines.begin() + b.line + 1);
         lines.insert(lines.begin() + a.line, std::make_move_iterator(parts.begin()), std::make_move_iterator(parts.end()));
+        outline_splice(a.line, removed_lines, static_cast<int>(parts.size()));
+        if (!max_cols_rescan_) {
+            int widest_new = 0;
+            for (int l = a.line; l < a.line + static_cast<int>(parts.size()); ++l) widest_new = std::max(widest_new, display_col(l, line_len(l)));
+            if (lost_widest && widest_new < max_cols_) max_cols_rescan_ = true;
+            else max_cols_ = std::max(max_cols_, widest_new);
+        }
         // Folds below the edit shift with their lines; folds it touched open.
         if (!folds.empty()) {
             std::set<int> moved;

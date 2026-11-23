@@ -342,6 +342,32 @@ static void test_syntax() {
     check(nsyms.size() == 2 && nsyms[0].name == "hand" && nsyms[1].name == "Real",
           "C++ outline skips `using namespace` and forward declarations");
     check(outline(rs, std::vector<std::string>{"struct Unit;"}).size() == 1, "a Rust unit struct is a definition");
+    {   // the outline is kept across edits: it must always equal a fresh one
+        auto e2 = ed("");
+        e2.language = &cpp;
+        std::string src;
+        for (int i = 0; i < 300; ++i)
+            src += i % 11 == 0 ? "/* block\n" : i % 11 == 3 ? "end */\n" : i % 5 == 0 ? "int f" + std::to_string(i) + "(int x) {\n"
+                 : i % 7 == 0 ? "struct S" + std::to_string(i) + " {\n" : "    x += 1;\n";
+        e2.set_text(src);
+        (void)e2.symbols();
+        std::uint32_t seed = 12345;
+        const auto rnd = [&](int n) { seed = seed * 1664525u + 1013904223u; return static_cast<int>((seed >> 8) % static_cast<std::uint32_t>(n)); };
+        bool same_all = true;
+        const char* bits[] = {"/*", "*/", "\n", "int g(int y) {", "struct T {", "\"", "x", "\n\n", "// c"};
+        for (int step = 0; step < 400 && same_all; ++step) {
+            const int l = rnd(e2.line_count());
+            e2.set_cursor(Pos{l, rnd(e2.line_len(l) + 1)});
+            if (rnd(3) == 0 && e2.line_count() > 2) { e2.set_cursor(Pos{l, 0}); e2.set_cursor(Pos{std::min(l + rnd(3), e2.line_count() - 1), 0}, true); e2.backspace(); }
+            else e2.paste(bits[rnd(9)]);
+            const auto& inc = e2.symbols();
+            const auto fresh = outline(cpp, e2.lines, e2.tab_width);
+            same_all = inc.size() == fresh.size();
+            for (std::size_t k = 0; same_all && k < inc.size(); ++k)
+                same_all = inc[k].name == fresh[k].name && inc[k].line == fresh[k].line && inc[k].kind == fresh[k].kind && inc[k].depth == fresh[k].depth;
+        }
+        check(same_all, "the outline kept across 400 random edits equals one built from scratch");
+    }
 }
 
 static void test_fuzzy_and_diff() {
