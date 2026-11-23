@@ -145,6 +145,30 @@ void completion_and_symbols() {
     ok(s.ed.line(4) == "    render_frame" && !s.comp_open, "tab takes it, replacing the typed prefix");
     type(s, "(");
     ok(!s.comp_open, "a non-word character ends the word");
+    {   // the pool is cached while you type on one line; an edit elsewhere
+        // must show up the next time, and so must a word on this very line
+        auto t = text_editor_ops::open("int alpha_one = 1;\n\nint main() {\n    \n}\n", "b.cpp");
+        text_editor_ops::press(t, {3, 4}, 1, {});
+        type(t, "al");
+        ok(t.comp_open, "completion opens (the pool is built)");
+        key(t, Key::escape);
+        // an edit elsewhere with no completion there (a paste, a tool): the
+        // pool cached for line 3 must notice it
+        t.ed.set_cursor({1, 0});
+        t.ed.paste("int alpine_two;");
+        t.ed.set_cursor({3, 6});
+        key(t, Key::backspace); key(t, Key::backspace);
+        type(t, "al");
+        bool two = false;
+        for (const auto& c : t.comp) two = two || c.word == "alpine_two";
+        ok(two, "a word typed on another line is offered (the cached pool notices the edit)");
+        key(t, Key::escape);
+        type(t, "x albatross_z ");
+        type(t, "alb");
+        bool same_line = false;
+        for (const auto& c : t.comp) same_line = same_line || c.word == "albatross_z";
+        ok(same_line, "...and a word earlier on the caret's own line");
+    }
     // go to symbol
     key(s, Key::o, Mods{.shift = true, .super = true});
     key(s, Key::o, Mods{.shift = true, .ctrl = true});

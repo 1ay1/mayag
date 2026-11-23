@@ -103,6 +103,21 @@ struct TextEditorState {
     int  comp_sel = 0;
     std::vector<EditorCompletion> comp;           ///< ranked, best first
     std::vector<std::vector<std::uint16_t>> comp_hits;   ///< matched chars, per entry
+    /// The completion pool from every line but the caret's (words around it,
+    /// the file's symbols), kept while edits touch only the caret's line:
+    /// typing doesn't rescan 3000 lines per key. complete() owns it.
+    struct CompPool {
+        std::uint64_t version = 0;
+        int line = -1, lines = -1;
+        const void* lang = nullptr;
+        std::vector<EditorCompletion> pool;
+        struct Hash {
+            using is_transparent = void;
+            std::size_t operator()(std::string_view v) const noexcept { return std::hash<std::string_view>{}(v); }
+        };
+        std::unordered_map<std::string, std::size_t, Hash, std::equal_to<>> at;   // looked up by string_view, no copies
+    };
+    CompPool comp_pool;
     // go to symbol (⌘⇧O): the file's functions, types, ... as a picker
     bool sym_open = false;
     TextEditState sym_q;
@@ -290,37 +305,72 @@ inline void complete(TextEditorState& s, bool force = false) {
     const std::string pre = word_before_caret(s, &start);
     const editor::Pos c = s.ed.cursor();
     if ((!force && pre.size() < 2) || s.ed.sels.size() > 1 || !s.ed.primary_sel().empty()) { s.comp_open = false; return; }
-    // the file's words, counted (the one being typed excluded). Hashed: a
-    // linear find per word was quadratic in the distinct words (up to 6000)
-    // and most of a keystroke's cost in a big file.
-    std::vector<EditorCompletion> pool;
-    std::unordered_map<std::string_view, std::size_t> at;   // word -> index in pool
-    {
-        // the words near the caret (where what you are writing lives): ±1500
-        // lines, ~1 ms on any file; the symbols below cover the whole file
+    // The pool: words near the caret (±1500 lines: where what you are
+    // writing lives) and every symbol in the file, counted -- from every line
+    // but the caret's, cached while edits stay on that line; then the caret
+    // line's own words on top (the one being typed excluded), every key.
+    auto& cp = s.comp_pool;
+    const auto [tlo, thi] = s.ed.lines_touched_since(cp.version);
+    const bool fresh = cp.line == c.line && cp.lines == s.ed.line_count() && cp.lang == s.ed.language &&
+                       (thi < tlo || (tlo == c.line && thi == c.line));
+    const auto is_word_start = [](unsigned char ch) { return editor::detail::is_word(ch) && !(ch >= '0' && ch <= '9'); };
+    if (!fresh) {
+        cp = {};
+        cp.version = s.ed.version(); cp.line = c.line; cp.lines = s.ed.line_count(); cp.lang = s.ed.language;
         const int lo = std::max(0, c.line - 1500), hi = std::min(s.ed.line_count(), c.line + 1500);
-        for (int l = lo; l < hi && pool.size() <= 6000; ++l) {
+        for (int l = lo; l < hi && cp.pool.size() <= 6000; ++l) {
+            if (l == c.line) continue;
             const std::string& t = s.ed.line(l);
             for (std::size_t i = 0; i < t.size();) {
-                if (!editor::detail::is_word(static_cast<unsigned char>(t[i])) || (t[i] >= '0' && t[i] <= '9')) { ++i; continue; }
+                if (!is_word_start(static_cast<unsigned char>(t[i]))) { ++i; continue; }
                 std::size_t j = i;
                 while (j < t.size() && editor::detail::is_word(static_cast<unsigned char>(t[j]))) ++j;
-                if (j - i >= 3 && !(l == c.line && static_cast<int>(i) == start)) {
-                    const std::string_view w{t.data() + i, j - i};   // the buffer's own bytes: stable for this call
-                    if (const auto it = at.find(w); it != at.end()) ++pool[it->second].uses;
-                    else { at.emplace(w, pool.size()); pool.push_back({std::string{w}, EditorCompletion::From::file, 1, {}}); }
+                if (j - i >= 3) {
+                    std::string w = t.substr(i, j - i);
+                    if (const auto it = cp.at.find(w); it != cp.at.end()) ++cp.pool[it->second].uses;
+                    else { cp.at.emplace(w, cp.pool.size()); cp.pool.push_back({std::move(w), EditorCompletion::From::file, 1, {}}); }
                 }
                 i = j;
             }
         }
+        for (const auto& sym : s.ed.symbols()) {
+            if (sym.line == c.line) continue;
+            if (const auto it = cp.at.find(sym.name); it != cp.at.end()) { cp.pool[it->second].from = EditorCompletion::From::symbol; cp.pool[it->second].detail = sym.kind; }
+            else if (cp.pool.size() < 9000 && sym.name.size() >= 3) { cp.at.emplace(sym.name, cp.pool.size()); cp.pool.push_back({sym.name, EditorCompletion::From::symbol, 1, sym.kind}); }
+        }
+    } else {
+        cp.version = s.ed.version();   // the caret line moved on; the rest is as cached
     }
-    for (const auto& sym : s.ed.symbols()) {
-        if (const auto it = at.find(sym.name); it != at.end()) { pool[it->second].from = EditorCompletion::From::symbol; pool[it->second].detail = sym.kind; }
-        else if (pool.size() < 9000 && sym.name.size() >= 3 && sym.name != pre) { at.emplace(sym.name, pool.size()); pool.push_back({sym.name, EditorCompletion::From::symbol, 1, sym.kind}); }
+    std::vector<EditorCompletion> pool = cp.pool;
+    std::unordered_map<std::string_view, std::size_t> mine;   // the caret line's own new words
+    const auto find = [&](std::string_view w) -> EditorCompletion* {
+        if (const auto it = cp.at.find(w); it != cp.at.end()) return &pool[it->second];
+        if (const auto it = mine.find(w); it != mine.end()) return &pool[it->second];
+        return nullptr;
+    };
+    {
+        const std::string& t = s.ed.line(c.line);
+        for (std::size_t i = 0; i < t.size();) {
+            if (!is_word_start(static_cast<unsigned char>(t[i]))) { ++i; continue; }
+            std::size_t j = i;
+            while (j < t.size() && editor::detail::is_word(static_cast<unsigned char>(t[j]))) ++j;
+            if (j - i >= 3 && static_cast<int>(i) != start) {
+                const std::string_view w{t.data() + i, j - i};
+                if (auto* e = find(w)) ++e->uses;
+                else { mine.emplace(w, pool.size()); pool.push_back({std::string{w}, EditorCompletion::From::file, 1, {}}); }
+            }
+            i = j;
+        }
+        // the caret line's own definition, if any (symbols are in line order)
+        const auto& syms = s.ed.symbols();
+        for (auto it = std::lower_bound(syms.begin(), syms.end(), c.line, [](const editor::Symbol& x, int l) { return x.line < l; });
+             it != syms.end() && it->line == c.line; ++it)
+            if (it->name != pre)
+                if (auto* e = find(it->name)) { e->from = EditorCompletion::From::symbol; e->detail = it->kind; }
     }
     const auto add_lang = [&](const std::vector<std::string_view>& v, EditorCompletion::From from, const char* d) {
         for (auto w : v)
-            if (!at.contains(w)) pool.push_back({std::string{w}, from, 0, d});
+            if (!find(w)) pool.push_back({std::string{w}, from, 0, d});
     };
     add_lang(s.ed.language->keywords, EditorCompletion::From::keyword, "keyword");
     add_lang(s.ed.language->types, EditorCompletion::From::type, "type");

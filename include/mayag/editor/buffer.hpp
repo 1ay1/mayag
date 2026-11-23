@@ -176,6 +176,7 @@ class EditorState {
         folds.clear();
         saved_id_ = 0;
         ++version_;
+        edit_log_.clear(); edit_floor_ = version_;   // a new text: nothing earlier is comparable
         max_cols_rescan_ = true; visual_identity_ = false;
         ol_state_.clear(); ol_sym_.clear(); ol_pool_.clear(); ol_valid_ = 0; ol_dirty_to_ = 0;
         syntax.reset();
@@ -196,6 +197,21 @@ class EditorState {
     [[nodiscard]] const Selection& primary_sel() const { return sels[static_cast<std::size_t>(primary)]; }
     [[nodiscard]] Pos cursor() const { return primary_sel().head; }
     [[nodiscard]] std::uint64_t version() const noexcept { return version_; }
+
+    /// The lines edits since `since` (a version()) may have changed: [lo, hi]
+    /// as they are numbered NOW, hi = INT_MAX when lines were added or removed
+    /// (everything below moved). {INT_MAX, -1}: none. {0, INT_MAX}: unknown
+    /// (too long ago, or a new text). For caches of derived data that only
+    /// some lines feed -- completion keeps its word list while you type on
+    /// one line.
+    [[nodiscard]] std::pair<int, int> lines_touched_since(std::uint64_t since) const {
+        if (since >= version_) return {INT_MAX, -1};
+        if (since < edit_floor_ || edit_log_.empty() || edit_log_.front().version > since + 1) return {0, INT_MAX};
+        int lo = INT_MAX, hi = -1;
+        for (const auto& e : edit_log_)
+            if (e.version > since) { lo = std::min(lo, e.lo); hi = std::max(hi, e.hi); }
+        return {lo, hi};
+    }
 
     /// The buffer's symbol outline, kept across edits: an edit relexes from
     /// its own line only until the lexer's carried state agrees with what it
@@ -1207,6 +1223,10 @@ class EditorState {
     std::uint64_t            next_id_ = 1;
     std::uint64_t            saved_id_ = 0;
     std::uint64_t            version_ = 1;
+    // lines_touched_since(): the last edits, oldest first (bounded)
+    struct EditMark { std::uint64_t version; int lo, hi; };
+    std::vector<EditMark>    edit_log_;
+    std::uint64_t            edit_floor_ = 1;
     std::uint64_t            fold_version_ = 0;
     bool                     occurrence_whole_word_ = false;
     mutable bool             whole_line_clip_ = false;
@@ -1407,6 +1427,10 @@ class EditorState {
         syntax.invalidate_from(a.line);
         depth_valid_ = std::min(depth_valid_, a.line);
         ++version_;
+        // a line-count change moves everything below: hi = INT_MAX covers that
+        // (and any older mark below a.line, whose number shifted)
+        edit_log_.push_back({version_, a.line, (delta == 0 && removed_lines == 0) ? a.line : INT_MAX});
+        if (edit_log_.size() > 64) edit_log_.erase(edit_log_.begin(), edit_log_.begin() + 32);
         return e;
     }
 

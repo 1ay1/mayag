@@ -26,11 +26,13 @@
 #include "control.hpp"
 #include "scroll_view.hpp"
 #include "../editor/buffer.hpp"
+#include "../render/draw_list.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -241,16 +243,23 @@ template <class C>
 /// Rebuilt only when the text, the window onto it or the colours change.
 template <class Th>
 [[nodiscard]] inline Node minimap_rows(const editor::EditorState& ed, const Th& th, int top, int rows, float w, float row_px) {
-    std::vector<Node> blocks;
+    // One canvas owning its blocks, not a box node per word: the minimap is
+    // rebuilt on every keystroke, and hundreds of nodes (a style each, then
+    // cascade, layout, paint) were most of a keystroke's view in a big file.
+    struct Blocks { float w = 0, h = 0; std::vector<std::pair<Rect, Color<Srgb>>> b; };
+    auto data = std::make_shared<Blocks>();
+    data->w = w; data->h = static_cast<float>(rows) * row_px;
     const auto& vis = ed.visual_lines();
     const float cell = 1.0f;
     const int max_cols = static_cast<int>(w / cell);
+    std::vector<editor::Span> spans;
     for (int r = 0; r < rows && top + r < static_cast<int>(vis.size()); ++r) {
         const int l = vis[static_cast<std::size_t>(top + r)];
         const std::string& s = ed.line(l);
         if (s.empty()) continue;
         const float y = static_cast<float>(r) * row_px;
-        const auto spans = ed.syntax.spans(*ed.language, ed.lines, l);
+        spans.clear();
+        editor::highlight_line(*ed.language, s, ed.syntax.state_at(*ed.language, ed.lines, l), spans);
         // one block per run of non-space text, in its token's colour
         const auto run = [&](std::uint32_t a, std::uint32_t b, Color<Srgb> col) {
             std::uint32_t i = a;
@@ -263,7 +272,7 @@ template <class Th>
                     if (c0 >= max_cols) return;
                     const float x = static_cast<float>(c0) * cell;
                     const float bw = static_cast<float>(std::min(c1, max_cols) - c0) * cell;
-                    blocks.push_back((box() | size(bw, std::max(row_px - 0.5f, 1.0f)) | bg(col.fade(0.75f)) | absolute(x, y)).build());
+                    data->b.emplace_back(Rect{x, y, bw, std::max(row_px - 0.5f, 1.0f)}, col.fade(0.75f));
                 }
                 i = e;
             }
@@ -276,7 +285,17 @@ template <class Th>
         }
         if (at < s.size()) run(at, static_cast<std::uint32_t>(s.size()), th.of(editor::Tok::text));
     }
-    return (z(h_list(std::move(blocks))) | size(w, static_cast<float>(rows) * row_px)).build();
+    Style st;
+    st.layout.width = px(w);
+    st.layout.height = px(data->h);
+    const CanvasFn paint = [](DrawList& dl, const Rect& f, const void* u) {
+        const auto& d = *static_cast<const Blocks*>(u);
+        const float sx = d.w > 0 ? f.width() / d.w : 1.0f, sy = d.h > 0 ? f.height() / d.h : 1.0f;
+        for (const auto& [r, col] : d.b)
+            dl.fill_rect(Rect{f.left() + r.left() * sx, f.top() + r.top() * sy, r.width() * sx, r.height() * sy}, col);
+    };
+    const float hgt = data->h;
+    return (z(Node::make_canvas(paint, std::shared_ptr<const void>(std::move(data)), std::move(st))) | size(w, hgt)).build();
 }
 
 /// Expand tabs, so a run's text sits on the cell grid exactly.
