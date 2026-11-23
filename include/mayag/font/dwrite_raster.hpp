@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag/font/dwrite_raster.hpp — native Windows glyph rasterisation.
 //
 // On Windows, "correct" text is DirectWrite's: every native app, the shell,
@@ -25,7 +26,7 @@
 // dwrite.dll returns nullopt, and the caller rasterises the outline itself
 // as before.
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 
 #include "../core/win32.hpp"
 #include "../core/geometry.hpp"

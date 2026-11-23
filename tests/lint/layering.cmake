@@ -63,7 +63,8 @@ set(jaal_ok
     font/system.hpp                                                            # the font scan runs on a jaal worker
     font/ot_layout.hpp                                                         # lock-free lazy tables (jaal::once)
     font/mapped_file.hpp                                                       # its Sendable/Frozen claim (jaal traits)
-    core/sync.hpp)                                                             # Cell / Frozen: jaal's thread-safety types, for every layer
+    core/sync.hpp                                                              # Cell / Frozen: jaal's thread-safety types, for every layer
+    core/target.hpp)                                                           # the OS, read once for the stack (jaal/meta/target.hpp)
 
 set(hits "")
 file(GLOB dirs LIST_DIRECTORIES true ${ROOT}/include/mayag/*)

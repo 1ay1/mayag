@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::backend — the GPU abstraction
 //
 // mayag's portability claim rests on a deliberately TINY backend interface.
@@ -96,13 +97,13 @@ enum class Api : std::uint8_t {
 /// The platform's preferred order, best first.
 [[nodiscard]] inline std::vector<Api> preferred_order() {
     std::vector<Api> v;
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     v = {Api::metal, Api::vulkan, Api::opengl};
-#elif defined(_WIN32)
+#elif MAYAG_OS_WINDOWS
     v = {Api::d3d12, Api::vulkan, Api::opengl};
-#elif defined(__EMSCRIPTEN__)
+#elif MAYAG_OS_EMSCRIPTEN
     v = {Api::webgpu, Api::opengl};
-#elif defined(__ANDROID__)
+#elif MAYAG_OS_ANDROID
     v = {Api::vulkan, Api::opengl};
 #else
     v = {Api::vulkan, Api::opengl};

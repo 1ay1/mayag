@@ -716,6 +716,12 @@ if(MAYAG_BUILD_TESTS)
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_one_look.txt
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_look.cmake)
+        # The OS is read in ONE file for the whole stack (jaal/meta/target.hpp).
+        add_test(NAME mayag_one_os
+                 COMMAND ${CMAKE_COMMAND}
+                         "-DROOTS=${CMAKE_CURRENT_SOURCE_DIR}/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/src"
+                         -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/include/jaal/meta/target.hpp
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/lint/one_os.cmake)
         # Every text size is a tier of the type scale (style/type.hpp).
         add_test(NAME mayag_type_scale
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}

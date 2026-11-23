@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::typo::system — finding fonts on the machine
 //
 // "Use the UI font" and "render this emoji" both require asking the OS what
@@ -283,12 +284,12 @@ namespace detail {
 
     [[maybe_unused]] const char* home = std::getenv("HOME");
 
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     if (home != nullptr) dirs.emplace_back(std::string{home} + "/Library/Fonts");
     dirs.emplace_back("/Library/Fonts");
     dirs.emplace_back("/System/Library/Fonts");
     dirs.emplace_back("/System/Library/Fonts/Supplemental");
-#elif defined(_WIN32)
+#elif MAYAG_OS_WINDOWS
     if (const char* windir = std::getenv("WINDIR")) {
         dirs.emplace_back(std::string{windir} + "\\Fonts");
     }
@@ -427,7 +428,7 @@ struct WalkEntry { std::filesystem::path path; bool dir; };
 /// batches: one pass, no extra syscalls.
 inline void walk_fonts(const std::filesystem::path& root, std::vector<std::pair<std::string, std::int64_t>>& dirs,
                        std::vector<WalkEntry>* files) {
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     std::vector<std::wstring> stack{root.wstring()};
     bool first = true;
     while (!stack.empty()) {
@@ -482,9 +483,9 @@ inline void walk_fonts(const std::filesystem::path& root, std::vector<std::pair<
 [[nodiscard]] inline std::string cache_path() {
     if (const char* off = std::getenv("MAYAG_FONT_CACHE"); off != nullptr && std::string_view{off} == "0") return {};
     std::filesystem::path base;
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     if (const char* a = std::getenv("LOCALAPPDATA")) base = std::filesystem::path{a} / "mayag";
-#elif defined(__APPLE__)
+#elif MAYAG_OS_APPLE
     if (const char* h = std::getenv("HOME")) base = std::filesystem::path{h} / "Library/Caches/mayag";
 #else
     if (const char* x = std::getenv("XDG_CACHE_HOME"); x != nullptr && *x != '\0') base = std::filesystem::path{x} / "mayag";
@@ -755,9 +756,9 @@ class Database {
 
 /// The platform's default UI font family names, best first.
 [[nodiscard]] inline std::vector<std::string_view> ui_font_families() {
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     return {"SF Pro Text", "SF Pro", "System Font", "Helvetica Neue", "Helvetica", "Arial"};
-#elif defined(_WIN32)
+#elif MAYAG_OS_WINDOWS
     return {"Segoe UI Variable Text", "Segoe UI", "Tahoma", "Arial"};
 #else
     // The macOS faces first when installed (SF Pro from developer.apple.com,
@@ -767,9 +768,9 @@ class Database {
 }
 
 [[nodiscard]] inline std::vector<std::string_view> mono_font_families() {
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     return {"SF Mono", "Menlo", "Monaco", "Courier New"};
-#elif defined(_WIN32)
+#elif MAYAG_OS_WINDOWS
     return {"Cascadia Mono", "Consolas", "Courier New"};
 #else
     return {"SF Mono", "Menlo", "JetBrains Mono", "Fira Code", "Source Code Pro", "DejaVu Sans Mono", "Liberation Mono"};
@@ -778,9 +779,9 @@ class Database {
 
 /// Emoji font families, per platform.
 [[nodiscard]] inline std::vector<std::string_view> emoji_font_families() {
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     return {"Apple Color Emoji"};
-#elif defined(_WIN32)
+#elif MAYAG_OS_WINDOWS
     return {"Segoe UI Emoji"};
 #else
     return {"Apple Color Emoji", "Noto Color Emoji", "Twemoji", "JoyPixels"};
@@ -789,9 +790,9 @@ class Database {
 
 /// CJK families, per platform.
 [[nodiscard]] inline std::vector<std::string_view> cjk_font_families() {
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     return {"Hiragino Sans", "PingFang SC", "Apple SD Gothic Neo"};
-#elif defined(_WIN32)
+#elif MAYAG_OS_WINDOWS
     return {"Yu Gothic UI", "Microsoft YaHei", "Malgun Gothic"};
 #else
     return {"Noto Sans CJK JP", "Noto Sans CJK SC", "Source Han Sans"};
@@ -820,7 +821,7 @@ namespace detail {
 
 }  // namespace detail
 
-#if !defined(__APPLE__) && !defined(_WIN32)
+#if !MAYAG_OS_APPLE && !MAYAG_OS_WINDOWS
 /// The face a Linux desktop draws `s` with, best first: the standard text
 /// designs fontconfig's defaults, GNOME and KDE, Chrome and Firefox resolve
 /// to (Noto Sans <Script>, then the long-standing distro faces). Without
@@ -1071,7 +1072,7 @@ namespace detail {
     //    can draw a script, it is in the chain. Scripts already covered by
     //    the primary are skipped by add_entry's dedup, and the most
     //    specialised face per script is chosen by covering().
-#if !defined(__APPLE__) && !defined(_WIN32)
+#if !MAYAG_OS_APPLE && !MAYAG_OS_WINDOWS
     //    On Linux "most specialised" picks badly (Noto Kufi, a display face,
     //    for all Arabic; Noto Rashi, a historical script, for Hebrew; an icon
     //    font for symbols the UI font already has), so a script the stack
@@ -1089,14 +1090,14 @@ namespace detail {
     // a symbol design, not from the full-width ideograph-sized one in a CJK
     // face that happens to sit earlier in the chain.
     std::vector<ScriptProbe> probes{std::begin(script_probes), std::end(script_probes)};
-#if !defined(__APPLE__) && !defined(_WIN32)
+#if !MAYAG_OS_APPLE && !MAYAG_OS_WINDOWS
     std::stable_partition(probes.begin(), probes.end(), [](const ScriptProbe& p) {
         return p.script == Script::math || p.script == Script::symbols;
     });
 #endif
     for (const auto& probe : probes) {
         if (probe.script == Script::emoji) continue;   // handled last, in colour
-#if !defined(__APPLE__) && !defined(_WIN32)
+#if !MAYAG_OS_APPLE && !MAYAG_OS_WINDOWS
         // Symbols and math are huge blocks one probe cannot stand for (a UI
         // font has ∀ but not 𝔸): always add their face.
         const bool broad = probe.script == Script::math || probe.script == Script::symbols;

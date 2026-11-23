@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::typo::MappedFile — read a font without reading a font
 //
 // Font discovery has to inspect every file in every font directory: its
@@ -31,7 +32,7 @@
 #include <jaal/core/frozen.hpp>
 #include <jaal/core/sendable.hpp>
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 #  include "../core/win32.hpp"   // windows.h, with its keyword macros removed
 #  undef IN
 #  undef OUT
@@ -74,7 +75,7 @@ class MappedFile {
 
   private:
     void open(const std::string& path) {
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
         HANDLE fh = ::CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
                                   nullptr, OPEN_EXISTING,
                                   FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -138,7 +139,7 @@ class MappedFile {
 
     void close() noexcept {
         if (mapped_ && ptr_ != nullptr) {
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
             ::UnmapViewOfFile(const_cast<std::uint8_t*>(ptr_));
             if (mapping_ != nullptr) ::CloseHandle(mapping_);
 #else
@@ -149,7 +150,7 @@ class MappedFile {
         size_ = 0;
         mapped_ = false;
         owned_.clear();
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
         mapping_ = nullptr;
 #endif
     }
@@ -161,7 +162,7 @@ class MappedFile {
         // A fallback read owns its buffer, so re-point at the moved vector
         // rather than the source's dangling data pointer.
         ptr_    = mapped_ ? other.ptr_ : owned_.data();
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
         mapping_ = other.mapping_;
         other.mapping_ = nullptr;
 #endif
@@ -174,7 +175,7 @@ class MappedFile {
     std::size_t               size_ = 0;
     bool                      mapped_ = false;
     std::vector<std::uint8_t> owned_;   // only used by read_fallback
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     HANDLE mapping_ = nullptr;
 #endif
 };

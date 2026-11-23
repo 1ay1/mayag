@@ -1,4 +1,5 @@
 #pragma once
+#include "target.hpp"
 // mayag::app — input events
 //
 // The closed sum type of everything that can come from the outside world.
@@ -54,7 +55,7 @@ enum class Keymap : std::uint8_t { pc, mac };
 /// The convention of the machine this build runs on. The ONLY platform
 /// conditional about keys in mayag.
 [[nodiscard]] constexpr Keymap native_keymap() noexcept {
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     return Keymap::mac;
 #else
     return Keymap::pc;

@@ -1,4 +1,5 @@
 #pragma once
+#include "target.hpp"
 // mayag::startup — where launch time goes.
 //
 // MAYAG_STARTUP=1 prints a line per phase, in ms since the process started,
@@ -8,10 +9,10 @@
 #include <cstdio>
 #include <cstdlib>
 
-#if defined(__linux__)
+#if MAYAG_OS_LINUX
 #  include <time.h>
 #  include <unistd.h>
-#elif defined(_WIN32)
+#elif MAYAG_OS_WINDOWS
 // NOT <windows.h>: this header is included almost everywhere, and windows.h
 // defines IN, OUT, near, far... which collide with ordinary identifiers (the
 // font engine's LineBreak::IN). The three kernel32 calls are declared by
@@ -30,7 +31,7 @@ namespace detail {
 /// Milliseconds since the process was created (Linux: from /proc, so dynamic
 /// loading and static init count too); elsewhere since first use.
 [[nodiscard]] inline double now_ms() noexcept {
-#if defined(__linux__)
+#if MAYAG_OS_LINUX
     static const double start_ms = [] {
         // Field 22 of /proc/self/stat: start time in clock ticks since boot.
         double ticks = 0;
@@ -50,7 +51,7 @@ namespace detail {
     timespec ts{};
     ::clock_gettime(CLOCK_BOOTTIME, &ts);
     return static_cast<double>(ts.tv_sec) * 1000.0 + static_cast<double>(ts.tv_nsec) / 1e6 - start_ms;
-#elif defined(_WIN32)
+#elif MAYAG_OS_WINDOWS
     // From the process's creation time, like /proc on Linux, so the loader,
     // DLL init and static constructors are on the timeline too. FILETIME is
     // two 32-bit halves; read it as such through the opaque declaration.

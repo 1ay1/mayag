@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::run<P>() — run a program in a window.
 //
 // jaal is the runtime: the loop, update, Cmd, Sub, timers, tasks, streams,
@@ -37,7 +38,7 @@
 
 #include <jaal/jaal.hpp>
 
-#if defined(__APPLE__) && defined(MAYAG_WITH_COCOA) && !defined(MAYAG_PLATFORM_HEADLESS)
+#if MAYAG_OS_APPLE && defined(MAYAG_WITH_COCOA) && !defined(MAYAG_PLATFORM_HEADLESS)
 #  define MAYAG_COCOA_LOOP 1
 #  include "../platform/macos_loop.hpp"
 #else

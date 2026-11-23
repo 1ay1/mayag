@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::platform — the window/OS seam
 //
 // mayag needs exactly six things from an operating system:
@@ -77,11 +78,11 @@ concept Window = requires(W w, const W cw, const DrawList& dl, std::string_view 
 
 #if defined(MAYAG_PLATFORM_HEADLESS)
     // forced headless
-#elif defined(__APPLE__) && defined(MAYAG_WITH_COCOA)
+#elif MAYAG_OS_APPLE && defined(MAYAG_WITH_COCOA)
     #include "../platform/macos_window.hpp"
-#elif (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
+#elif (MAYAG_OS_LINUX || MAYAG_OS_FREEBSD) && defined(MAYAG_WITH_WAYLAND)
     #include "../platform/wayland.hpp"
-#elif defined(_WIN32) && defined(MAYAG_WITH_WIN32)
+#elif MAYAG_OS_WINDOWS && defined(MAYAG_WITH_WIN32)
     #include "../platform/win32_window.hpp"
 #endif
 
@@ -89,11 +90,11 @@ namespace mayag::platform {
 
 #if defined(MAYAG_PLATFORM_HEADLESS)
     using Native = Headless;
-#elif defined(__APPLE__) && defined(MAYAG_WITH_COCOA)
+#elif MAYAG_OS_APPLE && defined(MAYAG_WITH_COCOA)
     using Native = MacWindow;
-#elif (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
+#elif (MAYAG_OS_LINUX || MAYAG_OS_FREEBSD) && defined(MAYAG_WITH_WAYLAND)
     using Native = WaylandWindow;
-#elif defined(_WIN32) && defined(MAYAG_WITH_WIN32)
+#elif MAYAG_OS_WINDOWS && defined(MAYAG_WITH_WIN32)
     using Native = Win32Window;
 #else
     using Native = Headless;
@@ -106,11 +107,11 @@ static_assert(Window<Native>,
 [[nodiscard]] constexpr std::string_view native_name() noexcept {
 #if defined(MAYAG_PLATFORM_HEADLESS)
     return "headless";
-#elif defined(__APPLE__) && defined(MAYAG_WITH_COCOA)
+#elif MAYAG_OS_APPLE && defined(MAYAG_WITH_COCOA)
     return "cocoa";
-#elif (defined(__linux__) || defined(__FreeBSD__)) && defined(MAYAG_WITH_WAYLAND)
+#elif (MAYAG_OS_LINUX || MAYAG_OS_FREEBSD) && defined(MAYAG_WITH_WAYLAND)
     return "wayland";
-#elif defined(_WIN32) && defined(MAYAG_WITH_WIN32)
+#elif MAYAG_OS_WINDOWS && defined(MAYAG_WITH_WIN32)
     return "win32";
 #else
     return "headless";

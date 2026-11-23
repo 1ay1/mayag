@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::platform::WaylandWindow — the native Linux backend
 //
 // Wayland rather than X11 because it is what every current Linux desktop
@@ -69,7 +70,7 @@
 #include "../backend/vulkan.hpp"
 #endif
 
-#if defined(__linux__) || defined(__FreeBSD__)
+#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD
 
 #include <cerrno>
 #include <chrono>

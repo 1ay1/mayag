@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::typo::Face / FontStack — the public font API
 //
 // `Face`      one font file, one style. Owns its bytes, its outline source,
@@ -133,7 +134,7 @@ class Face {
         if (!axes_.empty()) apply_user_coords(vals);
     }
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     ~Face() {
         if (dw_face_ != nullptr) dw_face_->Release();
     }
@@ -752,7 +753,7 @@ class Face {
     std::optional<Frozen<Bytes>> bytes_;   ///< every span in file_ and the sources points in here (set by the factories)
     std::string               source_path_;        ///< the file, when from_file
     std::uint32_t             source_index_ = 0;   ///< its index in a collection
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     mutable std::mutex        dw_mutex_;           ///< Windows only (not built on Linux): guards dw_*
     mutable IDWriteFontFace*  dw_face_ = nullptr;  ///< native rasteriser's view (guarded by dw_mutex_)
     mutable bool              dw_tried_ = false;
@@ -938,7 +939,7 @@ struct TextLook {
     /// (and on other platforms).
     [[nodiscard]] static constexpr TextLook native() noexcept {
         TextLook l = portable();
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
         l.native_raster = true;
 #endif
         return l;
@@ -1939,7 +1940,7 @@ class FontStack : public Shaper {
         }
         if (hint) key.flags |= glyph_flags::cg_hinted;
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
         // The native rasteriser: DirectWrite's own coverage for an ordinary
         // outline glyph of a file-backed static face. Everything else --
         // SDF tiers, colour glyphs, synthetic bold/italic, variable faces,
@@ -1954,7 +1955,7 @@ class FontStack : public Shaper {
 
         if (const CachedGlyph* hit = atlas_.find(key)) return hit;
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
         if (native_face != nullptr) {
             const float phase = static_cast<float>(x_phase) / static_cast<float>(subpixel_phases_for(size_px));
             const float quantised = size_of_bucket(key.size_bucket);
@@ -3042,7 +3043,7 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             if (!stack_->config().centred) dst.origin.y -= grow_px;   // CoreGraphics: the growth goes up
             dl.glyph(dst, g.uv, st.color, true, edge, grow);
         } else if (g.is_native) {
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
             static const dwrite::TextParams tp = dwrite::text_params();
             dl.glyph_native(dst, g.uv, st.color,
                             Vec4{tp.gamma_ratios[0], tp.gamma_ratios[1], tp.gamma_ratios[2], tp.gamma_ratios[3]},

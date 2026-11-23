@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // Internal fragment: included by vulkan.hpp after the Vulkan ABI it uses;
 // include <mayag/backend/vulkan.hpp>, not this file.
 // mayag::backend::VulkanDevice — the render device
@@ -35,7 +36,7 @@
 // descriptor it is handed, so import duplicates first. The Windows CRT
 // spells them _dup/_close (the fd-import paths never run there, but they
 // must compile).
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 #include <io.h>
 namespace mayag::backend::detail {
 inline int fd_dup(int fd) noexcept { return ::_dup(fd); }
@@ -58,7 +59,7 @@ inline int fd_close(int fd) noexcept { return ::close(fd); }
 #include <map>
 #include <vector>
 
-#if defined(__linux__) || defined(__FreeBSD__) || defined(_WIN32)
+#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD || MAYAG_OS_WINDOWS
 
 namespace mayag::backend {
 
@@ -128,7 +129,7 @@ class VulkanDevice {
         return finish_attach(logical, dpi);
     }
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     /// Device + swapchain on a live HWND. Calls prepare() first if nobody did.
     ///
     /// The only platform-specific step is making the VkSurfaceKHR; everything
@@ -1267,9 +1268,9 @@ class VulkanDevice {
         std::vector<const char*> exts;
         if (want_surface) {
             exts.push_back("VK_KHR_surface");
-#if defined(__linux__) || defined(__FreeBSD__)
+#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD
             exts.push_back("VK_KHR_wayland_surface");
-#elif defined(_WIN32)
+#elif MAYAG_OS_WINDOWS
             exts.push_back("VK_KHR_win32_surface");
 #endif
         }
@@ -1306,7 +1307,7 @@ class VulkanDevice {
         MG_LOAD(GetPhysicalDeviceSurfaceFormatsKHR, "vkGetPhysicalDeviceSurfaceFormatsKHR");
         MG_LOAD(GetPhysicalDeviceSurfacePresentModesKHR, "vkGetPhysicalDeviceSurfacePresentModesKHR");
         MG_LOAD(CreateWaylandSurfaceKHR, "vkCreateWaylandSurfaceKHR");
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
         MG_LOAD(CreateWin32SurfaceKHR, "vkCreateWin32SurfaceKHR");
 #endif
         #undef MG_LOAD

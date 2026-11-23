@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::backend::VulkanDevice — the cross-platform GPU backend
 //
 // Metal covers Apple. This covers everything else: Linux, Windows and Android
@@ -33,9 +34,9 @@
 #include <cstring>
 #include <vector>
 
-#if defined(__linux__) || defined(__FreeBSD__) || defined(_WIN32)
+#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD || MAYAG_OS_WINDOWS
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 #  include "../core/win32.hpp"   // windows.h, with its keyword macros removed
 #  undef IN
 #  undef OUT
@@ -58,7 +59,7 @@ using Flags     = std::uint32_t;
 using Bool32    = std::uint32_t;
 using DeviceSize = std::uint64_t;
 
-#if defined(_WIN32) || defined(__LP64__) || defined(_LP64)
+#if MAYAG_OS_WINDOWS || defined(__LP64__) || defined(_LP64)
 #  define MG_VK_HANDLE(name) using name = struct name##_T*;
 #else
 // On 32-bit, non-dispatchable handles are uint64_t. mayag targets 64-bit.
@@ -614,7 +615,7 @@ struct VkPresentInfoKHR {
 struct VkWaylandSurfaceCreateInfoKHR {
     int sType; const void* pNext; Flags flags; void* display; void* surface;
 };
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 struct VkWin32SurfaceCreateInfoKHR {
     int sType; const void* pNext; Flags flags; void* hinstance; void* hwnd;
 };
@@ -741,7 +742,7 @@ struct Api {
     VkResult (*AcquireNextImageKHR)(VkDevice, VkSwapchainKHR, std::uint64_t, VkSemaphore, VkFence, std::uint32_t*) = nullptr;
     VkResult (*QueuePresentKHR)(VkQueue, const VkPresentInfoKHR*) = nullptr;
     VkResult (*CreateWaylandSurfaceKHR)(VkInstance, const VkWaylandSurfaceCreateInfoKHR*, const void*, VkSurfaceKHR*) = nullptr;
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     VkResult (*CreateWin32SurfaceKHR)(VkInstance, const void*, const void*, VkSurfaceKHR*) = nullptr;
 #endif
 };
@@ -749,9 +750,9 @@ struct Api {
 namespace detail {
 
 inline void* load_library() noexcept {
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     return reinterpret_cast<void*>(::LoadLibraryA("vulkan-1.dll"));
-#elif defined(__APPLE__)
+#elif MAYAG_OS_APPLE
     return ::dlopen("libvulkan.1.dylib", RTLD_LAZY | RTLD_LOCAL);
 #else
     void* h = ::dlopen("libvulkan.so.1", RTLD_LAZY | RTLD_LOCAL);
@@ -761,7 +762,7 @@ inline void* load_library() noexcept {
 }
 
 inline void* sym(void* h, const char* name) noexcept {
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     return reinterpret_cast<void*>(::GetProcAddress(reinterpret_cast<HMODULE>(h), name));
 #else
     return ::dlsym(h, name);
@@ -824,7 +825,7 @@ class VulkanBackend final : public Device {
         // and lets the next candidate try.
         if (s.surface == nullptr) return nullptr;
         auto self = std::make_unique<VulkanBackend>();
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
         // Win32: `display` is the HINSTANCE and may legitimately be null --
         // vkCreateWin32SurfaceKHR only needs the HWND -- so unlike Wayland it
         // is not required to be present.

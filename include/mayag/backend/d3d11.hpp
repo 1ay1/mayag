@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::backend::D3D11Device — the native Windows GPU backend.
 //
 // Same transport contract as VulkanDevice (attach, resize, submit, atlas,
@@ -29,7 +30,7 @@
 // Every DLL is loaded at runtime (d3d11, dxgi, d3dcompiler_47), so a program
 // that never opens a window links none of them.
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 
 #include "../core/win32.hpp"
 #include "../core/startup.hpp"

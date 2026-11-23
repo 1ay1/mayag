@@ -1,4 +1,5 @@
 #pragma once
+#include "target.hpp"
 // mayag/core/win32.hpp — the ONE way mayag's headers include <windows.h>.
 //
 // mayag is header-only, so whatever <windows.h> defines lands in every
@@ -17,7 +18,7 @@
 // keyword macros removed again afterwards. Nothing in the Windows SDK
 // headers needs them once those headers have been parsed.
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN 1
 #  endif

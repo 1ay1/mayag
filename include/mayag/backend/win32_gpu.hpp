@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::backend::Win32Gpu — the window's GPU, whichever API drives it.
 //
 // The Win32 window talks to one object with the transport contract every
@@ -9,7 +10,7 @@
 // or Vulkan when MAYAG_BACKEND=vulkan asks for it. If the preferred API
 // cannot come up, the other is tried before the window settles for the CPU.
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 
 #include "d3d11.hpp"
 #ifdef MAYAG_WITH_VULKAN

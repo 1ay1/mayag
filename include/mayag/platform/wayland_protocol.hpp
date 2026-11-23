@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/target.hpp"
 // mayag::platform::wl — the Wayland wire protocol, without the dependency
 //
 // mayag links nothing. It parses its own fonts, encodes its own PNGs, and
@@ -45,7 +46,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#if defined(__linux__) || defined(__FreeBSD__)
+#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD
 
 #include <dlfcn.h>
 
