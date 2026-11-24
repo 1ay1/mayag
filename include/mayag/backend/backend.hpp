@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/target.hpp"
+#include "gpu_policy.hpp"
 // mayag::backend — the GPU abstraction
 //
 // mayag's portability claim rests on a deliberately TINY backend interface.
@@ -112,8 +113,20 @@ enum class Api : std::uint8_t {
 /// branch anywhere in the core, the platform layer, or the app runtime.
 [[nodiscard]] inline std::vector<Api> selection_order() {
     std::vector<Api> v;
-    if (const char* forced = std::getenv("MAYAG_BACKEND")) {
-        v.push_back(api_from_name(forced));
+    // MAYAG_BACKEND, as gpu_policy reads it: "gpu" means any GPU, which is
+    // the platform order anyway; a name puts that renderer first.
+    if (const auto c = gpu_policy::forced()) {
+        using C = gpu_policy::Choice;
+        switch (*c) {
+            case C::software: v.push_back(Api::software); break;
+            case C::vulkan:   v.push_back(Api::vulkan); break;
+            case C::metal:    v.push_back(Api::metal); break;
+            case C::d3d12:    v.push_back(Api::d3d12); break;
+            case C::webgpu:   v.push_back(Api::webgpu); break;
+            case C::opengl:   v.push_back(Api::opengl); break;
+            case C::any_gpu:
+            case C::d3d11:    break;   // the platform order (D3D11 is Win32Gpu's, not a registry Api)
+        }
     }
     for (Api a : preferred_order()) v.push_back(a);
     return v;

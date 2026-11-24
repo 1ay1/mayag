@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/target.hpp"
+#include "gpu_policy.hpp"
 // mayag::backend::D3D11Device — the native Windows GPU backend.
 //
 // Same transport contract as VulkanDevice (attach, resize, submit, atlas,
@@ -109,9 +110,9 @@ class D3D11Device {
 
     void set_low_latency(bool on) noexcept {
         // MAYAG_PRESENT=immediate|fifo overrides, as for Vulkan.
-        const char* f = std::getenv("MAYAG_PRESENT");
-        if (f != nullptr && std::string_view{f} == "immediate") on = true;
-        if (f != nullptr && std::string_view{f} == "fifo") on = false;
+        const auto forced = gpu_policy::present_mode();
+        if (forced == gpu_policy::Present::immediate) on = true;
+        if (forced == gpu_policy::Present::fifo) on = false;
         low_latency_ = on;
     }
     void set_transparent(bool) noexcept {}   // DirectComposition transparency: not yet

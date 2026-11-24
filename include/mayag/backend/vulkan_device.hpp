@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/target.hpp"
+#include "gpu_policy.hpp"
 // Internal fragment: included by vulkan.hpp after the Vulkan ABI it uses;
 // include <mayag/backend/vulkan.hpp>, not this file.
 // mayag::backend::VulkanDevice — the render device
@@ -2197,9 +2198,9 @@ class VulkanDevice {
         // IMMEDIATE: no wait for vblank at all, tearing allowed.
         int present_mode = vk::VK_PRESENT_MODE_FIFO_KHR;
         {
-            const char* force = std::getenv("MAYAG_PRESENT");
-            const bool want_fifo = force != nullptr && std::string_view{force} == "fifo";
-            const bool want_immediate = low_latency_ || (force != nullptr && std::string_view{force} == "immediate");
+            const auto force = gpu_policy::present_mode();
+            const bool want_fifo = force == gpu_policy::Present::fifo;
+            const bool want_immediate = low_latency_ || force == gpu_policy::Present::immediate;
             std::uint32_t n = 0;
             api_->GetPhysicalDeviceSurfacePresentModesKHR(phys_, surface_, &n, nullptr);
             std::vector<int> modes(n);

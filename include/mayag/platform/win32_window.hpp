@@ -43,6 +43,7 @@
 #include "../render/draw_list.hpp"
 #include "types.hpp"
 #include "images.hpp"
+#include "../backend/gpu_policy.hpp"
 
 // The GPU renderer is Direct3D 11 + DXGI flip model by default (the native
 // Windows path), Vulkan when MAYAG_BACKEND=vulkan; see backend/win32_gpu.hpp.
@@ -813,8 +814,7 @@ class Win32Window {
     /// worker, before the HWND exists. adopt_gpu() attaches the swapchain to
     /// the window when the first frame is presented.
     void start_gpu([[maybe_unused]] const WindowConfig& cfg) {
-        const char* forced = ::getenv("MAYAG_BACKEND");
-        if (forced != nullptr && std::string_view{forced} == "software") return;
+        if (backend::gpu_policy::software_only()) return;
         State* st = state_.get();
         // Already preparing since the process started (gpu_prestart): adopt
         // that job instead of beginning again.
@@ -847,8 +847,7 @@ class Win32Window {
     /// it opens later adopts the prepared device. Harmless if no window ever
     /// opens (headless runs just never adopt it).
     static void gpu_prestart() {
-        const char* forced = ::getenv("MAYAG_BACKEND");
-        if (forced != nullptr && std::string_view{forced} == "software") return;
+        if (backend::gpu_policy::software_only()) return;
         auto& pre = prestart();
         if (pre.job.valid()) return;
         pre.pool = std::make_unique<jaal::kernel::pool>(1);
@@ -880,12 +879,9 @@ class Win32Window {
     /// where its loader starts every driver). MAYAG_GPU_WAIT_MS overrides;
     /// 0 restores CPU-first (draw now, switch later).
     [[nodiscard]] static int gpu_wait_budget_ms() {
-        if (const char* e = ::getenv("MAYAG_GPU_WAIT_MS"); e != nullptr && *e != '\0') return std::max(0, std::atoi(e));
-        return vulkan_requested() ? 3000 : 1000;
-    }
-    [[nodiscard]] static bool vulkan_requested() {
-        const char* e = ::getenv("MAYAG_BACKEND");
-        return e != nullptr && std::string_view{e} == "vulkan";
+        using backend::gpu_policy::Choice;
+        const Choice device = backend::gpu_policy::prefers(Choice::vulkan) ? Choice::vulkan : Choice::d3d11;
+        return static_cast<int>(std::min<long long>(backend::gpu_policy::first_frame_wait(device).count(), 1 << 30));
     }
 
     /// Take the prepared GPU and put it on the window. The first present

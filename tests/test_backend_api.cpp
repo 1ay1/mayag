@@ -200,6 +200,49 @@ int main() {
     if (check_transfer_functions() != 0) return 1;
     std::printf("mayag backend boundary\n======================\n");
 
+    // ── the GPU knobs mean ONE thing (backend/gpu_policy.hpp) ──
+    section("the GPU knobs: one meaning");
+    {
+        namespace gp = backend::gpu_policy;
+        using C = gp::Choice;
+        static const char* backend_v = nullptr;
+        static const char* wait_v = nullptr;
+        static const char* async_v = nullptr;
+        static const char* present_v = nullptr;
+        const gp::EnvLookup env = [](const char* k) -> const char* {
+            const std::string_view s{k};
+            return s == "MAYAG_BACKEND" ? backend_v : s == "MAYAG_GPU_WAIT_MS" ? wait_v
+                 : s == "MAYAG_GPU_ASYNC" ? async_v : s == "MAYAG_PRESENT" ? present_v : nullptr;
+        };
+        backend_v = nullptr;
+        const bool unset_all = gp::allows(C::vulkan, env) && gp::allows(C::metal, env) && !gp::software_only(env);
+        backend_v = "gpu";
+        const bool gpu_all = gp::allows(C::vulkan, env) && gp::allows(C::d3d11, env) && !gp::prefers(C::vulkan, env);
+        backend_v = "software";
+        const bool soft = gp::software_only(env) && !gp::allows(C::metal, env) && !gp::allows(C::vulkan, env);
+        backend_v = "vulkan";
+        const bool vk = gp::allows(C::vulkan, env) && gp::prefers(C::vulkan, env) && !gp::allows(C::metal, env);
+        backend_v = "nonsense";
+        const bool junk = gp::allows(C::metal, env) && !gp::software_only(env);
+        backend_v = nullptr;
+        check(unset_all && gpu_all && soft && vk && junk,
+              "MAYAG_BACKEND: unset or gpu = any GPU, a name = that one, software = none, unknown = ignored");
+        const bool waits = gp::first_frame_wait(C::vulkan, env).count() == 3000 &&
+                           gp::first_frame_wait(C::d3d11, env).count() == 1000;
+        wait_v = "0";
+        const bool zero = gp::first_frame_wait(C::vulkan, env).count() == 0;
+        wait_v = nullptr; async_v = "0";
+        const bool forever = gp::first_frame_wait(C::d3d11, env).count() > 1'000'000;
+        async_v = nullptr;
+        check(waits && zero && forever, "first frame waits 3 s for Vulkan, 1 s for D3D11/Metal; WAIT_MS and ASYNC=0 override both");
+        present_v = "fifo";
+        const bool fifo = gp::present_mode(env) == gp::Present::fifo;
+        present_v = "immediate";
+        const bool imm = gp::present_mode(env) == gp::Present::immediate;
+        present_v = nullptr;
+        check(fifo && imm && gp::present_mode(env) == gp::Present::device_default, "MAYAG_PRESENT: fifo / immediate / the device's");
+    }
+
     // ── each OS's preference, checked from ANY machine (it is a table) ──
     section("backend preference per OS");
     {

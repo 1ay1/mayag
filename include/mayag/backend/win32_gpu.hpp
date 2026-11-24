@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/target.hpp"
+#include "gpu_policy.hpp"
 // mayag::backend::Win32Gpu — the window's GPU, whichever API drives it.
 //
 // The Win32 window talks to one object with the transport contract every
@@ -61,8 +62,7 @@ class Win32Gpu {
         // fallback (a no-redirection window recreated for GDI) on a machine
         // that has a perfectly good GPU.
         if (std::getenv("MAYAG_GPU_FAIL") != nullptr) return false;
-        const char* want = std::getenv("MAYAG_BACKEND");
-        const bool vulkan_first = want != nullptr && std::string_view{want} == "vulkan";
+        const bool vulkan_first = gpu_policy::prefers(gpu_policy::Choice::vulkan);
         for (int pass = 0; pass < 2; ++pass) {
             const bool try_vulkan = (pass == 0) == vulkan_first;
             if (!try_vulkan) {

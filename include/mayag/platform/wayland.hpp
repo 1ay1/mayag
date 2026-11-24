@@ -58,6 +58,7 @@
 #include "keys.hpp"
 #include "photon.hpp"
 #include "images.hpp"
+#include "../backend/gpu_policy.hpp"
 #include "wayland_protocol.hpp"
 
 #include <jaal/core/capability.hpp>
@@ -494,10 +495,7 @@ class WaylandWindow {
 #if MAYAG_GPU_VULKAN
         // Driver init (instance + device) takes tens of ms and needs no
         // window, so it runs on a worker while we talk to the compositor.
-        const char* forced_backend = ::getenv("MAYAG_BACKEND");
-        const bool allow_gpu = forced_backend == nullptr ||
-                               std::string_view{forced_backend} == "vulkan" ||
-                               std::string_view{forced_backend} == "gpu";
+        const bool allow_gpu = backend::gpu_policy::allows(backend::gpu_policy::Choice::vulkan);
         std::optional<jaal::kernel::pool>& prep_pool = prep_pool_;
         auto& prep = prep_;
         if (allow_gpu) {
@@ -635,10 +633,8 @@ class WaylandWindow {
             // Only if it misses the budget do the first frames go out on the
             // CPU and the window switch when it is ready. MAYAG_GPU_WAIT_MS=0
             // restores CPU-first.
-            int budget = 3000;
-            if (const char* e = ::getenv("MAYAG_GPU_WAIT_MS"); e != nullptr && *e != '\0') budget = std::max(0, std::atoi(e));
-            if (const char* async = ::getenv("MAYAG_GPU_ASYNC"); async != nullptr && std::string_view{async} == "0") budget = 1 << 30;
-            if (budget > 0 && !prep.ready()) (void)prep.wait_for_at_root(std::chrono::milliseconds(budget));
+            const auto budget = backend::gpu_policy::first_frame_wait(backend::gpu_policy::Choice::vulkan);
+            if (budget.count() > 0 && !prep.ready()) (void)prep.wait_for_at_root(budget);
             if (prep.ready()) adopt_gpu(prep.get_at_root());
             else gpu_pending_ = true;
         }

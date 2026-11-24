@@ -748,6 +748,10 @@ if(MAYAG_BUILD_TESTS)
                          -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/include/jaal/meta/target.hpp
                          -DBUILD_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag/core/target.hpp
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/lint/one_os.cmake)
+        # The GPU knobs (MAYAG_BACKEND, ...) have one reader (backend/gpu_policy.hpp).
+        add_test(NAME mayag_one_gpu_policy
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_gpu_policy.cmake)
         # A window's images follow one policy (platform/images.hpp).
         add_test(NAME mayag_one_image_policy
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag

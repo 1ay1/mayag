@@ -28,6 +28,7 @@
 #include "keys.hpp"
 #include "photon.hpp"
 #include "images.hpp"
+#include "../backend/gpu_policy.hpp"
 
 #if MAYAG_GPU_METAL
 #include "../backend/metal.hpp"
@@ -923,9 +924,7 @@ class MacWindow {
     /// failure is what keeps the fallback honest.
     [[nodiscard]] bool init_gpu() {
 #if MAYAG_GPU_METAL
-        if (const char* forced = std::getenv("MAYAG_BACKEND")) {
-            if (std::string_view{forced} != "metal") return false;
-        }
+        if (!backend::gpu_policy::allows(backend::gpu_policy::Choice::metal)) return false;
 
         id saved_layer = objc::msg<id>(view_, objc::sel("layer"));
 

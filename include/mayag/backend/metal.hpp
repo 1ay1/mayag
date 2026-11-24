@@ -31,6 +31,7 @@
 #include "../render/draw_list.hpp"
 #include "../render/shader_source.hpp"
 #include "backend.hpp"
+#include "gpu_policy.hpp"
 
 #include <objc/message.h>
 #include <objc/objc.h>
@@ -311,8 +312,7 @@ class MetalDevice {
         // could tear). The host paces draws to at most two per refresh, so
         // this never turns into an unthrottled render loop.
         // MAYAG_PRESENT=fifo restores the queued behaviour for comparison.
-        const char* present = std::getenv("MAYAG_PRESENT");
-        fifo_ = present != nullptr && std::string_view{present} == "fifo";
+        fifo_ = gpu_policy::present_mode() == gpu_policy::Present::fifo;
         msg<void>(layer_, sel("setDisplaySyncEnabled:"), static_cast<BOOL>(fifo_ ? YES : NO));
 
         // Every pixel is written (the pass clears to an opaque background), so
