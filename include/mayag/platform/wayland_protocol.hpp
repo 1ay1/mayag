@@ -46,7 +46,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD
+#if MAYAG_OS_FREEDESKTOP
 
 #include <dlfcn.h>
 

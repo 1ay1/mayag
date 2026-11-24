@@ -13,7 +13,7 @@
 #if MAYAG_OS_WINDOWS
 
 #include "d3d11.hpp"
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
 #  include "vulkan.hpp"
 #  include "vulkan_device.hpp"
 #endif
@@ -36,13 +36,13 @@ class Win32Gpu {
     void set_low_latency(bool on) noexcept {
         low_latency_ = on;
         if (d3d_) d3d_->set_low_latency(on);   // read at present time: fine after prepare
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (vk_) vk_->set_low_latency(on);      // read when the swapchain is made
 #endif
     }
     void set_transparent(bool on) noexcept {
         transparent_ = on;
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (vk_) vk_->set_transparent(on);
 #endif
     }
@@ -71,7 +71,7 @@ class Win32Gpu {
                 if (d->prepare()) { d3d_ = std::move(d); api_ = Api::d3d11; return true; }
                 d->destroy();
             }
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
             else {
                 auto d = std::make_unique<VulkanDevice>();
                 d->set_low_latency(low_latency_);
@@ -88,7 +88,7 @@ class Win32Gpu {
     [[nodiscard]] bool attach_surface(HWND hwnd, Vec2 logical, float dpi) {
         bool ok = false;
         if (api_ == Api::d3d11) ok = d3d_->attach_swapchain(hwnd, logical, dpi);
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         else if (api_ == Api::vulkan) ok = vk_->attach_win32(::GetModuleHandleW(nullptr), hwnd, logical, dpi);
 #endif
         if (!ok) destroy();
@@ -97,11 +97,11 @@ class Win32Gpu {
 
     void destroy() {
         if (d3d_) d3d_->destroy();
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (vk_) vk_->destroy();
 #endif
         d3d_.reset();
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         vk_.reset();
 #endif
         api_ = Api::none;
@@ -112,7 +112,7 @@ class Win32Gpu {
         return api_ == Api::d3d11 ? "d3d11" : api_ == Api::vulkan ? "vulkan" : "none";
     }
 
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
 #  define MG_GPU_CALL(expr_d3d, expr_vk, fallback) \
         (api_ == Api::d3d11 ? (expr_d3d) : api_ == Api::vulkan ? (expr_vk) : (fallback))
 #else
@@ -127,20 +127,20 @@ class Win32Gpu {
     }
     void resize(Vec2 logical, float dpi) {
         if (api_ == Api::d3d11) d3d_->resize(logical, dpi);
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         else if (api_ == Api::vulkan) vk_->resize(logical, dpi);
 #endif
     }
     void submit(const DrawList& dl, Color<Srgb> clear) {
         if (api_ == Api::d3d11) d3d_->submit(dl, clear);
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         else if (api_ == Api::vulkan) vk_->submit(dl, clear);
 #endif
     }
     template <typename AtlasT>
     void sync_atlas(AtlasT& atlas) {
         if (api_ == Api::d3d11) d3d_->sync_atlas(atlas);
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         else if (api_ == Api::vulkan) vk_->sync_atlas(atlas);
 #endif
     }
@@ -149,7 +149,7 @@ class Win32Gpu {
     }
     void release_texture(std::uint32_t id) {
         if (api_ == Api::d3d11) d3d_->release_texture(id);
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         else if (api_ == Api::vulkan) vk_->release_texture(id);
 #endif
     }
@@ -159,7 +159,7 @@ class Win32Gpu {
     Api api_ = Api::none;
     bool low_latency_ = false, transparent_ = false;
     std::unique_ptr<D3D11Device> d3d_;
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
     std::unique_ptr<VulkanDevice> vk_;
 #endif
 };

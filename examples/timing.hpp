@@ -8,13 +8,15 @@
 // counts, draw calls, idle-means-idle) still is. GCC and clang both define
 // __OPTIMIZE__ at -O1 and above. MAYAG_ENFORCE_TIMING=1 forces enforcement.
 
+#include <mayag/core/target.hpp>
+
 #include <cstdlib>
 
 namespace mayag::testing {
 
 [[nodiscard]] inline bool timing_enforced() noexcept {
     if (const char* e = std::getenv("MAYAG_ENFORCE_TIMING")) return e[0] == '1';
-#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && defined(NDEBUG))
+#if defined(__OPTIMIZE__) || (MAYAG_CC_MSVC_ABI && defined(NDEBUG))
     return true;
 #else
     return false;

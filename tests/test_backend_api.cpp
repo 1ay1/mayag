@@ -16,9 +16,10 @@
 // drives it. If a future change makes backends special again, this stops
 // compiling or stops passing.
 
+#include <mayag/core/target.hpp>
 #include <mayag/mayag.hpp>
 #include <mayag/backend/tiled.hpp>     // the software backend registers here
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
 #include <mayag/backend/vulkan.hpp>
 #endif
 

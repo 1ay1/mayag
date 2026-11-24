@@ -18,6 +18,7 @@
 // window instead hands the draw list straight to the GPU and the whole
 // rasterise + encode + CGImage + blit chain disappears.
 
+#include "../core/target.hpp"
 #include "../core/event.hpp"
 #include "../backend/software.hpp"
 #include "../backend/tiled.hpp"
@@ -27,7 +28,7 @@
 #include "keys.hpp"
 #include "photon.hpp"
 
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
 #include "../backend/metal.hpp"
 #endif
 
@@ -353,7 +354,7 @@ class MacWindow {
 
     /// Which path this window is actually presenting through.
     [[nodiscard]] std::string_view renderer_name() const noexcept {
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (gpu_enabled_) return "metal";
 #endif
         return "software";
@@ -544,7 +545,7 @@ class MacWindow {
         const int h = static_cast<int>(size_.y * dpi_);
         if (w <= 0 || h <= 0 || !visible_) return;   // nobody can see it: no work, no blocking
 
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (gpu_enabled_) {
             // The GPU path is four steps shorter than the CPU one: no
             // framebuffer, no per-pixel shading, no sRGB encode pass, no
@@ -595,7 +596,7 @@ class MacWindow {
     /// shows the newest drawable at the next refresh, so a draw never waits
     /// behind a queued one (MAYAG_PRESENT=fifo restores the queue).
     [[nodiscard]] bool replaces_queued_frames() const noexcept {
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         return gpu_enabled_ && gpu_.replaces_queued();
 #else
         return false;
@@ -723,7 +724,7 @@ class MacWindow {
     /// path) and, when Metal is up, a texture.
     void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
         if (!img) return;
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (gpu_enabled_) gpu_.upload_image(id, img->rgba.data(), img->width, img->height);
 #endif
         images_.upload(id, std::move(img));
@@ -731,7 +732,7 @@ class MacWindow {
     /// Rows of an uploaded image moved in place on the GPU (Metal). false:
     /// not possible here; send the pixels instead.
     bool move_image_rows(std::uint32_t id, int x, int y, int w, int h, int dy) {
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (gpu_enabled_) return gpu_.move_image_rows(id, x, y, w, h, dy);
 #endif
         (void)id, (void)x, (void)y, (void)w, (void)h, (void)dy;
@@ -739,7 +740,7 @@ class MacWindow {
     }
     /// An uploaded image as the GPU holds it (RGBA), for checking. Empty: none.
     [[nodiscard]] std::vector<std::uint8_t> read_image(std::uint32_t id) {
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (gpu_enabled_) return gpu_.read_image(id);
 #endif
         (void)id;
@@ -749,7 +750,7 @@ class MacWindow {
     /// upload it whole instead.
     bool update_image_regions(std::uint32_t id, int w, int h, const std::vector<std::array<int, 4>>& rects,
                               const std::vector<std::uint8_t>& packed) {
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (gpu_enabled_) return gpu_.update_image_regions(id, w, h, rects, packed);
 #endif
         (void)id, (void)w, (void)h, (void)rects, (void)packed;
@@ -757,7 +758,7 @@ class MacWindow {
     }
     void release_image(std::uint32_t id) {
         images_.release(id);
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (gpu_enabled_) gpu_.release_image(id);
 #endif
     }
@@ -890,7 +891,7 @@ class MacWindow {
     /// window just calls it. On a software build this compiles to nothing.
     template <typename AtlasT>
     void set_atlas_source([[maybe_unused]] AtlasT* atlas) {
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (atlas == nullptr) { atlas_sync_ = nullptr; return; }
         atlas_sync_ = [atlas](backend::MetalDevice& d) { d.sync_atlas(*atlas); };
 #endif
@@ -915,7 +916,7 @@ class MacWindow {
     /// black window that looks like a hang. Restoring the software layer on
     /// failure is what keeps the fallback honest.
     [[nodiscard]] bool init_gpu() {
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (const char* forced = std::getenv("MAYAG_BACKEND")) {
             if (std::string_view{forced} != "metal") return false;
         }
@@ -1023,7 +1024,7 @@ class MacWindow {
         photon_.note((ts > now - 1.0 && ts <= now + 0.001) ? ts : now, now);
     }
 
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
     /// Every frame committed while an input is unshown carries it, so a frame
     /// replaced before scanout never takes the sample with it.
     [[nodiscard]] backend::FrameTag next_tag() noexcept {
@@ -1042,7 +1043,7 @@ class MacWindow {
 #endif
 
     void drain_feedback() {
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
         if (!gpu_enabled_) return;
         auto frames = gpu_.take_presented();
         if (frames.empty()) return;
@@ -1069,7 +1070,7 @@ class MacWindow {
 #endif
     }
 
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
     void learn_latch(const backend::Presented& f) noexcept {
         if (f.tag.target_s <= 0.0 || period_s_ <= 0.0) return;
         const double lead = f.tag.target_s - f.submit_s;    // how early it was handed over
@@ -1677,7 +1678,7 @@ class MacWindow {
 
     bool gpu_enabled_ = false;
     Vec2 gpu_size_{};
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
     backend::MetalDevice gpu_{};
     /// Set by the runtime when a font engine is bound. Type-erased so this
     /// header keeps knowing nothing about the font stack — the window moves

@@ -17,9 +17,10 @@
 // rasteriser painted a bitmap glyph's edge columns a second time into its
 // 1 px antialiasing skirt, so every glyph was a pixel too wide on each side.
 
+#include <mayag/core/target.hpp>
 #include <mayag/mayag.hpp>
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 #include <d2d1.h>
 #include <wincodec.h>
 #endif
@@ -40,7 +41,7 @@ void check(bool c, const std::string& what) {
     else std::printf("  ok    %s\n", what.c_str());
 }
 
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
 template <class T> void rel(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
 struct Result { double mean = 0, worst = 0, over8 = 0; bool ran = false; };
@@ -144,7 +145,7 @@ Result compare(typo::FontConfig cfg) {
 }  // namespace
 
 int main() {
-#if defined(_WIN32)
+#if MAYAG_OS_WINDOWS
     ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     std::printf("\nnative text vs Direct2D\n");
     const Result r = compare(typo::FontConfig::native());

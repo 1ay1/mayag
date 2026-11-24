@@ -18,6 +18,7 @@
 //   ./mayag_terminal_settings --png o.png  render one frame (TS_DEMO=1 adds edits)
 //   ./mayag_terminal_settings --headless   scripted and asserted, for CI
 
+#include <mayag/core/target.hpp>
 #include "harness.hpp"
 #include <mayag/widget/color_swatch.hpp>
 #include <mayag/widget/diff_view.hpp>
@@ -85,7 +86,7 @@ constexpr std::array<std::string_view, 12> kMonoCandidates{
     "Liberation Mono", "Courier New"};
 
 [[nodiscard]] constexpr Mods primary_mods(bool shift = false) noexcept {
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     return Mods{.shift = shift, .super = true};
 #else
     (void)shift;

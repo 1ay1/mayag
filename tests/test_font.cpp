@@ -15,6 +15,7 @@
 //   7. shaping          — kerning, clusters, fallback
 //   8. integration      — text actually reaches the framebuffer
 
+#include <mayag/core/target.hpp>
 #include <mayag/mayag.hpp>
 #include <mayag/widget/text_field.hpp>
 
@@ -2307,7 +2308,7 @@ void test_language() {
 /// covers them.
 void test_apple_cascade() {
     section("macOS fallback cascade (vs CoreText)");
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     // apple_cascade.hpp was derived from one macOS release; another ships a
     // different fallback set (macOS 15 picks Arial Unicode MS for symbols
     // that 27 sends to SF Devanagari and SF Tamil).
@@ -2359,7 +2360,7 @@ void test_emoji_placement() {
         near(u[5], 0.94f, 0.02f, "enlarge: eased bilinear, 15/16");
         near(u[6], 0.50f, 0.02f, "enlarge: eased bilinear, half");
     }
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
     using namespace mayag::typo;
     auto ui = Face::from_file("/System/Library/Fonts/Apple Color Emoji.ttc", 1);
     if (!ui) { check(true, "Apple Color Emoji not installed: skipped"); return; }

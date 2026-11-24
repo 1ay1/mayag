@@ -59,7 +59,7 @@ inline int fd_close(int fd) noexcept { return ::close(fd); }
 #include <map>
 #include <vector>
 
-#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD || MAYAG_OS_WINDOWS
+#if MAYAG_OS_FREEDESKTOP || MAYAG_OS_WINDOWS
 
 namespace mayag::backend {
 
@@ -1268,7 +1268,7 @@ class VulkanDevice {
         std::vector<const char*> exts;
         if (want_surface) {
             exts.push_back("VK_KHR_surface");
-#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD
+#if MAYAG_OS_FREEDESKTOP
             exts.push_back("VK_KHR_wayland_surface");
 #elif MAYAG_OS_WINDOWS
             exts.push_back("VK_KHR_win32_surface");

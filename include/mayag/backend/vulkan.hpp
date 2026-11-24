@@ -34,7 +34,7 @@
 #include <cstring>
 #include <vector>
 
-#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD || MAYAG_OS_WINDOWS
+#if MAYAG_OS_FREEDESKTOP || MAYAG_OS_WINDOWS
 
 #if MAYAG_OS_WINDOWS
 #  include "../core/win32.hpp"   // windows.h, with its keyword macros removed

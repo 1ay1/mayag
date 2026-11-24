@@ -75,19 +75,19 @@ enum class Api : std::uint8_t {
 /// machine" GPU bugs.
 [[nodiscard]] inline std::vector<Api> compiled_backends() {
     std::vector<Api> v;
-#if defined(MAYAG_WITH_VULKAN)
+#if MAYAG_GPU_VULKAN
     v.push_back(Api::vulkan);
 #endif
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
     v.push_back(Api::metal);
 #endif
-#if defined(MAYAG_WITH_D3D12)
+#if MAYAG_GPU_D3D12
     v.push_back(Api::d3d12);
 #endif
-#if defined(MAYAG_WITH_WEBGPU)
+#if MAYAG_GPU_WEBGPU
     v.push_back(Api::webgpu);
 #endif
-#if defined(MAYAG_WITH_OPENGL)
+#if MAYAG_GPU_OPENGL
     v.push_back(Api::opengl);
 #endif
     v.push_back(Api::software);   // unconditional

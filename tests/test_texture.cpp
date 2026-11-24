@@ -9,9 +9,10 @@
 // checks ORIENTATION as well as presence, using a four-colour quadrant image
 // so a flip or a channel swizzle shows up as a specific wrong colour rather
 // than as a vague "looks off".
+#include <mayag/core/target.hpp>
 #include <mayag/mayag.hpp>
 #include <mayag/backend/tiled.hpp>
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
 #include <mayag/backend/vulkan.hpp>
 #endif
 #include <cstdio>
@@ -108,7 +109,7 @@ int main() {
     check(bl[2] > bl[0] && bl[2] > bl[1], "bottom-left is blue-dominant");
     check(br[0] > 60 && br[1] > 60 && br[2] < br[0], "bottom-right is yellow-ish");
     // GPU: same draw list, same image, through the real Vulkan path.
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
     backend::VulkanDevice gpu;
     if (gpu.init_offscreen()) {
         gpu.upload_texture(img.data(), IW, IH);

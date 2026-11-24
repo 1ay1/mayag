@@ -38,11 +38,10 @@
 
 #include <jaal/jaal.hpp>
 
-#if MAYAG_OS_APPLE && defined(MAYAG_WITH_COCOA) && !defined(MAYAG_PLATFORM_HEADLESS)
-#  define MAYAG_COCOA_LOOP 1
+// Cocoa owns the main thread's run loop: the app is driven from inside it
+// (platform/macos_loop.hpp). Every other window system is polled by jaal.
+#if MAYAG_WINDOW_COCOA
 #  include "../platform/macos_loop.hpp"
-#else
-#  define MAYAG_COCOA_LOOP 0
 #endif
 
 #include <atomic>
@@ -547,7 +546,7 @@ int run(AppConfig cfg, Make make) {
 template <Program P, class W>
 int run_on(W& window, AppConfig cfg, jaal::prog::flags_t<P> flags) {
     detail::apply_env_overrides(cfg);
-#if MAYAG_COCOA_LOOP
+#if MAYAG_WINDOW_COCOA
     if constexpr (std::same_as<W, platform::MacWindow>) {
     // macOS: AppKit owns the main thread; the run loop drives the program.
     window.set_pull(false);

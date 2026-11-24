@@ -70,31 +70,28 @@ concept Window = requires(W w, const W cw, const DrawList& dl, std::string_view 
 
 // ── backend selection ───────────────────────────────────────────────────
 //
-// Order matters: an explicit MAYAG_PLATFORM_* override wins, then the native
-// windowing system, then headless. Headless is ALWAYS available, which is
-// what makes `run<P>()` compile and run on a build server with no display.
+// WHICH one is decided once, in core/target.hpp (MAYAG_WINDOW_*: an explicit
+// MAYAG_PLATFORM_HEADLESS wins, then the OS's native system if built, then
+// headless). Headless is ALWAYS available, which is what makes `run<P>()`
+// compile and run on a build server with no display.
 
 #include "../platform/headless.hpp"
 
-#if defined(MAYAG_PLATFORM_HEADLESS)
-    // forced headless
-#elif MAYAG_OS_APPLE && defined(MAYAG_WITH_COCOA)
+#if MAYAG_WINDOW_COCOA
     #include "../platform/macos_window.hpp"
-#elif (MAYAG_OS_LINUX || MAYAG_OS_FREEBSD) && defined(MAYAG_WITH_WAYLAND)
+#elif MAYAG_WINDOW_WAYLAND
     #include "../platform/wayland.hpp"
-#elif MAYAG_OS_WINDOWS && defined(MAYAG_WITH_WIN32)
+#elif MAYAG_WINDOW_WIN32
     #include "../platform/win32_window.hpp"
 #endif
 
 namespace mayag::platform {
 
-#if defined(MAYAG_PLATFORM_HEADLESS)
-    using Native = Headless;
-#elif MAYAG_OS_APPLE && defined(MAYAG_WITH_COCOA)
+#if MAYAG_WINDOW_COCOA
     using Native = MacWindow;
-#elif (MAYAG_OS_LINUX || MAYAG_OS_FREEBSD) && defined(MAYAG_WITH_WAYLAND)
+#elif MAYAG_WINDOW_WAYLAND
     using Native = WaylandWindow;
-#elif MAYAG_OS_WINDOWS && defined(MAYAG_WITH_WIN32)
+#elif MAYAG_WINDOW_WIN32
     using Native = Win32Window;
 #else
     using Native = Headless;
@@ -105,17 +102,13 @@ static_assert(Window<Native>,
               "mayag: the selected platform backend does not satisfy the Window concept.");
 
 [[nodiscard]] constexpr std::string_view native_name() noexcept {
-#if defined(MAYAG_PLATFORM_HEADLESS)
+    switch (target::window) {
+        case target::window_kind::cocoa: return "cocoa";
+        case target::window_kind::wayland: return "wayland";
+        case target::window_kind::win32: return "win32";
+        case target::window_kind::headless: break;
+    }
     return "headless";
-#elif MAYAG_OS_APPLE && defined(MAYAG_WITH_COCOA)
-    return "cocoa";
-#elif (MAYAG_OS_LINUX || MAYAG_OS_FREEBSD) && defined(MAYAG_WITH_WAYLAND)
-    return "wayland";
-#elif MAYAG_OS_WINDOWS && defined(MAYAG_WITH_WIN32)
-    return "win32";
-#else
-    return "headless";
-#endif
 }
 
 }  // namespace mayag::platform

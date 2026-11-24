@@ -66,11 +66,11 @@
 // runtime and falls back to the shm path if the GPU is unavailable. Compiled
 // in when MAYAG_WITH_VULKAN is defined (the default on Linux); otherwise the
 // shm path is the only renderer.
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
 #include "../backend/vulkan.hpp"
 #endif
 
-#if MAYAG_OS_LINUX || MAYAG_OS_FREEBSD
+#if MAYAG_OS_FREEDESKTOP
 
 #include <cerrno>
 #include <chrono>
@@ -490,7 +490,7 @@ class WaylandWindow {
         const wl::Lib& L = wl::lib();
         if (!L.ok) return false;                 // no libwayland: fall back
 
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         // Driver init (instance + device) takes tens of ms and needs no
         // window, so it runs on a worker while we talk to the compositor.
         const char* forced_backend = ::getenv("MAYAG_BACKEND");
@@ -619,7 +619,7 @@ class WaylandWindow {
         open_ = true;
         start_time_ = wldetail::monotonic_now();
 
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         // Bring up the GPU. This is the default renderer on Linux: a Vulkan
         // swapchain rendering straight into the wl_surface. If it fails — no
         // libvulkan, no device, a headless VM, MAYAG_BACKEND=software — the
@@ -673,7 +673,7 @@ class WaylandWindow {
     /// perfectly convincing diagonal-stripe "rendering bug" that does not
     /// exist. Ask the window instead of computing it.
     [[nodiscard]] Vec2 pixel_size() const noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (gpu_active_) {
             const auto e = gpu_->swapchain_extent();
             if (e.x > 0.0f && e.y > 0.0f) return e;
@@ -737,7 +737,7 @@ class WaylandWindow {
 
         if (resize_needed_) {
             if (!gpu_on() || shm_made_) resize_surfaces();   // shm buffers + geometry
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
             if (gpu_active_) {
                 gpu_->resize(logical_, scale_);
                 apply_surface_geometry();   // the swapchain's frames map to the NEW size
@@ -756,7 +756,7 @@ class WaylandWindow {
     void present(const DrawList& dl, Color<Srgb> clear) {
         if (!open_ || surface_ == nullptr) return;
 
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (gpu_pending_ && prep_.ready()) {
             adopt_gpu(prep_.get_at_root());
             gpu_pending_ = false;
@@ -970,7 +970,7 @@ class WaylandWindow {
 
     /// Read the current frame back as RGBA8, for screenshots and golden tests.
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() {
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (gpu_active_ && last_had_frame_) {
             std::vector<std::uint8_t> out;
 
@@ -1019,7 +1019,7 @@ class WaylandWindow {
     /// picture in the app.
     void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
         if (!img) return;
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (gpu_active_) {
             (void)gpu_->upload_texture(id, img->rgba.data(), img->width, img->height);
         }
@@ -1031,7 +1031,7 @@ class WaylandWindow {
     /// VulkanDevice::update_texture_regions). false: upload it whole.
     bool update_image_regions(std::uint32_t id, int w, int h, const std::vector<std::array<int, 4>>& rects,
                               const std::vector<std::uint8_t>& packed) {
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (!gpu_active_ || rects.empty()) return false;
         std::vector<backend::VulkanDevice::Region> r;
         r.reserve(rects.size());
@@ -1045,12 +1045,12 @@ class WaylandWindow {
 
     void release_image(std::uint32_t id) {
         images_.release(id);
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (gpu_active_) gpu_->release_texture(id);
 #endif
     }
 
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
     /// Optional window capability: show a FOREIGN GPU buffer as image(id),
     /// zero copies. The compositor path: a client's dmabuf, imported by the
     /// device, sampled where image(id) is drawn. `on_free` runs when the GPU
@@ -1087,7 +1087,7 @@ class WaylandWindow {
     }
 #endif
 
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
     /// Upload dirty glyph rects to the GPU atlas image before a frame that
     /// uses them. Cheap in steady state — the atlas reports an empty dirty
     /// region and the upload is skipped.
@@ -1122,7 +1122,7 @@ class WaylandWindow {
 #endif
 
     [[nodiscard]] bool gpu_on() const noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         return gpu_active_;
 #else
         return false;
@@ -1135,7 +1135,7 @@ class WaylandWindow {
     /// Atlas type is a template parameter of the FontStack).
     template <typename AtlasT>
     void set_atlas_source(AtlasT* atlas) noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (atlas == nullptr) { atlas_ = nullptr; atlas_sync_ = nullptr; return; }
         atlas_ = atlas;
         atlas_sync_ = [atlas](backend::VulkanDevice& d) { d.sync_atlas(*atlas); };
@@ -1145,28 +1145,28 @@ class WaylandWindow {
     }
 
     [[nodiscard]] std::string_view renderer_name() const noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         if (gpu_active_) return "vulkan (wayland)";
         if (gpu_pending_) return "vulkan (wayland; first frames on cpu)";
 #endif
         return "software (wayland/shm)";
     }
     [[nodiscard]] bool gpu_active() const noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         return gpu_active_;
 #else
         return false;
 #endif
     }
     [[nodiscard]] bool gpu_pending() const noexcept {
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         return gpu_pending_;
 #else
         return false;
 #endif
     }
     [[nodiscard]] bool gpu_ready_to_adopt() const {
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         return gpu_pending_ && prep_.ready();
 #else
         return false;
@@ -2413,7 +2413,7 @@ class WaylandWindow {
         if (cursor_buffer_ != nullptr) { wl::request_destroy(cursor_buffer_, wl::buffer_destroy); cursor_buffer_ = nullptr; }
         if (cursor_surface_ != nullptr) { wl::request_destroy(cursor_surface_, wl::surface_destroy); cursor_surface_ = nullptr; }
 
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
         // The GPU device wraps the wl_surface (its VkSurfaceKHR) and marshals
         // its own teardown over the wl_display, so it MUST be destroyed while
         // both are still alive — before the surface is destroyed and the
@@ -2581,7 +2581,7 @@ class WaylandWindow {
     const backend::CoverageSampler* sampler_ = nullptr;
     backend::ImageStore images_;
 
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
     // GPU renderer. `gpu_active_` gates every GPU code path; when false the
     // window is on the shm path and `gpu_` is an inert, unattached device.
     std::unique_ptr<backend::VulkanDevice> gpu_ = std::make_unique<backend::VulkanDevice>();
@@ -2701,7 +2701,7 @@ class WaylandWindow {
     }
     void release_image(std::uint32_t id) { p_->release_image(id); }
 
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
     /// A foreign GPU buffer (dmabuf) as image(id), zero copies. See Impl.
     [[nodiscard]] ImportResult import_image(std::uint32_t id, const Dmabuf& d, int w, int h,
                                             std::function<void()> on_free) {

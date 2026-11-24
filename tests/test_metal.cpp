@@ -17,9 +17,10 @@
 // shapes are, how big they are, what colour their interiors are, and that
 // clipping happened. Those are checked exactly; edges are given tolerance.
 
+#include <mayag/core/target.hpp>
 #include <mayag/mayag.hpp>
 
-#if defined(MAYAG_WITH_METAL)
+#if MAYAG_GPU_METAL
 #include <mayag/backend/metal.hpp>
 #endif
 
@@ -83,7 +84,7 @@ bool near(const Rgba& a, const Rgba& b, int tol) {
 int main() {
     std::printf("mayag Metal backend test\n========================");
 
-#if !defined(MAYAG_WITH_METAL)
+#if !MAYAG_GPU_METAL
     std::printf("\n\nSKIP  built without MAYAG_WITH_METAL\n");
     return 0;
 #else

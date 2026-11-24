@@ -22,7 +22,8 @@
 // heap. Every member of Frame is initialised; it is a known false positive
 // of the variant-storage analysis (clang and GCC 14 are silent). Scoped to
 // this file so -Werror builds stay meaningful everywhere else.
-#if defined(__GNUC__) && !defined(__clang__)
+#include <mayag/core/target.hpp>
+#if MAYAG_CC_GCC
 #  pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 

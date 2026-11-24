@@ -43,6 +43,29 @@ if(MAYAG_COMPILER_CACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
     endif()
 endif()
 
+# ── the platform, decided once ───────────────────────────────────────────
+# The build's OS: apple | windows | freedesktop (Linux, FreeBSD) | other --
+# ASKED of jaal/meta/target.hpp (cmake/JaalTarget.cmake compiles a one-line
+# check against it), so the build and the C++ cannot disagree about what
+# the platform is. Everything below -- the backend table, the linker, the
+# sanitizer and test choices -- reads MAYAG_SYSTEM; nothing re-derives it
+# from APPLE / WIN32 / CMAKE_SYSTEM_NAME.
+include(${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/cmake/JaalTarget.cmake)
+jaal_target_is(JAAL_OS_APPLE _mayag_apple)
+jaal_target_is(JAAL_OS_WINDOWS _mayag_windows)
+jaal_target_is(JAAL_OS_FREEDESKTOP _mayag_freedesktop)
+if(_mayag_apple)
+    set(MAYAG_SYSTEM apple)
+elseif(_mayag_windows)
+    set(MAYAG_SYSTEM windows)
+elseif(_mayag_freedesktop)
+    set(MAYAG_SYSTEM freedesktop)
+else()
+    set(MAYAG_SYSTEM other)
+endif()
+# published: an app that adds mayag reads the same answer for its own build
+set(MAYAG_SYSTEM ${MAYAG_SYSTEM} CACHE INTERNAL "apple | windows | freedesktop | other")
+
 # ───────────────────────────────────────────────────────────────────────
 # Fast linker (mold, else lld) for mayag's own examples and tests
 #
@@ -52,7 +75,7 @@ endif()
 # ───────────────────────────────────────────────────────────────────────
 option(MAYAG_FAST_LINKER "Link mayag's examples/tests with mold or lld when available" ON)
 set(MAYAG_LINK_FLAG "")
-if(MAYAG_FAST_LINKER AND UNIX AND NOT APPLE AND NOT CMAKE_LINKER_TYPE
+if(MAYAG_FAST_LINKER AND NOT MAYAG_SYSTEM MATCHES "apple|windows" AND NOT CMAKE_LINKER_TYPE
    AND NOT CMAKE_EXE_LINKER_FLAGS MATCHES "fuse-ld")
     find_program(MAYAG_MOLD mold)
     find_program(MAYAG_LLD ld.lld)
@@ -123,11 +146,47 @@ endif()
 # dependency and a binary built with it still runs where Vulkan is absent (it
 # falls back to the software rasteriser). ON by default so the GPU path is the
 # default on every platform.
-if(APPLE)
-    option(MAYAG_WITH_VULKAN "Build the Vulkan backend" OFF)
-else()
-    option(MAYAG_WITH_VULKAN "Build the Vulkan backend" ON)
-endif()
+# Which platform backend belongs to which OS (MAYAG_SYSTEM, decided at the
+# top). Every option default below and every "requires" check reads this.
+#                       backend   builds on                       ON by default
+set(_mayag_platform_backends
+    "VULKAN|windows,freedesktop,other|ON"
+    "METAL|apple|ON"
+    "D3D12|windows|OFF"
+    "COCOA|apple|ON"
+    "WAYLAND|freedesktop|ON"
+    "WIN32|windows|ON")
+# option(MAYAG_WITH_<B>) defaults ON where the table says so (and only on a
+# system it builds on); mayag_check_platform_backends() fails an explicit ON
+# anywhere else, after the options are read.
+function(mayag_platform_option backend doc)
+    set(on OFF)
+    foreach(row ${_mayag_platform_backends})
+        string(REPLACE "|" ";" row "${row}")
+        list(GET row 0 b)
+        list(GET row 1 systems)
+        list(GET row 2 dflt)
+        string(REPLACE "," ";" systems "${systems}")
+        if(b STREQUAL backend AND MAYAG_SYSTEM IN_LIST systems)
+            set(on ${dflt})
+        endif()
+    endforeach()
+    option(MAYAG_WITH_${backend} "${doc}" ${on})
+endfunction()
+function(mayag_check_platform_backends)
+    foreach(row ${_mayag_platform_backends})
+        string(REPLACE "|" ";" row "${row}")
+        list(GET row 0 b)
+        list(GET row 1 systems)
+        string(REPLACE "," ";" systems "${systems}")
+        if(MAYAG_WITH_${b} AND NOT MAYAG_SYSTEM IN_LIST systems)
+            string(REPLACE ";" ", " systems "${systems}")
+            message(FATAL_ERROR "mayag: MAYAG_WITH_${b} builds on ${systems}, not ${MAYAG_SYSTEM}.")
+        endif()
+    endforeach()
+endfunction()
+
+mayag_platform_option(VULKAN "Build the Vulkan backend")
 
 # mayag is a GPU framework, so the GPU backend is ON wherever the platform
 # has one. The software rasteriser does not go away — it is the reference
@@ -140,13 +199,8 @@ endif()
 # because it is the safer-sounding one would be the wrong trade for a
 # framework whose whole design — one SDF kernel, one instance struct, one
 # draw call per batch — exists to feed a GPU.
-if(APPLE)
-    option(MAYAG_WITH_METAL "Build the Metal backend"      ON)
-else()
-    option(MAYAG_WITH_METAL "Build the Metal backend"      OFF)
-endif()
-
-option(MAYAG_WITH_D3D12     "Build the D3D12 backend"      OFF)
+mayag_platform_option(METAL "Build the Metal backend")
+mayag_platform_option(D3D12 "Build the D3D12 backend")
 option(MAYAG_WITH_WEBGPU    "Build the WebGPU backend"     OFF)
 option(MAYAG_WITH_OPENGL    "Build the OpenGL backend"     OFF)
 
@@ -154,32 +208,21 @@ option(MAYAG_WITH_OPENGL    "Build the OpenGL backend"     OFF)
 # headless platform is always available, which is what lets the full app
 # runtime be tested on a build server with no display. Default ON where a
 # native windowing system exists.
-if(APPLE)
-    option(MAYAG_WITH_COCOA "Build the macOS window backend" ON)
-else()
-    option(MAYAG_WITH_COCOA "Build the macOS window backend" OFF)
-endif()
+mayag_platform_option(COCOA "Build the macOS window backend")
 
 # Wayland is the native Linux/BSD backend. It is ON by default because it
 # costs nothing to enable: the client library is resolved with dlopen() at
 # RUNTIME, so there is no build-time dependency, nothing to find_package, and
 # a binary built with it still runs on a machine with no Wayland at all (the
 # loader fails, open() returns nullopt, and the app falls back to headless).
-if(CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD")
-    option(MAYAG_WITH_WAYLAND "Build the Wayland window backend" ON)
-else()
-    option(MAYAG_WITH_WAYLAND "Build the Wayland window backend" OFF)
-endif()
+mayag_platform_option(WAYLAND "Build the Wayland window backend")
 
 # Win32 is the native Windows backend, and like Wayland it costs nothing to
 # enable: it talks to user32/gdi32, which are present on every Windows, and
 # the APIs that are not (per-monitor DPI v2) are resolved with GetProcAddress
 # so one binary still runs on older builds.
-if(WIN32)
-    option(MAYAG_WITH_WIN32 "Build the Windows window backend" ON)
-else()
-    option(MAYAG_WITH_WIN32 "Build the Windows window backend" OFF)
-endif()
+mayag_platform_option(WIN32 "Build the Windows window backend")
+mayag_check_platform_backends()
 
 # `-march=native` bakes the BUILD host's microarchitecture into the binary and
 # SIGILLs on any older chip. Fine for local dev, never for a shipped artifact,
@@ -229,9 +272,6 @@ endforeach()
 # rather than through an .mm file, which is what keeps mayag header-only.
 # It links Cocoa + CoreGraphics; both ship with every macOS.
 if(MAYAG_WITH_COCOA)
-    if(NOT APPLE)
-        message(FATAL_ERROR "mayag: MAYAG_WITH_COCOA requires macOS.")
-    endif()
     find_library(COCOA_LIB Cocoa REQUIRED)
     find_library(COREGRAPHICS_LIB CoreGraphics REQUIRED)
     target_link_libraries(mayag INTERFACE ${COCOA_LIB} ${COREGRAPHICS_LIB} objc)
@@ -243,9 +283,6 @@ endif()
 # protocol sources, no version skew between the headers on the build machine
 # and the .so on the user's.
 if(MAYAG_WITH_WAYLAND)
-    if(NOT CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD")
-        message(FATAL_ERROR "mayag: MAYAG_WITH_WAYLAND requires Linux or FreeBSD.")
-    endif()
     find_package(Threads REQUIRED)
     target_link_libraries(mayag INTERFACE ${CMAKE_DL_LIBS} Threads::Threads)
 endif()
@@ -254,9 +291,6 @@ endif()
 # and the input method (imm32). All three ship with Windows itself, so there
 # is nothing to find_package and no redistributable.
 if(MAYAG_WITH_WIN32)
-    if(NOT WIN32)
-        message(FATAL_ERROR "mayag: MAYAG_WITH_WIN32 requires Windows.")
-    endif()
     target_link_libraries(mayag INTERFACE user32 gdi32 imm32)
     # Keep <windows.h> from defining `min`/`max` and the legacy `near`/`far`
     # memory-model keywords, which collide with ordinary C++ identifiers.
@@ -295,9 +329,6 @@ endif()
 # Platform backends
 # ─────────────────────────────────────────────────────────────────────────
 if(MAYAG_WITH_METAL)
-    if(NOT APPLE)
-        message(FATAL_ERROR "mayag: MAYAG_WITH_METAL requires Apple platforms.")
-    endif()
     find_library(METAL_LIB Metal REQUIRED)
     find_library(QUARTZCORE_LIB QuartzCore REQUIRED)
     find_library(FOUNDATION_LIB Foundation REQUIRED)
@@ -312,9 +343,6 @@ endif()
 # when glslc is available; the result is checked in, so a build with no shader
 # compiler still has a working GPU path.
 if(MAYAG_WITH_VULKAN)
-    if(APPLE)
-        message(FATAL_ERROR "mayag: use MAYAG_WITH_METAL on Apple, not Vulkan.")
-    endif()
     find_package(Threads REQUIRED)
     target_link_libraries(mayag INTERFACE ${CMAKE_DL_LIBS} Threads::Threads)
 
@@ -359,9 +387,6 @@ if(MAYAG_WITH_VULKAN)
 endif()
 
 if(MAYAG_WITH_D3D12)
-    if(NOT WIN32)
-        message(FATAL_ERROR "mayag: MAYAG_WITH_D3D12 requires Windows.")
-    endif()
     target_link_libraries(mayag INTERFACE d3d12 dxgi d3dcompiler)
 endif()
 
@@ -648,7 +673,7 @@ if(MAYAG_BUILD_TESTS)
     # Zero-copy buffer import: the substrate a compositor is built on.
     # dmabuf fds are a Linux/BSD concept; the test drives them with open()
     # and fcntl(), so it only exists where they do.
-    if(NOT WIN32)
+    if(NOT MAYAG_SYSTEM STREQUAL "windows")
     add_executable(mayag_buffer_import_tests tests/test_buffer_import.cpp)
     target_link_libraries(mayag_buffer_import_tests PRIVATE mayag)
     target_compile_options(mayag_buffer_import_tests PRIVATE ${MAYAG_WARNINGS})
@@ -657,7 +682,7 @@ if(MAYAG_BUILD_TESTS)
 
     # Windows text against the OS's own: mayag's native look must render
     # what Direct2D renders, per pixel, for the same glyph positions.
-    if(WIN32)
+    if(MAYAG_SYSTEM STREQUAL "windows")
     add_executable(mayag_win32_text_tests tests/test_win32_text.cpp)
     target_link_libraries(mayag_win32_text_tests PRIVATE mayag d2d1 windowscodecs ole32)
     target_compile_options(mayag_win32_text_tests PRIVATE ${MAYAG_WARNINGS})
@@ -719,9 +744,15 @@ if(MAYAG_BUILD_TESTS)
         # The OS is read in ONE file for the whole stack (jaal/meta/target.hpp).
         add_test(NAME mayag_one_os
                  COMMAND ${CMAKE_COMMAND}
-                         "-DROOTS=${CMAKE_CURRENT_SOURCE_DIR}/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/src"
+                         "-DROOTS=${CMAKE_CURRENT_SOURCE_DIR}/include;${CMAKE_CURRENT_SOURCE_DIR}/tests;${CMAKE_CURRENT_SOURCE_DIR}/examples;${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/src;${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests"
                          -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/include/jaal/meta/target.hpp
+                         -DBUILD_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag/core/target.hpp
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/lint/one_os.cmake)
+        # ...and the build asks the headers, never if(WIN32 / APPLE / UNIX).
+        add_test(NAME mayag_one_os_cmake
+                 COMMAND ${CMAKE_COMMAND}
+                         "-DFILES=${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt;${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/CMakeLists.txt;${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/CMakeLists.txt"
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/lint/one_os_cmake.cmake)
         # Every text size is a tier of the type scale (style/type.hpp).
         add_test(NAME mayag_type_scale
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
@@ -777,7 +808,7 @@ if(MAYAG_BUILD_TESTS)
         set(_tsan_default ${CMAKE_HOST_UNIX})
     endif()
     option(MAYAG_TSAN_TESTS "Build and run the threaded tests under ThreadSanitizer" ${_tsan_default})
-    if(NOT MSVC AND NOT APPLE)
+    if(NOT MSVC AND NOT MAYAG_SYSTEM STREQUAL "apple")
         add_executable(mayag_concurrency_tsan EXCLUDE_FROM_ALL
                        tests/test_concurrency.cpp)
         target_link_libraries(mayag_concurrency_tsan PRIVATE mayag)
@@ -919,7 +950,7 @@ endif()
 # system libc++ it links against; code compiled from them references symbols
 # the OS library does not have (std::__get_locale_encoding). Compile against
 # the SDK's libc++ headers, which match the library actually linked.
-if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_OSX_SYSROOT
+if(MAYAG_SYSTEM STREQUAL "apple" AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_OSX_SYSROOT
    AND EXISTS "${CMAKE_OSX_SYSROOT}/usr/include/c++/v1")
     target_compile_options(mayag INTERFACE
         "SHELL:-stdlib++-isystem ${CMAKE_OSX_SYSROOT}/usr/include/c++/v1")
@@ -996,7 +1027,7 @@ if(MAYAG_PCH_ACTIVE)
 elseif(MAYAG_PCH AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     message(STATUS "mayag: AppleClang cannot read mayag's PCH; for ~2x faster builds use "
                    "upstream clang: -DCMAKE_CXX_COMPILER=$(brew --prefix llvm)/bin/clang++")
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE AND (MAYAG_BUILD_EXAMPLES OR MAYAG_BUILD_TESTS))
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT MAYAG_SYSTEM STREQUAL "apple" AND (MAYAG_BUILD_EXAMPLES OR MAYAG_BUILD_TESTS))
     # GCC has no PCH codegen and spends ~3x clang's time per -O3 TU on
     # mayag's template stack (hello.cpp: 44 s vs 14 s); a .gch only saves the
     # ~2 s parse. Point at the presets rather than switching compilers

@@ -11,6 +11,7 @@
 //     than the presence of any particular font, so they pass on a minimal CI
 //     image and on a fully-loaded desktop alike.
 
+#include <mayag/core/target.hpp>
 #include <mayag/mayag.hpp>
 #include <mayag/font/last_resort.hpp>
 #include <mayag/font/system.hpp>
@@ -179,7 +180,7 @@ void test_default_stack_completeness() {
 // Each check skips itself on a machine without that family.
 
 void test_linux_conventions() {
-#if !defined(__APPLE__) && !defined(_WIN32)
+#if !MAYAG_OS_APPLE && !MAYAG_OS_WINDOWS
     section("linux fallback conventions");
     const auto& db = system::Database::instance();
     const auto family_for = [](const typo::FontStack& s, char32_t cp) -> std::string {

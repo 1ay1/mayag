@@ -23,6 +23,7 @@
 // folder (in the tab's colour), and `here` marks the folder the focused tab
 // is in, so the tree answers "where is everything running?" at a glance.
 
+#include "../core/target.hpp"
 #include "control.hpp"
 #include "file_icon.hpp"
 #include "virtual_list.hpp"
@@ -127,7 +128,7 @@ inline void tree_reveal(ScrollState& scroll, int row) {
 // GCC 16 at -O3 inlines a constant out-of-range row into this and warns
 // about rows[at] on the path the bounds check has already cut off (it can't
 // relate size(), a pointer difference over sizeof(TreeRow), to the index).
-#if defined(__GNUC__) && !defined(__clang__)
+#if MAYAG_CC_GCC
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Warray-bounds"
 #endif
@@ -140,7 +141,7 @@ inline void tree_reveal(ScrollState& scroll, int row) {
     if (rows[at].dir) return {A::toggle, row};
     return {count >= 2 ? A::open : A::preview, row};
 }
-#if defined(__GNUC__) && !defined(__clang__)
+#if MAYAG_CC_GCC
 #pragma GCC diagnostic pop
 #endif
 

@@ -11,6 +11,7 @@
 //   ./mayag_terminal --headless   scripted, asserted
 //   TM_SHOT=<dir> ./mayag_terminal --headless   screenshots
 
+#include <mayag/core/target.hpp>
 #include "harness.hpp"
 #include <mayag/widget/activity_feed.hpp>
 #include <mayag/widget/project_panel.hpp>
@@ -510,7 +511,7 @@ struct Terminal {
     /// Workspaces switch on a modifier that isn't the tab one: ⌃N on macOS
     /// (⌘N is tabs), Alt+N elsewhere (Ctrl+N is tabs there).
     static constexpr Mods workspace_mods() noexcept {
-#if defined(__APPLE__)
+#if MAYAG_OS_APPLE
         return Mods{.ctrl = true};
 #else
         return Mods{.alt = true};

@@ -14,6 +14,7 @@
 // This header holds the argument parsing and font setup so the examples
 // themselves stay pure UI.
 
+#include <mayag/core/target.hpp>
 #include <mayag/mayag.hpp>
 
 // The example harness names NO backend. `--gpu` asks the registry for the best
@@ -21,7 +22,7 @@
 // picked up here with no change to this file (and MAYAG_BACKEND=<api> selects
 // one by hand). Including a specific backend header is what registers it.
 #include <mayag/backend/tiled.hpp>     // software backend, always available
-#ifdef MAYAG_WITH_VULKAN
+#if MAYAG_GPU_VULKAN
 #include <mayag/backend/vulkan.hpp>
 #endif
 

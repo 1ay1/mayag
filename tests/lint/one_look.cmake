@@ -5,7 +5,8 @@
 # kernel (render/kernel.hpp, transpiled to SPIR-V / HLSL) are written ONCE.
 # Platforms differ only in how a frame reaches the screen and where fonts are
 # found: platform/, backend/, font/system.hpp, font/mapped_file.hpp and
-# font/dwrite_raster.hpp.
+# font/dwrite_raster.hpp -- and core/target.hpp, which decides what the
+# platform IS (the target, the renderers, the one window system).
 #
 # So in the files below a platform conditional (_WIN32, __APPLE__,
 # __linux__, TARGET_OS_*) is an error unless allow_one_look.txt grants that
@@ -13,7 +14,7 @@
 # the build, and so does a grant that is no longer used up.
 
 set(dirs font layout render style dsl widget core scene image output editor)
-set(platform_files font/system.hpp font/mapped_file.hpp font/dwrite_raster.hpp core/win32.hpp core/startup.hpp)
+set(platform_files core/target.hpp font/system.hpp font/mapped_file.hpp font/dwrite_raster.hpp core/win32.hpp core/startup.hpp)
 
 file(STRINGS ${ALLOW} allow_lines)
 set(granted "")

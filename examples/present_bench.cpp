@@ -24,6 +24,7 @@
 //   ./mayag_present_bench --size 3840 2160  the resolution where CPU breaks
 //   ./mayag_present_bench --instances 2000  scene complexity sweep
 
+#include <mayag/core/target.hpp>
 #include <mayag/mayag.hpp>
 
 #include <algorithm>
@@ -37,7 +38,7 @@
 
 using namespace mayag;
 
-#if defined(MAYAG_WITH_COCOA)
+#if MAYAG_WINDOW_COCOA
 namespace {
 
 /// CPU time burned by THIS THREAD, which is the number that matters.
@@ -137,7 +138,7 @@ void report(const char* name, const Stats& wall, const Stats& cpu, double budget
 #endif
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
-#if !defined(MAYAG_WITH_COCOA)
+#if !MAYAG_WINDOW_COCOA
     std::printf("present_bench needs a real window; build with MAYAG_WITH_COCOA=ON\n");
     return 0;
 #else
