@@ -142,6 +142,7 @@ class RunLoop {
         make_target();
         observe_window();
         make_display_link();
+        make_photon_probe();
     }
 
     RunLoop(const RunLoop&)            = delete;
@@ -159,6 +160,7 @@ class RunLoop {
             set_owner(target_, nullptr);
             msg<void>(target_, sel("release"));
         }
+        if (probe_ != nullptr) { CFRunLoopTimerInvalidate(probe_); CFRelease(probe_); }
         if (fallback_ != nullptr) { CFRunLoopTimerInvalidate(fallback_); CFRelease(fallback_); }
         if (sig_src_ != nullptr) { CFRunLoopSourceInvalidate(sig_src_); CFRelease(sig_src_); }
         if (sig_fd_ != nullptr) { CFFileDescriptorInvalidate(sig_fd_); CFRelease(sig_fd_); }
@@ -346,11 +348,45 @@ class RunLoop {
         }
     }
 
+    // MAYAG_PHOTON_PROBE=N: post N real key presses (left arrow, down + up)
+    // through the app's own event queue, every 137 ms -- a period that
+    // drifts against any refresh rate, so the presses land at every phase of
+    // the frame -- starting a second after launch. Each is an NSEvent
+    // timestamped now, read by the same dispatch() as a user's key, so with
+    // MAYAG_PHOTON=1 the meter reports input-to-photon on real presents,
+    // with no accessibility permission and no other app involved.
+    void make_photon_probe() {
+        const char* e = std::getenv("MAYAG_PHOTON_PROBE");
+        if (e == nullptr || std::atoi(e) <= 0) return;
+        probe_left_ = std::atoi(e) * 2;   // a down and an up per press
+        CFRunLoopTimerContext tc{};
+        tc.info = this;
+        probe_ = CFRunLoopTimerCreate(nullptr, CFAbsoluteTimeGetCurrent() + 1.0, 0.0685, 0, 0,
+            [](CFRunLoopTimerRef, void* self) { static_cast<RunLoop*>(self)->probe(); }, &tc);
+        CFRunLoopAddTimer(rl_, probe_, kCFRunLoopCommonModes);
+    }
+    void probe() {
+        using namespace objc;
+        if (probe_left_ <= 0) { CFRunLoopTimerInvalidate(probe_); return; }
+        const bool down = probe_left_ % 2 == 0;
+        --probe_left_;
+        const double now = static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) * 1e-9;   // NSEvent's clock
+        const long wnum = msg<long>(win_.ns_window(), sel("windowNumber"));
+        id chars = nsstring("\xEF\x9C\x82");   // U+F702 NSLeftArrowFunctionKey
+        id ev = msg_cls<id>(objc_getClass("NSEvent"),
+            sel("keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:"),
+            static_cast<unsigned long>(down ? 10 : 11), CGPoint{0, 0}, static_cast<unsigned long>(0xA00000), now, wnum,
+            static_cast<id>(nullptr), chars, chars, static_cast<BOOL>(NO), static_cast<unsigned short>(123));
+        if (ev != nullptr) msg<void>(win_.ns_app(), sel("postEvent:atStart:"), ev, static_cast<BOOL>(NO));
+    }
+
     MacWindow&               win_;
     CFRunLoopRef             rl_ = nullptr;
     CFRunLoopSourceRef       wake_ = nullptr;
     CFRunLoopTimerRef        timer_ = nullptr;
     CFRunLoopTimerRef        fallback_ = nullptr;
+    CFRunLoopTimerRef        probe_ = nullptr;     ///< MAYAG_PHOTON_PROBE
+    int                      probe_left_ = 0;
     CFFileDescriptorRef      sig_fd_ = nullptr;
     CFRunLoopSourceRef       sig_src_ = nullptr;
     id                       target_ = nullptr;

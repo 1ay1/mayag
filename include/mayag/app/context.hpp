@@ -213,11 +213,16 @@ Node Ctx::memoize(std::uint64_t site, std::uint64_t key, F&& build) const {
     const std::size_t overlays0 = c.overlays != nullptr ? c.overlays->size() : 0;
     const std::size_t tracked0 = c.tracked != nullptr ? c.tracked->size() : 0;
     const bool anim0 = animation_was_requested();
+    const double at0 = frame_requested_at();
     clear_animation_request();
     Node n = Node(build());
+    // A subtree that animates or schedules a step depends on time, so it is
+    // never stored: a hit would replay a frozen frame and drop its next step.
+    const bool timed = animation_was_requested() || frame_requested_at() >= 0.0;
     const bool side_effects = (c.overlays != nullptr && c.overlays->size() != overlays0) ||
-                              (c.tracked != nullptr && c.tracked->size() != tracked0) || animation_was_requested();
+                              (c.tracked != nullptr && c.tracked->size() != tracked0) || timed;
     if (anim0) request_animation_frame();
+    if (at0 >= 0.0) request_frame_at(at0);   // the earlier subtrees' schedule survives this one
     const bool reads_interaction = c.reads() != reads0;
     if (cache != nullptr && !side_effects && cache->store_built(k, n, reads_interaction, interaction)) n.set_memo_key(k);
     if (site != 0) cache->site_miss(site, true);

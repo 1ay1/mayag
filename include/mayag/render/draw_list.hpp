@@ -152,6 +152,7 @@ class DrawList {
         backdrop_since_ = 0;
         covers_.clear();
         cover_bound_ = Rect{};
+        covers_stale_ = false;
     }
 
     void reserve(std::size_t n) {
@@ -242,17 +243,20 @@ class DrawList {
         backdrop_since_ = instances_.size();
         covers_.clear();
         cover_bound_ = Rect{};
+        covers_stale_ = false;
     }
     void clear_text_backdrop() noexcept { text_backdrop_ = Vec4{}; }
     struct BackdropState { Vec4 colour; std::size_t since; };
     [[nodiscard]] BackdropState text_backdrop() const noexcept { return {text_backdrop_, backdrop_since_}; }
     void restore_text_backdrop(BackdropState s) noexcept {
         text_backdrop_ = s.colour;
-        if (s.since != backdrop_since_) {   // a different window: rebuild its covers from the list
+        if (s.since != backdrop_since_ || covers_stale_) {   // another window, or untracked pushes: rebuild
             backdrop_since_ = s.since;
             covers_.clear();
             cover_bound_ = Rect{};
-            for (std::size_t k = backdrop_since_; k < instances_.size(); ++k) note_cover(instances_[k]);
+            covers_stale_ = false;
+            if (text_backdrop_.w >= 0.5f)
+                for (std::size_t k = backdrop_since_; k < instances_.size(); ++k) note_cover(instances_[k]);
         }
     }
 
@@ -570,8 +574,14 @@ class DrawList {
     std::vector<Rect>     covers_;
     Rect                  cover_bound_{};
 
+    bool                  covers_stale_ = false;   ///< pushes went untracked while no backdrop was known
+
     void note_cover(const Instance& o) {
         if (o.kind == static_cast<std::uint32_t>(ShapeKind::glyph)) return;
+        // No known backdrop: nothing asks the covers, so don't keep them (a
+        // panel of rects drawn on a translucent surface paid for this).
+        // restore_text_backdrop rebuilds them if the backdrop comes back.
+        if (text_backdrop_.w < 0.5f) { covers_stale_ = true; return; }
         const Rect r{o.rect.x, o.rect.y, o.rect.z, o.rect.w};
         cover_bound_ = covers_.empty() ? r : cover_bound_.unite(r);
         covers_.push_back(r);

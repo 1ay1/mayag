@@ -100,7 +100,18 @@ class LatencyStats {
         samples_[next_ % window] = t;
         ++next_;
         count_ = num::min<std::size_t>(count_ + 1, window);
+        if (widget_ms(t) > widget_ms(slowest_)) slowest_ = t;
     }
+
+    /// What a frame costs on EVERY backend: building, styling, laying out and
+    /// painting the widget tree. Raster/encode/present (render_ms) is left
+    /// out: on a GPU window it is the GPU's, not the loop's.
+    [[nodiscard]] static double widget_ms(const FrameTiming& t) noexcept {
+        return t.view_ms + t.cascade_ms + t.layout_ms + t.paint_ms;
+    }
+    /// The slowest frame since the start (by widget_ms), with its stages:
+    /// the number a "no frame ever drops" gate checks.
+    [[nodiscard]] const FrameTiming& slowest() const noexcept { return slowest_; }
 
     [[nodiscard]] std::size_t size() const noexcept { return count_; }
     [[nodiscard]] const FrameTiming& last() const noexcept {
@@ -160,12 +171,13 @@ class LatencyStats {
         return n;
     }
 
-    void clear() noexcept { next_ = 0; count_ = 0; }
+    void clear() noexcept { next_ = 0; count_ = 0; slowest_ = {}; }
 
   private:
     FrameTiming samples_[window]{};
     std::size_t next_ = 0;
     std::size_t count_ = 0;
+    FrameTiming slowest_{};
 };
 
 /// Detects an app that never stops rendering.

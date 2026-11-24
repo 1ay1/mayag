@@ -43,6 +43,11 @@ namespace detail {
 /// Thread-local because a headless test and a window can render on different
 /// threads, and a stray request from one must not keep the other awake.
 inline thread_local bool animation_requested = false;
+/// The earliest time (on the view's clock, Ctx::time) at which something
+/// drawn this frame looks different, when it is not changing continuously:
+/// a spinner's next glyph, a countdown's next second, a caret's next blink.
+/// Negative: nothing scheduled.
+inline thread_local double next_change_at = -1.0;
 }  // namespace detail
 
 /// "I am animating; please schedule another frame."
@@ -55,11 +60,46 @@ inline void request_animation_frame() noexcept {
     detail::animation_requested = true;
 }
 
+/// "What I drew changes at `t`" (seconds, the view's clock: Ctx::time).
+///
+/// For anything that is a pure function of time but steps rather than
+/// flows -- a 12 fps spinner, a once-a-second countdown, a blinking caret.
+/// The runtime draws again at `t` and not before, so a spinner costs 12
+/// frames a second instead of the display's 120, and it NEVER stalls: it
+/// does not depend on the app keeping a clock subscription alive or on some
+/// unrelated message arriving to move a model clock. Earliest request wins.
+inline void request_frame_at(double t) noexcept {
+    if (detail::next_change_at < 0.0 || t < detail::next_change_at) detail::next_change_at = t;
+}
+
 [[nodiscard]] inline bool animation_was_requested() noexcept {
     return detail::animation_requested;
 }
+[[nodiscard]] inline double frame_requested_at() noexcept { return detail::next_change_at; }
 inline void clear_animation_request() noexcept {
     detail::animation_requested = false;
+    detail::next_change_at = -1.0;
+}
+
+/// A value that steps at `rate` Hz from time `t`, and asks for the frame
+/// at its next step: what every frame-of-N animation (spinners, dots,
+/// marching ants) is. Returns the step index.
+[[nodiscard]] inline long stepper(double t, double rate) noexcept {
+    const double s = t * rate;
+    const double whole = static_cast<double>(static_cast<long>(s));
+    request_frame_at((whole + 1.0) / rate);
+    return static_cast<long>(whole);
+}
+
+/// The time an AMBIENT animation draws at: `t` quantised to `rate` Hz, with
+/// the next step scheduled. For indicators that move smoothly but need not
+/// move at the display's rate -- a busy ring turning, a status dot breathing:
+/// 30 Hz reads as smooth at that size and costs a quarter of a 120 Hz
+/// redraw, and the frames between steps are identical, so damage tracking
+/// reuses them. Use request_animation_frame() only for motion the eye
+/// follows (a dragged tab, a sliding panel).
+[[nodiscard]] inline double ambient_time(double t, double rate = 30.0) noexcept {
+    return static_cast<double>(stepper(t, rate)) / rate;
 }
 
 // ── tracked geometry ────────────────────────────────────────────────────

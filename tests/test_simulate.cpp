@@ -9,6 +9,7 @@
 // shown fixed by a generation stamp across a thousand seeds.
 
 #include <mayag/mayag.hpp>
+#include <mayag/widget/agent_state.hpp>
 #include <mayag/app/simulate.hpp>
 
 #include <chrono>
@@ -81,6 +82,22 @@ int scenario(App& app) {
     const auto& m = app.model();
     return (m.in_flight == 0 && m.shown_for == m.query) ? 0 : 1;
 }
+/// A program that shows ONLY a spinner: no subscription, no message, no
+/// model clock. The spinner schedules its own frames (stepper).
+struct Spinner {
+    struct Model {};
+    struct Nothing {};
+    using Msg = std::variant<Nothing>;
+    using Cmd = mayag::Cmd<Msg>;
+    static Cmd init(Model&) { return {}; }
+    static Cmd update(Model&, Nothing) { return {}; }
+    static Node view(const Model&) { return text_owned(spinner_frame(ctx().time)) | font(14); }
+};
+std::string glyph_of(const Node& n) {
+    if (n.kind() == NodeKind::text) return std::string{n.text()};
+    for (const auto& k : n.children()) if (auto g = glyph_of(k); !g.empty()) return g;
+    return {};
+}
 }  // namespace
 
 int main() {
@@ -94,6 +111,18 @@ int main() {
     slowish.task_latency_max = 120ms;
 
     std::printf("-- deterministic simulation\n");
+
+    {   // a spinner on screen turns by itself, at its own rate, forever
+        simulated_app<Spinner> app(cfg, 1);
+        std::vector<std::string> seen;
+        for (int i = 0; i < 120; ++i) {   // two simulated seconds
+            app.tick();
+            const std::string g = glyph_of(app.tree());
+            if (seen.empty() || seen.back() != g) seen.push_back(g);
+        }
+        ok(seen.size() >= 20, "a spinner with no subscription and no messages keeps turning (" +
+                                  std::to_string(seen.size()) + " glyph changes in 2 s, 12 fps expected ~24)");
+    }
 
     // 1. The unstamped version is wrong for SOME timings: explore finds one.
     const auto bug = explore<Search<false>>(cfg, {.first_seed = 1, .runs = 1000, .sim = slowish},

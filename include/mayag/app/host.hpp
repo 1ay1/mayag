@@ -294,6 +294,7 @@ class window_host {
             };
         }
         const bool poll_only = std::exchange(poll_only_, false);
+        if (change_due(now_())) { dirty_ = true; change_at_ = -1.0; }   // the scheduled step is this frame
 
         // A window with no fd (Cocoa) is read here on a short poll. When the
         // poll was the only reason we were called, draw only if it brought
@@ -456,7 +457,8 @@ class window_host {
         const auto now = now_();
         if (window_wants_redraw()) return true;
         if (external_loop_ && tick_pending_) return true;   // a display-link frame draws now
-        if ((dirty_ || draw_owed_) && now >= next_draw_at(now)) return true;
+        // a scheduled step has come (a spinner's next glyph): a frame is owed
+        if ((dirty_ || draw_owed_ || change_due(now)) && now >= next_draw_at(now)) return true;
         if (!external_loop_ && animating() && now >= next_frame_) return true;
         // fd-less window: time to look. Remembered so present() can skip the
         // draw when the look finds nothing. (jaal skips this call when the
@@ -485,7 +487,7 @@ class window_host {
     [[nodiscard]] std::optional<std::chrono::nanoseconds> wait_hint_inner() const noexcept {
         using ns = std::chrono::nanoseconds;
         const auto now = now_();
-        if (dirty_ || draw_owed_) {
+        if (dirty_ || draw_owed_ || change_due(now)) {
             return std::max(std::chrono::duration_cast<ns>(next_draw_at(now) - now), ns{0});
         }
         // The window is waiting on something (the GPU coming up) and will
@@ -494,10 +496,13 @@ class window_host {
         // A foreign loop's display link drives animation frames.
         if (external_loop_) return std::nullopt;
         if (!animating()) {
+            // A scheduled step (a spinner's next glyph) wakes us exactly then.
+            std::optional<ns> step;
+            if (change_at_ >= 0.0) step = std::max(std::chrono::duration_cast<ns>(change_point() - now), ns{0});
             // Wayland wakes us through its fd. A window with none (Cocoa)
             // has to be asked: poll it often enough that input feels instant.
-            if (!poll_window_ && children_.empty()) return std::nullopt;
-            return kPollPeriod;
+            if (!poll_window_ && children_.empty()) return step;
+            return step ? std::min(*step, std::chrono::duration_cast<ns>(kPollPeriod)) : std::chrono::duration_cast<ns>(kPollPeriod);
         }
         // Nanoseconds, so a late-latch wake lands on time, not up to 1 ms late.
         return std::max(std::chrono::duration_cast<ns>(next_frame_ - now), ns{0});
@@ -1054,6 +1059,12 @@ class window_host {
             window_.set_text_input(entry, caret);
         }
     }
+
+    /// The view asked to be drawn again at change_at_ (seconds since start).
+    [[nodiscard]] time_point change_point() const noexcept {
+        return start_ + std::chrono::duration_cast<duration_t>(std::chrono::duration<double>(change_at_));
+    }
+    [[nodiscard]] bool change_due(time_point now) const noexcept { return change_at_ >= 0.0 && now >= change_point(); }
 
     [[nodiscard]] bool animating() const noexcept {
         return frames_on_ || motion_pending_ || tracked_.animating() || motion_.animating() || morphing_ || children_animating();
@@ -1752,6 +1763,11 @@ class window_host {
                           // A `starting(...)` look lasts exactly one frame;
                           // the next one is owed or it would stick forever.
                           starting_pending_;
+        // Something drawn this frame steps at a known time (a spinner's next
+        // glyph): draw again then, from the frame clock itself -- not from a
+        // model clock some message has to move. (core/motion.hpp:
+        // request_frame_at / stepper.)
+        change_at_ = frame_requested_at();
 
         frame.instances  = static_cast<std::uint32_t>(draws_.size());
         frame.draw_calls = static_cast<std::uint32_t>(draws_.batches().size());
@@ -1853,6 +1869,7 @@ class window_host {
     bool                latched_ = false;                       // that slot had its late draw
     std::uint64_t       display_seq_ = 0;
     bool                motion_pending_ = false;
+    double              change_at_ = -1.0;      ///< the view's next scheduled change (Ctx::time), or < 0
 
     bool                frames_on_ = false;
     std::function<typename P::Msg(double)> frame_make_;

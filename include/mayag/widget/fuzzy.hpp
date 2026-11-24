@@ -68,6 +68,18 @@ namespace detail {
 
 [[nodiscard]] inline FuzzyMatch fuzzy_match(std::string_view pattern, std::string_view text) {
     if (pattern.empty()) return FuzzyMatch{true, 0, {}};
+    // A match needs every pattern char, in order: test that first with one
+    // allocation-free scan, so the scoring passes (which build hit lists)
+    // run only on candidates. A completion pool of thousands of words is
+    // almost all misses; this is what each key of typing pays for them.
+    {
+        std::size_t p = 0;
+        const auto skip = [&] { while (p < pattern.size() && pattern[p] == ' ') ++p; };   // as fuzzy_pass does
+        skip();
+        for (std::size_t i = 0; i < text.size() && p < pattern.size(); ++i)
+            if (detail::fold(text[i]) == detail::fold(pattern[p])) { ++p; skip(); }
+        if (p < pattern.size()) return FuzzyMatch{};
+    }
     // Boundary-preferring first; it can jump past a letter a later pattern
     // char needed, so fall back to plain greedy before declaring no match.
     auto m = detail::fuzzy_pass(pattern, text, true);

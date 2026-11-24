@@ -235,11 +235,13 @@ class EditorState {
             ol_dirty_to_ = static_cast<int>(lines.size());   // every line, no early stop
             symbols_lang_ = language;
             symbols_tab_ = tab_width;
+            symbols_lines_ = -1;   // the list is rebuilt below, not patched
         }
         if (ol_valid_ < static_cast<int>(lines.size()) || symbols_version_ != version_) {
             std::vector<Span> spans;
             std::vector<Symbol> one;
             int l = ol_valid_;
+            const int relex_from = l;
             const int n = static_cast<int>(lines.size());
             for (; l < n; ++l) {
                 one.clear();
@@ -253,12 +255,40 @@ class EditorState {
             }
             ol_valid_ = n;
             ol_dirty_to_ = 0;
-            symbols_.clear();
-            for (int k = 0; k < n; ++k)
-                if (const int s = ol_sym_[static_cast<std::size_t>(k)]; s >= 0) {
-                    symbols_.push_back(ol_pool_[static_cast<std::size_t>(s)]);
-                    symbols_.back().line = k;
+            if (symbols_lines_ == n && l - relex_from <= 256) {
+                // The same number of lines as the list was built for: only the
+                // relexed lines [relex_from, l) can differ, and each holds at
+                // most one symbol, so patch those entries in place. A keystroke
+                // in a 100k-line file was a full O(lines) rebuild of the list,
+                // copying every symbol's strings, on every key.
+                for (int k = relex_from; k < l; ++k) {
+                    const int s = ol_sym_[static_cast<std::size_t>(k)];
+                    const Symbol* now = s >= 0 ? &ol_pool_[static_cast<std::size_t>(s)] : nullptr;
+                    auto it = std::lower_bound(symbols_.begin(), symbols_.end(), k,
+                                               [](const Symbol& x, int line) { return x.line < line; });
+                    const bool had = it != symbols_.end() && it->line == k;
+                    if (!had && now == nullptr) continue;
+                    if (had && now != nullptr) {
+                        if (it->name != now->name || it->kind != now->kind || it->depth != now->depth) {
+                            *it = *now;
+                            it->line = k;
+                        }
+                    } else if (had) {
+                        symbols_.erase(it);
+                    } else {
+                        it = symbols_.insert(it, *now);
+                        it->line = k;
+                    }
                 }
+            } else {   // lines came or went: every symbol below moved -- rebuild
+                symbols_.clear();
+                for (int k = 0; k < n; ++k)
+                    if (const int s = ol_sym_[static_cast<std::size_t>(k)]; s >= 0) {
+                        symbols_.push_back(ol_pool_[static_cast<std::size_t>(s)]);
+                        symbols_.back().line = k;
+                    }
+                symbols_lines_ = n;
+            }
             // the pool only grows with relexed lines: compact it now and then
             if (ol_pool_.size() > symbols_.size() * 2 + 1024) {
                 ol_pool_ = symbols_;
@@ -1241,6 +1271,7 @@ class EditorState {
     mutable bool             visual_identity_ = false;
     mutable std::vector<Symbol> symbols_;
     mutable std::uint64_t    symbols_version_ = ~std::uint64_t{0};
+    mutable int              symbols_lines_ = -1;   ///< the line count symbols_ was last built for
     mutable const Language*  symbols_lang_ = nullptr;
     enum class DragUnit : std::uint8_t { character, word, line };
     DragUnit drag_unit_ = DragUnit::character;

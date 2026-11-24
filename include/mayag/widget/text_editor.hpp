@@ -343,12 +343,32 @@ inline void complete(TextEditorState& s, bool force = false) {
     } else {
         cp.version = s.ed.version();   // the caret line moved on; the rest is as cached
     }
-    std::vector<EditorCompletion> pool = cp.pool;
-    std::unordered_map<std::string_view, std::size_t> mine;   // the caret line's own new words
-    const auto find = [&](std::string_view w) -> EditorCompletion* {
-        if (const auto it = cp.at.find(w); it != cp.at.end()) return &pool[it->second];
-        if (const auto it = mine.find(w); it != mine.end()) return &pool[it->second];
-        return nullptr;
+    // The cached pool is READ, never copied: this key's changes (the caret
+    // line's words, its own symbol, the language's words) go into a small
+    // overlay -- `patch` for cached entries, `extra` for new ones. Copying
+    // the pool (up to 9000 words, two strings each) was most of what a
+    // keystroke cost in a big file.
+    const std::vector<EditorCompletion>& base = cp.pool;
+    std::unordered_map<std::size_t, EditorCompletion> patch;   // index in base -> this key's version
+    std::vector<EditorCompletion> extra;                         // indices base.size() + k
+    std::unordered_map<std::string_view, std::size_t> mine;    // the caret line's own new words
+    const auto at = [&](std::size_t i) -> const EditorCompletion& {
+        if (i >= base.size()) return extra[i - base.size()];
+        if (const auto it = patch.find(i); it != patch.end()) return it->second;
+        return base[i];
+    };
+    const auto edit = [&](std::size_t i) -> EditorCompletion& {
+        if (i >= base.size()) return extra[i - base.size()];
+        return patch.try_emplace(i, base[i]).first->second;
+    };
+    const auto add = [&](EditorCompletion e) {
+        extra.push_back(std::move(e));
+        return base.size() + extra.size() - 1;
+    };
+    const auto find = [&](std::string_view w) -> std::optional<std::size_t> {
+        if (const auto it = cp.at.find(w); it != cp.at.end()) return it->second;
+        if (const auto it = mine.find(w); it != mine.end()) return it->second;
+        return std::nullopt;
     };
     {
         const std::string& t = s.ed.line(c.line);
@@ -358,8 +378,8 @@ inline void complete(TextEditorState& s, bool force = false) {
             while (j < t.size() && editor::detail::is_word(static_cast<unsigned char>(t[j]))) ++j;
             if (j - i >= 3 && static_cast<int>(i) != start) {
                 const std::string_view w{t.data() + i, j - i};
-                if (auto* e = find(w)) ++e->uses;
-                else { mine.emplace(w, pool.size()); pool.push_back({std::string{w}, EditorCompletion::From::file, 1, {}}); }
+                if (const auto e = find(w)) ++edit(*e).uses;
+                else mine.emplace(w, add({std::string{w}, EditorCompletion::From::file, 1, {}}));
             }
             i = j;
         }
@@ -368,32 +388,34 @@ inline void complete(TextEditorState& s, bool force = false) {
         for (auto it = std::lower_bound(syms.begin(), syms.end(), c.line, [](const editor::Symbol& x, int l) { return x.line < l; });
              it != syms.end() && it->line == c.line; ++it)
             if (it->name != pre)
-                if (auto* e = find(it->name)) { e->from = EditorCompletion::From::symbol; e->detail = it->kind; }
+                if (const auto e = find(it->name)) { auto& x = edit(*e); x.from = EditorCompletion::From::symbol; x.detail = it->kind; }
     }
     const auto add_lang = [&](const std::vector<std::string_view>& v, EditorCompletion::From from, const char* d) {
         for (auto w : v)
-            if (!find(w)) pool.push_back({std::string{w}, from, 0, d});
+            if (!find(w)) (void)add({std::string{w}, from, 0, d});
     };
     add_lang(s.ed.language->keywords, EditorCompletion::From::keyword, "keyword");
     add_lang(s.ed.language->types, EditorCompletion::From::type, "type");
     // rank: fuzzy score, then a prefix match, then how often the file uses it
     struct Ranked { int score; std::size_t i; std::vector<std::uint16_t> hits; };
     std::vector<Ranked> r;
-    for (std::size_t i = 0; i < pool.size(); ++i) {
-        if (pool[i].word == pre) continue;
-        auto m = fuzzy_match(pre, pool[i].word);
+    const std::size_t total = base.size() + extra.size();
+    for (std::size_t i = 0; i < total; ++i) {
+        const EditorCompletion& e = at(i);
+        if (e.word == pre) continue;
+        auto m = fuzzy_match(pre, e.word);
         if (!m.ok) continue;
-        const bool prefix = pool[i].word.size() >= pre.size() &&
-            std::equal(pre.begin(), pre.end(), pool[i].word.begin(), [](char a, char b) { return detail::fold(a) == detail::fold(b); });
-        int score = m.score + (prefix ? 30 : 0) + std::min(pool[i].uses, 12) +
-                    (pool[i].from == EditorCompletion::From::symbol ? 6 : 0);
+        const bool prefix = e.word.size() >= pre.size() &&
+            std::equal(pre.begin(), pre.end(), e.word.begin(), [](char a, char b) { return detail::fold(a) == detail::fold(b); });
+        int score = m.score + (prefix ? 30 : 0) + std::min(e.uses, 12) +
+                    (e.from == EditorCompletion::From::symbol ? 6 : 0);
         r.push_back({score, i, std::move(m.positions)});
     }
     std::stable_sort(r.begin(), r.end(), [](const Ranked& a, const Ranked& b) { return a.score > b.score; });
     // A scattered match ("up" in nullptr) is noise beside real ones: keep it
     // only when nothing starts with the typed word or meets it at a word start.
     const auto strong = [&](const Ranked& x) {
-        const auto& w = pool[x.i].word;
+        const auto& w = at(x.i).word;
         if (x.hits.empty() || x.hits.size() != pre.size()) return false;
         if (x.hits[0] == 0) return true;   // a prefix (or one that starts there)
         const unsigned char before = static_cast<unsigned char>(w[x.hits[0] - 1]);
@@ -403,7 +425,7 @@ inline void complete(TextEditorState& s, bool force = false) {
     if (std::any_of(r.begin(), r.end(), strong)) std::erase_if(r, [&](const Ranked& x) { return !strong(x); });
     if (r.size() > 40) r.resize(40);
     s.comp.clear(); s.comp_hits.clear();
-    for (auto& x : r) { s.comp.push_back(pool[x.i]); s.comp_hits.push_back(std::move(x.hits)); }
+    for (auto& x : r) { s.comp.push_back(at(x.i)); s.comp_hits.push_back(std::move(x.hits)); }
     s.comp_open = !s.comp.empty();
     s.comp_sel = 0;
 }

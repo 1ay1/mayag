@@ -232,7 +232,8 @@ inline void arc_ring_paint(DrawList& dl, const Rect& r, const void* user) {
     if (tb.running && tb.progress >= 0)
         ring = detail::arc_ring(tb.progress_error ? t.danger : hue, track, 0.0f, static_cast<float>(tb.progress) / 100.0f, d);
     else if (tb.running)
-        ring = detail::arc_ring(hue, t.surface.fade(0.0f), static_cast<float>(time * 0.85), 0.30f, d);
+        // a busy ring turns by itself (ambient: 30 Hz, scheduled from the frame clock)
+        ring = detail::arc_ring(hue, t.surface.fade(0.0f), static_cast<float>(ambient_time(time) * 0.85), 0.30f, d);
     else
         ring = (box() | size(d, d)).build();
     return (z(node(std::move(ring)), node(std::move(core))) | size(d, d)).build();
@@ -380,7 +381,7 @@ template <ControlContext C>
         const Color<Srgb> title_col = on ? t.text_primary : tb.unread || hov ? mix(t.text_secondary, t.text_primary, 0.6f) : t.text_secondary;
         // no icon: a running command still shows, as a pulsing dot
         const bool dot = (tb.unread && !on) || tb.dirty || (!o.icon && tb.running);
-        const float pulse = tb.running ? 0.55f + 0.45f * static_cast<float>(std::sin(time * 5.0)) : 1.0f;
+        const float pulse = tb.running ? 0.55f + 0.45f * static_cast<float>(std::sin(ambient_time(time) * 5.0)) : 1.0f;
         // children only when present: an empty slot still takes a gap, which
         // indents one tab's title against its neighbours'
         std::vector<Node> title_parts;
@@ -522,7 +523,7 @@ template <ControlContext C>
         const bool can_close = o.close != TabClose::never;
         const bool show_x = can_close && (hov || o.close == TabClose::always);
         const float ring_d = std::round(fs * 0.72f);
-        Node mark = tb.running ? detail::arc_ring(gcol, mix(on ? cell : bar, ink, 0.10f), static_cast<float>(time * 0.85), 0.30f, ring_d)
+        Node mark = tb.running ? detail::arc_ring(gcol, mix(on ? cell : bar, ink, 0.10f), static_cast<float>(ambient_time(time) * 0.85), 0.30f, ring_d)
                   : glyph.empty() ? Node{} : mono(glyph, gcol).build();
         if (can_close || tb.running || !glyph.empty())
             bits.push_back(tab_close_slot(c, id, i, std::move(mark), can_close, show_x,

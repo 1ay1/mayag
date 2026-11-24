@@ -10,6 +10,7 @@
 //   agent_badge(c, {.agent = "claude", .state = AgentState::needs_input}, time)
 
 #include "control.hpp"
+#include "../core/motion.hpp"   // stepper
 
 #include <string>
 
@@ -31,11 +32,15 @@ struct AgentInfo {
     double      since = 0.0;    ///< seconds in this state
 };
 
-/// A braille spinner frame for `time` seconds.
+/// A braille spinner frame for `time` seconds (the view's clock, Ctx::time).
+/// It schedules its own next frame (stepper: request_frame_at), so a spinner
+/// on screen turns at 12 fps by itself -- it never waits on a model clock, a
+/// subscription or some unrelated message to move, and it draws 12 frames a
+/// second, not the display's 120.
 [[nodiscard]] inline const char* spinner_frame(double time) {
     static constexpr const char* frames[] = {"\u280B", "\u2819", "\u2839", "\u2838", "\u283C",
                                              "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"};
-    return frames[static_cast<int>(time * 12.0) % 10];
+    return frames[static_cast<std::size_t>(stepper(time, 12.0) % 10)];
 }
 
 [[nodiscard]] inline Color<Srgb> agent_tone(const Theme& t, AgentState s) {
