@@ -149,6 +149,9 @@ class DrawList {
         clip_stack_.clear();
         current_clip_ = Rect{Vec2{}, Vec2{num::inf, num::inf}};
         text_backdrop_ = Vec4{};
+        backdrop_since_ = 0;
+        covers_.clear();
+        cover_bound_ = Rect{};
     }
 
     void reserve(std::size_t n) {
@@ -237,11 +240,21 @@ class DrawList {
         // The fill that set it is the instance just pushed; anything drawn
         // after it that overlaps a glyph invalidates it for that glyph.
         backdrop_since_ = instances_.size();
+        covers_.clear();
+        cover_bound_ = Rect{};
     }
     void clear_text_backdrop() noexcept { text_backdrop_ = Vec4{}; }
     struct BackdropState { Vec4 colour; std::size_t since; };
     [[nodiscard]] BackdropState text_backdrop() const noexcept { return {text_backdrop_, backdrop_since_}; }
-    void restore_text_backdrop(BackdropState s) noexcept { text_backdrop_ = s.colour; backdrop_since_ = s.since; }
+    void restore_text_backdrop(BackdropState s) noexcept {
+        text_backdrop_ = s.colour;
+        if (s.since != backdrop_since_) {   // a different window: rebuild its covers from the list
+            backdrop_since_ = s.since;
+            covers_.clear();
+            cover_bound_ = Rect{};
+            for (std::size_t k = backdrop_since_; k < instances_.size(); ++k) note_cover(instances_[k]);
+        }
+    }
 
     // ── emission ────────────────────────────────────────────────────────
 
@@ -262,6 +275,7 @@ class DrawList {
                 static_cast<ShapeKind>(instances_[tail.first].kind) == ShapeKind::backdrop;
             if (!tail_is_backdrop && tail.texture == texture &&
                 tail.blend == blend && tail.clip == current_clip_) {
+                note_cover(inst);
                 instances_.push_back(inst);
                 ++tail.count;
                 return;
@@ -269,6 +283,7 @@ class DrawList {
         }
         batches_.push_back(Batch{static_cast<std::uint32_t>(instances_.size()), 1,
                                  current_clip_, texture, blend});
+        note_cover(inst);
         instances_.push_back(inst);
     }
 
@@ -547,6 +562,20 @@ class DrawList {
     Rect                  current_clip_{Vec2{}, Vec2{num::inf, num::inf}};
     Vec4                  text_backdrop_{};   // see set_text_backdrop
     std::size_t           backdrop_since_ = 0;
+    // The non-glyph rects pushed since backdrop_since_ (what can hide the
+    // backdrop from a glyph), and their bounding box. backdrop_for asks these
+    // instead of rescanning every instance since the backdrop for every glyph:
+    // that scan was O(glyphs x instances), the single largest cost of
+    // painting a screen of text (a terminal under a flood: 8 ms a frame).
+    std::vector<Rect>     covers_;
+    Rect                  cover_bound_{};
+
+    void note_cover(const Instance& o) {
+        if (o.kind == static_cast<std::uint32_t>(ShapeKind::glyph)) return;
+        const Rect r{o.rect.x, o.rect.y, o.rect.z, o.rect.w};
+        cover_bound_ = covers_.empty() ? r : cover_bound_.unite(r);
+        covers_.push_back(r);
+    }
 
     /// The backdrop under a glyph at `dst`, or unknown if any non-glyph
     /// instance drawn after the backdrop's fill overlaps it (a sibling card,
@@ -554,12 +583,9 @@ class DrawList {
     /// never sits on other text's ink.
     [[nodiscard]] Vec4 backdrop_for(const Rect& dst) const noexcept {
         if (text_backdrop_.w < 0.5f) return Vec4{};
-        for (std::size_t k = backdrop_since_; k < instances_.size(); ++k) {
-            const Instance& o = instances_[k];
-            if (o.kind == static_cast<std::uint32_t>(ShapeKind::glyph)) continue;
-            const Rect r{o.rect.x, o.rect.y, o.rect.z, o.rect.w};
+        if (covers_.empty() || !cover_bound_.intersects(dst)) return text_backdrop_;   // the common case: O(1)
+        for (const Rect& r : covers_)
             if (r.intersects(dst)) return Vec4{};
-        }
         return text_backdrop_;
     }
 };
