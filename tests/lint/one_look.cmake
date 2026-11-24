@@ -8,10 +8,12 @@
 # font/dwrite_raster.hpp -- and core/target.hpp, which decides what the
 # platform IS (the target, the renderers, the one window system).
 #
-# So in the files below a platform conditional (_WIN32, __APPLE__,
-# __linux__, TARGET_OS_*) is an error unless allow_one_look.txt grants that
-# file a COUNT, with the reason. Grants are exact: a new conditional fails
-# the build, and so does a grant that is no longer used up.
+# So in the files below a platform conditional (the OS, the compiler, the
+# CPU or vector unit, the renderer or window system: *_OS_ / _CC_ / _CPU_ /
+# _ISA_ / _GPU_ / _WINDOW_, or a raw _WIN32 / __APPLE__ ...) is an error
+# unless allow_one_look.txt grants that file a COUNT, with the reason.
+# Grants are exact: a new conditional fails the build, and so does a grant
+# that is no longer used up.
 
 set(dirs font layout render style dsl widget core scene image output editor)
 set(platform_files core/target.hpp font/system.hpp font/mapped_file.hpp font/dwrite_raster.hpp core/win32.hpp core/startup.hpp)
@@ -37,7 +39,7 @@ foreach(d ${dirs})
         if(NOT is_platform EQUAL -1)
             continue()
         endif()
-        file(STRINGS ${ROOT}/${rel} hits REGEX "^[ \t]*#[ \t]*(if|elif|ifdef|ifndef).*(_WIN32|__APPLE__|__linux__|TARGET_OS_|MAYAG_OS_|JAAL_OS_)")
+        file(STRINGS ${ROOT}/${rel} hits REGEX "^[ \t]*#[ \t]*(if|elif|ifdef|ifndef).*(_WIN32|__APPLE__|__linux__|TARGET_OS_|(MAYAG|JAAL)_(OS|CC|CPU|ISA|GPU|WINDOW)_)")
         list(LENGTH hits n)
         set(want 0)
         if(DEFINED grant_${rel})

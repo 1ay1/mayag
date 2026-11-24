@@ -25,23 +25,48 @@
 // its default instance, a synthetic italic or bold, or a machine without
 // dwrite.dll returns nullopt, and the caller rasterises the outline itself
 // as before.
+//
+// ── the seam ─────────────────────────────────────────────────────────────
+// font.hpp never names DirectWrite or tests the OS. It talks to
+// mayag::typo::os_raster, which is declared on EVERY platform:
+//
+//   os_raster::available     constexpr: this build has an OS rasteriser
+//   os_raster::open_face     the OS's view of a face file (FaceRef), or null
+//   os_raster::rasterize     one glyph's coverage, or nullopt
+//   os_raster::text_params   the composite's gamma / contrast
+//
+// On Windows it is DirectWrite; elsewhere every call answers "none" and
+// `available` is false. So the font engine is one source: its native path
+// is type-checked on every build, and branches on a constant, not on #if.
 
-#if MAYAG_OS_WINDOWS
-
-#include "../core/win32.hpp"
 #include "../core/geometry.hpp"
+#include "../core/sync.hpp"   // the Sendable / Frozen claim below
 #include "raster.hpp"
 
-#include <dwrite_2.h>
-
-#include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
-namespace mayag::typo::dwrite {
+namespace mayag::typo::os_raster {
+
+/// This build has an OS rasteriser to ask (DirectWrite, on Windows).
+inline constexpr bool available = MAYAG_OS_WINDOWS != 0;
+
+/// The OS's own handle for a face file, shared and released with its last
+/// owner. Empty when there is none (not this OS, a face from memory, ...).
+/// Opaque on purpose: font.hpp holds and passes it, only this file opens it.
+class FaceRef {
+  public:
+    FaceRef() = default;
+    explicit FaceRef(std::shared_ptr<void> h) noexcept : h_(std::move(h)) {}
+    [[nodiscard]] explicit operator bool() const noexcept { return h_ != nullptr; }
+    [[nodiscard]] void* get() const noexcept { return h_.get(); }
+
+  private:
+    std::shared_ptr<void> h_;
+};
 
 /// One rasterised glyph: an 8-bit coverage bitmap and where its top-left
 /// sits relative to the pen, in device px, y DOWN (the atlas convention).
@@ -49,6 +74,38 @@ struct Glyph {
     Bitmap bitmap;
     Vec2   offset{};
 };
+
+/// The user's text rendering parameters, for the composite: the gamma
+/// ratios and grayscale enhanced contrast the OS would apply. Read once
+/// (Windows does not expect apps to refresh them after startup).
+struct TextParams {
+    std::array<float, 4> gamma_ratios{};
+    float grayscale_contrast = 1.0f;
+};
+
+}  // namespace mayag::typo::os_raster
+
+// A FaceRef crosses threads (faces are shared by every runtime) and sits in a
+// Face's Cell cache. That is sound: the handle is an immutable font face --
+// DirectWrite documents IDWriteFontFace as free-threaded, every method const
+// in effect -- reference-counted by the shared_ptr, and never written once
+// opened. jaal cannot see that through an opaque pointer, so it is stated.
+template <> inline constexpr bool jaal::sendable_opt_in<mayag::typo::os_raster::FaceRef> = true;
+template <> inline constexpr bool jaal::frozen_opt_in<mayag::typo::os_raster::FaceRef>   = true;
+
+#if MAYAG_OS_WINDOWS
+
+#include "../core/win32.hpp"
+
+#include <dwrite_2.h>
+
+#include <algorithm>
+#include <cmath>
+
+namespace mayag::typo::dwrite {
+
+using Glyph      = os_raster::Glyph;
+using TextParams = os_raster::TextParams;
 
 namespace detail {
 
@@ -127,13 +184,6 @@ struct Runtime {
 
 }  // namespace detail
 
-/// The user's text rendering parameters, for the composite: the gamma
-/// ratios and grayscale enhanced contrast DirectWrite would apply. Read
-/// once (Windows does not expect apps to refresh them after startup).
-struct TextParams {
-    std::array<float, 4> gamma_ratios{};
-    float grayscale_contrast = 1.0f;
-};
 [[nodiscard]] inline TextParams text_params() {
     auto& rt = detail::Runtime::get();
     return {detail::gamma_ratios(rt.gamma), rt.grayscale_contrast};
@@ -239,4 +289,25 @@ struct TextParams {
 
 }  // namespace mayag::typo::dwrite
 
-#endif  // _WIN32
+namespace mayag::typo::os_raster {
+[[nodiscard]] inline FaceRef open_face(const std::string& path, std::uint32_t index) {
+    IDWriteFontFace* f = dwrite::open_face(path, index);
+    if (f == nullptr) return {};
+    return FaceRef{std::shared_ptr<void>{f, [](void* p) { static_cast<IDWriteFontFace*>(p)->Release(); }}};
+}
+[[nodiscard]] inline std::optional<Glyph> rasterize(const FaceRef& face, std::uint16_t gid, float size_px,
+                                                    float x_phase) {
+    return dwrite::rasterize(static_cast<IDWriteFontFace*>(face.get()), gid, size_px, x_phase);
+}
+[[nodiscard]] inline TextParams text_params() { return dwrite::text_params(); }
+}  // namespace mayag::typo::os_raster
+
+#else   // no OS rasteriser: every question answers "none"
+
+namespace mayag::typo::os_raster {
+[[nodiscard]] inline FaceRef open_face(const std::string&, std::uint32_t) { return {}; }
+[[nodiscard]] inline std::optional<Glyph> rasterize(const FaceRef&, std::uint16_t, float, float) { return std::nullopt; }
+[[nodiscard]] inline TextParams text_params() { return {}; }
+}  // namespace mayag::typo::os_raster
+
+#endif

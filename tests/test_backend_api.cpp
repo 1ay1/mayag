@@ -200,6 +200,23 @@ int main() {
     if (check_transfer_functions() != 0) return 1;
     std::printf("mayag backend boundary\n======================\n");
 
+    // ── each OS's preference, checked from ANY machine (it is a table) ──
+    section("backend preference per OS");
+    {
+        using backend::Api;
+        using K = target::os_kind;
+        const auto first = [](K os) { return backend::preferred_order(os).front(); };
+        bool soft_last = true;
+        for (K os : {K::windows, K::apple, K::gnu_linux, K::android, K::freebsd, K::openbsd, K::netbsd, K::emscripten,
+                     K::other_unix})
+            soft_last = soft_last && backend::preferred_order(os).back() == Api::software;
+        check(first(K::apple) == Api::metal && first(K::windows) == Api::d3d12 && first(K::gnu_linux) == Api::vulkan &&
+                  first(K::android) == Api::vulkan && first(K::emscripten) == Api::webgpu,
+              "Metal on Apple, D3D12 on Windows, Vulkan on Linux and Android, WebGPU on the web");
+        check(soft_last, "every OS ends in the software rasteriser, which cannot fail");
+        check(backend::preferred_order() == backend::preferred_order(target::os), "this build reads its own OS's row");
+    }
+
     // ── what the core knows ─────────────────────────────────────────
     section("the registry");
     {

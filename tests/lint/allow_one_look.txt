@@ -2,10 +2,6 @@
 # mayag's graphics (see one_look.cmake). `file: count` and why. Each is an
 # OPT-IN or content, never how the default frame looks.
 
-# DirectWrite's coverage for TextLook::native() (opt-in; FontConfig{} never
-# selects it): the Face's IDWriteFontFace handle, its mutex, the raster call
-# and the native glyph emit.
-font/font.hpp: 6
 
 # Keyboard conventions: native_keymap() -- the one place mayag decides
 # whether keys follow the Mac's or the PC's. Everything else (editing keys,

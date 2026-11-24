@@ -268,8 +268,44 @@ void test_color_emoji_renders() {
 
 }  // namespace
 
+// ── every OS's font data, from ANY machine: they are tables, not #ifs ──
+namespace {
+const char* fake_env(const char* k) {
+    const std::string_view v{k};
+    if (v == "HOME") return "/home/u";
+    if (v == "WINDIR") return "C:\\Windows";
+    if (v == "LOCALAPPDATA") return "C:\\Users\\u\\AppData\\Local";
+    return nullptr;
+}
+void test_every_os_table() {
+    section("font tables, every OS");
+    using K = target::os_kind;
+    namespace d = system::detail;
+    const auto first_dir = [](K os) { return d::font_directories(os, fake_env).front().string(); };
+    check(first_dir(K::apple) == "/home/u/Library/Fonts" && first_dir(K::windows) == "C:\\Windows\\Fonts" &&
+              first_dir(K::gnu_linux) == "/home/u/.local/share/fonts",
+          "font directories: the user's own first, on macOS, Windows and Linux");
+    check(d::cache_path(K::apple, fake_env) == "/home/u/Library/Caches/mayag/fonts.cache" &&
+              d::cache_path(K::gnu_linux, fake_env) == "/home/u/.cache/mayag/fonts.cache" &&
+              !d::cache_path(K::windows, fake_env).empty(),
+          "the font cache: ~/Library/Caches, XDG, %LOCALAPPDATA%");
+    check(system::ui_font_families(K::apple).front() == "SF Pro Text" &&
+              system::ui_font_families(K::windows).front() == "Segoe UI Variable Text" &&
+              system::mono_font_families(K::windows).front() == "Cascadia Mono" &&
+              system::emoji_font_families(K::gnu_linux).size() > 1,
+          "default families: each OS's own faces");
+    check(!system::desktop_script_conventions(K::apple) && !system::desktop_script_conventions(K::windows) &&
+              system::desktop_script_conventions(K::gnu_linux) && system::desktop_script_conventions(K::freebsd),
+          "script conventions on the free desktops only");
+    check(system::ui_font_families() == system::ui_font_families(target::os) &&
+              d::font_directories() == d::font_directories(target::os, d::real_env),
+          "this build reads its own OS's rows");
+}
+}  // namespace
+
 int main() {
     std::printf("mayag font discovery\n====================\n");
+    test_every_os_table();
     test_last_resort();
     test_color_fonts_load();
     test_color_emoji_renders();

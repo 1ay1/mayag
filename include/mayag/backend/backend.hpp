@@ -75,42 +75,33 @@ enum class Api : std::uint8_t {
 /// machine" GPU bugs.
 [[nodiscard]] inline std::vector<Api> compiled_backends() {
     std::vector<Api> v;
-#if MAYAG_GPU_VULKAN
-    v.push_back(Api::vulkan);
-#endif
-#if MAYAG_GPU_METAL
-    v.push_back(Api::metal);
-#endif
-#if MAYAG_GPU_D3D12
-    v.push_back(Api::d3d12);
-#endif
-#if MAYAG_GPU_WEBGPU
-    v.push_back(Api::webgpu);
-#endif
-#if MAYAG_GPU_OPENGL
-    v.push_back(Api::opengl);
-#endif
-    v.push_back(Api::software);   // unconditional
-    return v;
-}
-
-/// The platform's preferred order, best first.
-[[nodiscard]] inline std::vector<Api> preferred_order() {
-    std::vector<Api> v;
-#if MAYAG_OS_APPLE
-    v = {Api::metal, Api::vulkan, Api::opengl};
-#elif MAYAG_OS_WINDOWS
-    v = {Api::d3d12, Api::vulkan, Api::opengl};
-#elif MAYAG_OS_EMSCRIPTEN
-    v = {Api::webgpu, Api::opengl};
-#elif MAYAG_OS_ANDROID
-    v = {Api::vulkan, Api::opengl};
-#else
-    v = {Api::vulkan, Api::opengl};
-#endif
+    // MAYAG_GPU_*: the build's renderers, decided in core/target.hpp
+    if constexpr (MAYAG_GPU_VULKAN != 0) v.push_back(Api::vulkan);
+    if constexpr (MAYAG_GPU_METAL != 0) v.push_back(Api::metal);
+    if constexpr (MAYAG_GPU_D3D12 != 0) v.push_back(Api::d3d12);
+    if constexpr (MAYAG_GPU_WEBGPU != 0) v.push_back(Api::webgpu);
+    if constexpr (MAYAG_GPU_OPENGL != 0) v.push_back(Api::opengl);
     v.push_back(Api::software);
     return v;
 }
+
+/// An OS's preferred order, best first, software last. A table over the OS
+/// (target::os_kind), not an #if chain: every row compiles on every build,
+/// and a test checks every OS's order from any machine.
+[[nodiscard]] inline std::vector<Api> preferred_order(target::os_kind os) {
+    using K = target::os_kind;
+    std::vector<Api> v;
+    switch (os) {
+        case K::apple:      v = {Api::metal, Api::vulkan, Api::opengl}; break;
+        case K::windows:    v = {Api::d3d12, Api::vulkan, Api::opengl}; break;
+        case K::emscripten: v = {Api::webgpu, Api::opengl}; break;
+        default:            v = {Api::vulkan, Api::opengl}; break;   // Linux, Android, the BSDs
+    }
+    v.push_back(Api::software);
+    return v;
+}
+/// This build's OS's preferred order.
+[[nodiscard]] inline std::vector<Api> preferred_order() { return preferred_order(target::os); }
 
 /// The order backends are actually TRIED in: an explicit MAYAG_BACKEND request
 /// first (so a user can force or exclude a backend without a rebuild), then the

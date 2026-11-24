@@ -54,6 +54,20 @@
 #define MAYAG_ISA_SSE41      JAAL_ISA_SSE41
 #define MAYAG_ISA_AVX2       JAAL_ISA_AVX2
 
+/// Silence one GCC warning for the code between, on GCC only (a false
+/// positive, with the reason written next to it):
+///   MAYAG_GCC_IGNORE("-Wshadow")  ...  MAYAG_GCC_RESTORE()
+/// The one place mayag spells a compiler's pragma, so no file outside this
+/// one tests MAYAG_CC_* to quiet a warning.
+#define MAYAG_PRAGMA_(x) _Pragma(#x)
+#if MAYAG_CC_GCC
+#  define MAYAG_GCC_IGNORE(warning) _Pragma("GCC diagnostic push") MAYAG_PRAGMA_(GCC diagnostic ignored warning)
+#  define MAYAG_GCC_RESTORE()       _Pragma("GCC diagnostic pop")
+#else
+#  define MAYAG_GCC_IGNORE(warning)
+#  define MAYAG_GCC_RESTORE()
+#endif
+
 // ── the build: renderers ─────────────────────────────────────────────────────
 #if defined(MAYAG_WITH_VULKAN)
 #  define MAYAG_GPU_VULKAN 1

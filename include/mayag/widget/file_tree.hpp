@@ -128,10 +128,7 @@ inline void tree_reveal(ScrollState& scroll, int row) {
 // GCC 16 at -O3 inlines a constant out-of-range row into this and warns
 // about rows[at] on the path the bounds check has already cut off (it can't
 // relate size(), a pointer difference over sizeof(TreeRow), to the index).
-#if MAYAG_CC_GCC
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Warray-bounds"
-#endif
+MAYAG_GCC_IGNORE("-Warray-bounds")
 [[nodiscard]] inline TreeIntent tree_click(int row, int count, int& selected,
                                            const std::vector<TreeRow>& rows) {
     using A = TreeIntent::Act;
@@ -141,9 +138,7 @@ inline void tree_reveal(ScrollState& scroll, int row) {
     if (rows[at].dir) return {A::toggle, row};
     return {count >= 2 ? A::open : A::preview, row};
 }
-#if MAYAG_CC_GCC
-#pragma GCC diagnostic pop
-#endif
+MAYAG_GCC_RESTORE()
 
 namespace detail {
 template <ControlContext C>

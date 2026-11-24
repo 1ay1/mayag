@@ -276,38 +276,40 @@ struct FontEntry {
 
 namespace detail {
 
-/// Directories the platform keeps fonts in, most specific first so a
-/// user-installed override wins over the system copy.
-[[nodiscard]] inline std::vector<std::filesystem::path> font_directories() {
-    namespace fs = std::filesystem;
-    std::vector<fs::path> dirs;
+/// Where an OS's environment comes from: the real one, or a test's.
+using EnvLookup = const char* (*)(const char*);
+[[nodiscard]] inline const char* real_env(const char* k) { return std::getenv(k); }
 
-    [[maybe_unused]] const char* home = std::getenv("HOME");
-
-#if MAYAG_OS_APPLE
-    if (home != nullptr) dirs.emplace_back(std::string{home} + "/Library/Fonts");
-    dirs.emplace_back("/Library/Fonts");
-    dirs.emplace_back("/System/Library/Fonts");
-    dirs.emplace_back("/System/Library/Fonts/Supplemental");
-#elif MAYAG_OS_WINDOWS
-    if (const char* windir = std::getenv("WINDIR")) {
-        dirs.emplace_back(std::string{windir} + "\\Fonts");
+/// Directories an OS keeps fonts in, most specific first so a user-installed
+/// override wins over the system copy. A table over the OS, not an #if
+/// chain: every row compiles everywhere and is tested from any machine.
+[[nodiscard]] inline std::vector<std::filesystem::path> font_directories(target::os_kind os, EnvLookup env) {
+    std::vector<std::filesystem::path> dirs;
+    const auto under = [&](const char* var, std::string_view tail) {
+        if (const char* v = env(var); v != nullptr && *v != '\0') dirs.emplace_back(std::string{v} + std::string{tail});
+    };
+    switch (os) {
+        case target::os_kind::apple:
+            under("HOME", "/Library/Fonts");
+            dirs.emplace_back("/Library/Fonts");
+            dirs.emplace_back("/System/Library/Fonts");
+            dirs.emplace_back("/System/Library/Fonts/Supplemental");
+            break;
+        case target::os_kind::windows:
+            under("WINDIR", "\\Fonts");
+            under("LOCALAPPDATA", "\\Microsoft\\Windows\\Fonts");
+            break;
+        default:   // the free desktops and every other POSIX
+            under("HOME", "/.local/share/fonts");
+            under("HOME", "/.fonts");
+            dirs.emplace_back("/usr/share/fonts");
+            dirs.emplace_back("/usr/local/share/fonts");
+            dirs.emplace_back("/run/host/fonts");        // flatpak
+            break;
     }
-    if (const char* local = std::getenv("LOCALAPPDATA")) {
-        dirs.emplace_back(std::string{local} + "\\Microsoft\\Windows\\Fonts");
-    }
-#else
-    if (home != nullptr) {
-        dirs.emplace_back(std::string{home} + "/.local/share/fonts");
-        dirs.emplace_back(std::string{home} + "/.fonts");
-    }
-    dirs.emplace_back("/usr/share/fonts");
-    dirs.emplace_back("/usr/local/share/fonts");
-    dirs.emplace_back("/run/host/fonts");        // flatpak
-#endif
-
     return dirs;
 }
+[[nodiscard]] inline std::vector<std::filesystem::path> font_directories() { return font_directories(target::os, real_env); }
 
 [[nodiscard]] inline bool is_font_file(const std::filesystem::path& p) {
     auto ext = p.extension().string();
@@ -480,20 +482,29 @@ inline void walk_fonts(const std::filesystem::path& root, std::vector<std::pair<
 #endif
 }
 
-[[nodiscard]] inline std::string cache_path() {
-    if (const char* off = std::getenv("MAYAG_FONT_CACHE"); off != nullptr && std::string_view{off} == "0") return {};
+[[nodiscard]] inline std::string cache_path(target::os_kind os, EnvLookup env) {
+    if (const char* off = env("MAYAG_FONT_CACHE"); off != nullptr && std::string_view{off} == "0") return {};
+    const auto var = [&](const char* k) -> const char* {
+        const char* v = env(k);
+        return v != nullptr && *v != '\0' ? v : nullptr;
+    };
     std::filesystem::path base;
-#if MAYAG_OS_WINDOWS
-    if (const char* a = std::getenv("LOCALAPPDATA")) base = std::filesystem::path{a} / "mayag";
-#elif MAYAG_OS_APPLE
-    if (const char* h = std::getenv("HOME")) base = std::filesystem::path{h} / "Library/Caches/mayag";
-#else
-    if (const char* x = std::getenv("XDG_CACHE_HOME"); x != nullptr && *x != '\0') base = std::filesystem::path{x} / "mayag";
-    else if (const char* h = std::getenv("HOME")) base = std::filesystem::path{h} / ".cache/mayag";
-#endif
+    switch (os) {
+        case target::os_kind::windows:
+            if (const char* a = var("LOCALAPPDATA")) base = std::filesystem::path{a} / "mayag";
+            break;
+        case target::os_kind::apple:
+            if (const char* h = var("HOME")) base = std::filesystem::path{h} / "Library/Caches/mayag";
+            break;
+        default:   // XDG
+            if (const char* x = var("XDG_CACHE_HOME")) base = std::filesystem::path{x} / "mayag";
+            else if (const char* h = var("HOME")) base = std::filesystem::path{h} / ".cache/mayag";
+            break;
+    }
     if (base.empty()) return {};
     return (base / "fonts.cache").string();
 }
+[[nodiscard]] inline std::string cache_path() { return cache_path(target::os, real_env); }
 
 class CacheWriter {
   public:
@@ -754,49 +765,58 @@ class Database {
 // Convenience builders
 // ════════════════════════════════════════════════════════════════════════
 
-/// The platform's default UI font family names, best first.
-[[nodiscard]] inline std::vector<std::string_view> ui_font_families() {
-#if MAYAG_OS_APPLE
-    return {"SF Pro Text", "SF Pro", "System Font", "Helvetica Neue", "Helvetica", "Arial"};
-#elif MAYAG_OS_WINDOWS
-    return {"Segoe UI Variable Text", "Segoe UI", "Tahoma", "Arial"};
-#else
-    // The macOS faces first when installed (SF Pro from developer.apple.com,
-    // or a Mac's System Font copied over): the macOS look is the default.
-    return {"System Font", "SF Pro Text", "SF Pro", "Inter", "Cantarell", "Ubuntu", "Noto Sans", "DejaVu Sans", "Liberation Sans"};
-#endif
+/// An OS's default font families, best first: the UI face, the mono face,
+/// the emoji face. One table over the OS (every row compiles everywhere and
+/// is tested from any machine); the no-argument forms read this build's.
+/// Where no OS face is assumed (the free desktops), the macOS faces come
+/// first when installed (SF Pro from developer.apple.com, or a Mac's System
+/// Font copied over): the macOS look is the default.
+[[nodiscard]] inline std::vector<std::string_view> ui_font_families(target::os_kind os) {
+    switch (os) {
+        case target::os_kind::apple: return {"SF Pro Text", "SF Pro", "System Font", "Helvetica Neue", "Helvetica", "Arial"};
+        case target::os_kind::windows: return {"Segoe UI Variable Text", "Segoe UI", "Tahoma", "Arial"};
+        default:
+            return {"System Font", "SF Pro Text", "SF Pro", "Inter", "Cantarell", "Ubuntu", "Noto Sans", "DejaVu Sans",
+                    "Liberation Sans"};
+    }
 }
-
-[[nodiscard]] inline std::vector<std::string_view> mono_font_families() {
-#if MAYAG_OS_APPLE
-    return {"SF Mono", "Menlo", "Monaco", "Courier New"};
-#elif MAYAG_OS_WINDOWS
-    return {"Cascadia Mono", "Consolas", "Courier New"};
-#else
-    return {"SF Mono", "Menlo", "JetBrains Mono", "Fira Code", "Source Code Pro", "DejaVu Sans Mono", "Liberation Mono"};
-#endif
+[[nodiscard]] inline std::vector<std::string_view> mono_font_families(target::os_kind os) {
+    switch (os) {
+        case target::os_kind::apple: return {"SF Mono", "Menlo", "Monaco", "Courier New"};
+        case target::os_kind::windows: return {"Cascadia Mono", "Consolas", "Courier New"};
+        default:
+            return {"SF Mono", "Menlo", "JetBrains Mono", "Fira Code", "Source Code Pro", "DejaVu Sans Mono", "Liberation Mono"};
+    }
 }
-
-/// Emoji font families, per platform.
-[[nodiscard]] inline std::vector<std::string_view> emoji_font_families() {
-#if MAYAG_OS_APPLE
-    return {"Apple Color Emoji"};
-#elif MAYAG_OS_WINDOWS
-    return {"Segoe UI Emoji"};
-#else
-    return {"Apple Color Emoji", "Noto Color Emoji", "Twemoji", "JoyPixels"};
-#endif
+[[nodiscard]] inline std::vector<std::string_view> emoji_font_families(target::os_kind os) {
+    switch (os) {
+        case target::os_kind::apple: return {"Apple Color Emoji"};
+        case target::os_kind::windows: return {"Segoe UI Emoji"};
+        default: return {"Apple Color Emoji", "Noto Color Emoji", "Twemoji", "JoyPixels"};
+    }
 }
+[[nodiscard]] inline std::vector<std::string_view> ui_font_families() { return ui_font_families(target::os); }
+[[nodiscard]] inline std::vector<std::string_view> mono_font_families() { return mono_font_families(target::os); }
+[[nodiscard]] inline std::vector<std::string_view> emoji_font_families() { return emoji_font_families(target::os); }
 
-/// CJK families, per platform.
-[[nodiscard]] inline std::vector<std::string_view> cjk_font_families() {
-#if MAYAG_OS_APPLE
-    return {"Hiragino Sans", "PingFang SC", "Apple SD Gothic Neo"};
-#elif MAYAG_OS_WINDOWS
-    return {"Yu Gothic UI", "Microsoft YaHei", "Malgun Gothic"};
-#else
-    return {"Noto Sans CJK JP", "Noto Sans CJK SC", "Source Han Sans"};
-#endif
+/// CJK families, per OS (the same table rule as above).
+[[nodiscard]] inline std::vector<std::string_view> cjk_font_families(target::os_kind os) {
+    switch (os) {
+        case target::os_kind::apple: return {"Hiragino Sans", "PingFang SC", "Apple SD Gothic Neo"};
+        case target::os_kind::windows: return {"Yu Gothic UI", "Microsoft YaHei", "Malgun Gothic"};
+        default: return {"Noto Sans CJK JP", "Noto Sans CJK SC", "Source Han Sans"};
+    }
+}
+[[nodiscard]] inline std::vector<std::string_view> cjk_font_families() { return cjk_font_families(target::os); }
+
+/// Whether fallback follows the free desktops' per-script conventions
+/// (linux_script_families below) instead of the font database's own
+/// ranking. macOS and Windows ship one curated face per script, so ranking
+/// is right there; a Linux machine has dozens of Noto designs, and the most
+/// specialised covering face picks badly. A constant read by plain branches,
+/// so both policies compile (and are type-checked) on every build.
+[[nodiscard]] constexpr bool desktop_script_conventions(target::os_kind os) noexcept {
+    return os != target::os_kind::apple && os != target::os_kind::windows;
 }
 
 namespace detail {
@@ -821,7 +841,6 @@ namespace detail {
 
 }  // namespace detail
 
-#if !MAYAG_OS_APPLE && !MAYAG_OS_WINDOWS
 /// The face a Linux desktop draws `s` with, best first: the standard text
 /// designs fontconfig's defaults, GNOME and KDE, Chrome and Firefox resolve
 /// to (Noto Sans <Script>, then the long-standing distro faces). Without
@@ -873,7 +892,7 @@ namespace detail {
         default: return {};
     }
 }
-#endif
+
 
 /// The always-available floor: a real TrueType face synthesized in memory,
 /// so `default_stack()` is never empty even on a machine with no fonts. This
@@ -1072,65 +1091,63 @@ namespace detail {
     //    can draw a script, it is in the chain. Scripts already covered by
     //    the primary are skipped by add_entry's dedup, and the most
     //    specialised face per script is chosen by covering().
-#if !MAYAG_OS_APPLE && !MAYAG_OS_WINDOWS
     //    On Linux "most specialised" picks badly (Noto Kufi, a display face,
     //    for all Arabic; Noto Rashi, a historical script, for Hebrew; an icon
     //    font for symbols the UI font already has), so a script the stack
     //    already draws is skipped, and the standard text design a Linux
     //    desktop uses (linux_script_families, locale-aware for CJK) is tried
     //    before the generic ranking.
-    const std::string lang = detail::user_language();
+    constexpr bool conventions = desktop_script_conventions(target::os);
+    const std::string lang = conventions ? detail::user_language() : std::string{};
     const auto served = [&](char32_t cp) {
         for (std::size_t i = 0; i < stack->face_count(); ++i)
             if (stack->serves(i, cp)) return true;
         return false;
     };
-#endif
     // Linux: symbols and math first, so ∀ or → the UI font lacks comes from
     // a symbol design, not from the full-width ideograph-sized one in a CJK
     // face that happens to sit earlier in the chain.
     std::vector<ScriptProbe> probes{std::begin(script_probes), std::end(script_probes)};
-#if !MAYAG_OS_APPLE && !MAYAG_OS_WINDOWS
-    std::stable_partition(probes.begin(), probes.end(), [](const ScriptProbe& p) {
-        return p.script == Script::math || p.script == Script::symbols;
-    });
-#endif
+    if (conventions)
+        std::stable_partition(probes.begin(), probes.end(), [](const ScriptProbe& p) {
+            return p.script == Script::math || p.script == Script::symbols;
+        });
     for (const auto& probe : probes) {
         if (probe.script == Script::emoji) continue;   // handled last, in colour
-#if !MAYAG_OS_APPLE && !MAYAG_OS_WINDOWS
-        // Symbols and math are huge blocks one probe cannot stand for (a UI
-        // font has ∀ but not 𝔸): always add their face.
-        const bool broad = probe.script == Script::math || probe.script == Script::symbols;
-        if (!broad && served(probe.codepoint)) continue;
-        bool placed = false;
-        for (const std::string& fam : linux_script_families(probe.script, lang)) {
-            const FontEntry* e = db.find(fam, 400, false);
-            if (e == nullptr || !e->covers(probe.script) || !e->outlines) continue;
-            if (broad) {
-                // Limited to the symbol/math blocks: Noto Sans Math also maps
-                // Arabic letters (the Arabic math alphabet) and must not
-                // shadow the Arabic text face.
-                static constexpr std::array<std::array<char32_t, 2>, 6> math_blocks{{
-                    {0x2100, 0x214F}, {0x2200, 0x22FF}, {0x27C0, 0x27EF}, {0x2980, 0x2AFF},
-                    {0x1D400, 0x1D7FF}, {0x1EE00, 0x1EEFF}}};
-                static constexpr std::array<std::array<char32_t, 2>, 9> symbol_blocks{{
-                    {0x2190, 0x21FF}, {0x2300, 0x23FF}, {0x2400, 0x24FF}, {0x25A0, 0x27BF},
-                    {0x2900, 0x297F}, {0x2B00, 0x2BFF}, {0x1F000, 0x1F0FF}, {0x1F700, 0x1F8FF},
-                    {0x1FB00, 0x1FBFF}}};
-                if (already(e)) { placed = true; break; }
-                if (auto face = Face::from_file(e->path, e->face_index)) {
-                    added.emplace_back(e->path, e->face_index);
-                    if (probe.script == Script::math) stack->add_limited(std::move(face), math_blocks);
-                    else stack->add_limited(std::move(face), symbol_blocks);
-                    placed = true;
-                    break;
+        if (conventions) {
+            // Symbols and math are huge blocks one probe cannot stand for (a UI
+            // font has ∀ but not 𝔸): always add their face.
+            const bool broad = probe.script == Script::math || probe.script == Script::symbols;
+            if (!broad && served(probe.codepoint)) continue;
+            bool placed = false;
+            for (const std::string& fam : linux_script_families(probe.script, lang)) {
+                const FontEntry* e = db.find(fam, 400, false);
+                if (e == nullptr || !e->covers(probe.script) || !e->outlines) continue;
+                if (broad) {
+                    // Limited to the symbol/math blocks: Noto Sans Math also maps
+                    // Arabic letters (the Arabic math alphabet) and must not
+                    // shadow the Arabic text face.
+                    static constexpr std::array<std::array<char32_t, 2>, 6> math_blocks{{
+                        {0x2100, 0x214F}, {0x2200, 0x22FF}, {0x27C0, 0x27EF}, {0x2980, 0x2AFF},
+                        {0x1D400, 0x1D7FF}, {0x1EE00, 0x1EEFF}}};
+                    static constexpr std::array<std::array<char32_t, 2>, 9> symbol_blocks{{
+                        {0x2190, 0x21FF}, {0x2300, 0x23FF}, {0x2400, 0x24FF}, {0x25A0, 0x27BF},
+                        {0x2900, 0x297F}, {0x2B00, 0x2BFF}, {0x1F000, 0x1F0FF}, {0x1F700, 0x1F8FF},
+                        {0x1FB00, 0x1FBFF}}};
+                    if (already(e)) { placed = true; break; }
+                    if (auto face = Face::from_file(e->path, e->face_index)) {
+                        added.emplace_back(e->path, e->face_index);
+                        if (probe.script == Script::math) stack->add_limited(std::move(face), math_blocks);
+                        else stack->add_limited(std::move(face), symbol_blocks);
+                        placed = true;
+                        break;
+                    }
+                    continue;
                 }
-                continue;
+                if (add_entry(e)) { placed = true; break; }
             }
-            if (add_entry(e)) { placed = true; break; }
+            if (placed) continue;
         }
-        if (placed) continue;
-#endif
         // The best candidate first; if it will not load, the next one. One
         // unloadable face must not leave a whole script as tofu.
         if (add_entry(db.covering(probe.codepoint))) continue;

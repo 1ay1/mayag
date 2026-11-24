@@ -45,7 +45,6 @@
 #include <fstream>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -134,26 +133,22 @@ class Face {
         if (!axes_.empty()) apply_user_coords(vals);
     }
 
-#if MAYAG_OS_WINDOWS
-    ~Face() {
-        if (dw_face_ != nullptr) dw_face_->Release();
+    /// This face as the OS rasteriser sees it (os_raster, dwrite_raster.hpp:
+    /// DirectWrite on Windows), for native coverage. Null when this build has
+    /// none, when the face did not come from a file the OS can open, or when
+    /// it is variable (instances away from the default would need the OS's
+    /// axis values; such faces keep mayag's own raster). Opened once, cached
+    /// like every other lazy fill: in a Cell, a pure function of the face.
+    [[nodiscard]] os_raster::FaceRef os_face() const {
+        if constexpr (!os_raster::available) return {};
+        if (source_path_.empty() || is_variable()) return {};
+        if (auto hit = caches_->os_face.read([](const std::optional<os_raster::FaceRef>& v) { return v; })) return *hit;
+        os_raster::FaceRef f = os_raster::open_face(source_path_, source_index_);   // outside the lock
+        return caches_->os_face.with([](std::optional<os_raster::FaceRef>& v, os_raster::FaceRef x) {
+            if (!v) v = std::move(x);   // the first one in wins
+            return *v;
+        }, std::move(f));
     }
-
-    /// This face as DirectWrite sees it, for native rasterisation (see
-    /// dwrite_raster.hpp). Null when the face did not come from a file
-    /// DirectWrite can open, when it is variable (instances away from the
-    /// default would need DWRITE_FONT_AXIS_VALUEs; such faces keep mayag's
-    /// own raster), or when DirectWrite is unavailable. Opened once.
-    [[nodiscard]] IDWriteFontFace* dwrite_face() const {
-        if (source_path_.empty() || is_variable()) return nullptr;
-        std::lock_guard lock{dw_mutex_};
-        if (!dw_tried_) {
-            dw_tried_ = true;
-            dw_face_ = dwrite::open_face(source_path_, source_index_);
-        }
-        return dw_face_;
-    }
-#endif
 
   private:
     bool init(std::span<const std::uint8_t> bytes, std::uint32_t face_index, ot::Error* err) {
@@ -753,11 +748,6 @@ class Face {
     std::optional<Frozen<Bytes>> bytes_;   ///< every span in file_ and the sources points in here (set by the factories)
     std::string               source_path_;        ///< the file, when from_file
     std::uint32_t             source_index_ = 0;   ///< its index in a collection
-#if MAYAG_OS_WINDOWS
-    mutable std::mutex        dw_mutex_;           ///< Windows only (not built on Linux): guards dw_*
-    mutable IDWriteFontFace*  dw_face_ = nullptr;  ///< native rasteriser's view (guarded by dw_mutex_)
-    mutable bool              dw_tried_ = false;
-#endif
     ot::FontFile              file_;
     GlyphSource               glyphs_;
     KernTable                 kerning_;
@@ -793,6 +783,7 @@ class Face {
         Cell<std::vector<float>>                          advance;      // per gid, NaN = unknown
         Cell<std::optional<std::optional<CgHintMetrics>>> cg_metrics;   // outer: computed yet?
         Cell<std::optional<MergeMode>>                    merge_mode;
+        Cell<std::optional<os_raster::FaceRef>>           os_face;      // outer: opened yet?
     };
     std::unique_ptr<Caches> caches_ = std::make_unique<Caches>();
 
@@ -864,8 +855,8 @@ class Face {
 //     the merge mode) sits in Cell leaf locks, each entry a pure
 //     function of the face, so concurrent fills agree;
 //   * the bytes are a shared_ptr<const> to immutable data (owned or mapped).
-// The Windows-only DirectWrite handle (dwrite_face) keeps its own raw mutex,
-// inside #if defined(_WIN32) -- not compiled on Linux.
+// The OS rasteriser's handle (os_face, DirectWrite on Windows) is one more
+// Cell-cached lazy fill, on every platform.
 template <> inline constexpr bool jaal::frozen_opt_in<mayag::typo::Face>   = true;
 template <> inline constexpr bool jaal::sendable_opt_in<mayag::typo::Face> = true;
 
@@ -939,9 +930,7 @@ struct TextLook {
     /// (and on other platforms).
     [[nodiscard]] static constexpr TextLook native() noexcept {
         TextLook l = portable();
-#if MAYAG_OS_WINDOWS
-        l.native_raster = true;
-#endif
+        l.native_raster = os_raster::available;
         return l;
     }
     /// What FontConfig{} uses: the same on every platform.
@@ -1940,32 +1929,29 @@ class FontStack : public Shaper {
         }
         if (hint) key.flags |= glyph_flags::cg_hinted;
 
-#if MAYAG_OS_WINDOWS
-        // The native rasteriser: DirectWrite's own coverage for an ordinary
-        // outline glyph of a file-backed static face. Everything else --
-        // SDF tiers, colour glyphs, synthetic bold/italic, variable faces,
-        // in-memory faces -- keeps mayag's rasteriser below.
-        IDWriteFontFace* native_face = nullptr;
+        // The OS rasteriser (os_raster: DirectWrite on Windows, none
+        // elsewhere): its own coverage for an ordinary outline glyph of a
+        // file-backed static face. Everything else -- SDF tiers, colour
+        // glyphs, synthetic bold/italic, variable faces, in-memory faces --
+        // keeps mayag's rasteriser below. One path on every platform.
+        os_raster::FaceRef native_face;
         if (config_.native_raster && !use_sdf && !synth_italic && !synth_bold && !face.is_color() &&
             !face.has_colr(gid)) {
-            native_face = face.dwrite_face();
-            if (native_face != nullptr) key.flags |= glyph_flags::native;
+            native_face = face.os_face();
+            if (native_face) key.flags |= glyph_flags::native;
         }
-#endif
 
         if (const CachedGlyph* hit = atlas_.find(key)) return hit;
 
-#if MAYAG_OS_WINDOWS
-        if (native_face != nullptr) {
+        if (native_face) {
             const float phase = static_cast<float>(x_phase) / static_cast<float>(subpixel_phases_for(size_px));
             const float quantised = size_of_bucket(key.size_bucket);
-            if (auto g = dwrite::rasterize(native_face, gid, quantised, phase))
+            if (auto g = os_raster::rasterize(native_face, gid, quantised, phase))
                 return atlas_.insert(key, g->bitmap, g->offset, face.advance(gid, size_px), face.scale_for(quantised),
                                      0.0f, false, /*is_native=*/true);
             key.flags &= static_cast<std::uint16_t>(~glyph_flags::native);   // fall through to our own raster
             if (const CachedGlyph* hit = atlas_.find(key)) return hit;
         }
-#endif
 
         Outline o = face.outline(gid);
         if (synth_italic) {
@@ -3042,15 +3028,11 @@ class StackGlyphRenderer final : public render::GlyphRenderer {
             const float grow = grow_px * per_px;
             if (!stack_->config().centred) dst.origin.y -= grow_px;   // CoreGraphics: the growth goes up
             dl.glyph(dst, g.uv, st.color, true, edge, grow);
-        } else if (g.is_native) {
-#if MAYAG_OS_WINDOWS
-            static const dwrite::TextParams tp = dwrite::text_params();
+        } else if (g.is_native) {   // only ever set where os_raster::available
+            static const os_raster::TextParams tp = os_raster::text_params();
             dl.glyph_native(dst, g.uv, st.color,
                             Vec4{tp.gamma_ratios[0], tp.gamma_ratios[1], tp.gamma_ratios[2], tp.gamma_ratios[3]},
                             tp.grayscale_contrast);
-#else
-            dl.glyph(dst, g.uv, st.color, false);
-#endif
         } else {
             dl.glyph(dst, g.uv, st.color, false);
         }
