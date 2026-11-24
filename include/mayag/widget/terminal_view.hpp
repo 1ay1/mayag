@@ -105,6 +105,10 @@ struct TermViewOptions {
     float font_size = 13.0f;
     float line_height = 1.25f;      ///< multiple of the font size
     float padding = 8.0f;
+    /// Where column 0 starts (logical px); < 0: padding + the mark margin.
+    /// An app that centres the grid in its space (equal gaps both sides)
+    /// passes the origin it fitted the columns to.
+    float origin_x = -1.0f;
     bool  focused = true;
     bool  cursor_on = true;         ///< blink phase (the app's clock)
     float dim_unfocused = 0.0f;     ///< 0..1 darken when not focused (splits)
@@ -290,7 +294,7 @@ template <ControlContext C>
     const float cw = detail::term_cell_width(c, o.font_size, o.family);
     const float ch = std::round(o.font_size * o.line_height);
     const float margin = o.marks ? 10.0f : 0.0f;
-    const float ox = o.padding + margin, oy = o.padding;
+    const float ox = o.origin_x >= 0.0f ? o.origin_x : o.padding + margin, oy = o.padding;
     if (out_metrics != nullptr) {
         out_metrics->cell_w = cw; out_metrics->cell_h = ch;
         out_metrics->origin_x = ox; out_metrics->origin_y = oy;
@@ -357,7 +361,7 @@ template <ControlContext C>
         if (o.marks && row.mark != TermMark::none) {
             const std::uint32_t mc = row.mark == TermMark::error ? th.mark_error : row.mark == TermMark::ok ? th.mark_ok
                                    : row.mark == TermMark::running ? th.mark_running : th.mark_prompt;
-            rect(o.padding, y + 2, 3, ch - 4, rgb_of(mc), 1.5f);
+            rect(ox - margin, y + 2, 3, ch - 4, rgb_of(mc), 1.5f);   // the mark sits in the gutter just left of column 0
         }
 
         // ── backgrounds: merged runs of equal colour ──

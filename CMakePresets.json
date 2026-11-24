@@ -49,6 +49,23 @@
       }
     },
     {
+      "name": "quick",
+      "displayName": "macOS edit-test loop: upstream clang -O1 + shared PCH + ccache",
+      "description": "What to build while changing mayag. Measured on this M-series at -j12 (utility QoS): 166 s cold for everything (examples + tests) against 323 s for 'fast' (-O3); a widget-header change rebuilds in 19 s (Apple clang -O3, no shared PCH: 41 s). All 82 tests pass, and run in 27 s. -O1 still defines __OPTIMIZE__, so the timing gates stay enforced. Use 'fast' for benchmarks.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-quick",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O1 -DNDEBUG",
+        "CMAKE_C_FLAGS_RELEASE": "-O1 -DNDEBUG",
+        "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++",
+        "MAYAG_PCH": "ON",
+        "MAYAG_COMPILER_CACHE": "ON"
+      }
+    },
+    {
       "name": "gcc",
       "displayName": "GCC (Homebrew g++-16)",
       "description": "The CI macOS-gcc configuration. No shared PCH; ~4x slower to build than 'fast'.",
@@ -65,12 +82,14 @@
     { "name": "dev", "configurePreset": "dev" },
     { "name": "release", "configurePreset": "release" },
     { "name": "fast", "configurePreset": "fast" },
+    { "name": "quick", "configurePreset": "quick" },
     { "name": "gcc", "configurePreset": "gcc" }
   ],
   "testPresets": [
     { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true }, "execution": { "jobs": 8 } },
     { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true }, "execution": { "jobs": 8 } },
     { "name": "fast", "configurePreset": "fast", "output": { "outputOnFailure": true }, "execution": { "jobs": 6 } },
+    { "name": "quick", "configurePreset": "quick", "output": { "outputOnFailure": true }, "execution": { "jobs": 8 } },
     { "name": "gcc", "configurePreset": "gcc", "output": { "outputOnFailure": true }, "execution": { "jobs": 6 } }
   ]
 }
