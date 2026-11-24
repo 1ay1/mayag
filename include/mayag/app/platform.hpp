@@ -11,8 +11,9 @@
 //   5. a clock
 //   6. the clipboard and the cursor
 //
-// That is the entire `Window` concept below. It is a CONCEPT, not a base
-// class: the concrete type is chosen by `#if` at compile time and aliased to
+// That is the entire `Window` concept (platform/concepts.hpp, with the
+// optional capabilities). It is a CONCEPT, not a base class: the concrete
+// type is chosen ONCE (core/target.hpp: MAYAG_WINDOW_*) and aliased to
 // `platform::Native`, so there is no vtable, no indirect call per frame, and
 // the optimiser sees straight through to the platform code.
 //
@@ -23,50 +24,20 @@
 #include "../backend/software.hpp"
 #include "../core/geometry.hpp"
 #include "../platform/types.hpp"
+#include "../platform/concepts.hpp"   // Window, and what a window MAY do
 #include "../core/event.hpp"
 
+#include <array>
+#include <chrono>
 #include <concepts>
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
-namespace mayag::platform {
-
-// ── the concept ─────────────────────────────────────────────────────────
-
-template <typename W>
-concept Window = requires(W w, const W cw, const DrawList& dl, std::string_view text) {
-    // Lifecycle
-    { W::open(WindowConfig{}) } -> std::same_as<std::optional<W>>;
-    { w.close() }               -> std::same_as<void>;
-    { cw.is_open() }            -> std::same_as<bool>;
-
-    // Geometry
-    { cw.size() }      -> std::same_as<Vec2>;    ///< logical
-    { cw.dpi_scale() } -> std::same_as<float>;
-
-    // Events: everything queued, without blocking. jaal does the waiting;
-    // a window with an fd (Wayland) also exposes `int fd() const`.
-    { w.dispatch() } -> std::same_as<std::vector<Event>>;
-
-    // Presentation
-    { w.present(dl, Color<Srgb>{}) } -> std::same_as<void>;
-
-    // Services
-    { cw.now() }               -> std::same_as<double>;   ///< monotonic seconds
-    /// The user's configured multi-click interval, in seconds.
-    { cw.double_click_interval() } -> std::same_as<double>;
-    { w.set_title(text) }      -> std::same_as<void>;
-    { w.set_cursor(CursorShape::arrow) } -> std::same_as<void>;
-    { w.set_clipboard(text) }  -> std::same_as<void>;
-    { w.get_clipboard() }      -> std::same_as<std::string>;
-
-    // Screenshots / golden tests
-    { w.read_pixels() } -> std::same_as<std::vector<std::uint8_t>>;
-};
-
-}  // namespace mayag::platform
 
 // ── backend selection ───────────────────────────────────────────────────
 //
@@ -100,6 +71,34 @@ namespace mayag::platform {
 // The concept check that turns a bad port into a one-line error.
 static_assert(Window<Native>,
               "mayag: the selected platform backend does not satisfy the Window concept.");
+
+// ── what each backend offers, stated ──────────────────────────────────────────────
+// The table of which window can do what. A backend that drops or reshapes
+// a method it is listed with fails HERE, by name, instead of the host's
+// `if constexpr (UploadsImages<W>)` going quietly false and the feature
+// vanishing on one platform. Headless is checked on every build; each
+// native row where that backend is the build's window.
+template <class W>
+inline constexpr bool manages_and_uploads = Window<W> && Fullscreens<W> && ManagesItself<W> && UploadsImages<W> &&
+                                            TakesTextInput<W>;
+static_assert(manages_and_uploads<Headless>, "mayag: Headless lost a capability the host relies on");
+#if MAYAG_WINDOW_COCOA
+static_assert(manages_and_uploads<MacWindow> && PatchesImages<MacWindow> && MovesImageRows<MacWindow> &&
+                  ReplacesQueuedFrames<MacWindow> && CountsSkippedFrames<MacWindow> && LatchesLate<MacWindow> &&
+                  CountsLatchMisses<MacWindow> && ReportsDisplayTiming<MacWindow> && SharesEventQueue<MacWindow> &&
+                  MeasuresPhotons<MacWindow>,
+              "mayag: MacWindow lost a capability it is listed with");
+#elif MAYAG_WINDOW_WAYLAND
+static_assert(manages_and_uploads<WaylandWindow> && HasEventFd<WaylandWindow> && PatchesImages<WaylandWindow> &&
+                  ReplacesQueuedFrames<WaylandWindow> && CountsSkippedFrames<WaylandWindow> &&
+                  ReportsDisplayTiming<WaylandWindow> && RepeatsKeys<WaylandWindow> && AsksForRedraw<WaylandWindow> &&
+                  OwesRedraw<WaylandWindow> && MeasuresPhotons<WaylandWindow>,
+              "mayag: WaylandWindow lost a capability it is listed with");
+#elif MAYAG_WINDOW_WIN32
+static_assert(manages_and_uploads<Win32Window> && HasEventFd<Win32Window> && DrawsLive<Win32Window> &&
+                  CountsSkippedFrames<Win32Window> && ReportsDisplayTiming<Win32Window> && PrestartsGpu<Win32Window>,
+              "mayag: Win32Window lost a capability it is listed with");
+#endif
 
 [[nodiscard]] constexpr std::string_view native_name() noexcept {
     switch (target::window) {

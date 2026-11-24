@@ -40,6 +40,7 @@
 #include "../style/theme.hpp"
 #include "effects.hpp"
 #include "../core/event.hpp"
+#include "../platform/concepts.hpp"   // the window capabilities the host asks by name
 #include "handlers.hpp"
 #include "interaction.hpp"
 #include "latency.hpp"
@@ -210,7 +211,7 @@ class window_host {
 
     template <class Cx>
     void attach(Cx& cx) {
-        if constexpr (requires { window_.fd(); }) {
+        if constexpr (platform::HasEventFd<W>) {
             // `fd()` is the reactor's handle type, not necessarily an int:
             // an fd on Wayland, a HANDLE on Windows. Compare against the
             // platform's "nothing here" value rather than assuming >= 0.
@@ -235,7 +236,7 @@ class window_host {
         // content freezes, then snaps, for the whole drag. The callback pumps
         // the window's events into the program and draws immediately, outside
         // the frame pacing: the user is watching this frame land.
-        if constexpr (requires { window_.set_live_draw(std::function<void()>{}); }) {
+        if constexpr (platform::DrawsLive<W>) {
             window_.set_live_draw([this, &cx] {
                 if (!cx_ || !live_kernel_) return;
                 pump(cx);
@@ -373,13 +374,13 @@ class window_host {
     }
 
     [[nodiscard]] bool window_replaces_queued() const noexcept {
-        if constexpr (requires { { window_.replaces_queued_frames() } -> std::convertible_to<bool>; })
+        if constexpr (platform::ReplacesQueuedFrames<W>)
             return window_.replaces_queued_frames();
         return false;
     }
 
     [[nodiscard]] std::uint64_t frames_skipped() const noexcept {
-        if constexpr (requires { window_.frames_skipped(); }) return window_.frames_skipped();
+        if constexpr (platform::CountsSkippedFrames<W>) return window_.frames_skipped();
         return 0;
     }
 
@@ -427,7 +428,7 @@ class window_host {
     /// The window's learned margin when it measures one (macOS, capped there
     /// at half a refresh), else the fixed default capped at a quarter.
     [[nodiscard]] duration_t latch_margin() const noexcept {
-        if constexpr (requires { window_.latch_margin(); })
+        if constexpr (platform::LatchesLate<W>)
             return std::min<duration_t>(
                 std::chrono::duration_cast<duration_t>(window_.latch_margin()), period_ / 2);
         return std::min<duration_t>(std::chrono::duration_cast<duration_t>(kLatchMargin),
@@ -436,7 +437,7 @@ class window_host {
     void sync_display() {
         // A window reports vblanks on the REAL clock; under a simulated
         // clock they are meaningless, and the 60 Hz default grid is used.
-        if constexpr (requires(W& w) { { w.display_timing()->vblank } -> std::convertible_to<time_point>; }) {
+        if constexpr (platform::ReportsDisplayTiming<W> && std::same_as<time_point, std::chrono::steady_clock::time_point>) {
             const auto t = window_.display_timing();
             if (!t || t->seq == display_seq_) return;   // nothing new
             display_seq_ = t->seq;
@@ -468,7 +469,7 @@ class window_host {
 
     /// Seconds until the window's next key repeat; negative when none.
     [[nodiscard]] double window_repeat_in() const noexcept {
-        if constexpr (requires { window_.seconds_until_repeat(); }) return window_.seconds_until_repeat();
+        if constexpr (platform::RepeatsKeys<W>) return window_.seconds_until_repeat();
         return -1.0;
     }
 
@@ -505,12 +506,12 @@ class window_host {
     // Optional window hooks: wants_redraw() (redraw now: its renderer
     // changed) and redraw_pending() (it will want one soon).
     [[nodiscard]] bool window_wants_redraw() const noexcept {
-        if constexpr (requires(const W& w) { { w.wants_redraw() } -> std::convertible_to<bool>; })
+        if constexpr (platform::AsksForRedraw<W>)
             return window_.wants_redraw();
         return false;
     }
     [[nodiscard]] bool window_redraw_pending() const noexcept {
-        if constexpr (requires(const W& w) { { w.redraw_pending() } -> std::convertible_to<bool>; })
+        if constexpr (platform::OwesRedraw<W>)
             return window_.redraw_pending();
         return false;
     }
@@ -540,20 +541,20 @@ class window_host {
     std::optional<Msg> handle(const Run<Msg>& e) { return e.go(); }
     void handle(const SetCursor& e)      { window_.set_cursor(e.shape); }
     void handle(const SetFullscreen& e) {
-        if constexpr (requires { window_.set_fullscreen(e.on); }) window_.set_fullscreen(e.on);
+        if constexpr (platform::Fullscreens<W>) window_.set_fullscreen(e.on);
     }
     void handle(const WindowAction& e) {
         using K = WindowAction::Kind;
         switch (e.kind) {
             case K::move:
                 // The press that started it no longer drags inside the app.
-                if constexpr (requires { window_.begin_move(); }) { window_.begin_move(); input_.cancel_press(); }
+                if constexpr (platform::ManagesItself<W>) { window_.begin_move(); input_.cancel_press(); }
                 break;
             case K::minimize:
-                if constexpr (requires { window_.minimize(); }) window_.minimize();
+                if constexpr (platform::ManagesItself<W>) window_.minimize();
                 break;
             case K::toggle_maximize:
-                if constexpr (requires { window_.toggle_maximize(); }) window_.toggle_maximize();
+                if constexpr (platform::ManagesItself<W>) window_.toggle_maximize();
                 break;
         }
     }
@@ -567,19 +568,19 @@ class window_host {
         // and video frame after the first one off screen.
         const bool partial = !p.rects.empty() || p.move;
         bool moved = !p.move;
-        if constexpr (requires { window_.move_image_rows(e.id, 0, 0, 1, 1, 0); })
+        if constexpr (platform::MovesImageRows<W>)
             if (p.move) moved = window_.move_image_rows(e.id, (*p.move)[0], (*p.move)[1], (*p.move)[2], (*p.move)[3], (*p.move)[4]);
-        if constexpr (requires { window_.update_image_regions(e.id, 1, 1, p.rects, p.pixels); })
+        if constexpr (platform::PatchesImages<W>)
             if (partial && moved) done = window_.update_image_regions(e.id, p.width, p.height, p.rects, p.pixels);
         if (!done && p.whole) {
-            if constexpr (requires { window_.upload_image(e.id, std::shared_ptr<const ImageData>{}); })
+            if constexpr (platform::UploadsImages<W>)
                 window_.upload_image(e.id, std::shared_ptr<const ImageData>(
                                                std::make_shared<jaal::shared<ImageData>>(*p.whole), &p.whole->get()));
         }
         dirty_ = true;
     }
     void handle(const UploadImage& e) {
-        if constexpr (requires { window_.upload_image(e.id, std::shared_ptr<const ImageData>{}); }) {
+        if constexpr (platform::UploadsImages<W>) {
             // shared<T> holds a shared_ptr<const T>; alias it without a copy.
             window_.upload_image(e.id, std::shared_ptr<const ImageData>(
                 std::make_shared<jaal::shared<ImageData>>(e.image), &e.image.get()));
@@ -587,7 +588,7 @@ class window_host {
         }
     }
     void handle(const ReleaseImage& e) {
-        if constexpr (requires { window_.release_image(e.id); }) {
+        if constexpr (platform::UploadsImages<W>) {
             window_.release_image(e.id);
             dirty_ = true;
         }
@@ -672,7 +673,7 @@ class window_host {
                 auto s = std::make_unique<Surface>(w, std::move(*opened));
                 // the main window's loop reads the app's event queue and hands
                 // each event to the window it belongs to
-                if constexpr (requires { window_.enroll(); s->win.set_pull(false); }) {
+                if constexpr (platform::SharesEventQueue<W>) {
                     window_.enroll();
                     s->win.set_pull(false);
                     s->win.enroll();
@@ -1034,7 +1035,7 @@ class window_host {
     /// entry by role (`text_field`, set by text_field / code_view /
     /// terminal_view, or by `| role(...)` on a custom one).
     void sync_text_input() {
-        if constexpr (requires { window_.set_text_input(true, Rect{}); }) {
+        if constexpr (platform::TakesTextInput<W>) {
             const std::uint64_t f = input_.focused();
             const Node* n = f != 0 ? tree_.find(f) : nullptr;
             if (n == nullptr && f != 0) {
@@ -1581,7 +1582,7 @@ class window_host {
 
         Ctx ctx{size_, dpi_, time_, theme_, &latency_, {}, &bindings_->measurer,
                 &tracked_, &overlays_, &input_};
-        if constexpr (requires { window_.photon_stats(); }) ctx.photon = window_.photon_stats();
+        if constexpr (platform::MeasuresPhotons<W>) ctx.photon = window_.photon_stats();
         // Pull last frame's memo() subtrees out of the tree view() replaces.
         memos_.begin_frame(frame_counter_);
         ctx.memos = memo_on_ ? &memos_ : nullptr;
@@ -1870,7 +1871,7 @@ class window_host {
         if (now - framestats_at_ < 1.0) return;
         const FrameTiming m = latency_.mean(framestats_frames_);
         std::uint64_t skipped = 0;
-        if constexpr (requires { window_.frames_skipped(); }) skipped = window_.frames_skipped();
+        if constexpr (platform::CountsSkippedFrames<W>) skipped = window_.frames_skipped();
         const auto ms = std::exchange(memos_.stats, {});
         const auto ps = std::exchange(paint_cache_.stats, {});
         std::fprintf(stderr, "mayag: paint cache hits %llu  misses %llu\n", static_cast<unsigned long long>(ps.hits),
