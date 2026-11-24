@@ -42,6 +42,7 @@
 #include "../core/event.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
+#include "concepts.hpp"   // check_capabilities
 #include "images.hpp"
 #include "gpu_bringup.hpp"
 #include "../backend/gpu_policy.hpp"
@@ -1463,5 +1464,12 @@ class Win32Window {
         return ::DefWindowProcW(hwnd, msg, wp, lp);
     }
 };
+
+// What Win32Window can do, stated: checked both ways against what its methods
+// give it (platform/concepts.hpp) -- losing one or gaining one unstated
+// fails the build, naming the capability.
+static_assert(check_capabilities<Win32Window, caps<cap::event_fd, cap::draws_live, cap::counts_skipped_frames,
+                                                          cap::reports_display_timing, cap::fullscreens, cap::manages_itself,
+                                                          cap::uploads_images, cap::takes_text_input, cap::prestarts_gpu>>());
 
 }  // namespace mayag::platform

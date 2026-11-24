@@ -22,6 +22,7 @@
 #include "../image/png.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
+#include "concepts.hpp"   // check_capabilities
 
 #include <chrono>
 #include <cstdio>
@@ -321,5 +322,10 @@ class Headless {
     bool        text_input_ = false;
     Rect        text_caret_{};
 };
+
+// What Headless can do, stated: checked both ways against what its methods
+// give it (platform/concepts.hpp) -- losing one or gaining one unstated
+// fails the build, naming the capability.
+static_assert(check_capabilities<Headless, caps<cap::fullscreens, cap::manages_itself, cap::uploads_images, cap::takes_text_input>>());
 
 }  // namespace mayag::platform

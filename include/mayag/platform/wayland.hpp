@@ -55,6 +55,7 @@
 #include "../render/draw_list.hpp"
 #include "raw_input.hpp"
 #include "types.hpp"
+#include "concepts.hpp"   // check_capabilities
 #include "keys.hpp"
 #include "photon.hpp"
 #include "images.hpp"
@@ -2739,6 +2740,14 @@ class WaylandWindow {
   private:
     std::unique_ptr<Impl> p_;
 };
+
+// What WaylandWindow can do, stated: checked both ways against what its methods
+// give it (platform/concepts.hpp) -- losing one or gaining one unstated
+// fails the build, naming the capability.
+static_assert(check_capabilities<WaylandWindow, caps<cap::event_fd, cap::replaces_queued_frames, cap::counts_skipped_frames,
+                                                            cap::reports_display_timing, cap::repeats_keys, cap::asks_for_redraw,
+                                                            cap::owes_redraw, cap::fullscreens, cap::manages_itself, cap::uploads_images,
+                                                            cap::patches_images, cap::takes_text_input, cap::measures_photons>>());
 
 }  // namespace mayag::platform
 

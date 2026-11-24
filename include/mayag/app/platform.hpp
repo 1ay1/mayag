@@ -72,33 +72,8 @@ namespace mayag::platform {
 static_assert(Window<Native>,
               "mayag: the selected platform backend does not satisfy the Window concept.");
 
-// ── what each backend offers, stated ──────────────────────────────────────────────
-// The table of which window can do what. A backend that drops or reshapes
-// a method it is listed with fails HERE, by name, instead of the host's
-// `if constexpr (UploadsImages<W>)` going quietly false and the feature
-// vanishing on one platform. Headless is checked on every build; each
-// native row where that backend is the build's window.
-template <class W>
-inline constexpr bool manages_and_uploads = Window<W> && Fullscreens<W> && ManagesItself<W> && UploadsImages<W> &&
-                                            TakesTextInput<W>;
-static_assert(manages_and_uploads<Headless>, "mayag: Headless lost a capability the host relies on");
-#if MAYAG_WINDOW_COCOA
-static_assert(manages_and_uploads<MacWindow> && PatchesImages<MacWindow> && MovesImageRows<MacWindow> &&
-                  ReplacesQueuedFrames<MacWindow> && CountsSkippedFrames<MacWindow> && LatchesLate<MacWindow> &&
-                  CountsLatchMisses<MacWindow> && ReportsDisplayTiming<MacWindow> && SharesEventQueue<MacWindow> &&
-                  MeasuresPhotons<MacWindow>,
-              "mayag: MacWindow lost a capability it is listed with");
-#elif MAYAG_WINDOW_WAYLAND
-static_assert(manages_and_uploads<WaylandWindow> && HasEventFd<WaylandWindow> && PatchesImages<WaylandWindow> &&
-                  ReplacesQueuedFrames<WaylandWindow> && CountsSkippedFrames<WaylandWindow> &&
-                  ReportsDisplayTiming<WaylandWindow> && RepeatsKeys<WaylandWindow> && AsksForRedraw<WaylandWindow> &&
-                  OwesRedraw<WaylandWindow> && MeasuresPhotons<WaylandWindow>,
-              "mayag: WaylandWindow lost a capability it is listed with");
-#elif MAYAG_WINDOW_WIN32
-static_assert(manages_and_uploads<Win32Window> && HasEventFd<Win32Window> && DrawsLive<Win32Window> &&
-                  CountsSkippedFrames<Win32Window> && ReportsDisplayTiming<Win32Window> && PrestartsGpu<Win32Window>,
-              "mayag: Win32Window lost a capability it is listed with");
-#endif
+// What each backend offers is stated next to it (check_capabilities, after
+// each window class) and checked against what its methods give it.
 
 [[nodiscard]] constexpr std::string_view native_name() noexcept {
     switch (target::window) {

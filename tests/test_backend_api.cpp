@@ -149,6 +149,37 @@ struct Slow {
     }
 };
 }  // namespace bringup
+
+// ── capabilities as types (platform/concepts.hpp), on fake windows ──
+namespace capfake {
+struct Bare {};
+struct Imagey {
+    void upload_image(std::uint32_t, std::shared_ptr<const ImageData>) {}
+    void release_image(std::uint32_t) {}
+    [[nodiscard]] double seconds_until_repeat() const { return 0.0; }
+};
+struct WrongShape {   // a method of the right NAME but the wrong signature
+    void upload_image(int) {}
+    void release_image(std::uint32_t) {}
+};
+}  // namespace capfake
+static void check_capability_types() {
+    namespace p = platform;
+    using namespace capfake;
+    section("capabilities as types (platform/concepts.hpp)");
+    check(std::is_same_v<p::capabilities_of<Bare>, p::caps<>>, "a type with no methods has no capabilities");
+    check(std::is_same_v<p::capabilities_of<Imagey>, p::caps<p::cap::repeats_keys, p::cap::uploads_images>>,
+          "the set is COMPUTED from the methods, in cap::all's order");
+    check(p::capabilities_of<Imagey>::names[1] == "uploads_images", "...and each capability knows its name");
+    check(!p::has<WrongShape, p::cap::uploads_images>, "a method with the right name but the wrong shape is not the capability");
+    check(p::offers_exactly<Imagey, p::caps<p::cap::uploads_images, p::cap::repeats_keys>>,
+          "a stated set matches in any order");
+    check(!p::offers_exactly<Imagey, p::caps<p::cap::uploads_images>> &&
+              !p::offers_exactly<Imagey, p::caps<p::cap::uploads_images, p::cap::repeats_keys, p::cap::fullscreens>>,
+          "an unstated capability and an overclaimed one both fail the statement");
+    check(p::has<p::Headless, p::cap::uploads_images> && !p::has<p::Headless, p::cap::event_fd>,
+          "Headless: images, no event fd");
+}
 static void check_gpu_bringup() {
     using namespace std::chrono_literals;
     using namespace bringup;
@@ -261,6 +292,7 @@ int main() {
     if (check_metal_mirrors() != 0) return 1;
     if (check_transfer_functions() != 0) return 1;
     check_gpu_bringup();
+    check_capability_types();
     std::printf("mayag backend boundary\n======================\n");
 
     // ── the GPU knobs mean ONE thing (backend/gpu_policy.hpp) ──

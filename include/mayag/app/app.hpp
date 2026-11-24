@@ -447,7 +447,7 @@ int run_headless(AppConfig cfg, jaal::prog::flags_t<P> flags, Driver&& drive) {
 namespace detail {
 template <class W>
 void gpu_prestart_on() {
-    if constexpr (platform::PrestartsGpu<W>) W::gpu_prestart();
+    if constexpr (platform::has<W, platform::cap::prestarts_gpu>) W::gpu_prestart();
 }
 }  // namespace detail
 inline void gpu_prestart() { detail::gpu_prestart_on<platform::Native>(); }
@@ -463,7 +463,7 @@ namespace detail {
 /// the window closes, so latency can be checked from a script without a HUD.
 template <class W>
 void log_photon(W& window) {
-    if constexpr (platform::MeasuresPhotons<W>) {
+    if constexpr (platform::has<W, platform::cap::measures_photons>) {
         const char* on = std::getenv("MAYAG_PHOTON");
         if (on == nullptr || *on == '\0' || *on == '0') return;
         const auto s = window.photon_stats();
@@ -471,7 +471,7 @@ void log_photon(W& window) {
                      s.best_ms, s.p50_ms, s.mean_ms, s.p95_ms, s.worst_ms, s.samples);
         std::fprintf(stderr, "\n  stages (mean): to us %.2f  in us %.2f  compositor %.2f ms",
                      s.stage_ms[0], s.stage_ms[1], s.stage_ms[2]);
-        if constexpr (platform::CountsLatchMisses<W>) {
+        if constexpr (platform::has<W, platform::cap::counts_latch_misses>) {
             const auto [missed, tried] = window.latch_misses();
             std::fprintf(stderr, "  latch margin %.2f ms, %llu/%llu late draws missed",
                          static_cast<double>(window.latch_margin().count()) / 1e6,

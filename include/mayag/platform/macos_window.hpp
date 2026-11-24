@@ -25,6 +25,7 @@
 #include "../render/draw_list.hpp"
 #include "raw_input.hpp"
 #include "types.hpp"
+#include "concepts.hpp"   // check_capabilities
 #include "keys.hpp"
 #include "photon.hpp"
 #include "images.hpp"
@@ -1715,5 +1716,14 @@ class MacWindow {
     bool          photon_manual_ = false;
     bool          photon_sink_ = false;       // someone listens: drain feedback every dispatch
 };
+
+// What MacWindow can do, stated: checked both ways against what its methods
+// give it (platform/concepts.hpp) -- losing one or gaining one unstated
+// fails the build, naming the capability.
+static_assert(check_capabilities<MacWindow, caps<cap::replaces_queued_frames, cap::counts_skipped_frames, cap::latches_late,
+                                                        cap::counts_latch_misses, cap::reports_display_timing, cap::fullscreens,
+                                                        cap::manages_itself, cap::uploads_images, cap::patches_images,
+                                                        cap::moves_image_rows, cap::shares_event_queue, cap::takes_text_input,
+                                                        cap::measures_photons>>());
 
 }  // namespace mayag::platform
