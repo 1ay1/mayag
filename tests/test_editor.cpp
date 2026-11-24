@@ -374,11 +374,11 @@ static void test_syntax() {
     {   // the outline is kept across edits: it must always equal a fresh one
         auto e2 = ed("");
         e2.language = &cpp;
-        std::string src;
+        std::string text;
         for (int i = 0; i < 300; ++i)
-            src += i % 11 == 0 ? "/* block\n" : i % 11 == 3 ? "end */\n" : i % 5 == 0 ? "int f" + std::to_string(i) + "(int x) {\n"
+            text += i % 11 == 0 ? "/* block\n" : i % 11 == 3 ? "end */\n" : i % 5 == 0 ? "int f" + std::to_string(i) + "(int x) {\n"
                  : i % 7 == 0 ? "struct S" + std::to_string(i) + " {\n" : "    x += 1;\n";
-        e2.set_text(src);
+        e2.set_text(text);
         (void)e2.symbols();
         std::uint32_t seed = 12345;
         const auto rnd = [&](int n) { seed = seed * 1664525u + 1013904223u; return static_cast<int>((seed >> 8) % static_cast<std::uint32_t>(n)); };

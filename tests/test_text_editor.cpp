@@ -143,9 +143,9 @@ void motion_and_scopes() {
     text_editor_ops::minimap_seek(s, 200.0f, false);   // row 100
     ok(std::abs(s.ed.scroll.offset.y - (100 * 20.0f - 200.0f)) < 1.0f, "a minimap press centres the row under it");
     {   // the minimap keeps its rows across edits: always what a fresh build draws
-        std::string src;
-        for (int i = 0; i < 400; ++i) src += i % 13 == 0 ? "int f" + std::to_string(i) + "() {\n" : "    x = \"s\" + 1; // c\n";
-        auto e = editor::EditorState::from_text(src, &editor::language_named("C++"));
+        std::string text;
+        for (int i = 0; i < 400; ++i) text += i % 13 == 0 ? "int f" + std::to_string(i) + "() {\n" : "    x = \"s\" + 1; // c\n";
+        auto e = editor::EditorState::from_text(text, &editor::language_named("C++"));
         const auto th = CodeTheme::dark(themes::midnight);
         const auto draw = [&](const editor::EditorState& ed) {
             Node n = mayag::dsl::detail::minimap_rows(ed, th, 0, 300, 84.0f, 2.0f, 7);

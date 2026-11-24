@@ -68,7 +68,8 @@ int main() {
         for (float a : light) sl += a;
         for (float a : heavy) sh += a;
         std::printf("    %s: %zu axes, wght(300)=%g wght(800)=%g, widths %.2f vs %.2f\n", path.c_str(), face->axes().size(),
-                    face->wght_for(300.0f), face->wght_for(800.0f), sl, sh);
+                    static_cast<double>(face->wght_for(300.0f)), static_cast<double>(face->wght_for(800.0f)),
+                    static_cast<double>(sl), static_cast<double>(sh));
     }
     ok(!light.empty() && light != heavy, "a variable face: weight 300 and 800 shape differently");
 

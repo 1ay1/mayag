@@ -754,8 +754,8 @@ template <ControlContext C, class On>
                             [on](ScrollOp op) { return on(SettingsOp{[op](SettingsPanelState& s) { op(s.scroll); }}); });
 
     // ── footer: key hints ────────────────────────────────────────────────
-    const auto hint = [&](std::string_view k, std::string_view what) {
-        return (h(h(text_owned(std::string{k}) | font(t.type(Tier::fine)) | fg(t.text_secondary))
+    const auto hint = [&](std::string_view keys, std::string_view what) {
+        return (h(h(text_owned(std::string{keys}) | font(t.type(Tier::fine)) | fg(t.text_secondary))
                       | height(18.0f) | pad(0, 5.0f) | center | radius(t.rounded(4.0f)) | border(t.stroke(1), line),
                   text_owned(std::string{what}) | font(t.type(Tier::small)) | fg(muted))
                 | gap(6.0f) | align(Align::center)).build();

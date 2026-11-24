@@ -242,8 +242,8 @@ void test_color_emoji_renders() {
     int coloured_texels = 0, opaque_texels = 0;
     for (int yy = 0; yy < 8; ++yy)
         for (int xx = 0; xx < 8; ++xx) {
-            const Vec4 c = stack->atlas().sample_color(g->uv.left() + g->uv.width() * (xx + 0.5f) / 8.0f,
-                                                       g->uv.top() + g->uv.height() * (yy + 0.5f) / 8.0f);
+            const Vec4 c = stack->atlas().sample_color(g->uv.left() + g->uv.width() * (static_cast<float>(xx) + 0.5f) / 8.0f,
+                                                       g->uv.top() + g->uv.height() * (static_cast<float>(yy) + 0.5f) / 8.0f);
             if (c.w > 0.5f) ++opaque_texels;
             if (c.w > 0.5f && (std::abs(c.x - c.y) > 0.1f || std::abs(c.y - c.z) > 0.1f)) ++coloured_texels;
         }

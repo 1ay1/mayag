@@ -184,7 +184,7 @@ static int check_transfer_functions() {
         worst = std::max(worst, std::abs(mayag::kernel::srgb_to_linear(x) - mayag::detail::srgb_to_linear(x)));
         worst = std::max(worst, std::abs(mayag::kernel::linear_to_srgb(x) - mayag::detail::linear_to_srgb(x)));
     }
-    if (worst > 1e-6f) { std::printf("  FAIL  kernel sRGB curves differ from core/color.hpp by %g\n", worst); ++bad; }
+    if (worst > 1e-6f) { std::printf("  FAIL  kernel sRGB curves differ from core/color.hpp by %g\n", static_cast<double>(worst)); ++bad; }
     // Metal's SDF band fallback is the kernel's sdf_edge_fallback.
     char band[64];
     std::snprintf(band, sizeof band, "params.x : %g;", static_cast<double>(mayag::kernel::sdf_edge_fallback));

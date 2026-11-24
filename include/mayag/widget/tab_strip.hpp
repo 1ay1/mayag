@@ -32,6 +32,7 @@
 //   Clicked on part_id(id, part_menu)          -> new-tab menu (tab_launcher)
 //   Entered / Left on part_id(id, i)           -> hover, for tab_peek
 
+#include "../core/target.hpp"
 #include "control.hpp"
 #include "agent_state.hpp"   // spinner_frame
 #include "../core/motion.hpp"
@@ -72,12 +73,22 @@ struct TabStripMotion {
 };
 
 /// How the active tab is marked.
+// GCC 16's -Wshadow flags these as shadowing dsl::pill / dsl::underline, but
+// a SCOPED enumerator is only ever written TabStripStyle::pill: it cannot
+// shadow anything. A false positive, silenced for this enum alone.
+#if MAYAG_CC_GCC
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wshadow"
+#endif
 enum class TabStripStyle : std::uint8_t {
     pill,        ///< a lifted card that slides between tabs (default)
     underline,   ///< flat tabs; a bar slides under the active one
     flat,        ///< a filled block with an accent edge on top, no lift
     line,        ///< tmux-like: one mono line, square cells, numbered, no curves (tab_line)
 };
+#if MAYAG_CC_GCC
+#  pragma GCC diagnostic pop
+#endif
 /// How the active-tab marker moves to a newly selected tab.
 enum class TabMotion : std::uint8_t {
     stretch,   ///< the leading edge races ahead, the trailing edge catches up (elastic)

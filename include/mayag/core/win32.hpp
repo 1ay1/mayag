@@ -28,12 +28,17 @@
 #  include <windows.h>
 #  undef near
 #  undef far
+// ...but the SDK spells them through FAR / NEAR (minwindef.h: `#define FAR
+// far`), in every COM header parsed after this one: combaseapi.h, objbase.h,
+// ole2.h, oleauto.h (`LPMALLOC FAR * ppMalloc`). With `far` gone, FAR
+// expanded to an unknown identifier and every MSVC build that reached a COM
+// header (d3d11, dxgi, dwrite_2, dwmapi) stopped with 495 x "missing ','
+// before '*'". The uppercase names expand to what `far` did: nothing.
+#  undef FAR
+#  undef NEAR
+#  define FAR
+#  define NEAR
 #  undef IN
 #  undef OUT
 #  undef OPTIONAL
-// NOT `interface`: it is not empty but `struct`, and every COM header
-// parsed after this one (combaseapi.h, ole2.h, d3d11.h, dxgi, dwrite_2.h,
-// dwmapi.h) spells `typedef interface ID3D11Device ID3D11Device;`.
-// Undefining it broke every MSVC build that reached a COM header (85
-// errors a file, from combaseapi.h on). Nothing in mayag or hand names it.
 #endif
