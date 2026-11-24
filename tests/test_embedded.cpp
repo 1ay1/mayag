@@ -13,7 +13,9 @@
 // display link and stops it when it settles; quit leaves the loop.
 
 #include <mayag/mayag.hpp>
+#include <mayag/widget/agent_state.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -86,7 +88,11 @@ struct FakeLoop {
                 const auto now = clk::now();
                 if (signalled) { signalled = false; what = wake; }
                 else if (link_on && now >= next_vsync) what = vsync;
-                else if (timer && now >= *timer) { timer.reset(); what = tick; }
+                else if (timer && now >= *timer) {
+                    lateness_ms.push_back(std::chrono::duration<double, std::milli>(now - *timer).count());
+                    timer.reset();
+                    what = tick;
+                }
             }
             if (what == wake || what == tick) app.turn();
             if (what == vsync) {
@@ -99,6 +105,7 @@ struct FakeLoop {
     }
 
     std::thread::id loop_thread = std::this_thread::get_id();
+    std::vector<double> lateness_ms;   ///< how late each armed timer actually fired (the OS's share)
 };
 
 // ── a program with every kind of wake source ────────────────────────────
@@ -169,6 +176,25 @@ AppConfig quiet() {
     return cfg;
 }
 
+/// A program showing ONLY a spinner: no subscription, no message. Its view
+/// books its own next frame (stepper -> request_frame_at). The view records
+/// each glyph it draws and when, so the test sees the cadence the user sees.
+struct Glyph { double at; std::string g; };
+std::vector<Glyph> g_drawn;
+struct Ticker {
+    struct Model {};
+    struct Nothing {};
+    using Msg = std::variant<Nothing>;
+    using Cmd = mayag::Cmd<Msg>;
+    static Cmd update(Model&, Nothing) { return {}; }
+    static Node view(const Model&) {
+        const std::string g = dsl::spinner_frame(ctx().time);
+        const double now = std::chrono::duration<double>(clk::now().time_since_epoch()).count();
+        if (g_drawn.empty() || g_drawn.back().g != g) g_drawn.push_back({now, g});
+        return (dsl::text_owned(g) | dsl::font(14)).build();
+    }
+};
+
 }  // namespace
 
 int main() {
@@ -227,6 +253,40 @@ int main() {
     press(Key::q);
     check(app.finished() && loop.quit, "Cmd::quit tells the loop to stop");
     check(app.exit_code() == 3, "with the program's exit code");
+
+    section("a spinner alone keeps its own time (the Cocoa path)");
+    {   // On macOS the run loop is external: a view's booked frame must arm
+        // the loop's timer itself. It did not -- wait_hint returned early for
+        // an external loop -- so a spinner with nothing else animating
+        // advanced only when something unrelated woke the loop (the blink,
+        // the 1 Hz clock, output): the tab spinner "lags".
+        auto tw = platform::Headless::open(detail::window_config(cfg));
+        FakeLoop tl;
+        embedded_app<Ticker, platform::Headless> ticker{*tw, cfg, tl.hooks()};
+        ticker.turn();
+        // the deterministic part, what was broken: after a frame, the loop's
+        // timer is armed for the spinner's next step (~83 ms ahead), not left
+        // unset ("sleep until something else happens")
+        const auto armed_in = tl.timer ? std::chrono::duration<double, std::milli>(*tl.timer - clk::now()).count() : -1.0;
+        check(armed_in > 0.0 && armed_in < 90.0, "a drawn spinner arms the loop's timer for its next step (in " +
+                                                   std::to_string(static_cast<int>(armed_in)) + " ms)");
+        g_drawn.clear();
+        tl.run(ticker, 1000ms);
+        double worst = 0;
+        for (std::size_t i = 1; i < g_drawn.size(); ++i) worst = std::max(worst, g_drawn[i].at - g_drawn[i - 1].at);
+        // the timing part: loose, since a parallel ctest descheduling this
+        // thread is not the code (the bug drew NO glyph in the whole second)
+        check(g_drawn.size() >= 6, "it turns at its own rate with nothing else running (" +
+                                       std::to_string(g_drawn.size()) + " glyphs in 1 s, ~12 expected)");
+        check(worst < 0.4, "and never stalls: the longest gap between glyphs is " + std::to_string(static_cast<int>(worst * 1000)) +
+                               " ms (a step is 83 ms)");
+        check(tl.link_starts == 0, "on its own timer, without running the display link");
+        if (!tl.lateness_ms.empty()) {
+            auto l = tl.lateness_ms;
+            std::sort(l.begin(), l.end());
+            std::printf("        timer lateness: p50 %.2f ms  max %.2f ms over %zu wakes\n", l[l.size() / 2], l.back(), l.size());
+        }
+    }
 
     std::printf("\n%s  %d checks, %d failures\n", failures == 0 ? "PASS" : "FAIL", checks, failures);
     return failures == 0 ? 0 : 1;

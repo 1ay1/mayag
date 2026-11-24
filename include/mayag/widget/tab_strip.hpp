@@ -1,7 +1,7 @@
 #pragma once
 // mayag::widget tab_strip — terminal tabs that show what each tab is doing
 //
-//   tab_strip(c, "tabs", tabs, active, &m.tab_motion, time, {.inset_left = 78})
+//   tab_strip(c, "tabs", tabs, active, &m.tab_motion, {.inset_left = 78})   // animates on c's own clock
 //
 // A terminal tab is a window onto a running process, so the tab says what
 // that process is up to, without switching to it:
@@ -287,12 +287,13 @@ template <ControlContext C>
 
 template <ControlContext C>
 [[nodiscard]] inline Node tab_line(const C& c, std::string_view id, const std::vector<TermTabInfo>& tabs, int active,
-                                   double time, const TabStripOptions& o);
+                                   const TabStripOptions& o);
 
 template <ControlContext C>
 [[nodiscard]] inline Node tab_strip(const C& c, std::string_view id, const std::vector<TermTabInfo>& tabs, int active,
-                                    const TabStripMotion* motion, double time, const TabStripOptions& o = {}) {
-    if (o.style == TabStripStyle::line) return tab_line(c, id, tabs, active, time, o);
+                                    const TabStripMotion* motion, const TabStripOptions& o = {}) {
+    const double time = frame_time(c);   // the frame clock: the ring and spinner book their own frames
+    if (o.style == TabStripStyle::line) return tab_line(c, id, tabs, active, o);
     const Theme& t = c.theme;
     using S = TabStripStyle;
     const bool lifted = o.style == S::pill;
@@ -492,7 +493,8 @@ template <ControlContext C>
 /// host's tab is red. Same interaction ids as tab_strip.
 template <ControlContext C>
 [[nodiscard]] inline Node tab_line(const C& c, std::string_view id, const std::vector<TermTabInfo>& tabs, int active,
-                                   double time, const TabStripOptions& o) {
+                                   const TabStripOptions& o) {
+    const double time = frame_time(c);
     const Theme& t = c.theme;
     const float fs = t.type_at(t.font_size * o.font_scale, Tier::body);
     const float hgt = std::clamp(o.height, 20.0f, 40.0f);

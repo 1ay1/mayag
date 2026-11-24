@@ -584,7 +584,7 @@ struct Terminal {
 
         std::vector<TermTabInfo> infos;
         for (const auto& d : m.tabs) infos.push_back(d.info);
-        Node strip = tab_strip(look, "tabs", infos, m.active, &m.motion, m.time, {.show_numbers = m.numbers});
+        Node strip = tab_strip(look, "tabs", infos, m.active, &m.motion, {.show_numbers = m.numbers});
 
         const TabData& cur = m.tabs[static_cast<std::size_t>(m.active)];
         TermGrid g = screen_of(cur.screen, 150);
@@ -618,8 +618,7 @@ struct Terminal {
             TermGrid pg = screen_of(h_.screen, 64);
             tab_peek(look, "peek", part_id("tabs", static_cast<std::size_t>(m.hovered)), h_.info,
                      terminal_view(look, "peekterm", pg, tt, {.font_size = 10.5f, .padding = 8.0f, .focused = false, .marks = false}),
-                     "pid " + std::to_string(4100 + m.hovered * 37) + "  \u00B7  " + h_.info.process + "  \u00B7  \u2318" + std::to_string(m.hovered + 1),
-                     m.time);
+                     "pid " + std::to_string(4100 + m.hovered * 37) + "  \u00B7  " + h_.info.process + "  \u00B7  \u2318" + std::to_string(m.hovered + 1));
         }
 
         // The rail: every workspace, the current one read live from m.tabs.
@@ -629,8 +628,8 @@ struct Terminal {
             for (const auto& d : static_cast<int>(w) == m.ws ? m.tabs : m.workspaces[w].tabs) wi.tabs.push_back(d.info);
             wsi.push_back(std::move(wi));
         }
-        Node rail = workspace_rail(look, "rail", wsi, m.ws, m.time, {.expanded = m.rail_open});
-        activity_feed(look, "feed", m.feed, c.size, m.time);
+        Node rail = workspace_rail(look, "rail", wsi, m.ws, {.expanded = m.rail_open});
+        activity_feed(look, "feed", m.feed, c.size);
 
         Node panel = m.panel_open ? project_view(look, m) : Node{};
         return h(node(std::move(rail)),

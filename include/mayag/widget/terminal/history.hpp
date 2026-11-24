@@ -96,7 +96,6 @@ struct StickyCommandProps {
     int          exit_code = 0;
     std::string  time;               ///< "41.2s", or the live elapsed time
     std::int64_t at = 1, span = 1;   ///< the view's top line within its output
-    double       now = 0.0;          ///< the spinner's clock
     float        ease = 1.0f;        ///< 0..1: slides down from the top edge
     bool         marks = false;      ///< the terminal has a mark gutter (align with the text)
 };
@@ -113,7 +112,7 @@ template <ControlContext C>
     const float w = b.size.x - b.right_inset;
     const float through = static_cast<float>(p.at) / static_cast<float>(std::max<std::int64_t>(p.span, 1));
     std::string tag = term_detail::command_tag(p.state, p.exit_code);
-    if (p.state == CommandState::running) tag = std::string{spinner_frame(p.now)} + " " + tag;
+    if (p.state == CommandState::running) tag = std::string{spinner_frame(frame_time(c))} + " " + tag;   // books its own frames
     const bool hot = c.hovered(node_id(id));
     std::vector<Node> row;
     row.push_back((h(mono(tag, t.type_at(b.font_size, Tier::fine), paper) | semibold) | height(std::round(fs * 1.5f)) | pad(0, fs * 0.45f) | center | bg(tone)).build());

@@ -3,7 +3,7 @@
 //
 //   host_badge(c, host)                      env-coloured chip (prod is red)
 //   ssh_hosts(c, "hosts", query, hosts, ranked, sel)   the host picker
-//   connection_bar(c, "conn", conn, time)    connecting / reconnecting / lost
+//   connection_bar(c, "conn", conn)          connecting / reconnecting / lost
 //   host_key_dialog(c, "hostkey", key)       verify or reject a host key
 //   port_forwards(c, "fwd", forwards)        -L / -R / -D forwards
 //
@@ -332,7 +332,8 @@ struct SshConnection {
 /// Reconnect when lost (the pane keeps its scrollback underneath).
 /// Interaction: part_id(id, 0) reconnect now, part_id(id, 1) close.
 template <ControlContext C>
-[[nodiscard]] inline Node connection_bar(const C& c, std::string_view id, const SshConnection& s, double time) {
+[[nodiscard]] inline Node connection_bar(const C& c, std::string_view id, const SshConnection& s) {
+    const double time = frame_time(c);
     const Theme& t = c.theme;
     using S = SshConnection::State;
     if (s.state == S::connected && s.latency_ms < 300) return Node{};

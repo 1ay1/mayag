@@ -301,9 +301,9 @@ struct AgentTerminal {
         trees[3].branch = "perf/tiles"; trees[3].host = kHosts[1];
         trees[3].agent = {"claude", AgentState::working, "", 25}; trees[3].added = 88; trees[3].removed = 120; trees[3].files = 4;
         trees[3].checks = Worktree::Checks::passing;
-        auto side = v(node(worktree_list(look, "trees", trees, m.workspace, m.time)),
+        auto side = v(node(worktree_list(look, "trees", trees, m.workspace)),
                       box() | height(1) | width(pct(100)) | bg(t.border),
-                      node(attention_queue(look, "queue", m.queue, m.time)),
+                      node(attention_queue(look, "queue", m.queue)),
                       spacer(),
                       v(text<"FORWARDS \u00B7 prod-db-01"> | font(t.font_size * 0.72f) | semibold | tracking(0.8f) | fg(t.text_secondary),
                         node(port_forwards(look, "fwd", m.fwd)))
@@ -312,7 +312,7 @@ struct AgentTerminal {
 
         // ── panes: claude (local worktree) | ssh to prod ────────────────
         Node left = pane_frame(look, "pane-l", {"claude \u2014 fix/cell-px", true, false, true, false, 0, false},
-                               (v(h(node(agent_badge(look, {"claude", AgentState::needs_approval, "", 94}, m.time))) | pad(6, 8),
+                               (v(h(node(agent_badge(look, {"claude", AgentState::needs_approval, "", 94}))) | pad(6, 8),
                                   v(node(terminal_view(look, "term-l", claude_pane(), tt, {.font_size = 12.5f, .focused = true, .marks = false})))
                                       | grow() | min_size(0, 0))
                                 | grow() | width(pct(100)) | height(pct(100))).build());
@@ -320,14 +320,14 @@ struct AgentTerminal {
                            "Connection reset by peer \u2014 scrollback kept", 38, 3, 2, false};
         Node right = pane_frame(look, "pane-r", {"ssh \u2014 deploy@prod-db-01", false, false, true, false, 0, false},
                                 (v(h(node(host_badge(look, kHosts[0]))) | pad(6, 8),
-                                   node(connection_bar(look, "conn", conn, m.time)),
+                                   node(connection_bar(look, "conn", conn)),
                                    v(node(terminal_view(look, "term-r", shell_pane(), tt, {.font_size = 12.5f, .focused = false, .dim_unfocused = 0.4f, .marks = false})))
                                        | grow() | min_size(0, 0))
                                  | grow() | width(pct(100)) | height(pct(100))
                                  | border(m.reconnecting ? 0.0f : 0.0f, t.danger)).build());
 
         // ── overlays ────────────────────────────────────────────────────
-        agent_toasts(look, "notes", m.notes, c.size, m.time);
+        agent_toasts(look, "notes", m.notes, c.size);
         if (m.prompt)
             prompt_editor(look, "prompt", m.draft, {"claude \u00B7 tab 3 \u00B7 feat/cache", {"src/cache.rs", "docs/cache.md"}, false, 0,
                                                     std::fmod(m.time, 1.06) < 0.53, 0});
@@ -356,7 +356,7 @@ struct AgentTerminal {
                                            tt, {.font_size = 11.0f, .focused = false, .marks = false})});
             std::stable_sort(cards.begin(), cards.end(), [](const PaneCard& a, const PaneCard& b) {
                 return wants_attention(a.agent.state) > wants_attention(b.agent.state); });
-            pane_overview(look, "overview", std::move(cards), m.time);
+            pane_overview(look, "overview", std::move(cards));
         }
 
         Node main_area;
@@ -384,7 +384,7 @@ struct AgentTerminal {
         std::vector<StatusItem> sr{{"\u2318J next", "", StatusItem::Tone::dim, false}, {"\u2318. overview", "", StatusItem::Tone::dim, false},
                                    {"\u2318\u21E7E prompt", "", StatusItem::Tone::dim, false}, {"\u2318\u21E7S ssh", "", StatusItem::Tone::dim, false}};
 
-        return v(node(term_tabs(look, "tabs", tabs, m.tab, m.time)),
+        return v(node(term_tabs(look, "tabs", tabs, m.tab)),
                  h(std::move(side), v(node(std::move(main_area))) | grow() | height(pct(100)) | min_size(0, 0))
                      | grow() | width(pct(100)) | min_size(0, 0),
                  node(status_bar(look, "status", sl, sr)))

@@ -1,7 +1,7 @@
 #pragma once
 // mayag::widget activity_feed — what just happened, across every workspace
 //
-//   activity_feed(c, "feed", events, window_size, time)
+//   activity_feed(c, "feed", events, window_size)
 //
 // A terminal knows when commands finish (shell integration), when a bell
 // rings, when a long job reports progress. When that happens in a tab or a
@@ -34,7 +34,7 @@ struct ActivityEvent {
 
 template <ControlContext C>
 inline void activity_feed(const C& c, std::string_view id, const std::vector<ActivityEvent>& events, Vec2 window,
-                          double /*time*/ = 0.0, float top = 56.0f) {
+                          float top = 56.0f) {
     if (events.empty()) return;
     const Theme& t = c.theme;
     std::vector<Node> cards;

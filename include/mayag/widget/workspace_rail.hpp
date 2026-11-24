@@ -88,11 +88,6 @@ struct WorkspaceSummary {
     return mix(t.surface_raised, hue, 0.10f);
 }
 
-[[nodiscard]] inline std::string spinner_text(double time) {
-    static constexpr const char* frames[] = {"\u280B", "\u2819", "\u2839", "\u2838", "\u283C", "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"};
-    return frames[static_cast<int>(time * 12.0) % 10];
-}
-
 [[nodiscard]] inline std::string summary_text(const WorkspaceSummary& s, std::size_t tabs) {
     std::vector<std::string> parts;
     if (s.running) parts.push_back(std::to_string(s.running) + " running");
@@ -106,8 +101,11 @@ struct WorkspaceSummary {
 
 /// One dot per tab: the status of a whole workspace in one glance.
 template <ControlContext C>
-[[nodiscard]] inline Node tab_lights(const C& c, const std::vector<TermTabInfo>& tabs, Color<Srgb> hue, double time,
+[[nodiscard]] inline Node tab_lights(const C& c, const std::vector<TermTabInfo>& tabs, Color<Srgb> hue,
                                      float d = 7.0f) {
+    // ambient: 30 Hz, booking its own next step (a raw sin(time) froze whenever
+    // nothing else drew a frame)
+    const double time = ambient_time(frame_time(c));
     const Theme& t = c.theme;
     std::vector<Node> dots;
     for (const auto& tb : tabs) {
@@ -130,7 +128,8 @@ template <ControlContext C>
 /// The monogram tile with its aggregate ring and attention badge.
 template <ControlContext C>
 [[nodiscard]] inline Node workspace_tile(const C& c, const WorkspaceInfo& w, const WorkspaceSummary& s, bool active,
-                                         bool hov, double time, float d = 40.0f) {
+                                         bool hov, float d = 40.0f) {
+    const double time = ambient_time(frame_time(c));
     const Theme& t = c.theme;
     const Color<Srgb> hue = workspace_hue(w);
     std::string mono;
@@ -165,7 +164,8 @@ struct RailOptions {
 
 template <ControlContext C>
 [[nodiscard]] inline Node workspace_rail(const C& c, std::string_view id, const std::vector<WorkspaceInfo>& ws, int active,
-                                         double time, const RailOptions& o = {}) {
+                                         const RailOptions& o = {}) {
+    const double time = ambient_time(frame_time(c));   // the footer ring: ambient, self-booking
     const Theme& t = c.theme;
     std::vector<Node> rows;
     for (std::size_t i = 0; i < ws.size(); ++i) {
@@ -174,7 +174,7 @@ template <ControlContext C>
         const auto pid = part_id(id, i);
         const bool on = static_cast<int>(i) == active, hov = c.hovered(pid);
         const Color<Srgb> hue = workspace_hue(w);
-        Node tile = workspace_tile(c, w, s, on, hov, time);
+        Node tile = workspace_tile(c, w, s, on, hov);
         if (!o.expanded) {
             rows.push_back((h(box() | size(3, on ? 26.0f : hov ? 12.0f : 0.0f) | bg(hue) | radius(t.rounded(1.5f)) | margin(0, 7, 0, 0),
                               node(std::move(tile)))
@@ -190,7 +190,7 @@ template <ControlContext C>
                                   | fg(hov ? t.text_secondary : t.text_disabled))
                                 | gap(t.spaced(6)) | align(Align::center) | width(pct(100)),
                             text_owned(summary_text(s, w.tabs.size())) | font(t.type(Tier::fine)) | fg(sub_col) | ellipsis,
-                            h(node(tab_lights(c, w.tabs, hue, time)), spacer(),
+                            h(node(tab_lights(c, w.tabs, hue)), spacer(),
                               node(s.running > 0 && !s.activity.empty() ? activity_sparkline(s.activity, mix(hue, t.text_secondary, 0.2f), 10.0f, 12) : Node{}))
                                 | align(Align::center) | width(pct(100)) | margin(3, 0, 0, 0))
                               | gap(t.spaced(1)) | grow() | min_size(0, 0))

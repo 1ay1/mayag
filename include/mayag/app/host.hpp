@@ -494,12 +494,18 @@ class window_host {
         // The window is waiting on something (the GPU coming up) and will
         // want a redraw when it lands; look again soon.
         if (window_redraw_pending()) return ns{2'000'000};
-        // A foreign loop's display link drives animation frames.
-        if (external_loop_) return std::nullopt;
+        // A scheduled step (a spinner's next glyph, the busy ring's next
+        // turn): wake exactly then. This comes BEFORE the external-loop
+        // return: on macOS the run loop is external, and when it returned
+        // first the booked step never armed a timer -- a spinner with nothing
+        // else animating moved only when something unrelated woke the loop
+        // (the blink, the 1 Hz clock, output). The tab spinner's "lag".
+        std::optional<ns> step;
+        if (change_at_ >= 0.0) step = std::max(std::chrono::duration_cast<ns>(change_point() - now), ns{0});
+        // A foreign loop's display link drives animation frames; a booked
+        // step between them is its timer.
+        if (external_loop_) return animating() ? std::nullopt : step;
         if (!animating()) {
-            // A scheduled step (a spinner's next glyph) wakes us exactly then.
-            std::optional<ns> step;
-            if (change_at_ >= 0.0) step = std::max(std::chrono::duration_cast<ns>(change_point() - now), ns{0});
             // Wayland wakes us through its fd. A window with none (Cocoa)
             // has to be asked: poll it often enough that input feels instant.
             if (!poll_window_ && children_.empty()) return step;
@@ -977,6 +983,10 @@ class window_host {
     /// Does anything want display refreshes right now? The loop runs its
     /// display link exactly while this is true.
     [[nodiscard]] bool wants_frames() const noexcept { return animating(); }
+    /// The view-clock time (seconds) the last frame booked its next change at
+    /// (request_frame_at / stepper), or < 0: nothing booked. What a timed
+    /// visual's test asserts on, independent of whatever else animates.
+    [[nodiscard]] double next_change_at() const noexcept { return change_at_; }
 
     /// Why frames are wanted, the first reason that holds ("" when none):
     /// "on_frame" (the program's subscription), "request" (a view asked:
@@ -1915,9 +1925,10 @@ class window_host {
                      static_cast<unsigned long long>(ms.hits), static_cast<unsigned long long>(ms.miss_new),
                      static_cast<unsigned long long>(ms.miss_taken), static_cast<unsigned long long>(ms.miss_unready),
                      static_cast<unsigned long long>(ms.miss_interaction));
-        std::fprintf(stderr, "mayag: %zu frames  view %.3f  cascade %.3f  layout %.3f  paint %.3f  render %.3f  = %.3f ms  (%u instances, %u draws, %llu identical skipped)\n",
+        std::fprintf(stderr, "mayag: %zu frames  view %.3f  cascade %.3f  layout %.3f  paint %.3f  render %.3f  = %.3f ms  (%u instances, %u draws, %llu identical skipped)  wanted by: %s%s\n",
                      framestats_frames_, m.view_ms, m.cascade_ms, m.layout_ms, m.paint_ms, m.render_ms, m.cpu_ms(),
-                     m.instances, m.draw_calls, static_cast<unsigned long long>(skipped));
+                     m.instances, m.draw_calls, static_cast<unsigned long long>(skipped),
+                     *frame_reason() ? frame_reason() : "-", change_at_ >= 0.0 ? " + a booked step" : "");
         framestats_at_ = now;
         framestats_frames_ = 0;
     }

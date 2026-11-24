@@ -1,7 +1,7 @@
 #pragma once
 // mayag::widget notification_toast — an agent wants you, from another tab
 //
-//   agent_toasts(c, "notes", notes, window_size, time)
+//   agent_toasts(c, "notes", notes, window_size)
 //
 // When an agent in a background pane finishes or asks for approval, the
 // terminal surfaces it where your eyes are: a stacked toast in the corner
@@ -28,7 +28,8 @@ struct AgentNote {
 };
 
 template <ControlContext C>
-inline void agent_toasts(const C& c, std::string_view id, const std::vector<AgentNote>& notes, Vec2 window, double time) {
+inline void agent_toasts(const C& c, std::string_view id, const std::vector<AgentNote>& notes, Vec2 window) {
+    const double time = frame_time(c);
     if (notes.empty()) return;
     const Theme& t = c.theme;
     std::vector<Node> cards;

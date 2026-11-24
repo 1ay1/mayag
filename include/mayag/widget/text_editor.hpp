@@ -125,6 +125,10 @@ struct TextEditorState {
     int  sym_sel = 0;
     // the file changed on disk while open
     bool disk_changed = false;
+    /// The view clock of the first frame that drew a save in flight (< 0: none
+    /// in flight). Derived presentation state, like ScrollState's measures:
+    /// the widget times the "saving…" mark with it (TextEditorProps).
+    mutable double saving_seen_at = -1.0;
     std::vector<TextEditorAction> out;    ///< for the app: drain after every op
 };
 
@@ -142,6 +146,12 @@ struct TextEditorProps {
     bool        focused = true;           ///< the editor has the keyboard (draws the caret)
     bool        cursor_on = true;         ///< blink phase, the app's clock
     bool        saving = false;           ///< a write is in flight
+    /// The mark waits this long: a save that lands sooner (a local disk, a
+    /// warm ssh channel: 1-15 ms) never flashes "saving…" for a frame. Timed
+    /// by the widget on the view's own clock, from the first frame that saw
+    /// `saving` (TextEditorState::saving_seen_at); it books the frame the mark
+    /// appears in (request_frame_at), so it shows even when nothing else draws.
+    static constexpr double kSavingShowAfter = 0.15;
     std::string error;                    ///< the last save failed: why
     std::string host;                     ///< the machine the file is on ("" = this one): a chip before the path
     bool        host_danger = false;      ///< ...a production machine: the chip is red
@@ -776,7 +786,20 @@ template <ControlContext C, class On>
         if (inner != nullptr) crumbs.push_back({inner->name, false, true});
     }
     const bool dirty = ed.dirty();
-    Node state_mark = p.saving ? (text<"saving\u2026"> | font(t.type(Tier::small)) | fg(muted)).build()
+    bool show_saving = false;
+    {   // only once it has taken long enough to be worth saying
+        double now = 0.0;
+        if constexpr (requires { c.time; }) now = c.time;
+        else if constexpr (requires { c.c.time; }) now = c.c.time;
+        if (!p.saving) st.saving_seen_at = -1.0;
+        else {
+            if (st.saving_seen_at < 0.0) st.saving_seen_at = now;
+            const double due = st.saving_seen_at + TextEditorProps::kSavingShowAfter;
+            show_saving = now >= due;
+            if (!show_saving) request_frame_at(due);
+        }
+    }
+    Node state_mark = show_saving ? (text<"saving\u2026"> | font(t.type(Tier::small)) | fg(muted)).build()
                     : dirty    ? (h(text<"\u25CF"> | font(t.type(Tier::small)) | fg(t.readable(t.warning, 3.0f)))
                                   | tooltip("Unsaved changes \u2014 " + chord_text({Key::s, Mods::cmd(false, p.keymap)}) + " saves")).build()
                                : Node{};

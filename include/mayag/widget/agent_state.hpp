@@ -81,7 +81,8 @@ struct AgentInfo {
 
 /// Compact pill: glyph + agent name + state words.
 template <ControlContext C>
-[[nodiscard]] inline Node agent_badge(const C& c, const AgentInfo& a, double time, bool words = true) {
+[[nodiscard]] inline Node agent_badge(const C& c, const AgentInfo& a, bool words = true) {
+    const double time = frame_time(c);
     const Theme& t = c.theme;
     if (a.state == AgentState::none) return Node{};
     const Color<Srgb> tone = agent_tone(t, a.state);

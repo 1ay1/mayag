@@ -1,7 +1,7 @@
 #pragma once
 // mayag::widget attention_queue — the panes waiting for you
 //
-//   attention_queue(c, "queue", items, time)
+//   attention_queue(c, "queue", items)
 //
 // With five agents running in five panes, the terminal's job is to tell you
 // which one needs you, in what order, and get you there in one key. Each
@@ -47,8 +47,9 @@ inline void sort_attention(std::vector<AttentionItem>& v) {
 }
 
 template <ControlContext C>
-[[nodiscard]] inline Node attention_queue(const C& c, std::string_view id, const std::vector<AttentionItem>& items, double time,
+[[nodiscard]] inline Node attention_queue(const C& c, std::string_view id, const std::vector<AttentionItem>& items, 
                                           int keyboard = -1) {
+    const double time = frame_time(c);
     const Theme& t = c.theme;
     std::vector<Node> rows;
     for (std::size_t i = 0; i < items.size(); ++i) {

@@ -2,7 +2,7 @@
 // mayag::widget project_panel — a workspace's folder, its worktrees, and where
 // every tab is sitting in it
 //
-//   project_panel(c, "proj", project, rows, tree_sel, tree_scroll, time)
+//   project_panel(c, "proj", project, rows, tree_sel, tree_scroll)
 //
 // A terminal workspace is usually backed by a folder, and usually that folder
 // is a git repo with a few worktrees (main, a fix branch, one per agent). This

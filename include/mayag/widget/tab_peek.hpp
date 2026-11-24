@@ -20,7 +20,8 @@ namespace mayag::dsl {
 
 template <ControlContext C>
 inline void tab_peek(const C& c, std::string_view id, std::uint64_t anchor, const TermTabInfo& tb, Node preview,
-                     std::string_view footer, double time = 0.0, float width_px = 420.0f) {
+                     std::string_view footer, float width_px = 420.0f) {
+    const double time = frame_time(c);
     const Theme& t = c.theme;
     const Color<Srgb> hue = tab_hue(tb);
     detail::make_inert(preview);

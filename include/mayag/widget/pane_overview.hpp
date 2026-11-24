@@ -1,7 +1,7 @@
 #pragma once
 // mayag::widget pane_overview — every pane at a glance (mission control)
 //
-//   pane_overview(c, "overview", cards, time)
+//   pane_overview(c, "overview", cards)   // live spinners on the frame clock
 //
 // A grid of live thumbnails: each card shows the last few lines of a pane's
 // screen (any Node — usually a small terminal_view), its title, the host
@@ -32,8 +32,9 @@ struct PaneCard {
 };
 
 template <ControlContext C>
-inline void pane_overview(const C& c, std::string_view id, std::vector<PaneCard> cards, double time, int keyboard = -1,
+inline void pane_overview(const C& c, std::string_view id, std::vector<PaneCard> cards, int keyboard = -1,
                           int columns = 3) {
+    const double time = frame_time(c);
     const Theme& t = c.theme;
     std::vector<Node> grid_rows, row;
     for (std::size_t i = 0; i < cards.size(); ++i) {
@@ -46,7 +47,7 @@ inline void pane_overview(const C& c, std::string_view id, std::vector<PaneCard>
         row.push_back((v(h(text_owned(i < 9 ? std::to_string(i + 1) : std::string{}) | font(t.type(Tier::fine)) | fg(var::text_disabled) | width(10),
                            text_owned(k.title) | font(t.type(Tier::small)) | semibold | fg(var::text_primary) | ellipsis | grow() | min_size(0, 0),
                            node(k.host ? host_badge(c, *k.host, true) : Node{}),
-                           node(agent_badge(c, k.agent, time, false)))
+                           node(agent_badge(c, k.agent, false)))
                            | gap(t.spaced(6)) | align(Align::center) | pad(t.spaced(6), t.spaced(8)) | width(pct(100)) | bg(var::surface),
                          v(node(std::move(k.preview))) | height(150) | width(pct(100)) | clip,
                          node(hot && !k.agent.message.empty()

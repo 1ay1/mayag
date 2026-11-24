@@ -55,7 +55,8 @@ inline constexpr std::size_t term_part_close = part_dec + 4096;
 /// so it reads as the top of the pane it shows rather than as a button.
 template <ControlContext C, Responder... Grab>
 [[nodiscard]] inline Node term_tabs(const C& c, std::string_view id, const std::vector<TermTab>& tabs, int active,
-                                    double time = 0.0, Grab... grab_mods) {
+                                    Grab... grab_mods) {
+    const double time = frame_time(c);   // the frame clock: spinners book their own frames
     const Theme& t = c.theme;
     const Sheet& sh = sheet_of(t);
     const float H = t.bar_height;

@@ -1,7 +1,7 @@
 #pragma once
 // mayag::widget worktree_list — one row per agent workspace
 //
-//   worktree_list(c, "trees", trees, active, time)
+//   worktree_list(c, "trees", trees, active)
 //
 // The way to run several coding agents without them trampling each other is
 // a git worktree (or a remote box) per agent. This sidebar lists them: the
@@ -35,7 +35,8 @@ struct Worktree {
 };
 
 template <ControlContext C>
-[[nodiscard]] inline Node worktree_list(const C& c, std::string_view id, const std::vector<Worktree>& trees, int active, double time) {
+[[nodiscard]] inline Node worktree_list(const C& c, std::string_view id, const std::vector<Worktree>& trees, int active) {
+    const double time = frame_time(c);
     const Theme& t = c.theme;
     std::vector<Node> rows;
     for (std::size_t i = 0; i < trees.size(); ++i) {

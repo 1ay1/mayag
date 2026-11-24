@@ -38,6 +38,20 @@ concept ControlContext = requires(const C& c, std::uint64_t id) {
     { c.focused(id) } -> std::same_as<bool>;
 };
 
+/// The frame's own clock (Ctx::time, seconds), from any control context (a
+/// wrapper exposing the Ctx as `.c` too); 0 where there is none. The ONLY
+/// clock a widget animates by: it takes no `time` parameter, so an app can't
+/// hand it a model clock that moves only while some subscription runs (hand
+/// did, three times: the tab spinner, the sticky header, the dialog froze or
+/// lagged whenever nothing else animated). Read it through stepper /
+/// ambient_time, which book the next frame (docs/motion.md).
+template <class C>
+[[nodiscard]] double frame_time(const C& c) noexcept {
+    if constexpr (requires { { c.time } -> std::convertible_to<double>; }) return c.time;
+    else if constexpr (requires { { c.c.time } -> std::convertible_to<double>; }) return c.c.time;
+    else return 0.0;
+}
+
 /// Build through the context's memo cache when it has one (a live window's
 /// Ctx), so a heavy widget reuses last frame's subtree while its inputs
 /// (folded into `key`) are unchanged. Any other context just builds.

@@ -59,7 +59,6 @@ struct TermDialogSpec {
     bool        remember_on = false;
     float       width = 580.0f;
     float       appear = 1.0f;     ///< 0..1, the entrance
-    double      time = 0.0;        ///< for the flagged-line pulse
 };
 
 namespace term_dialog_detail {
@@ -122,7 +121,9 @@ template <ControlContext C>
 
     // ── the preview: numbered, flagged lines tinted ──────────────────────
     if (!s.preview.empty()) {
-        const float pulse = 0.5f + 0.5f * static_cast<float>(std::sin(s.time * 4.0));
+        // ambient: 30 Hz, and it schedules its own next step, so the pulse
+        // needs no frame subscription from the app (docs/motion.md)
+        const float pulse = 0.5f + 0.5f * static_cast<float>(std::sin(ambient_time(frame_time(c)) * 4.0));
         const int digits = static_cast<int>(std::to_string(s.preview.size() + static_cast<std::size_t>(s.preview_more)).size());
         std::vector<Node> lines;
         for (std::size_t i = 0; i < s.preview.size(); ++i) {

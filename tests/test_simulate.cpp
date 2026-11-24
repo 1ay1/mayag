@@ -10,6 +10,7 @@
 
 #include <mayag/mayag.hpp>
 #include <mayag/widget/agent_state.hpp>
+#include <mayag/widget/text_editor.hpp>
 #include <mayag/app/simulate.hpp>
 
 #include <chrono>
@@ -98,6 +99,29 @@ std::string glyph_of(const Node& n) {
     for (const auto& k : n.children()) if (auto g = glyph_of(k); !g.empty()) return g;
     return {};
 }
+bool has_text(const Node& n, std::string_view s) {
+    if (n.kind() == NodeKind::text && n.text() == s) return true;
+    for (const auto& k : n.children()) if (has_text(k, s)) return true;
+    return false;
+}
+/// An editor whose save the test starts and lands by message.
+struct Saver {
+    struct Model { TextEditorState st = text_editor_ops::open("x\n", "a.txt"); bool saving = false; };
+    struct Save {};
+    struct Saved {};
+    using Msg = std::variant<Save, Saved>;
+    using Cmd = mayag::Cmd<Msg>;
+    static Cmd init(Model&) { return {}; }
+    static Cmd update(Model& m, Save) { m.saving = true; return {}; }
+    static Cmd update(Model& m, Saved) { m.saving = false; return {}; }
+    static Node view(const Model& m) {
+        TextEditorProps p;
+        p.path = "a.txt";
+        p.saving = m.saving;
+        p.minimap = false;
+        return text_editor(ctx(), "ed", m.st, p, [](TextEditorOp) -> Msg { return Saved{}; });
+    }
+};
 }  // namespace
 
 int main() {
@@ -122,6 +146,23 @@ int main() {
         }
         ok(seen.size() >= 20, "a spinner with no subscription and no messages keeps turning (" +
                                   std::to_string(seen.size()) + " glyph changes in 2 s, 12 fps expected ~24)");
+    }
+    {   // "saving…" only for a save that takes long enough to be worth saying
+        {
+            simulated_app<Saver> fast(cfg, 1);
+            fast.send(Saver::Msg{Saver::Save{}});
+            const bool flashed = has_text(fast.tree(), "saving\u2026");
+            fast.wait(16ms);
+            fast.send(Saver::Msg{Saver::Saved{}});
+            ok(!flashed && !has_text(fast.tree(), "saving\u2026"), "a save that lands in a frame never flashes \"saving\u2026\"");
+        }
+        simulated_app<Saver> slow(cfg, 1);
+        (void)slow.settle(5s);   // every transition at rest: the only frame left to come is the mark's own
+        slow.send(Saver::Msg{Saver::Save{}});
+        ok(slow.host().next_change_at() > 0.0 && !has_text(slow.tree(), "saving\u2026"),
+           "a save in flight books the frame its mark is due in (and not before)");
+        slow.wait(300ms);   // no messages, no subscription: the widget's own booked frame
+        ok(has_text(slow.tree(), "saving\u2026"), "a slow one shows it, by itself, a moment in");
     }
 
     // 1. The unstamped version is wrong for SOME timings: explore finds one.

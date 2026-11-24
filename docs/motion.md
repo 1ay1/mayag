@@ -14,6 +14,19 @@ answers one question in the same place: **when do I look different next?**
 All three read **`Ctx::time`**, the frame's own clock. None of them reads a
 model clock, starts a timer, or keeps a subscription alive.
 
+A widget does not even TAKE a clock: it reads `frame_time(c)` from its
+context (widget/control.hpp). Widgets used to take `double time`, and hand
+passed its model clock three times over (tab spinner, sticky header, dialog
+pulse) -- a clock that moved only while a frame subscription ran, so each
+froze whenever nothing else animated. Lint `one_clock` refuses a widget
+signature or props field carrying a clock.
+
+On a foreign loop (macOS: the Cocoa run loop owns the thread) a booked step
+must arm that loop's timer too: `window_host::wait_hint` returns it before
+the external-loop early-out. It once returned first, and a spinner alone
+drew no glyph for a whole second (test_embedded: "a spinner alone keeps its
+own time").
+
 ## Why
 
 The view is a pure function of the model **and the time of the frame**.

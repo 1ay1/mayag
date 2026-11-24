@@ -785,6 +785,10 @@ if(MAYAG_BUILD_TESTS)
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/type_scale.cmake)
         # Cache keys are made of values, never of an object's (padded) bytes.
+        # Widgets animate on the frame's own clock: none takes a `double time`.
+        add_test(NAME mayag_one_clock
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_clock.cmake)
         add_test(NAME mayag_no_byte_hash
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/no_byte_hash.cmake)

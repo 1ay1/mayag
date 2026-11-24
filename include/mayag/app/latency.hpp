@@ -123,6 +123,8 @@ class LatencyStats {
     [[nodiscard]] const FrameTiming& slowest_cpu() const noexcept { return slowest_cpu_; }
 
     [[nodiscard]] std::size_t size() const noexcept { return count_; }
+    /// The i-th recorded frame of the window (0..size()-1, oldest first once full).
+    [[nodiscard]] const FrameTiming& sample(std::size_t i) const noexcept { return samples_[i % window]; }
     [[nodiscard]] const FrameTiming& last() const noexcept {
         return samples_[(next_ + window - 1) % window];
     }

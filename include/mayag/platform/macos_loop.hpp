@@ -102,6 +102,7 @@ CFRunLoopTimerRef  CFRunLoopTimerCreate(CFAllocatorRef, CFAbsoluteTime, CFTimeIn
                                         CFOptionFlags, CFIndex, CFRunLoopTimerCallBack,
                                         CFRunLoopTimerContext*);
 void               CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef, CFAbsoluteTime);
+void               CFRunLoopTimerSetTolerance(CFRunLoopTimerRef, CFTimeInterval);
 void               CFRunLoopTimerInvalidate(CFRunLoopTimerRef);
 void               CFRunLoopAddTimer(CFRunLoopRef, CFRunLoopTimerRef, CFStringRef);
 CFAbsoluteTime     CFAbsoluteTimeGetCurrent(void);
@@ -141,6 +142,10 @@ class RunLoop {
         tc.info = this;
         timer_ = CFRunLoopTimerCreate(nullptr, far_future(), kForever, 0, 0,
             [](CFRunLoopTimerRef, void* self) { static_cast<RunLoop*>(self)->turn(); }, &tc);
+        // No coalescing slack: this timer IS the next frame of a spinner or a
+        // late-latched draw. Measured: default tolerance fired 3 ms late
+        // (p50); zero, 0.3 ms (the kernel still rounds the odd wake ~5 ms).
+        CFRunLoopTimerSetTolerance(timer_, 0.0);
         CFRunLoopAddTimer(rl_, timer_, kCFRunLoopCommonModes);
 
         make_target();
