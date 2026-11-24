@@ -58,11 +58,10 @@
 #include "keys.hpp"
 #include "photon.hpp"
 #include "images.hpp"
+#include "gpu_bringup.hpp"
 #include "../backend/gpu_policy.hpp"
 #include "wayland_protocol.hpp"
 
-#include <jaal/core/capability.hpp>
-#include <jaal/kernel/pool.hpp>
 
 // The Vulkan backend is the default renderer on Linux; it self-loads at
 // runtime and falls back to the shm path if the GPU is unavailable. Compiled
@@ -496,15 +495,7 @@ class WaylandWindow {
         // Driver init (instance + device) takes tens of ms and needs no
         // window, so it runs on a worker while we talk to the compositor.
         const bool allow_gpu = backend::gpu_policy::allows(backend::gpu_policy::Choice::vulkan);
-        std::optional<jaal::kernel::pool>& prep_pool = prep_pool_;
-        auto& prep = prep_;
-        if (allow_gpu) {
-            prep_pool.emplace(1);
-            prep = prep_pool->submit([](std::stop_token, std::unique_ptr<backend::VulkanDevice> d) {
-                if (!d->prepare()) d.reset();
-                return d;
-            }, std::move(gpu_));
-        }
+        if (allow_gpu) bringup_.start(std::move(gpu_));   // platform/gpu_bringup.hpp
 #endif
 
         display_ = L.display_connect(nullptr);
@@ -634,12 +625,10 @@ class WaylandWindow {
             // CPU and the window switch when it is ready. MAYAG_GPU_WAIT_MS=0
             // restores CPU-first.
             const auto budget = backend::gpu_policy::first_frame_wait(backend::gpu_policy::Choice::vulkan);
-            if (budget.count() > 0 && !prep.ready()) (void)prep.wait_for_at_root(budget);
-            if (prep.ready()) adopt_gpu(prep.get_at_root());
-            else gpu_pending_ = true;
+            if (auto t = bringup_.first_frame(budget)) adopt_gpu(std::move(*t));
         }
         if (!gpu_) gpu_ = std::make_unique<backend::VulkanDevice>();
-        startup::mark(gpu_pending_ ? "vulkan pending (missed the wait budget: cpu first)" : "vulkan ready (first frame)");
+        startup::mark(bringup_.pending() ? "vulkan pending (missed the wait budget: cpu first)" : "vulkan ready (first frame)");
 #endif
 
         // The shm buffers (a float framebuffer plus three encoded copies,
@@ -754,10 +743,8 @@ class WaylandWindow {
         if (!open_ || surface_ == nullptr) return;
 
 #if MAYAG_GPU_VULKAN
-        if (gpu_pending_ && prep_.ready()) {
-            adopt_gpu(prep_.get_at_root());
-            gpu_pending_ = false;
-            prep_pool_.reset();
+        if (auto t = bringup_.poll()) {   // a GPU that missed frame one's budget
+            adopt_gpu(std::move(*t));
             startup::mark("vulkan took over");
         }
         // GPU path: the Vulkan swapchain owns the wl_surface's buffers, so
@@ -1143,7 +1130,7 @@ class WaylandWindow {
     [[nodiscard]] std::string_view renderer_name() const noexcept {
 #if MAYAG_GPU_VULKAN
         if (gpu_active_) return "vulkan (wayland)";
-        if (gpu_pending_) return "vulkan (wayland; first frames on cpu)";
+        if (bringup_.pending()) return "vulkan (wayland; first frames on cpu)";
 #endif
         return "software (wayland/shm)";
     }
@@ -1156,14 +1143,14 @@ class WaylandWindow {
     }
     [[nodiscard]] bool gpu_pending() const noexcept {
 #if MAYAG_GPU_VULKAN
-        return gpu_pending_;
+        return bringup_.pending();
 #else
         return false;
 #endif
     }
     [[nodiscard]] bool gpu_ready_to_adopt() const {
 #if MAYAG_GPU_VULKAN
-        return gpu_pending_ && prep_.ready();
+        return bringup_.ready();
 #else
         return false;
 #endif
@@ -2582,9 +2569,15 @@ class WaylandWindow {
     // window is on the shm path and `gpu_` is an inert, unattached device.
     std::unique_ptr<backend::VulkanDevice> gpu_ = std::make_unique<backend::VulkanDevice>();
     bool gpu_active_ = false;
-    bool gpu_pending_ = false;   ///< prepared on a worker; adopt on the first frame after
-    std::optional<jaal::kernel::pool> prep_pool_;
-    jaal::kernel::job_result<std::unique_ptr<backend::VulkanDevice>> prep_;
+    /// Bring-up: prepared on a worker, adopted on the first frame that finds
+    /// it ready (platform/gpu_bringup.hpp, the same machine Win32 uses).
+    struct PrepareVulkan {
+        static std::unique_ptr<backend::VulkanDevice> run(std::unique_ptr<backend::VulkanDevice> d) {
+            if (!d->prepare()) d.reset();
+            return d;
+        }
+    };
+    GpuBringUp<backend::VulkanDevice, PrepareVulkan> bringup_;
     const void* atlas_ = nullptr;
     std::function<void(backend::VulkanDevice&)> atlas_sync_;
     // A second, offscreen device just for read_pixels()/screenshots on the GPU

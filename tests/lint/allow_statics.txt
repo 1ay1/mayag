@@ -19,4 +19,4 @@ font/dwrite_raster.hpp: static Runtime r = [] {
 platform/macos_loop.hpp: static Class cls = [] {
 platform/macos_window.hpp: static Class cls = [] {
 platform/macos_window.hpp: static bool done = false;
-platform/win32_window.hpp: static Prestart p;
+platform/win32_window.hpp: static Win32BringUp p;

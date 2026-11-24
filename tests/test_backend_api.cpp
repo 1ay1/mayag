@@ -24,11 +24,14 @@
 #endif
 
 #include <mayag/render/shader_source.hpp>
+#include <mayag/platform/gpu_bringup.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <string_view>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace mayag;
@@ -133,6 +136,65 @@ class ChalkBackend final : public backend::Device {
 
 }  // namespace
 
+// ── GpuBringUp, with a fake device: the state machine every window uses ──
+namespace bringup {
+struct FakeGpu { int prepared = 0; };
+struct Fast { static std::unique_ptr<FakeGpu> run(std::unique_ptr<FakeGpu> d) { d->prepared = 1; return d; } };
+struct Fails { static std::unique_ptr<FakeGpu> run(std::unique_ptr<FakeGpu>) { return nullptr; } };
+struct Slow {
+    static std::unique_ptr<FakeGpu> run(std::unique_ptr<FakeGpu> d) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        d->prepared = 2;
+        return d;
+    }
+};
+}  // namespace bringup
+static void check_gpu_bringup() {
+    using namespace std::chrono_literals;
+    using namespace bringup;
+    section("GPU bring-up (platform/gpu_bringup.hpp)");
+    {
+        platform::GpuBringUp<FakeGpu, Fast> b;
+        check(!b.pending() && !b.first_frame(1s).has_value(), "never started: nothing to take, nothing pending");
+        b.start(std::make_unique<FakeGpu>());
+        auto t = b.first_frame(2s);
+        check(t && *t && (*t)->prepared == 1 && !b.pending(), "frame one waits for a device that comes up in time, and takes it");
+    }
+    {
+        platform::GpuBringUp<FakeGpu, Fails> b;
+        b.start(std::make_unique<FakeGpu>());
+        auto t = b.first_frame(2s);
+        check(t && !*t && !b.pending(), "a device that cannot run answers null: the window stays on the CPU");
+    }
+    {
+        platform::GpuBringUp<FakeGpu, Slow> b;
+        b.start(std::make_unique<FakeGpu>());
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool missed = !b.first_frame(0ms).has_value() && b.pending();
+        const bool quick = std::chrono::steady_clock::now() - t0 < 50ms;
+        platform::GpuBringUp<FakeGpu, Slow>::Taken late;
+        for (int i = 0; i < 200 && !late; ++i) {
+            late = b.poll();
+            if (!late) std::this_thread::sleep_for(5ms);
+        }
+        check(missed && quick && late && *late && (*late)->prepared == 2 && !b.pending(),
+              "a zero budget never blocks; a later frame takes the device the moment it is ready");
+    }
+    {
+        platform::GpuBringUp<FakeGpu, Slow> b;
+        b.start(std::make_unique<FakeGpu>());
+        auto d = b.finish();
+        check(d && d->prepared == 2 && !b.pending(), "teardown waits for a job still running and hands its device back");
+    }
+    {
+        platform::GpuBringUp<FakeGpu, Fast> a;
+        a.start(std::make_unique<FakeGpu>());
+        platform::GpuBringUp<FakeGpu, Fast> b = std::move(a);   // Win32: a prestart adopted by the window
+        auto t = b.first_frame(2s);
+        check(t && *t && (*t)->prepared == 1, "a bring-up begun elsewhere moves to its window intact");
+    }
+}
+
 // ── one source of truth: the hand-written Metal shader ────────────────────────
 //
 // Vulkan's shader is transpiled from render/kernel.hpp; the MSL in
@@ -198,6 +260,7 @@ static int check_transfer_functions() {
 int main() {
     if (check_metal_mirrors() != 0) return 1;
     if (check_transfer_functions() != 0) return 1;
+    check_gpu_bringup();
     std::printf("mayag backend boundary\n======================\n");
 
     // ── the GPU knobs mean ONE thing (backend/gpu_policy.hpp) ──

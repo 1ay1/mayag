@@ -56,8 +56,8 @@ set(widget_app_ok context.hpp gestures.hpp handlers.hpp interaction.hpp latency.
 set(jaal_ok
     app/app.hpp app/effects.hpp app/host.hpp app/simulate.hpp app/sources.hpp   # the host: mayag <-> jaal
     platform/macos_loop.hpp                                                    # Cocoa's run loop drives jaal's kernel
-    platform/wayland.hpp                                                       # GPU bring-up on a jaal worker
-    platform/win32_window.hpp                                                  # GPU bring-up on a jaal worker; the reactor's message-queue sentinel
+    platform/gpu_bringup.hpp                                                   # every window's GPU bring-up runs on a jaal worker
+    platform/win32_window.hpp                                                  # the reactor's message-queue sentinel
     backend/thread_pool.hpp                                                    # the render fork-join is jaal's pool
     backend/vulkan_device.hpp                                                  # a device handle opted into jaal::sendable
     font/system.hpp                                                            # the font scan runs on a jaal worker

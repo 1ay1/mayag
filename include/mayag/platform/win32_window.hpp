@@ -43,6 +43,7 @@
 #include "../render/draw_list.hpp"
 #include "types.hpp"
 #include "images.hpp"
+#include "gpu_bringup.hpp"
 #include "../backend/gpu_policy.hpp"
 
 // The GPU renderer is Direct3D 11 + DXGI flip model by default (the native
@@ -56,7 +57,6 @@
 #include <uxtheme.h>    // MARGINS
 #include <dwmapi.h>     // types only: every dwmapi function is loaded at runtime
 
-#include <jaal/kernel/pool.hpp>                     // GPU bring-up on a worker
 #include <jaal/platform/windows/wait_reactor.hpp>   // the message-queue sentinel
 #include "../core/startup.hpp"
 
@@ -172,6 +172,18 @@ inline Mods mods_now() {
 
 }  // namespace win32_detail
 
+/// How a Win32 GPU is brought up on the worker (platform/gpu_bringup.hpp).
+struct PrepareWin32Gpu {
+    static std::unique_ptr<backend::Win32Gpu> run(std::unique_ptr<backend::Win32Gpu> d) {
+        if (!d->prepare()) {
+            d->destroy();
+            d.reset();
+        }
+        return d;
+    }
+};
+using Win32BringUp = GpuBringUp<backend::Win32Gpu, PrepareWin32Gpu>;
+
 class Win32Window {
   public:
     Win32Window(const Win32Window&) = delete;
@@ -248,7 +260,7 @@ class Win32Window {
         // CPU-first was asked for (MAYAG_GPU_WAIT_MS=0) or no GPU is expected;
         // a GPU that fails or misses its budget gets the window recreated
         // for GDI (recreate_for_gdi), which is rare by construction.
-        const bool gpu_expected = w.state_->gpu_prep.valid();
+        const bool gpu_expected = w.state_->bringup.pending();
         const bool may_fall_back = !gpu_expected || w.gpu_wait_budget_ms() == 0;
         w.state_->no_redirection = gpu_expected && !may_fall_back;
         const DWORD ex = w.state_->no_redirection ? WS_EX_NOREDIRECTIONBITMAP : 0;
@@ -727,9 +739,7 @@ class Win32Window {
         std::uint64_t frames_skipped = 0;
         /// Instance, device and swapchain are brought up on a jaal worker
         /// (see start_gpu); adopt_gpu() takes the result between frames.
-        std::optional<jaal::kernel::pool> gpu_pool;
-        std::unique_ptr<jaal::kernel::pool> gpu_pool_owned;   ///< the prestart's pool, when adopted
-        jaal::kernel::job_result<std::unique_ptr<backend::Win32Gpu>> gpu_prep;
+        Win32BringUp bringup;   ///< platform/gpu_bringup.hpp (the prestart's, when adopted)
         struct Settings { bool low_latency, transparent; };
         std::optional<Settings> gpu_settings;   ///< set when the device was prestarted
 
@@ -783,10 +793,8 @@ class Win32Window {
     void destroy() {
         release_dib();
         // A prep still running owns a device; let it finish and drop it.
-        if (state_ && state_->gpu_prep.valid()) {
-            if (auto d = state_->gpu_prep.get_at_root()) d->destroy();
-        }
-        if (state_) { state_->gpu_pool.reset(); state_->gpu_pool_owned.reset(); }
+        if (state_)
+            if (auto d = state_->bringup.finish()) d->destroy();
         // Before the HWND goes away: the swapchain holds a VkSurfaceKHR that
         // references it, and destroying the window first is undefined.
         if (state_ && state_->gpu) {
@@ -818,25 +826,15 @@ class Win32Window {
         State* st = state_.get();
         // Already preparing since the process started (gpu_prestart): adopt
         // that job instead of beginning again.
-        if (auto& pre = prestart(); pre.job.valid()) {
-            st->gpu_pool_owned = std::move(pre.pool);
-            st->gpu_prep = std::move(pre.job);
+        if (auto& pre = prestart(); pre.pending()) {
+            st->bringup = std::move(pre);
             st->gpu_settings = State::Settings{!cfg.vsync, cfg.transparent};
             return;
         }
         auto d = std::make_unique<backend::Win32Gpu>();
         d->set_low_latency(!cfg.vsync);
         d->set_transparent(cfg.transparent);
-        st->gpu_pool.emplace(1);
-        st->gpu_prep = st->gpu_pool->submit(
-            [](std::stop_token, std::unique_ptr<backend::Win32Gpu> dev) {
-                if (!dev->prepare()) {
-                    dev->destroy();
-                    dev.reset();
-                }
-                return dev;
-            },
-            std::move(d));
+        st->bringup.start(std::move(d));
     }
 
   public:
@@ -849,26 +847,16 @@ class Win32Window {
     static void gpu_prestart() {
         if (backend::gpu_policy::software_only()) return;
         auto& pre = prestart();
-        if (pre.job.valid()) return;
-        pre.pool = std::make_unique<jaal::kernel::pool>(1);
-        pre.job = pre.pool->submit(
-            [](std::stop_token, std::unique_ptr<backend::Win32Gpu> dev) {
-                if (!dev->prepare()) {
-                    dev->destroy();
-                    dev.reset();
-                }
-                return dev;
-            },
-            std::make_unique<backend::Win32Gpu>());
+        if (pre.pending()) return;
+        pre.start(std::make_unique<backend::Win32Gpu>());
     }
 
   private:
-    struct Prestart {
-        std::unique_ptr<jaal::kernel::pool> pool;
-        jaal::kernel::job_result<std::unique_ptr<backend::Win32Gpu>> job;
-    };
-    static Prestart& prestart() {
-        static Prestart p;
+    /// The bring-up begun by gpu_prestart(), before any window exists; the
+    /// first window to open moves it into its State. Written only from the
+    /// main thread (prestart in main(), adoption in open()).
+    static Win32BringUp& prestart() {
+        static Win32BringUp p;
         return p;
     }
 
@@ -891,18 +879,14 @@ class Win32Window {
     /// CPU path.
     void adopt_gpu() {
         State* st = state_.get();
-        if (!st->gpu_prep.valid()) return;
-        const int budget = st->shown ? 0 : gpu_wait_budget_ms();
-        if (!st->shown) startup::mark(st->gpu_prep.ready() ? "first present: gpu already prepared" : "first present: waiting for gpu");
-        if (budget > 0 && !st->gpu_prep.ready()) {
-            // A real wait, woken the instant the device is ready: Sleep(1)
-            // polling rounds every sleep up to the 15.6 ms timer tick.
-            (void)st->gpu_prep.wait_for_at_root(std::chrono::milliseconds(budget));
-        }
-        if (!st->gpu_prep.ready()) return;
-        auto d = st->gpu_prep.get_at_root();
-        st->gpu_pool.reset();
-        st->gpu_pool_owned.reset();
+        if (!st->bringup.pending()) return;
+        if (!st->shown) startup::mark(st->bringup.ready() ? "first present: gpu already prepared" : "first present: waiting for gpu");
+        // The first present waits (woken the instant the device is ready:
+        // Sleep(1) polling rounds every sleep up to the 15.6 ms timer tick);
+        // later presents only poll.
+        auto taken = st->shown ? st->bringup.poll() : st->bringup.first_frame(std::chrono::milliseconds{gpu_wait_budget_ms()});
+        if (!taken) return;
+        auto d = std::move(*taken);
         if (d && st->gpu_settings) {   // a prestarted device learns the window's wishes now
             d->set_low_latency(st->gpu_settings->low_latency);
             d->set_transparent(st->gpu_settings->transparent);

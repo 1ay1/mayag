@@ -752,6 +752,10 @@ if(MAYAG_BUILD_TESTS)
         add_test(NAME mayag_one_gpu_policy
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_gpu_policy.cmake)
+        # Windows bring their GPU up one way (platform/gpu_bringup.hpp).
+        add_test(NAME mayag_one_gpu_bringup
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_gpu_bringup.cmake)
         # A window's images follow one policy (platform/images.hpp).
         add_test(NAME mayag_one_image_policy
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
