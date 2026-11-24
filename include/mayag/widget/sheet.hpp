@@ -617,14 +617,14 @@ namespace detail {
     using Table = std::unordered_map<std::uint64_t, Frozen<Sheet>>;
     static Cell<Table> cache;
     const std::uint64_t key = k.key();
-    if (auto hit = cache.read([](const Table& t, std::uint64_t key) -> std::optional<Frozen<Sheet>> {
-            if (auto it = t.find(key); it != t.end()) return it->second;
+    if (auto hit = cache.read([](const Table& t, std::uint64_t want) -> std::optional<Frozen<Sheet>> {
+            if (auto it = t.find(want); it != t.end()) return it->second;
             return std::nullopt;
         }, key))
         return **hit;   // kept alive by the table, forever
     auto made = Frozen<Sheet>::make(detail::build_tuned(k));   // outside the lock: building is slow
-    return *cache.with([](Table& t, std::uint64_t key, Frozen<Sheet> f) {
-        return t.try_emplace(key, std::move(f)).first->second;   // the first one in wins
+    return *cache.with([](Table& t, std::uint64_t want, Frozen<Sheet> f) {
+        return t.try_emplace(want, std::move(f)).first->second;   // the first one in wins
     }, key, std::move(made));
 }
 

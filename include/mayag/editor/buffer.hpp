@@ -30,6 +30,7 @@
 #include "../core/scroll_state.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <compare>
 #include <cstdint>
 #include <optional>

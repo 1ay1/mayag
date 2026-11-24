@@ -22,6 +22,7 @@
 // Output is bit-identical to `Software`. That is asserted by a test, and it
 // is what lets the fast path be the default without risk.
 
+#include "../core/target.hpp"
 #include "backend.hpp"   // Device / AtlasView / register_backend
 #include "simd.hpp"
 #include "software.hpp"
@@ -59,8 +60,23 @@ namespace tile_hash {
 /// glyph, and good enough that two different tiles colliding is not a
 /// practical concern (2^-64 per tile per frame).
 [[nodiscard]] inline std::uint64_t mix(std::uint64_t a, std::uint64_t b) noexcept {
-    const __uint128_t r = static_cast<__uint128_t>(a ^ 0xA0761D6478BD642Full) * (b ^ 0xE7037ED1A0B428DBull);
+    a ^= 0xA0761D6478BD642Full;
+    b ^= 0xE7037ED1A0B428DBull;
+#if MAYAG_CC_INT128
+    __extension__ using u128 = unsigned __int128;   // __extension__: -Wpedantic knows it is deliberate
+    const u128 r = static_cast<u128>(a) * b;
     return static_cast<std::uint64_t>(r) ^ static_cast<std::uint64_t>(r >> 64);
+#else
+    // MSVC has no 128-bit integer: the same product from 32-bit halves, so
+    // every platform hashes a tile to the SAME value (the determinism CI
+    // job diffs frames across them).
+    const std::uint64_t al = a & 0xFFFFFFFFu, ah = a >> 32, bl = b & 0xFFFFFFFFu, bh = b >> 32;
+    const std::uint64_t ll = al * bl, lh = al * bh, hl = ah * bl, hh = ah * bh;
+    const std::uint64_t mid = (ll >> 32) + (lh & 0xFFFFFFFFu) + (hl & 0xFFFFFFFFu);
+    const std::uint64_t lo = (mid << 32) | (ll & 0xFFFFFFFFu);
+    const std::uint64_t hi = hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+    return lo ^ hi;
+#endif
 }
 inline void bytes(std::uint64_t& h, const void* p, std::size_t n) noexcept {
     const auto* c = static_cast<const unsigned char*>(p);

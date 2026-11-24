@@ -31,5 +31,9 @@
 #  undef IN
 #  undef OUT
 #  undef OPTIONAL
-#  undef interface
+// NOT `interface`: it is not empty but `struct`, and every COM header
+// parsed after this one (combaseapi.h, ole2.h, d3d11.h, dxgi, dwrite_2.h,
+// dwmapi.h) spells `typedef interface ID3D11Device ID3D11Device;`.
+// Undefining it broke every MSVC build that reached a COM header (85
+// errors a file, from combaseapi.h on). Nothing in mayag or hand names it.
 #endif
