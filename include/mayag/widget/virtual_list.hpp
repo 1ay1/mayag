@@ -63,6 +63,33 @@ struct VisibleRange {
     return r;
 }
 
+/// The visible range of a list whose rows have KNOWN, differing heights
+/// (section headers between rows, say): `heights[i]` is row i's height. The
+/// only per-row cost is summing floats (microseconds for 10k rows); the
+/// nodes built are still only the visible ones.
+[[nodiscard]] inline VisibleRange visible_rows(const ScrollState& scroll, const std::vector<float>& heights,
+                                               int overscan = 2) {
+    VisibleRange r;
+    const int total = static_cast<int>(heights.size());
+    if (total == 0) return r;
+    const float top = scroll.offset.y;
+    const float bottom = top + num::max(scroll.viewport.y, 1.0f);
+    float y = 0.0f;
+    int first = total, last = total;
+    for (int i = 0; i < total; ++i) {
+        const float h = heights[static_cast<std::size_t>(i)];
+        if (first == total && y + h > top) first = i;
+        if (y >= bottom) { last = i; break; }
+        y += h;
+    }
+    if (first == total) first = total - 1;   // scrolled past the end: keep the last row
+    r.first = num::max(first - overscan, 0);
+    r.last = num::min(last + overscan, total);
+    for (int i = 0; i < r.first; ++i) r.pad_before += heights[static_cast<std::size_t>(i)];
+    for (int i = r.last; i < total; ++i) r.pad_after += heights[static_cast<std::size_t>(i)];
+    return r;
+}
+
 /// A virtualised vertical list.
 ///
 /// `build(i)` is called only for visible indices. The two spacers preserve

@@ -38,6 +38,11 @@ struct SshHost {
     std::string last;          ///< "2h ago"
     bool        connected = false;
     int         sessions = 0;  ///< open tabs/panes on it
+    /// What the last probe found (the app probes; the widget draws): unknown,
+    /// reachable with a round trip, or not with the reason.
+    enum class Link : std::uint8_t { unknown, probing, up, down } link = Link::unknown;
+    int         rtt_ms = -1;          ///< up: a command's round trip over the shared connection
+    std::string link_error;           ///< down: why ("key login refused", "timed out")
     std::vector<std::string> tags;
     bool        pinned = false;
     int         uses = 0;          ///< connections made (frecency)

@@ -4,7 +4,3 @@
 
 # The settings: a fixed table of settings, ~60 rows, known at compile time.
 widget/settings_panel.hpp
-# The host book (one row per configured ssh host, rows of mixed height:
-# group headers, badges) and one host's form. Hundreds at most; virtualise
-# with visible_rows if a host book can reach thousands.
-widget/ssh_manager.hpp

@@ -987,6 +987,9 @@ class window_host {
     /// (request_frame_at / stepper), or < 0: nothing booked. What a timed
     /// visual's test asserts on, independent of whatever else animates.
     [[nodiscard]] double next_change_at() const noexcept { return change_at_; }
+    /// The overlays the last frame posted (menus, modals, toasts), for tests
+    /// that look at what a modal drew.
+    [[nodiscard]] const OverlayList& overlays() const noexcept { return overlays_; }
 
     /// Why frames are wanted, the first reason that holds ("" when none):
     /// "on_frame" (the program's subscription), "request" (a view asked:

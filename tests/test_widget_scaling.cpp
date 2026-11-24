@@ -16,6 +16,7 @@
 #include <mayag/widget/file_tree.hpp>
 #include <mayag/widget/picker.hpp>
 #include <mayag/widget/problems.hpp>
+#include <mayag/widget/ssh_manager.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -125,6 +126,17 @@ int main() {
     scales("file_pane", pane_at);
     scales("file_tree", tree_at);
     scales("problems_panel", problems_at);
+    scales("ssh_manager", [](std::size_t n, Ctx& c) {
+        std::vector<SshHost> hosts;
+        for (std::size_t i = 0; i < n; ++i)
+            hosts.push_back({.alias = "host-" + std::to_string(i), .user = "deploy", .hostname = "10.0." + std::to_string(i % 250) + ".1",
+                             .tags = {i % 3 ? "web" : "db"}, .pinned = i % 17 == 0});
+        SshManagerState st;
+        st.list_scroll.viewport = Vec2{280.0f, 600.0f};
+        st.list_scroll.offset.y = 44.0f * static_cast<float>(n / 2);
+        st.sel = static_cast<int>(n / 2);
+        return ssh_manager(c, "mgr", hosts, st, SshManagerProps{}, [](SshManagerOp) { return 0; });
+    });
     scales("picker", picker_at);
     {
         Ctx c;

@@ -752,12 +752,23 @@ template <ControlContext C, class On>
                 | pointer_cursor | id_of(base + ".search")
                 | on_click([op] { return op([](SshManagerState& s) { s.filtering = true; s.editing = false; }); });
 
-    std::vector<Node> list;
-    for (const auto& g : groups) {
+    // The list as items first (a group header or a host row, each a known
+    // height), nodes only for those on screen: a host book of thousands costs
+    // the rows you see, like every other list (lint one_list).
+    struct Item { int group = -1; int host = -1; };
+    std::vector<Item> items;
+    std::vector<float> heights;
+    for (std::size_t gi = 0; gi < groups.size(); ++gi) {
+        items.push_back({static_cast<int>(gi), -1});
+        heights.push_back(d::kHeadH);
+        if (groups[gi].collapsed) continue;   // as move_sel lays them out
+        for (int i : groups[gi].hosts) { items.push_back({static_cast<int>(gi), i}); heights.push_back(d::kRowH); }
+    }
+    const auto header_node = [&](const auto& g) -> Node {
         if (g.folder.empty()) {
-            list.push_back((h(text_owned(g.title) | font(t.type(Tier::fine)) | semibold | tracking(0.9f) | fg(muted),
+            return (h(text_owned(g.title) | font(t.type(Tier::fine)) | semibold | tracking(0.9f) | fg(muted),
                               spacer(), mono(std::to_string(g.hosts.size()), t.type(Tier::fine), faint))
-                            | align(Align::end) | height(d::kHeadH) | pad(0, 10.0f, 6.0f, 10.0f)).build());
+                            | align(Align::end) | height(d::kHeadH) | pad(0, 10.0f, 6.0f, 10.0f)).build();
         } else {
             // A folder: click folds it; its gear edits what its hosts share.
             const auto fid = node_id(base + ".folder." + g.folder);
@@ -767,7 +778,7 @@ template <ControlContext C, class On>
                 return f.name == g.folder && (!f.user.empty() || !f.jump.empty() || !f.identity.empty() || f.port > 0); });
             const auto depth = static_cast<float>(std::count(g.folder.begin(), g.folder.end(), '/'));
             const std::string leaf = g.folder.substr(g.folder.rfind('/') == std::string::npos ? 0 : g.folder.rfind('/') + 1);
-            list.push_back((h(node(icon_node(g.collapsed ? Icon::chevron_right : Icon::chevron_down, 11.0f, muted)),
+            return (h(node(icon_node(g.collapsed ? Icon::chevron_right : Icon::chevron_down, 11.0f, muted)),
                               node(icon_node(g.collapsed ? Icon::folder : Icon::folder_open, 13.0f, fh ? t.accent : t.text_secondary)),
                               text_owned(leaf) | font(t.type(Tier::small)) | semibold | fg(fh ? ink : t.text_secondary) | ellipsis | min_size(0, 0) | grow(),
                               (h(node(icon_node(Icon::settings, 12.0f, c.hovered(gid) ? ink : shared ? t.accent.fade(0.8f) : faint)))
@@ -783,10 +794,11 @@ template <ControlContext C, class On>
                                       auto it = std::find(s.collapsed.begin(), s.collapsed.end(), f);
                                       if (it == s.collapsed.end()) s.collapsed.push_back(f); else s.collapsed.erase(it);
                                   });
-                              })).build());
-            if (g.collapsed) continue;
+                              })).build();
         }
-        for (int i : g.hosts) {
+    };
+    const auto row_node = [&](int i) -> Node {
+        {
             const auto& hst = hosts[static_cast<std::size_t>(i)];
             const bool sel = i == st.sel;
             const auto rid = part_id(base + ".row", static_cast<std::size_t>(i));
@@ -800,6 +812,17 @@ template <ControlContext C, class On>
                                | radius(3.0f) | bg(tone.fade(0.14f))).build());
             if (hst.connected)
                 top.push_back((box() | size(7.0f, 7.0f) | radius(3.5f) | bg(t.success) | tooltip(std::to_string(hst.sessions) + " open")).build());
+            else if (hst.link == SshHost::Link::up || hst.link == SshHost::Link::down || hst.link == SshHost::Link::probing) {
+                // reachable (with its round trip), unreachable (with why), or being asked: a ring, not
+                // the filled "open" dot, so live tabs still read first
+                using L = SshHost::Link;
+                const auto col = hst.link == L::up ? t.success : hst.link == L::down ? t.danger : faint;
+                const std::string tip = hst.link == L::up ? "reachable \u00B7 " + std::to_string(hst.rtt_ms) + " ms"
+                                      : hst.link == L::down ? (hst.link_error.empty() ? std::string{"unreachable"} : hst.link_error)
+                                                            : std::string{"checking\u2026"};
+                top.push_back((box() | size(7.0f, 7.0f) | radius(3.5f) | border(1.5f, col) | tooltip(tip)).build());
+                if (hst.link == L::up && hst.rtt_ms >= 0) top.push_back(mono(std::to_string(hst.rtt_ms) + "ms", t.type(Tier::fine), faint).build());
+            }
             {
                 const auto up = std::count(hst.tunnel.begin(), hst.tunnel.end(), SshHost::Tunnel::up);
                 const bool bad = std::any_of(hst.tunnel.begin(), hst.tunnel.end(), [](SshHost::Tunnel x) { return x == SshHost::Tunnel::down || x == SshHost::Tunnel::conflict; });
@@ -813,7 +836,7 @@ template <ControlContext C, class On>
             std::vector<Node> sub;
             sub.push_back((mono(d::host_line(hst), t.type(Tier::fine), muted) | ellipsis | min_size(0, 0) | grow()).build());
             if (!age.empty()) sub.push_back(mono(age, t.type(Tier::fine), faint).build());
-            list.push_back((v(h_list(std::move(top), 6.0f) | align(Align::center) | width(pct(100)),
+            return (v(h_list(std::move(top), 6.0f) | align(Align::center) | width(pct(100)),
                               h_list(std::move(sub), 8.0f) | align(Align::center) | width(pct(100)))
                             | gap(2.0f) | justify(Justify::center) | height(d::kRowH) | width(pct(100)) | pad(0, 10.0f)
                             | radius(t.rounded(7.0f))
@@ -829,8 +852,18 @@ template <ControlContext C, class On>
                                       s.tab = 0;
                                       if (twice) s.out.push_back({A::Kind::connect, i, {}, {}});
                                   });
-                              })).build());
+                              })).build();
         }
+    };
+    std::vector<Node> list;
+    {
+        const VisibleRange r = visible_rows(st.list_scroll, heights);
+        if (r.pad_before > 0.0f) list.push_back((box() | height(r.pad_before) | width(pct(100))).build());
+        for (int k = r.first; k < r.last; ++k) {
+            const Item& it = items[static_cast<std::size_t>(k)];
+            list.push_back(it.host < 0 ? header_node(groups[static_cast<std::size_t>(it.group)]) : row_node(it.host));
+        }
+        if (r.pad_after > 0.0f) list.push_back((box() | height(r.pad_after) | width(pct(100))).build());
     }
     if (shown.empty()) {
         const bool typed = !st.filter.text.empty();
@@ -1093,11 +1126,24 @@ template <ControlContext C, class On>
                          | on_click([op, i = st.sel] { return op([i](SshManagerState& s) { s.out.push_back({A::Kind::pin, i, {}, {}}); }); })).build());
         const std::string src = hst.editable ? "saved in " + p.store : hst.source == "known" ? "from known_hosts" : "from " + p.source;
         const std::string age = detail::host_age(hst.last_used, p.now);
+        // the link as the last probe found it: a round trip, or why not
+        Node link_line;
+        {
+            using L = SshHost::Link;
+            if (hst.link != L::unknown) {
+                const auto col = hst.link == L::up ? t.readable(t.success) : hst.link == L::down ? t.readable(t.danger) : muted;
+                const std::string what = hst.link == L::up ? "reachable \u00B7 " + std::to_string(hst.rtt_ms) + " ms round trip"
+                                       : hst.link == L::down ? "unreachable \u00B7 " + (hst.link_error.empty() ? std::string{"no answer"} : hst.link_error)
+                                                             : std::string{"checking the link\u2026"};
+                link_line = (text_owned(what) | font(t.type(Tier::small)) | fg(col)).build();
+            }
+        }
         pane.push_back((v(h_list(std::move(title), 10.0f) | align(Align::center) | width(pct(100)),
                           mono(d::host_line(hst), t.type(Tier::body), t.text_secondary),
                           text_owned(src + (hst.uses > 0 ? "  \u00B7  " + std::to_string(hst.uses) + (hst.uses == 1 ? " connection" : " connections")
                                                                + (age.empty() ? "" : ", last " + age + " ago") : "  \u00B7  never connected"))
-                              | font(t.type(Tier::small)) | fg(muted))
+                              | font(t.type(Tier::small)) | fg(muted),
+                          node(std::move(link_line)))
                         | gap(5.0f) | width(pct(100))).build());
         // actions
         std::vector<Node> acts;
