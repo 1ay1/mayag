@@ -764,7 +764,15 @@ template <ControlContext C, class On>
         if (parts.size() > keep + 1) { parts.erase(parts.begin(), parts.end() - static_cast<std::ptrdiff_t>(keep + 1)); parts.insert(parts.begin(), "\u2026"); }
         for (std::size_t i = 0; i < parts.size(); ++i) crumbs.push_back({parts[i], i + 1 == parts.size(), false});
         const editor::Symbol* inner = nullptr;
-        for (const auto& s : ed.symbols()) if (s.line <= ed.cursor().line) inner = &s;
+        {   // the last symbol at or above the caret; symbols are in line order, so
+            // a binary search -- the scan was O(symbols up to the caret) a FRAME,
+            // the reason typing at the end of a big file cost twice the top
+            const auto& syms = ed.symbols();
+            const int line = ed.cursor().line;
+            const auto it = std::upper_bound(syms.begin(), syms.end(), line,
+                                             [](int l, const editor::Symbol& x) { return l < x.line; });
+            if (it != syms.begin()) inner = &*std::prev(it);
+        }
         if (inner != nullptr) crumbs.push_back({inner->name, false, true});
     }
     const bool dirty = ed.dirty();

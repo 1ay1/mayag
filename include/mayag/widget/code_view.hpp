@@ -332,8 +332,14 @@ template <class Th>
 }
 
 /// Expand tabs, so a run's text sits on the cell grid exactly.
-[[nodiscard]] inline std::string expand_tabs(std::string_view s, int start_col, int tab, bool visible) {
+/// `s` with its tabs expanded from display column `start_col`; when `end_col`
+/// is given it receives the column after `s` -- the same rule as
+/// EditorState::display_col, so a caller walking a line run by run never
+/// rescans it from the start (that was O(runs x length) a line, every frame).
+[[nodiscard]] inline std::string expand_tabs(std::string_view s, int start_col, int tab, bool visible,
+                                             int* end_col = nullptr) {
     std::string out;
+    out.reserve(s.size());
     int col = start_col;
     for (char ch : s) {
         if (ch == '\t') {
@@ -346,6 +352,7 @@ template <class Th>
             if ((static_cast<unsigned char>(ch) & 0xC0) != 0x80) ++col;
         }
     }
+    if (end_col != nullptr) *end_col = col;
     return out;
 }
 
@@ -505,10 +512,12 @@ template <ControlContext C>
         std::vector<Node> runs;
         int col = 0;
         std::uint32_t at = 0;
+        std::uint32_t col_at = 0;   // the byte `col` is the display column of
         const auto push_run = [&](std::uint32_t a, std::uint32_t b, Color<Srgb> col_, bool italic_ = false) {
             if (b <= a) return;
-            const std::string seg = detail::expand_tabs(std::string_view{s}.substr(a, b - a), col, ed.tab_width, o.show_whitespace);
-            col = ed.display_col(l, static_cast<int>(b));
+            if (a != col_at) col = ed.display_col(l, static_cast<int>(a));   // runs tile the line; this never fires, but stays right if not
+            const std::string seg = detail::expand_tabs(std::string_view{s}.substr(a, b - a), col, ed.tab_width, o.show_whitespace, &col);
+            col_at = b;
             Node n = (text_owned(seg) | font(fs) | family(o.family) | fg(col_) | ligatures(o.ligatures) | clip_text).build();
             if (italic_) n.style().text.italic = true;
             runs.push_back(std::move(n));
