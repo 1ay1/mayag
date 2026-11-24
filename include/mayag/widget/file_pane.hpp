@@ -29,6 +29,7 @@
 #include "fuzzy.hpp"
 #include "icons.hpp"
 #include "scroll_view.hpp"
+#include "virtual_list.hpp"
 #include "../app/handlers.hpp"
 
 #include <algorithm>
@@ -637,19 +638,22 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     std::uint64_t biggest = 0;
     for (const auto& s : vis)
         if (!p.entries[s.i].dir) biggest = std::max(biggest, p.entries[s.i].size);
-    // Only the rows on screen are built. Every row is exactly `rh` tall, so
-    // the ones above and below are a spacer each: same scroll extent, same
-    // row positions, same part ids (q is still the row's index). Building all
-    // of them -- a measured, shaped, closure-carrying row per entry -- made a
-    // frame O(folder): 21 ms a scroll step in a 3000-file folder. The window
-    // is the viewport plus a screen above and below, so a fast fling never
-    // shows an unbuilt row before the next frame.
-    const float view_h = st.scroll.viewport.y > 0.0f ? st.scroll.viewport.y : 2000.0f;   // before the first layout: a tall screen
-    const auto first_row = static_cast<std::size_t>(std::max(0.0f, std::floor((st.scroll.offset.y - view_h) / rh)));
-    const std::size_t last_row = std::min(vis.size(), static_cast<std::size_t>(std::ceil((st.scroll.offset.y + 2.0f * view_h) / rh)) + 1);
+    // Only the rows on screen are built (virtual_list.hpp: visible_rows, the
+    // one virtualisation rule in mayag; lint one_list). Every row is exactly
+    // `rh`, so the rest are two spacers: same scroll extent, same positions,
+    // same part ids. Building every row made a frame O(folder): 21 ms a
+    // scroll step in a 3000-file folder. A screen of overscan each side, so a
+    // fling never shows an unbuilt row; before the first layout the viewport
+    // is unknown, so assume a tall one rather than build three rows.
+    ScrollState window = st.scroll;
+    if (window.viewport.y <= 0.0f) window.viewport.y = 2000.0f;
+    const VisibleRange vr = visible_rows(window, static_cast<int>(vis.size()), rh, 0.0f,
+                                         static_cast<int>(window.viewport.y / rh) + 1);
+    const auto first_row = static_cast<std::size_t>(vr.first);
+    const auto last_row = static_cast<std::size_t>(vr.last);
     const auto skipped_rows = [](float hpx) { return (box() | height(hpx) | width(pct(100))).build(); };
-    if (first_row > 0 && first_row < vis.size()) rows.push_back(skipped_rows(rh * static_cast<float>(first_row)));
-    for (std::size_t q = std::min(first_row, vis.size()); q < last_row; ++q) {
+    if (vr.pad_before > 0.0f) rows.push_back(skipped_rows(vr.pad_before));
+    for (std::size_t q = first_row; q < last_row; ++q) {
         const auto& e = p.entries[vis[q].i];
         const auto kind = d::kind_of(e);
         const auto rid = part_id(base + ".row", q);
@@ -761,7 +765,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
                               });
                           })).build());
     }
-    if (last_row < vis.size()) rows.push_back(skipped_rows(rh * static_cast<float>(vis.size() - last_row)));
+    if (vr.pad_after > 0.0f) rows.push_back(skipped_rows(vr.pad_after));
     Node list = scroll_view(c, base + ".list", st.scroll, v(std::move(rows)) | width(pct(100)) | pad(4.0f, 6.0f),
                             [op](ScrollOp so) { return op([so](FilePaneState& s) { so(s.scroll); }); });
 

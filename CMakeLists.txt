@@ -539,6 +539,12 @@ if(MAYAG_BUILD_TESTS)
     target_compile_definitions(mayag_app_tests PRIVATE MAYAG_PLATFORM_HEADLESS)
     add_test(NAME mayag_app_tests COMMAND mayag_app_tests)
 
+    # Every scrolling widget is O(screen), not O(data): node counts at 100 vs
+    # 10000 items, and DrawList stays linear under nested backdrops.
+    add_executable(mayag_widget_scaling_tests tests/test_widget_scaling.cpp)
+    target_link_libraries(mayag_widget_scaling_tests PRIVATE mayag)
+    target_compile_options(mayag_widget_scaling_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_widget_scaling_tests COMMAND mayag_widget_scaling_tests)
     add_executable(mayag_widget_behaviour_tests tests/test_widget_behaviour.cpp)
     target_link_libraries(mayag_widget_behaviour_tests PRIVATE mayag)
     target_compile_options(mayag_widget_behaviour_tests PRIVATE ${MAYAG_WARNINGS})
@@ -756,6 +762,11 @@ if(MAYAG_BUILD_TESTS)
         add_test(NAME mayag_one_capability
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_capability.cmake)
+        # A widget that scrolls builds only what is visible (widget/virtual_list.hpp).
+        add_test(NAME mayag_one_list
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         -DALLOW=${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/allow_one_list.txt
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_list.cmake)
         # Windows bring their GPU up one way (platform/gpu_bringup.hpp).
         add_test(NAME mayag_one_gpu_bringup
                  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag

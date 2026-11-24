@@ -1,0 +1,10 @@
+# tests/lint/allow_one_list.txt -- widgets that scroll WITHOUT virtualising,
+# and why their content is bounded (see one_list.cmake). A grant is a claim:
+# if the content can grow with the user's data, virtualise instead.
+
+# The settings: a fixed table of settings, ~60 rows, known at compile time.
+widget/settings_panel.hpp
+# The host book (one row per configured ssh host, rows of mixed height:
+# group headers, badges) and one host's form. Hundreds at most; virtualise
+# with visible_rows if a host book can reach thousands.
+widget/ssh_manager.hpp

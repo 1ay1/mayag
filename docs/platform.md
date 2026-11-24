@@ -94,5 +94,30 @@ Nothing in the host, the widgets or the app changes.
 | `one_image_policy` | windows call `images::`, never a device's texture verbs |
 | `one_gpu_bringup` | no window runs its own GPU worker |
 | `one_capability` | every capability concept has a `cap::` tag in `cap::all`; the host asks only `has<>` |
+| `one_list` | a widget that calls `scroll_view` virtualises (`visible_rows` / `virtual_list`) or is granted as bounded, with the reason |
 
 Each lint is mutation-tested: a planted violation of each kind is caught.
+
+## A frame is O(screen), never O(data)
+
+Every lag bug so far had one shape: a frame whose cost grew with the data.
+The file pane built every row of a folder (21 ms a scroll step at 3000
+files). DrawList rescanned every instance for each glyph, then on every
+backdrop restore. The editor rebuilt the file's symbol list on every key.
+Three rules hold this shut:
+
+- **Lists are virtual.** Uniform rows go through `visible_rows` /
+  `virtual_list` (widget/virtual_list.hpp); lint `one_list`.
+- **Proven by structure, not by feel.** `test_widget_scaling` builds each
+  scrolling widget at 100 and 10000 items with the same viewport, and the
+  node count must not grow. It also checks that DrawList stays linear under
+  nested backdrops. Putting back the old file pane or the old restore fails
+  it (100044 nodes; 49x the time for 8x the work).
+- **Derived data is cached where it lives**, keyed on what it depends on.
+  Examples: `FilePaneState::view_memo` for a sort, the syntax cache for
+  bracket depth, `EditorState` for symbols, patched in place on an edit.
+  It is never recomputed from all the data each frame.
+
+And the UI thread asks the OS for interactive priority before any thread
+starts (`platform/priority.hpp`), so background work on the machine cannot
+starve input-to-frames.
