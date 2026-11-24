@@ -39,6 +39,7 @@
 #include <initializer_list>
 #include <numeric>
 #include <optional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -75,6 +76,13 @@ struct FilePaneAction {
     std::string path;
 };
 
+/// One row as shown: which entry, and which of its characters the filter matched.
+struct FileShown {
+    std::size_t i = 0;
+    std::vector<std::uint16_t> hits;
+    int score = 0;
+};
+
 struct FilePaneState {
     int           sel = 0;
     ScrollState   scroll;
@@ -84,6 +92,20 @@ struct FilePaneState {
     std::string   filter;
     FileSort      sort = FileSort::name;
     std::vector<FilePaneAction> out;
+
+    /// The last file_pane_view answer and what it was computed from: derived
+    /// data, like ScrollState's measurements, so `mutable` and never compared.
+    /// A scroll, a hover or a selection does not change the order; only the
+    /// entries and the four settings do.
+    struct ViewMemo {
+        std::uint64_t fingerprint = 0;
+        std::size_t   size = 0;
+        std::string   filter;
+        bool          hidden = false, dirs = false, valid = false;
+        FileSort      sort = FileSort::name;
+        std::shared_ptr<const std::vector<FileShown>> out;
+    };
+    mutable ViewMemo view_memo;
 };
 using FilePaneOp = Edit<FilePaneState>;
 
@@ -119,13 +141,6 @@ struct FilePaneProps {
     /// The face of names, paths and sizes (an app passes its terminal's or its
     /// interface's role).
     FontFamily  family = FontFamily::mono;
-};
-
-/// One row as shown: which entry, and which of its characters the filter matched.
-struct FileShown {
-    std::size_t i = 0;
-    std::vector<std::uint16_t> hits;
-    int score = 0;
 };
 
 namespace file_pane_detail {
@@ -270,6 +285,26 @@ enum class Kind : std::uint8_t { dir, code, config, doc, image, archive, exec, o
 [[nodiscard]] inline std::vector<FileShown> file_pane_view(const std::vector<FileEntry>& all, const FilePaneState& st,
                                                            bool dirs_first = true) {
     namespace d = file_pane_detail;
+    // The order depends only on the entries and four settings; a scroll, a
+    // hover or a selection change does not touch it. So the last answer is
+    // kept (per thread) and reused while those are the same -- sorting 3000
+    // names case-insensitively every frame was most of a scrolling frame's
+    // CPU in a big folder, and the key handler sorts again on every key.
+    auto& memo = st.view_memo;
+    std::uint64_t fp = 1469598103934665603ull;
+    const auto mix = [&](std::uint64_t x) { fp = (fp ^ x) * 1099511628211ull; };
+    for (const auto& e : all) {
+        mix(std::hash<std::string>{}(e.name));
+        mix(static_cast<std::uint64_t>(e.mtime) ^ (e.size << 1) ^ static_cast<std::uint64_t>(e.dir));
+    }
+    if (memo.valid && memo.out && memo.size == all.size() && memo.fingerprint == fp && memo.filter == st.filter &&
+        memo.hidden == st.show_hidden && memo.dirs == dirs_first && memo.sort == st.sort)
+        return *memo.out;
+    const auto remember = [&](std::vector<FileShown> v) {
+        memo = {fp, all.size(), st.filter, st.show_hidden, dirs_first, true, st.sort,
+                std::make_shared<const std::vector<FileShown>>(v)};
+        return v;
+    };
     std::vector<FileShown> v;
     v.reserve(all.size());
     const bool dot_query = !st.filter.empty() && st.filter[0] == '.';
@@ -285,7 +320,7 @@ enum class Kind : std::uint8_t { dir, code, config, doc, image, archive, exec, o
             if (a.score != b.score) return a.score > b.score;
             return d::ci_less(all[a.i].name, all[b.i].name);
         });
-        return v;
+        return remember(std::move(v));
     }
     std::stable_sort(v.begin(), v.end(), [&](const FileShown& a, const FileShown& b) {
         const auto& x = all[a.i];
@@ -303,7 +338,7 @@ enum class Kind : std::uint8_t { dir, code, config, doc, image, archive, exec, o
         }
         return d::ci_less(x.name, y.name);
     });
-    return v;
+    return remember(std::move(v));
 }
 
 /// The keyboard, while the pane has it. nullopt: not the pane's key (while
@@ -602,7 +637,19 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
     std::uint64_t biggest = 0;
     for (const auto& s : vis)
         if (!p.entries[s.i].dir) biggest = std::max(biggest, p.entries[s.i].size);
-    for (std::size_t q = 0; q < vis.size(); ++q) {
+    // Only the rows on screen are built. Every row is exactly `rh` tall, so
+    // the ones above and below are a spacer each: same scroll extent, same
+    // row positions, same part ids (q is still the row's index). Building all
+    // of them -- a measured, shaped, closure-carrying row per entry -- made a
+    // frame O(folder): 21 ms a scroll step in a 3000-file folder. The window
+    // is the viewport plus a screen above and below, so a fast fling never
+    // shows an unbuilt row before the next frame.
+    const float view_h = st.scroll.viewport.y > 0.0f ? st.scroll.viewport.y : 2000.0f;   // before the first layout: a tall screen
+    const auto first_row = static_cast<std::size_t>(std::max(0.0f, std::floor((st.scroll.offset.y - view_h) / rh)));
+    const std::size_t last_row = std::min(vis.size(), static_cast<std::size_t>(std::ceil((st.scroll.offset.y + 2.0f * view_h) / rh)) + 1);
+    const auto skipped_rows = [](float hpx) { return (box() | height(hpx) | width(pct(100))).build(); };
+    if (first_row > 0 && first_row < vis.size()) rows.push_back(skipped_rows(rh * static_cast<float>(first_row)));
+    for (std::size_t q = std::min(first_row, vis.size()); q < last_row; ++q) {
         const auto& e = p.entries[vis[q].i];
         const auto kind = d::kind_of(e);
         const auto rid = part_id(base + ".row", q);
@@ -714,6 +761,7 @@ template <ControlContext C, class On, class OnResize = std::nullptr_t>
                               });
                           })).build());
     }
+    if (last_row < vis.size()) rows.push_back(skipped_rows(rh * static_cast<float>(vis.size() - last_row)));
     Node list = scroll_view(c, base + ".list", st.scroll, v(std::move(rows)) | width(pct(100)) | pad(4.0f, 6.0f),
                             [op](ScrollOp so) { return op([so](FilePaneState& s) { so(s.scroll); }); });
 

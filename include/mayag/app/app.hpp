@@ -34,6 +34,7 @@
 #include "interaction.hpp"
 #include "latency.hpp"
 #include "platform.hpp"
+#include "../platform/priority.hpp"
 #include "sources.hpp"
 
 #include <jaal/jaal.hpp>
@@ -450,7 +451,10 @@ void gpu_prestart_on() {
     if constexpr (platform::has<W, platform::cap::prestarts_gpu>) W::gpu_prestart();
 }
 }  // namespace detail
-inline void gpu_prestart() { detail::gpu_prestart_on<platform::Native>(); }
+inline void gpu_prestart() {
+    platform::raise_ui_thread();   // before the first thread starts: they inherit it
+    detail::gpu_prestart_on<platform::Native>();
+}
 
 namespace detail {
 inline void log_renderer(std::string_view name) {
@@ -545,6 +549,7 @@ int run(AppConfig cfg, Make make) {
 /// say). Returns when the program quits.
 template <Program P, class W>
 int run_on(W& window, AppConfig cfg, jaal::prog::flags_t<P> flags) {
+    platform::raise_ui_thread();   // input-to-frames beats background work (platform/priority.hpp)
     detail::apply_env_overrides(cfg);
 #if MAYAG_WINDOW_COCOA
     if constexpr (std::same_as<W, platform::MacWindow>) {

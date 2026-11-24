@@ -562,16 +562,58 @@ class SyntaxCache {
     LineState state_at(const Language& lang, const auto& lines, int line) const {
         if (lang_ != &lang) { lang_ = &lang; valid_ = 0; }
         line = std::clamp(line, 0, static_cast<int>(lines.size()));
-        if (states_.size() < lines.size() + 1) states_.resize(lines.size() + 1);
-        if (valid_ == 0) states_[0] = LineState{};
+        if (states_.size() < lines.size() + 1) { states_.resize(lines.size() + 1); depth_.resize(lines.size() + 1); }
+        if (valid_ == 0) { states_[0] = LineState{}; depth_[0] = 0; }
         std::vector<Span> scratch;
         while (valid_ < line) {
             scratch.clear();
-            states_[static_cast<std::size_t>(valid_) + 1] =
-                highlight_line(lang, lines[static_cast<std::size_t>(valid_)], states_[static_cast<std::size_t>(valid_)], scratch);
+            const auto& text = lines[static_cast<std::size_t>(valid_)];
+            const auto v = static_cast<std::size_t>(valid_);
+            states_[v + 1] = highlight_line(lang, text, states_[v], scratch);
+            depth_[v + 1] = depth_after(text, scratch, depth_[v]);
             ++valid_;
         }
         return states_[static_cast<std::size_t>(line)];
+    }
+
+    /// The bracket nesting depth at the START of line `line`, counting only
+    /// brackets that are code (not in strings or comments). Kept in the SAME
+    /// pass as the lexer states: each line is lexed once for both, so a jump
+    /// to the end of a 100k-line file lexes the file once, not twice with a
+    /// vector allocated per line (that second pass was a 100 ms first frame).
+    int depth_at(const Language& lang, const auto& lines, int line) const {
+        line = std::clamp(line, 0, static_cast<int>(lines.size()));
+        (void)state_at(lang, lines, line);
+        return depth_[static_cast<std::size_t>(line)];
+    }
+
+    /// Lex up to `n` more lines ahead of what is cached. True when the whole
+    /// text is cached: then a jump anywhere draws without lexing. Driven in
+    /// slices from update() while the editor is idle, so the cost of a cold
+    /// 100k-line file is paid in the background, a few ms a step, instead of
+    /// in the first frame that shows its end.
+    bool warm(const Language& lang, const auto& lines, int n) const {
+        if (lang_ != &lang) { (void)state_at(lang, lines, 0); }
+        const int size = static_cast<int>(lines.size());
+        (void)state_at(lang, lines, std::min(size, valid_ + std::max(n, 1)));
+        return valid_ >= size;
+    }
+    [[nodiscard]] bool warm_for(const Language& lang, std::size_t line_count) const noexcept {
+        return lang_ == &lang && valid_ >= static_cast<int>(line_count);
+    }
+
+    /// `depth` after line `s`, whose spans are `sp` (the code_brackets rule).
+    static int depth_after(const std::string& s, const std::vector<Span>& sp, int depth) noexcept {
+        std::size_t k = 0;
+        for (std::size_t i = 0; i < s.size(); ++i) {
+            const char c = s[i];
+            const bool open = c == '(' || c == '[' || c == '{';
+            if (!open && c != ')' && c != ']' && c != '}') continue;
+            while (k < sp.size() && sp[k].end <= i) ++k;
+            const bool inside = k < sp.size() && sp[k].start <= i && (sp[k].kind == Tok::string || sp[k].kind == Tok::comment);
+            if (!inside) depth = std::max(0, depth + (open ? 1 : -1));
+        }
+        return depth;
     }
 
     /// Spans of one line.
@@ -584,6 +626,7 @@ class SyntaxCache {
 
   private:
     mutable std::vector<LineState> states_;
+    mutable std::vector<int>       depth_;   ///< bracket depth at the start of each line (states_'s pass)
     mutable int                    valid_ = 0;
     mutable const Language*        lang_ = nullptr;
 };

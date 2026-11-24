@@ -20,6 +20,7 @@
 #include "../style/style.hpp"
 #include "kernel.hpp"   // KIND_* / FLAG_*: the one definition shader and CPU share
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -151,8 +152,8 @@ class DrawList {
         text_backdrop_ = Vec4{};
         backdrop_since_ = 0;
         covers_.clear();
+        cover_from_ = 0;
         cover_bound_ = Rect{};
-        covers_stale_ = false;
     }
 
     void reserve(std::size_t n) {
@@ -241,22 +242,30 @@ class DrawList {
         // The fill that set it is the instance just pushed; anything drawn
         // after it that overlaps a glyph invalidates it for that glyph.
         backdrop_since_ = instances_.size();
-        covers_.clear();
+        cover_from_ = covers_.size();   // this backdrop's covers: the ones pushed from now on
         cover_bound_ = Rect{};
-        covers_stale_ = false;
     }
     void clear_text_backdrop() noexcept { text_backdrop_ = Vec4{}; }
-    struct BackdropState { Vec4 colour; std::size_t since; };
-    [[nodiscard]] BackdropState text_backdrop() const noexcept { return {text_backdrop_, backdrop_since_}; }
+    /// A saved backdrop window: its colour, where it began, and its covers so
+    /// far (their start in the log, how many, their bound), so a restore adds
+    /// only the covers pushed since the save -- never a rescan.
+    struct BackdropState {
+        Vec4 colour;
+        std::size_t since;
+        std::size_t cover_from = 0, cover_count = 0;
+        Rect bound{};
+    };
+    [[nodiscard]] BackdropState text_backdrop() const noexcept {
+        return {text_backdrop_, backdrop_since_, cover_from_, covers_.size(), cover_bound_};
+    }
     void restore_text_backdrop(BackdropState s) noexcept {
         text_backdrop_ = s.colour;
-        if (s.since != backdrop_since_ || covers_stale_) {   // another window, or untracked pushes: rebuild
+        if (s.since != backdrop_since_) {   // back to the saved window: its bound + what came since
             backdrop_since_ = s.since;
-            covers_.clear();
-            cover_bound_ = Rect{};
-            covers_stale_ = false;
-            if (text_backdrop_.w >= 0.5f)
-                for (std::size_t k = backdrop_since_; k < instances_.size(); ++k) note_cover(instances_[k]);
+            cover_from_ = s.cover_from;
+            cover_bound_ = s.bound;
+            for (std::size_t k = std::max(s.cover_count, s.cover_from); k < covers_.size(); ++k)
+                cover_bound_ = cover_bound_.unite(covers_[k].rect);
         }
     }
 
@@ -571,20 +580,25 @@ class DrawList {
     // instead of rescanning every instance since the backdrop for every glyph:
     // that scan was O(glyphs x instances), the single largest cost of
     // painting a screen of text (a terminal under a flood: 8 ms a frame).
-    std::vector<Rect>     covers_;
-    Rect                  cover_bound_{};
-
-    bool                  covers_stale_ = false;   ///< pushes went untracked while no backdrop was known
+    // Append-only for the frame: each non-glyph rect with its instance index,
+    // so any backdrop's covers are the suffix from cover_from_ -- set and
+    // restore never rescan (a list of cards, each its own backdrop, stays
+    // linear).
+    struct Cover { std::size_t at; Rect rect; };
+    std::vector<Cover>    covers_;
+    std::size_t           cover_from_ = 0;
+    Rect                  cover_bound_{};   ///< of covers_[cover_from_ ..]
 
     void note_cover(const Instance& o) {
+        // Always kept, even while no backdrop is known: the painter clears
+        // the backdrop inside a subtree and restores it after, and skipping
+        // here made every restore rescan the list (paint went quadratic:
+        // 0.07 -> 6 ms a terminal frame). A push_back is cheaper than any
+        // rescan.
         if (o.kind == static_cast<std::uint32_t>(ShapeKind::glyph)) return;
-        // No known backdrop: nothing asks the covers, so don't keep them (a
-        // panel of rects drawn on a translucent surface paid for this).
-        // restore_text_backdrop rebuilds them if the backdrop comes back.
-        if (text_backdrop_.w < 0.5f) { covers_stale_ = true; return; }
         const Rect r{o.rect.x, o.rect.y, o.rect.z, o.rect.w};
-        cover_bound_ = covers_.empty() ? r : cover_bound_.unite(r);
-        covers_.push_back(r);
+        cover_bound_ = covers_.size() == cover_from_ ? r : cover_bound_.unite(r);
+        covers_.push_back({instances_.size(), r});
     }
 
     /// The backdrop under a glyph at `dst`, or unknown if any non-glyph
@@ -593,9 +607,9 @@ class DrawList {
     /// never sits on other text's ink.
     [[nodiscard]] Vec4 backdrop_for(const Rect& dst) const noexcept {
         if (text_backdrop_.w < 0.5f) return Vec4{};
-        if (covers_.empty() || !cover_bound_.intersects(dst)) return text_backdrop_;   // the common case: O(1)
-        for (const Rect& r : covers_)
-            if (r.intersects(dst)) return Vec4{};
+        if (covers_.size() == cover_from_ || !cover_bound_.intersects(dst)) return text_backdrop_;   // the common case: O(1)
+        for (std::size_t k = cover_from_; k < covers_.size(); ++k)
+            if (covers_[k].rect.intersects(dst)) return Vec4{};
         return text_backdrop_;
     }
 };

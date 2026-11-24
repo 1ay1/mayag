@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <optional>
@@ -377,11 +378,21 @@ class RunLoop {
         --probe_left_;
         const double now = static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) * 1e-9;   // NSEvent's clock
         const long wnum = msg<long>(win_.ns_window(), sel("windowNumber"));
-        id chars = nsstring("\xEF\x9C\x82");   // U+F702 NSLeftArrowFunctionKey
+        // MAYAG_PHOTON_PROBE_KEY=keycode,flags,char: the key pressed (default
+        // left arrow). A key the app answers itself measures the app alone,
+        // without a shell's echo in the loop.
+        unsigned short code = 123;
+        unsigned long flags = 0xA00000;
+        std::string ch = "\xEF\x9C\x82";   // U+F702 NSLeftArrowFunctionKey
+        if (const char* k = std::getenv("MAYAG_PHOTON_PROBE_KEY")) {
+            unsigned c = 0; unsigned long f = 0; char text[8] = {};
+            if (std::sscanf(k, "%u,%lx,%7s", &c, &f, text) >= 2) { code = static_cast<unsigned short>(c); flags = f; if (text[0]) ch = text; }
+        }
+        id chars = nsstring(ch);
         id ev = msg_cls<id>(objc_getClass("NSEvent"),
             sel("keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:"),
-            static_cast<unsigned long>(down ? 10 : 11), CGPoint{0, 0}, static_cast<unsigned long>(0xA00000), now, wnum,
-            static_cast<id>(nullptr), chars, chars, static_cast<BOOL>(NO), static_cast<unsigned short>(123));
+            static_cast<unsigned long>(down ? 10 : 11), CGPoint{0, 0}, flags, now, wnum,
+            static_cast<id>(nullptr), chars, chars, static_cast<BOOL>(NO), code);
         if (ev != nullptr) msg<void>(win_.ns_app(), sel("postEvent:atStart:"), ev, static_cast<BOOL>(NO));
     }
 

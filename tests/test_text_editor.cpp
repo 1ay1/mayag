@@ -224,6 +224,29 @@ void completion_and_symbols() {
     auto b = text_editor_ops::open("f(a, \"(\") {\n  g([1]);\n}\n", "a.c");
     ok(b.ed.bracket_depth_at(1) == 1 && b.ed.bracket_depth_at(2) == 1 && b.ed.bracket_depth_at(3) == 0,
        "bracket depth counts code brackets, not ones in strings");
+    {   // ...the same answer as summing code_brackets line by line, on a mixed
+        // file, and still after edits above the line (the depth rides the
+        // syntax cache's single pass now)
+        std::string src;
+        for (int i = 0; i < 600; ++i)
+            src += i % 7 == 0 ? "/* ( { [ */ int f" + std::to_string(i) + "() {\n"
+                 : i % 7 == 1 ? "  s = \"))]\"; g(h(1), [2]);\n"
+                 : i % 7 == 2 ? "  // }}}} ((\n"
+                 : i % 7 == 6 ? "}\n" : "  x[i] = (y + z);\n";
+        auto e = text_editor_ops::open(src, "big.c");
+        const auto reference = [&](int l) {
+            int d = 0;
+            for (int k = 0; k < l; ++k)
+                for (const auto& br : e.ed.code_brackets(k)) d = std::max(0, d + (br.second ? 1 : -1));
+            return d;
+        };
+        bool same = true;
+        for (int l : {0, 1, 7, 50, 333, 599}) same = same && e.ed.bracket_depth_at(l) == reference(l);
+        e.ed.set_cursor({3, 0});
+        e.ed.insert_text("{ ( ");   // two opens above everything below
+        for (int l : {3, 4, 300, 599}) same = same && e.ed.bracket_depth_at(l) == reference(l);
+        ok(same, "bracket depth equals the per-line count everywhere, and after an edit above");
+    }
     // the file changed on disk
     text_editor_ops::disk_text(b, "g();\n");
     ok(b.ed.line(0) == "g();" && !b.disk_changed, "an unedited file takes the new text");

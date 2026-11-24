@@ -145,11 +145,6 @@ class EditorState {
 
     mutable ViewMetrics      metrics{};
     mutable SyntaxCache      syntax{};
-  private:
-    mutable std::vector<int> depth_;
-    mutable int              depth_valid_ = 0;
-    mutable const Language*  depth_lang_ = nullptr;
-  public:
 
     // ── construction ────────────────────────────────────────────────────
 
@@ -187,7 +182,6 @@ class EditorState {
         max_cols_rescan_ = true; visual_identity_ = false;
         ol_state_.clear(); ol_sym_.clear(); ol_pool_.clear(); ol_valid_ = 0; ol_dirty_to_ = 0;
         syntax.reset();
-        depth_valid_ = 0;
     }
     [[nodiscard]] std::string text() const {
         std::string s;
@@ -1086,16 +1080,15 @@ class EditorState {
     /// brackets that are code (not in strings or comments). Rainbow brackets
     /// colour each pair by it. Cached; recomputed from the first stale line.
     [[nodiscard]] int bracket_depth_at(int l) const {
-        l = std::clamp(l, 0, line_count());
-        if (depth_lang_ != language) { depth_valid_ = 0; depth_lang_ = language; }
-        if (depth_.size() < lines.size() + 1) depth_.resize(lines.size() + 1);
-        if (depth_valid_ == 0) depth_[0] = 0;
-        while (depth_valid_ < l) {
-            int d = depth_[static_cast<std::size_t>(depth_valid_)];
-            for (const auto& b : code_brackets(depth_valid_)) d = std::max(0, d + (b.second ? 1 : -1));
-            depth_[static_cast<std::size_t>(++depth_valid_)] = d;
-        }
-        return depth_[static_cast<std::size_t>(l)];
+        // kept by the syntax cache, in the same pass as the lexer states
+        return syntax.depth_at(*language, lines, std::clamp(l, 0, line_count()));
+    }
+    /// Lex `n` more lines of the syntax cache ahead (a background slice).
+    /// True when the whole text is cached.
+    bool warm_syntax(int n) const { return language == nullptr || syntax.warm(*language, lines, n); }
+    /// The syntax cache covers the whole text: drawing any line lexes nothing.
+    [[nodiscard]] bool syntax_warm() const noexcept {
+        return language == nullptr || syntax.warm_for(*language, lines.size());
     }
     /// The brackets on line `l` that are code: (byte, opens?).
     [[nodiscard]] std::vector<std::pair<int, bool>> code_brackets(int l) const {
@@ -1459,7 +1452,6 @@ class EditorState {
             if (moved != folds) { folds = std::move(moved); ++fold_version_; }
         }
         syntax.invalidate_from(a.line);
-        depth_valid_ = std::min(depth_valid_, a.line);
         ++version_;
         // a line-count change moves everything below: hi = INT_MAX covers that
         // (and any older mark below a.line, whose number shifted)
