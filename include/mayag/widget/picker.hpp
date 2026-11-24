@@ -100,25 +100,35 @@ struct Ranked { std::vector<int> order; std::vector<FuzzyMatch> matches; };
     return r;
 }
 
-template <ControlContext C>
-inline void picker(const C& c, std::string_view id, const TextEditState& query,
-                   const std::vector<PickerItem>& items, const Ranked& ranked, int chosen,
-                   const PickerStyle& st = {}) {
+/// One shown row of a lazy picker: the item and its matched byte positions.
+struct PickerRow { PickerItem item; std::vector<std::uint16_t> positions; };
+
+/// How many rows a picker has: `shown` ranked rows of `total` candidates.
+struct PickerCount { int shown = 0; std::size_t total = 0; };
+
+/// The picker over rows made on demand: `row(k)` is called only for the
+/// max_rows on screen, so a frame costs the window, never the list -- 2000
+/// search hits used to become 2000 PickerItems (each a few substrings) every
+/// frame to draw twelve of them.
+template <ControlContext C, class RowAt>
+    requires requires(RowAt f) { { f(0) } -> std::convertible_to<PickerRow>; }
+inline void picker(const C& c, std::string_view id, const TextEditState& query, PickerCount count,
+                   RowAt&& row, int chosen, const PickerStyle& st = {}) {
     const Theme& t = c.theme;
-    const int n = static_cast<int>(ranked.order.size());
+    const int n = count.shown;
     const int sel = n == 0 ? -1 : std::clamp(chosen, 0, n - 1);
     // Keep the selection on screen: a window of max_rows around it.
     const int top = std::clamp(sel - st.max_rows + 3, 0, std::max(0, n - st.max_rows));
     std::vector<Node> rows;
     for (int k = top; k < std::min(n, top + st.max_rows); ++k) {
-        const PickerItem& it = items[static_cast<std::size_t>(ranked.order[static_cast<std::size_t>(k)])];
-
+        const PickerRow pr = row(k);
+        const PickerItem& it = pr.item;
         const bool on = k == sel;
         rows.push_back((h(box() | size(t.mark, 14) | with_look(sheet_of(t).mark, t),
                           node(it.icon_name.empty() ? Node{} : file_icon(t, it.icon_name, 12.0f).build()),
-                          node(st.mono ? (node(fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.type(Tier::body),
+                          node(st.mono ? (node(fuzzy_text(it.label, pr.positions, t.type(Tier::body),
                                                           t.text_primary, t.accent).build()) | monospace | grow() | min_size(0, 0) | clip).build()
-                                       : fuzzy_text(it.label, ranked.matches[static_cast<std::size_t>(k)].positions, t.type(Tier::body),
+                                       : fuzzy_text(it.label, pr.positions, t.type(Tier::body),
                                                     t.text_primary, t.accent).build()),
                           st.mono ? (text_owned(it.detail) | font(t.type(Tier::small)) | fg(var::text_disabled) | ellipsis
                                          | max_size(st.width * 0.32f, 1000.0f) | min_size(0, 0)).build()
@@ -136,7 +146,7 @@ inline void picker(const C& c, std::string_view id, const TextEditState& query,
     std::vector<Node> foot;
     for (const auto& [k, a] : st.footer) foot.push_back(key_hint(t, k, a, t.type(Tier::small)).build());
     foot.push_back((spacer()).build());
-    foot.push_back((text_owned(std::to_string(n) + (n == static_cast<int>(items.size()) ? "" : " of " + std::to_string(items.size()))
+    foot.push_back((text_owned(std::to_string(n) + (static_cast<std::size_t>(n) == count.total ? "" : " of " + std::to_string(count.total))
                                + (st.noun.empty() ? std::string{} : " " + st.noun))
                     | font(t.type(Tier::small)) | fg(var::text_disabled)).build());
 
@@ -165,6 +175,19 @@ inline void picker(const C& c, std::string_view id, const TextEditState& query,
             return Vec2{std::max(0.0f, (sz.x - st.width) * 0.5f), std::round(sz.y * 0.10f)};
         }(),
     });
+}
+
+/// The picker over a built list, ranked by rank_items.
+template <ControlContext C>
+inline void picker(const C& c, std::string_view id, const TextEditState& query,
+                   const std::vector<PickerItem>& items, const Ranked& ranked, int chosen,
+                   const PickerStyle& st = {}) {
+    picker(c, id, query, PickerCount{static_cast<int>(ranked.order.size()), items.size()},
+           [&](int k) {
+               const auto ks = static_cast<std::size_t>(k);
+               return PickerRow{items[static_cast<std::size_t>(ranked.order[ks])], ranked.matches[ks].positions};
+           },
+           chosen, st);
 }
 
 }  // namespace mayag::dsl

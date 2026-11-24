@@ -70,6 +70,11 @@ struct FrameTiming {
     std::uint32_t instances = 0;
     std::uint32_t draw_calls = 0;
 
+    /// CPU this thread spent from view through paint (platform/thread_clock.hpp):
+    /// the stages' wall time minus the moments the OS ran something else. On a
+    /// loaded machine the wall time is mostly the neighbours'; this is the code's.
+    double widget_cpu_ms = 0;
+
     [[nodiscard]] double cpu_ms() const noexcept {
         return input_ms + update_ms + view_ms + cascade_ms + layout_ms + paint_ms + render_ms;
     }
@@ -101,6 +106,7 @@ class LatencyStats {
         ++next_;
         count_ = num::min<std::size_t>(count_ + 1, window);
         if (widget_ms(t) > widget_ms(slowest_)) slowest_ = t;
+        if (t.widget_cpu_ms > slowest_cpu_.widget_cpu_ms) slowest_cpu_ = t;
     }
 
     /// What a frame costs on EVERY backend: building, styling, laying out and
@@ -112,6 +118,9 @@ class LatencyStats {
     /// The slowest frame since the start (by widget_ms), with its stages:
     /// the number a "no frame ever drops" gate checks.
     [[nodiscard]] const FrameTiming& slowest() const noexcept { return slowest_; }
+    /// The frame that did the most work (by widget_cpu_ms): the number a gate
+    /// on the CODE checks, since a busy machine can't inflate it.
+    [[nodiscard]] const FrameTiming& slowest_cpu() const noexcept { return slowest_cpu_; }
 
     [[nodiscard]] std::size_t size() const noexcept { return count_; }
     [[nodiscard]] const FrameTiming& last() const noexcept {
@@ -171,13 +180,14 @@ class LatencyStats {
         return n;
     }
 
-    void clear() noexcept { next_ = 0; count_ = 0; slowest_ = {}; }
+    void clear() noexcept { next_ = 0; count_ = 0; slowest_ = {}; slowest_cpu_ = {}; }
 
   private:
     FrameTiming samples_[window]{};
     std::size_t next_ = 0;
     std::size_t count_ = 0;
     FrameTiming slowest_{};
+    FrameTiming slowest_cpu_{};
 };
 
 /// Detects an app that never stops rendering.

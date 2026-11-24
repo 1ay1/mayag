@@ -41,6 +41,7 @@
 #include "effects.hpp"
 #include "../core/event.hpp"
 #include "../platform/concepts.hpp"   // the window capabilities the host asks by name
+#include "../platform/thread_clock.hpp"
 #include "handlers.hpp"
 #include "interaction.hpp"
 #include "latency.hpp"
@@ -1598,6 +1599,7 @@ class window_host {
         memos_.begin_frame(frame_counter_);
         ctx.memos = memo_on_ ? &memos_ : nullptr;
         interaction_reads_ = 0;
+        const double cpu0 = platform::thread_cpu_ms();
         ctx.interaction_reads = &interaction_reads_;
         {
             ScopedTimer t{frame.view_ms};
@@ -1736,6 +1738,7 @@ class window_host {
                 }
             }
         }
+        frame.widget_cpu_ms = platform::thread_cpu_ms() - cpu0;
 
         // A widget mid-motion asked for another frame during the view, or
         // layout changed a scroll region's size (a scrollbar drawn from last
@@ -1794,9 +1797,9 @@ class window_host {
         // MAYAG_SLOW_MS=N: every frame whose CPU work took over N ms, by stage.
         static const double slow_ms = [] { const char* e = std::getenv("MAYAG_SLOW_MS"); return e ? std::atof(e) : 0.0; }();
         if (slow_ms > 0.0 && frame.cpu_ms() > slow_ms)
-            std::fprintf(stderr, "mayag: slow frame %.2f ms: input %.2f update %.2f view %.2f cascade %.2f layout %.2f paint %.2f render %.2f\n",
+            std::fprintf(stderr, "mayag: slow frame %.2f ms: input %.2f update %.2f view %.2f cascade %.2f layout %.2f paint %.2f render %.2f (widget cpu %.2f)\n",
                          frame.cpu_ms(), frame.input_ms, frame.update_ms, frame.view_ms, frame.cascade_ms, frame.layout_ms,
-                         frame.paint_ms, frame.render_ms);
+                         frame.paint_ms, frame.render_ms, frame.widget_cpu_ms);
         if (framestats_) report_frames();
         // Frames nobody asked for. Frames the user is driving (moving the
         // pointer over a live view) don't count.

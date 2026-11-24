@@ -14,6 +14,8 @@
 #include <mayag/widget/code_view.hpp>
 #include <mayag/widget/file_pane.hpp>
 #include <mayag/widget/file_tree.hpp>
+#include <mayag/widget/picker.hpp>
+#include <mayag/widget/problems.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -63,6 +65,30 @@ Node code_at(std::size_t n, Ctx& c) {
     ed.scroll.offset.y = 20.0f * static_cast<float>(n / 2);
     return code_view(c, "code", ed, CodeTheme{});
 }
+/// The picker's lazy form: it must ask only for the rows it shows.
+std::size_t picker_asked = 0;
+Node picker_at(std::size_t n, Ctx& c) {
+    OverlayList ol;
+    c.overlays = &ol;
+    TextEditState q;
+    picker_asked = 0;
+    picker(c, "pick", q, PickerCount{static_cast<int>(n), n},
+           [&](int k) {
+               ++picker_asked;
+               return PickerRow{{.label = "item " + std::to_string(k), .detail = "src/a/b"}, {0, 1}};
+           },
+           static_cast<int>(n / 2));
+    c.overlays = nullptr;
+    return ol.empty() ? Node{} : ol.items().front().content;
+}
+Node problems_at(std::size_t n, Ctx& c) {
+    std::vector<ProblemRow> rows;
+    for (std::size_t i = 0; i < n; ++i) rows.push_back({.header = i % 20 == 0, .file = "a.cpp", .message = "unused variable", .line = static_cast<int>(i)});
+    ScrollState sc;
+    sc.viewport = Vec2{600.0f, 400.0f};
+    sc.offset.y = 24.0f * static_cast<float>(n / 2);
+    return problems_panel(c, "problems", rows, static_cast<int>(n / 2), sc);
+}
 
 template <class Build>
 void scales(const char* what, Build build) {
@@ -98,6 +124,13 @@ int main() {
     std::printf("mayag scaling: a frame is O(screen), not O(data)\n");
     scales("file_pane", pane_at);
     scales("file_tree", tree_at);
+    scales("problems_panel", problems_at);
+    scales("picker", picker_at);
+    {
+        Ctx c;
+        (void)picker_at(10000, c);
+        check(picker_asked <= 40, "picker: built " + std::to_string(picker_asked) + " rows of 10000 (only those on screen)");
+    }
     scales("code_view", code_at);
     double small = 1e9, big = 1e9;   // best of a few: noise only ever adds
     for (int r = 0; r < 5; ++r) { small = std::min(small, paint_ms(500)); big = std::min(big, paint_ms(4000)); }
