@@ -34,7 +34,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <optional>
 #include <utility>
@@ -359,9 +362,11 @@ class RunLoop {
         const char* e = std::getenv("MAYAG_PHOTON_PROBE");
         if (e == nullptr || std::atoi(e) <= 0) return;
         probe_left_ = std::atoi(e) * 2;   // a down and an up per press
+        double delay = 1.0;               // N,seconds: when the first press comes
+        if (const char* comma = std::strchr(e, ','); comma != nullptr) delay = std::max(0.05, std::atof(comma + 1));
         CFRunLoopTimerContext tc{};
         tc.info = this;
-        probe_ = CFRunLoopTimerCreate(nullptr, CFAbsoluteTimeGetCurrent() + 1.0, 0.0685, 0, 0,
+        probe_ = CFRunLoopTimerCreate(nullptr, CFAbsoluteTimeGetCurrent() + delay, 0.0685, 0, 0,
             [](CFRunLoopTimerRef, void* self) { static_cast<RunLoop*>(self)->probe(); }, &tc);
         CFRunLoopAddTimer(rl_, probe_, kCFRunLoopCommonModes);
     }

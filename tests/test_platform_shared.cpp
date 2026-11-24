@@ -45,6 +45,7 @@ void test_keys() {
 void test_photon() {
     {   // the oldest unshown input is measured, through to its frame
         PhotonMeter m;
+        m.presented(PhotonMeter::Frame{}, 0.5);   // a window already on screen
         m.note(1.000, 1.001);
         m.note(1.005, 1.006);   // a later input does not overwrite it
         const auto f = m.take(1.002);
@@ -55,8 +56,18 @@ void test_photon() {
               "stages: to us 1, in us 1, compositor 8");
         check(!m.has_unshown(), "shown: nothing waits");
     }
+    {   // an input from before the window's first frame waited for STARTUP: not a sample
+        PhotonMeter m;
+        m.note(0.900, 0.950);                  // pressed while the app was still opening
+        m.presented(m.take(1.100), 1.390);     // the first frame: carries it
+        check(m.stats().samples == 0, "a key pressed during startup is not an input-to-photon sample");
+        m.note(1.500, 1.501);
+        m.presented(m.take(1.502), 1.510);
+        check(m.stats().samples == 1 && near(m.stats().last_ms, 10.0), "...and the next key is measured as usual");
+    }
     {   // a replaced frame does not take the sample with it
         PhotonMeter m;
+        m.presented(PhotonMeter::Frame{}, 0.5);   // a window already on screen
         m.note(2.000, 2.000);
         const auto dropped = m.take(2.001);
         (void)dropped;   // replaced before scanout: never presented
@@ -66,6 +77,7 @@ void test_photon() {
     }
     {   // an input shown once is not measured again
         PhotonMeter m;
+        m.presented(PhotonMeter::Frame{}, 0.5);   // a window already on screen
         m.note(3.0, 3.0);
         const auto a = m.take(3.001), b = m.take(3.002);
         m.presented(a, 3.010);
@@ -74,6 +86,7 @@ void test_photon() {
     }
     {   // percentiles
         PhotonMeter m;
+        m.presented(PhotonMeter::Frame{}, 0.5);   // a window already on screen
         for (int i = 1; i <= 100; ++i) {
             const double t = i * 1.0;
             m.note(t, t);

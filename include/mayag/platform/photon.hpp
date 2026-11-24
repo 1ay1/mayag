@@ -87,9 +87,15 @@ class PhotonMeter {
     void presented(const Frame& f, double at, double period_ms = 0.0, const char* flags = "") {
         if (trace_level() >= 3)
             std::fprintf(stderr, "present %.3f  commit %.3f  +%.2f ms\n", at, f.commit_at, (at - f.commit_at) * 1e3);
+        if (first_present_ < 0.0) first_present_ = at;   // the window's first frame on the glass
         if (f.input_at < 0.0 || f.input_at <= shown_) return;   // nothing new on screen
         shown_ = f.input_at;
         if (unshown_ == f.input_at) unshown_ = -1.0;   // an older mark made since stays unshown
+        // An input that came before the window had shown anything at all
+        // waited for STARTUP (opening, the GPU, fonts), not for a frame: that
+        // is time-to-first-frame, measured separately (MAYAG_STARTUP). Counted
+        // here it was the 59-390 ms "first key" outlier of every run.
+        if (f.input_at < first_present_) return;
         const double ms = (at - f.input_at) * 1e3;
         if (ms < 0.0 || ms > 5000.0) return;   // a clock glitch, not a frame
         record(ms);
@@ -146,6 +152,7 @@ class PhotonMeter {
     double last_ = 0.0;
     double unshown_ = -1.0, unshown_read_ = -1.0;
     double shown_ = -1.0;   // newest input a presented frame has shown
+    double first_present_ = -1.0;   // when the first frame reached the display
     std::array<double, 3> stage_sum_{};
     std::uint64_t stage_n_ = 0;
     std::function<void(double)> sink_;
