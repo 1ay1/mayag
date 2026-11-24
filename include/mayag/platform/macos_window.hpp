@@ -27,6 +27,7 @@
 #include "types.hpp"
 #include "keys.hpp"
 #include "photon.hpp"
+#include "images.hpp"
 
 #if MAYAG_GPU_METAL
 #include "../backend/metal.hpp"
@@ -721,13 +722,10 @@ class MacWindow {
     // ── images (image(id) nodes) ────────────────────────────────────────────────
 
     /// Hand pixels to the renderer for image(id): the CPU store (software
-    /// path) and, when Metal is up, a texture.
+    /// path) and, when Metal is up, a texture (platform/images.hpp: the one
+    /// policy every window follows).
     void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
-        if (!img) return;
-#if MAYAG_GPU_METAL
-        if (gpu_enabled_) gpu_.upload_image(id, img->rgba.data(), img->width, img->height);
-#endif
-        images_.upload(id, std::move(img));
+        images::upload(images_, gpu_images(), id, std::move(img));
     }
     /// Rows of an uploaded image moved in place on the GPU (Metal). false:
     /// not possible here; send the pixels instead.
@@ -757,11 +755,19 @@ class MacWindow {
         return false;
     }
     void release_image(std::uint32_t id) {
-        images_.release(id);
-#if MAYAG_GPU_METAL
-        if (gpu_enabled_) gpu_.release_image(id);
-#endif
+        images::release(images_, gpu_images(), id);
     }
+
+  private:
+    /// The device presenting images now, or null (no Metal in this build, or
+    /// Metal not up): what platform/images.hpp mirrors to.
+#if MAYAG_GPU_METAL
+    [[nodiscard]] backend::MetalDevice* gpu_images() noexcept { return gpu_enabled_ ? &gpu_ : nullptr; }
+#else
+    [[nodiscard]] static images::NoGpu* gpu_images() noexcept { return nullptr; }
+#endif
+
+  public:
 
     // ── fullscreen ───────────────────────────────────────────────────────────
 

@@ -748,6 +748,10 @@ if(MAYAG_BUILD_TESTS)
                          -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/include/jaal/meta/target.hpp
                          -DBUILD_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag/core/target.hpp
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/third_party/jaal/tests/lint/one_os.cmake)
+        # A window's images follow one policy (platform/images.hpp).
+        add_test(NAME mayag_one_image_policy
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/include/mayag
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint/one_image_policy.cmake)
         # ...and the build asks the headers, never if(WIN32 / APPLE / UNIX).
         add_test(NAME mayag_one_os_cmake
                  COMMAND ${CMAKE_COMMAND}

@@ -42,6 +42,7 @@
 #include "../core/event.hpp"
 #include "../render/draw_list.hpp"
 #include "types.hpp"
+#include "images.hpp"
 
 // The GPU renderer is Direct3D 11 + DXGI flip model by default (the native
 // Windows path), Vulkan when MAYAG_BACKEND=vulkan; see backend/win32_gpu.hpp.
@@ -353,7 +354,6 @@ class Win32Window {
         const int h = static_cast<int>(state_->size.y * state_->dpi);
         if (w <= 0 || h <= 0) return;
 
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         // GPU path: the Vulkan swapchain owns the HWND's buffers, so there is
         // no DIB, no CPU encode and no damage bookkeeping here -- the driver
         // presents directly. This is the default; it is only inactive when the
@@ -376,7 +376,6 @@ class Win32Window {
             reveal();
             return;
         }
-#endif
         if (state_->no_redirection && (state_->gpu_failed || !state_->gpu_active)) recreate_for_gdi();
         present_software(dl, clear, w, h);
         reveal();
@@ -531,7 +530,6 @@ class Win32Window {
 
     [[nodiscard]] std::vector<std::uint8_t> read_pixels() {
         if (!state_) return {};
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         // A present-mode Vulkan device has no readback path -- the swapchain
         // images belong to the compositor, and render_offscreen() needs a
         // device brought up with init_offscreen(). Re-rasterising the last
@@ -548,7 +546,6 @@ class Win32Window {
                                        &backend::shared_pool(), state_->last_clear);
             }
         }
-#endif
         return state_->fb.to_rgba8();
     }
 
@@ -623,20 +620,16 @@ class Win32Window {
         state_->images.set_glyphs(s);
         state_->sampler = &state_->images;
     }
+    // image(id): the one policy every window follows (platform/images.hpp)
     void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
-        if (!state_) return;
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
-        if (state_->gpu_active && state_->gpu && img)
-            (void)state_->gpu->upload_texture(id, img->rgba.data(), img->width, img->height);
-#endif
-        state_->images.upload(id, std::move(img));
+        if (state_) images::upload(state_->images, gpu_images(), id, std::move(img));
     }
     void release_image(std::uint32_t id) {
-        if (!state_) return;
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
-        if (state_->gpu_active && state_->gpu) state_->gpu->release_texture(id);
-#endif
-        state_->images.release(id);
+        if (state_) images::release(state_->images, gpu_images(), id);
+    }
+    /// The device presenting images now, or null (still on the CPU path).
+    [[nodiscard]] backend::Win32Gpu* gpu_images() noexcept {
+        return state_ && state_->gpu_active ? state_->gpu.get() : nullptr;
     }
 
     /// Remember how to push dirty glyph rects to the GPU. Type-erased because
@@ -644,11 +637,9 @@ class Win32Window {
     /// reads the atlas through the coverage sampler and needs no upload.
     template <typename AtlasT>
     void set_atlas_source([[maybe_unused]] AtlasT* atlas) noexcept {
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         if (!state_) return;
         if (atlas == nullptr) { state_->atlas_sync = nullptr; return; }
         state_->atlas_sync = [atlas](backend::Win32Gpu& d) { d.sync_atlas(*atlas); };
-#endif
     }
 
     [[nodiscard]] Vec2 pixel_size() const noexcept {
@@ -660,24 +651,16 @@ class Win32Window {
     /// The GPU that won ("Intel(R) Arc(TM) Pro Graphics"), or null on the
     /// CPU path.
     [[nodiscard]] const char* device_name() const noexcept {
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         if (state_ && state_->gpu_active && state_->gpu) return state_->gpu->device_name();
-#endif
         return nullptr;
     }
 
     [[nodiscard]] std::string_view renderer_name() const noexcept {
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         if (state_ && state_->gpu_active && state_->gpu) return state_->gpu->api_name();
-#endif
         return "software";
     }
     [[nodiscard]] bool gpu_active() const noexcept {
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         return state_ != nullptr && state_->gpu_active;
-#else
-        return false;
-#endif
     }
 
     /// The display's real refresh period and a recent vblank, from DWM and
@@ -690,11 +673,7 @@ class Win32Window {
     }
 
     [[nodiscard]] std::uint64_t frames_skipped() const noexcept {
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         return state_ ? state_->frames_skipped : 0;
-#else
-        return 0;
-#endif
     }
 
   private:
@@ -733,7 +712,6 @@ class Win32Window {
         void* dib_bits = nullptr;   ///< the section's pixels: encoded into directly
         int dib_w = 0, dib_h = 0;
 
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         // ── the GPU path ────────────────────────────────────────────
         std::unique_ptr<backend::Win32Gpu> gpu;
         bool gpu_active = false;
@@ -753,7 +731,6 @@ class Win32Window {
         jaal::kernel::job_result<std::unique_ptr<backend::Win32Gpu>> gpu_prep;
         struct Settings { bool low_latency, transparent; };
         std::optional<Settings> gpu_settings;   ///< set when the device was prestarted
-#endif
 
         // ── the OS modal loop (drag-resize, window move) ─────────────
         std::function<void()> live_draw;   ///< the host's "draw now"
@@ -804,7 +781,6 @@ class Win32Window {
     }
     void destroy() {
         release_dib();
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         // A prep still running owns a device; let it finish and drop it.
         if (state_ && state_->gpu_prep.valid()) {
             if (auto d = state_->gpu_prep.get_at_root()) d->destroy();
@@ -816,7 +792,6 @@ class Win32Window {
             state_->gpu->destroy();
             state_->gpu_active = false;
         }
-#endif
         if (state_ && state_->hwnd != nullptr) {
             ::SetWindowLongPtrW(state_->hwnd, GWLP_USERDATA, 0);
             ::DestroyWindow(state_->hwnd);
@@ -828,12 +803,10 @@ class Win32Window {
     /// rebuilds the swapchain; the CPU path reallocates lazily in present().
     void renderer_resized() {
         if (state_) state_->resized = false;
-#if 1  // GPU path: always on Windows (D3D11 needs no SDK)
         if (state_ && state_->gpu_active && state_->gpu) {
             state_->gpu->resize(state_->size, state_->dpi);
             state_->had_frame = false;   // the old contents are gone
         }
-#endif
     }
 
     /// Start the GPU's window-independent bring-up (device + pipeline) on a
@@ -947,8 +920,7 @@ class Win32Window {
         st->gpu = std::move(d);
         st->gpu_active = true;
         // Anything uploaded before the GPU existed has to be replayed.
-        for (const auto& [id, img] : st->images.all())
-            (void)st->gpu->upload_texture(id, img->rgba.data(), img->width, img->height);
+        images::replay(st->images, *st->gpu);
         st->had_frame = false;
         release_dib();
         st->fb = backend::Framebuffer{1, 1};

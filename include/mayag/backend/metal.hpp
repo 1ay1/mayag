@@ -503,7 +503,7 @@ class MetalDevice {
     /// mayag's ImageData is. Re-uploading at the same size rewrites it in
     /// place; a new size makes a new texture (frames in flight keep the old
     /// one alive: command buffers retain what they sample).
-    void upload_image(std::uint32_t key, const std::uint8_t* rgba, int w, int h) {
+    void upload_texture(std::uint32_t key, const std::uint8_t* rgba, int w, int h) {
         using namespace mtl;
         if (device_ == nullptr || rgba == nullptr || w <= 0 || h <= 0 || key == 0) return;
         content_changed_ = true;
@@ -616,7 +616,7 @@ class MetalDevice {
         return out;
     }
 
-    void release_image(std::uint32_t key) {
+    void release_texture(std::uint32_t key) {
         using namespace mtl;
         const auto it = images_.find(key);
         if (it == images_.end()) return;

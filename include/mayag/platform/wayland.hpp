@@ -57,6 +57,7 @@
 #include "types.hpp"
 #include "keys.hpp"
 #include "photon.hpp"
+#include "images.hpp"
 #include "wayland_protocol.hpp"
 
 #include <jaal/core/capability.hpp>
@@ -1016,15 +1017,10 @@ class WaylandWindow {
     /// the GPU gets a sampled image, the shm fallback gets the CPU store.
     /// Uploading to both costs one copy of an image the app already built,
     /// and means a GPU that fails to initialise does not silently lose every
-    /// picture in the app.
+    /// picture in the app. (The policy is platform/images.hpp, shared by
+    /// every window.)
     void upload_image(std::uint32_t id, std::shared_ptr<const ImageData> img) {
-        if (!img) return;
-#if MAYAG_GPU_VULKAN
-        if (gpu_active_) {
-            (void)gpu_->upload_texture(id, img->rgba.data(), img->width, img->height);
-        }
-#endif
-        images_.upload(id, std::move(img));
+        images::upload(images_, gpu_images(), id, std::move(img));
     }
 
     /// Rewrite rectangles of an uploaded image in place (see
@@ -1044,11 +1040,16 @@ class WaylandWindow {
     }
 
     void release_image(std::uint32_t id) {
-        images_.release(id);
-#if MAYAG_GPU_VULKAN
-        if (gpu_active_) gpu_->release_texture(id);
-#endif
+        images::release(images_, gpu_images(), id);
     }
+
+    /// The device presenting images now, or null (no Vulkan in this build,
+    /// or still on shm): what platform/images.hpp mirrors to.
+#if MAYAG_GPU_VULKAN
+    [[nodiscard]] backend::VulkanDevice* gpu_images() noexcept { return gpu_active_ ? gpu_.get() : nullptr; }
+#else
+    [[nodiscard]] static images::NoGpu* gpu_images() noexcept { return nullptr; }
+#endif
 
 #if MAYAG_GPU_VULKAN
     /// Optional window capability: show a FOREIGN GPU buffer as image(id),
@@ -1108,8 +1109,7 @@ class WaylandWindow {
         gpu_ = std::move(d);
         gpu_active_ = true;
         apply_surface_geometry();   // the size may have changed since the CPU frames
-        for (const auto& [id, img] : images_.all())
-            (void)gpu_->upload_texture(id, img->rgba.data(), img->width, img->height);
+        images::replay(images_, *gpu_);   // every image uploaded while on shm
         // The shm buffers are done with; give them back.
         if (shm_made_) {
             for (auto& b : buffers_) b.unmap();
