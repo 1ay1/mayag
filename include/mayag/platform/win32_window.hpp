@@ -55,6 +55,13 @@
 
 #include "../core/win32.hpp"   // windows.h, with its keyword macros removed
 #include <windowsx.h>   // GET_X_LPARAM
+// dwmapi.h pulls uxtheme.h, which pulls commctrl.h -- whose DPA_/DSA_
+// inline wrappers, emitted by a PCH built with -fpch-codegen, made every
+// app import functions comctl32 v5 exports only by ordinal: the exe would
+// not start (0xC0000139). mayag uses none of them.
+#ifndef NO_COMMCTRL_DA
+#  define NO_COMMCTRL_DA
+#endif
 #include <uxtheme.h>    // MARGINS
 #include <dwmapi.h>     // types only: every dwmapi function is loaded at runtime
 
