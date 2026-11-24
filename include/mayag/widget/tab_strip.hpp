@@ -66,10 +66,14 @@ struct TermTabInfo {
     bool        pinned = false;        ///< icon-only
 };
 
+/// The marker's motion. The host steps both Trackeds and asks for frames
+/// while they move, but only while the strip is DRAWN (a hidden strip
+/// registers nothing). So there is deliberately no `animating()` here: an app
+/// that subscribed frames on it (hand did) kept a hidden strip's stale
+/// "moving" pill asking for 60 frames a second, forever, on an idle window.
 struct TabStripMotion {
     Tracked pill;    ///< the active tab's rect
     Tracked strip;   ///< the strip's own rect (pill coordinates are relative to it)
-    [[nodiscard]] bool animating() const noexcept { return pill.animating(); }
 };
 
 /// How the active tab is marked.

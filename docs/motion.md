@@ -48,3 +48,25 @@ lives in the model and steps on a `Tick` from `Sub::on_frame`, subscribed
 only while it is unsettled. That is a different thing: the model changes.
 The rule above is for visuals that change with time while the model does
 not.
+
+## Every frame changes a pixel
+
+A frame the display did not need is pure cost: CPU, a present, battery, and
+a busy loop the next real input waits behind. Two rules keep them out:
+
+- **Still things take no frames.** A notice that shows for 3 s and then goes
+  away does not move; it needs one frame to appear and a *timer*
+  (`Cmd::after`) to leave, not 180 frames advancing a clock until it
+  expires. hand's toast did exactly that (193 frames that changed nothing);
+  so did its size HUD.
+- **An animation ends where it stops showing.** Settle a fade or glide at
+  the step the eye can't see, in the units it is drawn in: a quarter of a
+  logical pixel for motion, not `0.004` rows (0.08 px); the pixel distance a
+  trail stops being drawn, not a fixed fraction of a cell. Frames for a
+  timed effect run exactly as long as it draws (a 0.2 s flash, not 0.45 s).
+  Anything under a modal's scrim lands at once.
+
+`hand --motion` (ctest `motion_economy`) holds both: it runs every animation
+alone from rest to rest and fails if one never settles or more than a tenth
+of its frames changed no pixel, naming who asked for them
+(`window_host::frame_reason()`, and the app's own named reasons).

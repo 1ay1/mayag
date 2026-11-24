@@ -50,7 +50,7 @@ struct State {
 };
 
 inline bool cursor_settled(const State& s, CursorAnim anim, float x, float y, float tx, float ty);
-inline bool tail_settled(const State& s, float hx, float hy);
+inline bool tail_settled(const State& s, float hx, float hy, float cw, float ch);
 
 namespace detail {
 
@@ -236,18 +236,23 @@ inline void move_cursor(State& s, CursorAnim anim, float& x, float& y, float tx,
     if (cursor_settled(s, anim, x, y, tx, ty)) { x = tx; y = ty; s.vx = s.vy = 0.0f; }
 }
 
-inline void move_tail(State& s, float hx, float hy, float length, float dt) {
+inline void move_tail(State& s, float hx, float hy, float length, float dt, float cw = 0.0f, float ch = 0.0f) {
     if (!s.tail_known || length <= 0.0f) { s.tx = hx; s.ty = hy; s.tail_known = true; return; }
     // the longer the tail, the slower its end follows: 1x trails ~120 ms, 4x ~450 ms
     const float rate = 26.0f / (0.25f + 0.75f * length);
     const float k = 1.0f - std::exp(-dt * rate);
     s.tx += (hx - s.tx) * k;
     s.ty += (hy - s.ty) * k;
-    if (tail_settled(s, hx, hy)) { s.tx = hx; s.ty = hy; }
+    if (tail_settled(s, hx, hy, cw, ch)) { s.tx = hx; s.ty = hy; }
 }
 
-inline bool tail_settled(const State& s, float hx, float hy) {
-    return std::fabs(hx - s.tx) < 0.02f && std::fabs(hy - s.ty) < 0.02f;
+/// Settled once the tail is closer than comet/smear DRAW (under 1 px): in
+/// cells that is 1/cw, not a fixed 0.02 -- at 20 px cells 0.02 is 0.4 px, and
+/// the tail kept frames coming for an invisible 0.6 px of travel. Without the
+/// cell size (cw = 0) the old fixed fraction stands.
+inline bool tail_settled(const State& s, float hx, float hy, float cw = 0.0f, float ch = 0.0f) {
+    const float ex = cw > 0.0f ? 1.0f / cw : 0.02f, ey = ch > 0.0f ? 1.0f / ch : 0.02f;
+    return std::fabs(hx - s.tx) < ex && std::fabs(hy - s.ty) < ey;
 }
 
 inline std::vector<Node> comet(float hx, float hy, float tx, float ty, float cw, float ch, std::uint32_t rgb, float strength) {

@@ -771,7 +771,7 @@ int main(int argc, char** argv) {
         ok(M().active == 3, "clicking a tab activates it");
         rt.window().drive_frames(true);
         rt.tick(); rt.tick();
-        ok(M().motion.animating(), "the pill slides toward it");
+        ok(M().motion.pill.animating(), "the pill slides toward it");
         settle(120);
         const Rect chip_rect = M().motion.pill.rect();
         ok(std::abs(chip_rect.left() - tab3.left()) < 1.0f && std::abs(chip_rect.width() - tab3.width()) < 1.0f,

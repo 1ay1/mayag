@@ -978,6 +978,21 @@ class window_host {
     /// display link exactly while this is true.
     [[nodiscard]] bool wants_frames() const noexcept { return animating(); }
 
+    /// Why frames are wanted, the first reason that holds ("" when none):
+    /// "on_frame" (the program's subscription), "request" (a view asked:
+    /// request_animation_frame, a starting() look, scroll geometry), "tracked",
+    /// "transition" (a style spring), "morph" (a theme change), "child".
+    /// For tools that hunt frames nothing visible needed.
+    [[nodiscard]] const char* frame_reason() const noexcept {
+        if (frames_on_) return "on_frame";
+        if (motion_pending_) return "request";
+        if (tracked_.animating()) return "tracked";
+        if (motion_.animating()) return "transition";
+        if (morphing_) return "morph";
+        if (children_animating()) return "child";
+        return "";
+    }
+
     /// One display refresh. `dt` is the time since the previous one.
     template <class K>
     void vsync(K& k, double dt) {
