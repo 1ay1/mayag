@@ -23,6 +23,7 @@
 // is what lets the fast path be the default without risk.
 
 #include "../core/target.hpp"
+#include "../core/diag.hpp"
 #include "backend.hpp"   // Device / AtlasView / register_backend
 #include "simd.hpp"
 #include "software.hpp"
@@ -317,7 +318,7 @@ class Tiled {
                 }
                 s += '\n';
             }
-            std::fprintf(stderr, "damage %d/%d\n%s", n_tiles - stats.tiles_reused, n_tiles, s.c_str());
+            ::mayag::diag::say("damage %d/%d\n%s", n_tiles - stats.tiles_reused, n_tiles, s.c_str());
         }
         return stats;
     }

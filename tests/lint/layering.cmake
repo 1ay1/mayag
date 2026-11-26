@@ -64,6 +64,7 @@ set(jaal_ok
     font/ot_layout.hpp                                                         # lock-free lazy tables (jaal::once)
     font/mapped_file.hpp                                                       # its Sendable/Frozen claim (jaal traits)
     core/sync.hpp                                                              # Cell / Frozen: jaal's thread-safety types, for every layer
+    core/diag.hpp                                                              # diagnostics are written on a jaal worker, never on a frame path
     core/target.hpp)                                                           # the OS, read once for the stack (jaal/meta/target.hpp)
 
 set(hits "")

@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/target.hpp"
+#include "../core/diag.hpp"
 // mayag::run<P>() — run a program in a window.
 //
 // jaal is the runtime: the loop, update, Cmd, Sub, timers, tasks, streams,
@@ -458,7 +459,7 @@ inline void gpu_prestart() {
 
 namespace detail {
 inline void log_renderer(std::string_view name) {
-    std::fprintf(stderr, "mayag: renderer %.*s\n", static_cast<int>(name.size()), name.data());
+    ::mayag::diag::say("mayag: renderer %.*s\n", static_cast<int>(name.size()), name.data());
 }
 }  // namespace detail
 
@@ -471,18 +472,18 @@ void log_photon(W& window) {
         const char* on = std::getenv("MAYAG_PHOTON");
         if (on == nullptr || *on == '\0' || *on == '0') return;
         const auto s = window.photon_stats();
-        std::fprintf(stderr, "mayag: input->photon  best %.2f  p50 %.2f  mean %.2f  p95 %.2f  worst %.2f ms  (%d frames)",
+        ::mayag::diag::say("mayag: input->photon  best %.2f  p50 %.2f  mean %.2f  p95 %.2f  worst %.2f ms  (%d frames)",
                      s.best_ms, s.p50_ms, s.mean_ms, s.p95_ms, s.worst_ms, s.samples);
-        std::fprintf(stderr, "\n  stages (mean): to us %.2f  in us %.2f  compositor %.2f ms",
+        ::mayag::diag::say("\n  stages (mean): to us %.2f  in us %.2f  compositor %.2f ms",
                      s.stage_ms[0], s.stage_ms[1], s.stage_ms[2]);
         if constexpr (platform::has<W, platform::cap::counts_latch_misses>) {
             const auto [missed, tried] = window.latch_misses();
-            std::fprintf(stderr, "  latch margin %.2f ms, %llu/%llu late draws missed",
+            ::mayag::diag::say("  latch margin %.2f ms, %llu/%llu late draws missed",
                          static_cast<double>(window.latch_margin().count()) / 1e6,
                          static_cast<unsigned long long>(missed),
                          static_cast<unsigned long long>(tried));
         }
-        std::fprintf(stderr, "\n");
+        ::mayag::diag::say("\n");
     }
 }
 }  // namespace detail
@@ -510,7 +511,7 @@ int run(AppConfig cfg, jaal::prog::flags_t<P> flags) {
     }
     auto opened = platform::Native::open(detail::window_config(cfg));
     if (!opened) {
-        std::fprintf(stderr, "mayag: could not open a window\n");
+        ::mayag::diag::fatal("mayag: could not open a window\n");
         return 1;
     }
     platform::Native window = std::move(*opened);
@@ -533,7 +534,7 @@ int run(AppConfig cfg, Make make) {
     }
     auto opened = platform::Native::open(detail::window_config(cfg));
     if (!opened) {
-        std::fprintf(stderr, "mayag: could not open a window\n");
+        ::mayag::diag::fatal("mayag: could not open a window\n");
         return 1;
     }
     platform::Native window = std::move(*opened);

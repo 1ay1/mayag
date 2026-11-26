@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/target.hpp"
+#include "../core/diag.hpp"
 #include "gpu_policy.hpp"
 // Internal fragment: included by vulkan.hpp after the Vulkan ABI it uses;
 // include <mayag/backend/vulkan.hpp>, not this file.
@@ -224,7 +225,7 @@ class VulkanDevice {
             content_changed_ = true;
             static const bool trace = [] { const char* e = std::getenv("MAYAG_GPU_TRACE"); return e && *e && *e != '0'; }();
             if (trace)
-                std::fprintf(stderr, "gpu: atlas upload %dx%d%s %.2f ms\n", w, h, full ? " (new image)" : "",
+                ::mayag::diag::say("gpu: atlas upload %dx%d%s %.2f ms\n", w, h, full ? " (new image)" : "",
                              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count());
         }
 
@@ -374,7 +375,7 @@ class VulkanDevice {
         }
         if (gpu_trace) {
             const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
-            std::fprintf(stderr, "gpu: fence %.2f  acquire %.2f  record %.2f  submit+present %.2f ms  (%zu inst)\n",
+            ::mayag::diag::say("gpu: fence %.2f  acquire %.2f  record %.2f  submit+present %.2f ms  (%zu inst)\n",
                          ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, tclk::now()), list.instances().size());
         }
         last_presented_ = image_index;
@@ -2213,7 +2214,7 @@ class VulkanDevice {
         }
         present_mode_ = present_mode;
         if (const char* e = std::getenv("MAYAG_GPU_TRACE"); e && *e && *e != '0')
-            std::fprintf(stderr, "gpu: swapchain %ux%u, %u images (min %u max %u), present mode %d\n", swap_extent_.width,
+            ::mayag::diag::say("gpu: swapchain %ux%u, %u images (min %u max %u), present mode %d\n", swap_extent_.width,
                          swap_extent_.height, images, caps.minImageCount, caps.maxImageCount, present_mode);
 
         vk::VkSwapchainCreateInfoKHR ci{};
@@ -2329,7 +2330,7 @@ class VulkanDevice {
         const auto t3 = clk::now();
         if (trace) {
             const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
-            std::fprintf(stderr, "swap rebuild: idle %.2f  create %.2f  fbs %.2f ms\n", ms(t0, t1), ms(t1, t2), ms(t2, t3));
+            ::mayag::diag::say("swap rebuild: idle %.2f  create %.2f  fbs %.2f ms\n", ms(t0, t1), ms(t1, t2), ms(t2, t3));
         }
     }
 

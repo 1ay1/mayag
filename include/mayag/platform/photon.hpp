@@ -27,6 +27,7 @@
 // times, commit times and presentation times share it.
 
 #include "types.hpp"
+#include "../core/diag.hpp"
 #include "../core/event.hpp"
 
 #include <algorithm>
@@ -77,8 +78,8 @@ class PhotonMeter {
     /// The frame committed at `now` carries the oldest unshown input.
     [[nodiscard]] Frame take(double now) const noexcept {
         if (trace_level() >= 3) {
-            if (unshown_ >= 0.0) std::fprintf(stderr, "commit %.3f  +%.3f ms after input\n", now, (now - unshown_) * 1e3);
-            else std::fprintf(stderr, "commit %.3f\n", now);
+            if (unshown_ >= 0.0) ::mayag::diag::say("commit %.3f  +%.3f ms after input\n", now, (now - unshown_) * 1e3);
+            else ::mayag::diag::say("commit %.3f\n", now);
         }
         return Frame{unshown_, unshown_read_, now};
     }
@@ -86,7 +87,7 @@ class PhotonMeter {
     /// Frame `f` was presented at `at`. `flags` is for the trace only.
     void presented(const Frame& f, double at, double period_ms = 0.0, const char* flags = "") {
         if (trace_level() >= 3)
-            std::fprintf(stderr, "present %.3f  commit %.3f  +%.2f ms\n", at, f.commit_at, (at - f.commit_at) * 1e3);
+            ::mayag::diag::say("present %.3f  commit %.3f  +%.2f ms\n", at, f.commit_at, (at - f.commit_at) * 1e3);
         if (first_present_ < 0.0) first_present_ = at;   // the window's first frame on the glass
         if (f.input_at < 0.0 || f.input_at <= shown_) return;   // nothing new on screen
         shown_ = f.input_at;
@@ -103,7 +104,7 @@ class PhotonMeter {
         const std::array<double, 3> st{(read - f.input_at) * 1e3, (f.commit_at - read) * 1e3,
                                        (at - f.commit_at) * 1e3};
         if (trace_level() >= 2)
-            std::fprintf(stderr,
+            ::mayag::diag::say(
                          "photon %.3f  to-us %6.2f  in-us %6.2f  compositor %6.2f  = %6.2f ms  (period %.2f%s%s)\n",
                          f.input_at, st[0], st[1], st[2], ms, period_ms, *flags ? ", flags " : "", flags);
         for (std::size_t i = 0; i < 3; ++i) stage_sum_[i] += st[i];

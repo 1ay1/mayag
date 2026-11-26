@@ -1,5 +1,6 @@
 #pragma once
 #include "target.hpp"
+#include "diag.hpp"
 // mayag::startup — where launch time goes.
 //
 // MAYAG_STARTUP=1 prints a line per phase, in ms since the process started,
@@ -84,7 +85,7 @@ namespace detail {
 /// Record that a phase finished.
 inline void mark(const char* what) noexcept {
     if (!enabled()) return;
-    std::fprintf(stderr, "mayag: startup %8.1f ms  %s\n", detail::now_ms(), what);
+    ::mayag::diag::say("mayag: startup %8.1f ms  %s\n", detail::now_ms(), what);   // the time is taken now; the write happens off-thread
 }
 
 }  // namespace mayag::startup

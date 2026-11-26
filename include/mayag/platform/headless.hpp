@@ -93,7 +93,7 @@ class Headless {
             backend::Tiled::render(dl, fresh, sampler_, &backend::shared_pool(), clear);
             if (fresh.to_rgba8() != fb_.to_rgba8()) {
                 ++damage_mismatches_;
-                std::fprintf(stderr, "mayag: DAMAGE MISMATCH on frame %llu\n", static_cast<unsigned long long>(frames_presented_));
+                ::mayag::diag::say("mayag: DAMAGE MISMATCH on frame %llu\n", static_cast<unsigned long long>(frames_presented_));
             }
         }
 

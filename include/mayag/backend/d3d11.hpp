@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/target.hpp"
+#include "../core/diag.hpp"
 #include "gpu_policy.hpp"
 // mayag::backend::D3D11Device — the native Windows GPU backend.
 //
@@ -397,7 +398,15 @@ class D3D11Device {
             // (the Intel sync above already waited one)
             if (SUCCEEDED(hr) && intel_output_ == nullptr) (void)swapchain_->Present(1, DXGI_PRESENT_DO_NOT_SEQUENCE);
         } else {
+            LARGE_INTEGER p0{};
+            if (pstats_.on) ::QueryPerformanceCounter(&p0);
             hr = swapchain_->Present(immediate ? 0 : 1, immediate ? DXGI_PRESENT_ALLOW_TEARING : 0);
+            if (pstats_.on) {
+                LARGE_INTEGER p1, f;
+                ::QueryPerformanceCounter(&p1);
+                ::QueryPerformanceFrequency(&f);
+                pstats_.present_ms.push_back(static_cast<double>(p1.QuadPart - p0.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart));
+            }
         }
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) valid_ = false;
         content_changed_ = false;
@@ -588,6 +597,7 @@ class D3D11Device {
         std::vector<double> lat_ms;
         std::vector<double> gap_ms;    // submit-to-submit, while presents come within 100 ms (a burst)
         std::vector<double> wait_ms;   // blocked in the frame-latency wait before Present
+        std::vector<double> present_ms;   // blocked inside Present itself
         LONGLONG prev_q = 0;
         UINT last_shown = 0;
         UINT last_refresh = 0;
@@ -647,29 +657,35 @@ class D3D11Device {
             if (!s.lat_ms.empty()) {
                 std::sort(s.lat_ms.begin(), s.lat_ms.end());
                 const auto at = [&](double q) { return s.lat_ms[std::min(s.lat_ms.size() - 1, static_cast<std::size_t>(q * static_cast<double>(s.lat_ms.size())))]; };
-                std::fprintf(stderr, "mayag: present->screen p50 %.1f  p90 %.1f  max %.1f ms  (%d shown, %d never shown, %d missed refreshes)",
+                ::mayag::diag::say("mayag: present->screen p50 %.1f  p90 %.1f  max %.1f ms  (%d shown, %d never shown, %d missed refreshes)",
                              at(0.5), at(0.9), s.lat_ms.back(), s.shown, s.dropped, s.gaps);
                 if (!s.gap_ms.empty()) {
                     std::sort(s.gap_ms.begin(), s.gap_ms.end());
                     const auto g = [&](double q) { return s.gap_ms[std::min(s.gap_ms.size() - 1, static_cast<std::size_t>(q * static_cast<double>(s.gap_ms.size())))]; };
-                    std::fprintf(stderr, "  present gaps p50 %.1f p90 %.1f max %.1f ms", g(0.5), g(0.9), s.gap_ms.back());
+                    ::mayag::diag::say("  present gaps p50 %.1f p90 %.1f max %.1f ms", g(0.5), g(0.9), s.gap_ms.back());
                 }
-                std::fprintf(stderr, "\n");
+                ::mayag::diag::say("\n");
                 if (!s.wait_ms.empty()) {
                     std::sort(s.wait_ms.begin(), s.wait_ms.end());
-                    std::fprintf(stderr, "mayag: latency wait p50 %.2f p90 %.2f ms", s.wait_ms[s.wait_ms.size() / 2], s.wait_ms[s.wait_ms.size() * 9 / 10]);
+                    ::mayag::diag::say("mayag: latency wait p50 %.2f p90 %.2f max %.2f ms", s.wait_ms[s.wait_ms.size() / 2], s.wait_ms[s.wait_ms.size() * 9 / 10], s.wait_ms.back());
+                }
+                if (!s.present_ms.empty()) {
+                    std::sort(s.present_ms.begin(), s.present_ms.end());
+                    ::mayag::diag::say("  Present blocked p50 %.2f max %.2f ms (%zu over 2 ms)", s.present_ms[s.present_ms.size() / 2], s.present_ms.back(),
+                                 static_cast<std::size_t>(std::count_if(s.present_ms.begin(), s.present_ms.end(), [](double v) { return v > 2.0; })));
+                    s.present_ms.clear();
                 }
                 IDXGISwapChainMedia* media = nullptr;
                 if (SUCCEEDED(swapchain_->QueryInterface(__uuidof(IDXGISwapChainMedia), reinterpret_cast<void**>(&media)))) {
                     DXGI_FRAME_STATISTICS_MEDIA fm{};
                     if (SUCCEEDED(media->GetFrameStatisticsMedia(&fm)))
-                        std::fprintf(stderr, "  mode %s", fm.CompositionMode == DXGI_FRAME_PRESENTATION_MODE_COMPOSED ? "composed"
+                        ::mayag::diag::say("  mode %s", fm.CompositionMode == DXGI_FRAME_PRESENTATION_MODE_COMPOSED ? "composed"
                                                      : fm.CompositionMode == DXGI_FRAME_PRESENTATION_MODE_OVERLAY ? "overlay"
                                                      : fm.CompositionMode == DXGI_FRAME_PRESENTATION_MODE_NONE ? "none" : "failed");
                     media->Release();
                 }
-                std::fprintf(stderr, "\n");
-                std::fprintf(stderr, "mayag: display refresh %.2f ms (measured)  latch margin %.2f ms (%llu of %llu missed)\n", s.period_ms,
+                ::mayag::diag::say("\n");
+                ::mayag::diag::say("mayag: display refresh %.2f ms (measured)  latch margin %.2f ms (%llu of %llu missed)\n", s.period_ms,
                              latch_.margin_s * 1e3, static_cast<unsigned long long>(latch_.missed), static_cast<unsigned long long>(latch_.tried));
             }
             s.lat_ms.clear();
@@ -726,7 +742,7 @@ class D3D11Device {
         ID3DBlob* err = nullptr;
         const HRESULT hr = comp.compile(src.data(), src.size(), "mayag", defs, nullptr, "main", target,
                                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &blob, &err);
-        if (FAILED(hr) && err) std::fprintf(stderr, "mayag d3d11: %s\n", static_cast<const char*>(err->GetBufferPointer()));
+        if (FAILED(hr) && err) ::mayag::diag::say("mayag d3d11: %s\n", static_cast<const char*>(err->GetBufferPointer()));
         d3d11_detail::release(err);
         if (SUCCEEDED(hr)) {
             const auto* p = static_cast<const std::uint8_t*>(blob->GetBufferPointer());

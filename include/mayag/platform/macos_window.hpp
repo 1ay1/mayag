@@ -19,6 +19,7 @@
 // rasterise + encode + CGImage + blit chain disappears.
 
 #include "../core/target.hpp"
+#include "../core/diag.hpp"
 #include "../core/event.hpp"
 #include "../backend/software.hpp"
 #include "../backend/tiled.hpp"
@@ -1068,7 +1069,7 @@ class MacWindow {
             if (PhotonMeter::trace_level() >= 2 && f.tag.target_s > 0.0) {
                 // the late-latch schedule: how early the frame was handed
                 // over for the vblank it aimed at, and how far it slipped
-                std::fprintf(stderr, "latch lead %.3f slip %.3f ms\n",
+                ::mayag::diag::say("latch lead %.3f slip %.3f ms\n",
                              (f.tag.target_s - f.submit_s) * 1e3, (f.presented_s - f.tag.target_s) * 1e3);
             }
             learn_latch(f);

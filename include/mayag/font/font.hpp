@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/target.hpp"
+#include "../core/diag.hpp"
 // mayag::typo::Face / FontStack — the public font API
 //
 // `Face`      one font file, one style. Owns its bytes, its outline source,
@@ -1089,8 +1090,8 @@ class FontStack : public Shaper {
         explicit DrawLease(const FontStack& s) : s_(&s) {
             const bool free = s.drawing_.with([](bool& busy) { return !std::exchange(busy, true); });
             if (!free) {
-                std::fputs("mayag: a FontStack is being drawn by two renderers at once. Its atlas has one "
-                           "user at a time; give the second renderer its own: stack.fork().\n", stderr);
+                ::mayag::diag::fatal("mayag: a FontStack is being drawn by two renderers at once. Its atlas has one "
+                                   "user at a time; give the second renderer its own: stack.fork().\n");
                 std::abort();
             }
         }

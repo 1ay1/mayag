@@ -45,6 +45,7 @@
 #include "handlers.hpp"
 #include "interaction.hpp"
 #include "latency.hpp"
+#include "../core/diag.hpp"
 #include "pacing.hpp"
 #include "sources.hpp"
 
@@ -1103,7 +1104,7 @@ class window_host {
             if (step.skipped) ++janks_;   // a refresh shown twice: visible judder
             static const bool say = [] { const char* e = std::getenv("MAYAG_PRESENTSTATS"); return e && *e && *e != '0'; }();
             if (say && ticks_ % 120 == 0)
-                std::fprintf(stderr, "mayag: judder %llu of %llu animation frames skipped a refresh\n",
+                ::mayag::diag::say("mayag: judder %llu of %llu animation frames skipped a refresh\n",
                              static_cast<unsigned long long>(janks_), static_cast<unsigned long long>(ticks_));
         }
         last_tick_ = target;
@@ -1501,8 +1502,8 @@ class window_host {
                 k.dispatch(std::move(*m));
             } else if (!handler_type_warned_) {
                 handler_type_warned_ = true;
-                std::fputs("mayag: an on_click/on_* handler produced a message that is not one of the "
-                           "program's Msg alternatives; it was dropped.\n", stderr);
+                ::mayag::diag::say("mayag: an on_click/on_* handler produced a message that is not one of the "
+                                   "program's Msg alternatives; it was dropped.\n");
             }
         }
         dirty_ = true;
@@ -1833,7 +1834,7 @@ class window_host {
             const auto issues = layout::audit(tree_, &measurer);
             if (issues.size() != last_issue_count_) {
                 last_issue_count_ = issues.size();
-                std::fputs(layout::format_issues(issues).c_str(), stderr);
+                ::mayag::diag::say("%s", layout::format_issues(issues).c_str());
             }
         }
 
@@ -1929,7 +1930,7 @@ class window_host {
         }
         sync_text_input();
         if (frame_counter_ == 1 && startup::enabled()) {
-            std::fprintf(stderr, "mayag: startup first frame: view %.1f cascade %.1f layout %.1f paint %.1f render %.1f ms\n",
+            ::mayag::diag::say("mayag: startup first frame: view %.1f cascade %.1f layout %.1f paint %.1f render %.1f ms\n",
                          frame.view_ms, frame.cascade_ms, frame.layout_ms, frame.paint_ms, frame.render_ms);
             startup::mark("first frame presented");
         }
@@ -1937,7 +1938,7 @@ class window_host {
         // MAYAG_SLOW_MS=N: every frame whose CPU work took over N ms, by stage.
         static const double slow_ms = [] { const char* e = std::getenv("MAYAG_SLOW_MS"); return e ? std::atof(e) : 0.0; }();
         if (slow_ms > 0.0 && frame.cpu_ms() > slow_ms)
-            std::fprintf(stderr, "mayag: slow frame %.2f ms: input %.2f update %.2f view %.2f cascade %.2f layout %.2f paint %.2f render %.2f (widget cpu %.2f)\n",
+            ::mayag::diag::say("mayag: slow frame %.2f ms: input %.2f update %.2f view %.2f cascade %.2f layout %.2f paint %.2f render %.2f (widget cpu %.2f)\n",
                          frame.cpu_ms(), frame.input_ms, frame.update_ms, frame.view_ms, frame.cascade_ms, frame.layout_ms,
                          frame.paint_ms, frame.render_ms, frame.widget_cpu_ms);
         if (framestats_) report_frames();
@@ -2043,13 +2044,13 @@ class window_host {
         if constexpr (platform::has<W, platform::cap::counts_skipped_frames>) skipped = window_.frames_skipped();
         const auto ms = std::exchange(memos_.stats, {});
         const auto ps = std::exchange(paint_cache_.stats, {});
-        std::fprintf(stderr, "mayag: paint cache hits %llu  misses %llu\n", static_cast<unsigned long long>(ps.hits),
+        ::mayag::diag::say("mayag: paint cache hits %llu  misses %llu\n", static_cast<unsigned long long>(ps.hits),
                      static_cast<unsigned long long>(ps.misses));
-        std::fprintf(stderr, "mayag: memo hits %llu  misses: new %llu, taken %llu, unready %llu, hover %llu\n",
+        ::mayag::diag::say("mayag: memo hits %llu  misses: new %llu, taken %llu, unready %llu, hover %llu\n",
                      static_cast<unsigned long long>(ms.hits), static_cast<unsigned long long>(ms.miss_new),
                      static_cast<unsigned long long>(ms.miss_taken), static_cast<unsigned long long>(ms.miss_unready),
                      static_cast<unsigned long long>(ms.miss_interaction));
-        std::fprintf(stderr, "mayag: %zu frames  view %.3f  cascade %.3f  layout %.3f  paint %.3f  render %.3f  = %.3f ms  (%u instances, %u draws, %llu identical skipped)  wanted by: %s%s\n",
+        ::mayag::diag::say("mayag: %zu frames  view %.3f  cascade %.3f  layout %.3f  paint %.3f  render %.3f  = %.3f ms  (%u instances, %u draws, %llu identical skipped)  wanted by: %s%s\n",
                      framestats_frames_, m.view_ms, m.cascade_ms, m.layout_ms, m.paint_ms, m.render_ms, m.cpu_ms(),
                      m.instances, m.draw_calls, static_cast<unsigned long long>(skipped),
                      *frame_reason() ? frame_reason() : "-", change_at_ >= 0.0 ? " + a booked step" : "");
