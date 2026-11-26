@@ -83,6 +83,16 @@ struct ScrollbackInfo {
     return std::clamp(static_cast<int>(y / k) - s.visible / 2, 0, std::max(0, s.total - s.visible));
 }
 
+/// The same, unrounded: the exact (fractional) first line under `y`. A drag
+/// must use this -- a whole line per step jerks wherever a line is more than
+/// a pixel or two of the strip, and stalls between steps where it is less.
+[[nodiscard]] inline double scrollback_pos_at(const ScrollbackInfo& s, float y, float height) {
+    if (s.total <= 0 || height <= 0) return 0.0;
+    const double k = static_cast<double>(scrollback_scale(s, height));
+    return std::clamp(static_cast<double>(y) / k - static_cast<double>(s.visible) / 2.0, 0.0,
+                      static_cast<double>(std::max(0, s.total - s.visible)));
+}
+
 /// How many minimap rows to bin the history into for a strip `height` tall.
 [[nodiscard]] inline int scrollback_buckets(int total, float height, float line_px = 2.0f) {
     return std::max(1, std::min(total, static_cast<int>(height / line_px)));

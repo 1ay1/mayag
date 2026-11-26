@@ -369,6 +369,7 @@ class window_host {
             // the vblank, so that frame carries the freshest input. The draw
             // is owed, never dropped.
             if (now < next_draw_at(now)) {
+                if (!draw_owed_) draw_at_ = next_draw_at(now);   // the deadline this draw is held for
                 draw_owed_ = true;
                 return;
             }
@@ -398,6 +399,7 @@ class window_host {
         latched_ = (slot == drawn_slot_);   // second draw of a slot: the late one
         draws_in_slot_ = slot == drawn_slot_ ? draws_in_slot_ + 1 : 1;
         draw_owed_ = false;
+        draw_at_ = {};
         last_draw_ = now;
         drawn_slot_ = slot;
         const std::uint64_t skipped_before = frames_skipped();
@@ -465,6 +467,12 @@ class window_host {
         // nothing -- and the frame carries every input up to the deadline.
         // Past the deadline, the frame belongs to the next refresh.
         if (one_deep_queue()) {
+            // A draw already held keeps the deadline it was held FOR. The
+            // timer wakes a hair after that point; re-deciding then ("the
+            // deadline passed: next refresh") slipped every input-driven
+            // frame a whole refresh -- a scrollbar or pane drag ran at 20-30
+            // fps while animation ticks, which skip this, ran at 60.
+            if (draw_owed_ && draw_at_ != time_point{}) return draw_at_;
             auto t = slot_of(now);
             if (now > latch_point(t)) ++t;     // this refresh's deadline passed
             if (t <= drawn_slot_) t = drawn_slot_ + 1;   // it already has its frame
@@ -2028,6 +2036,7 @@ class window_host {
     bool                tick_pending_ = false;  // a frame tick was dispatched; draw it next
     time_point   last_draw_{};
     time_point   hold_until_{};             // a draw held behind a full queue (see present())
+    time_point   draw_at_{};                // a held draw's deadline (see next_draw_at)
     time_point   held_since_{};
     time_point   vblank_{};                 // a refresh boundary (set at start)
     duration_t     period_ = std::chrono::duration_cast<duration_t>(kFramePeriod);
