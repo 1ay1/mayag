@@ -726,16 +726,29 @@ class Win32Window {
         return state_ ? state_->frames_skipped : 0;
     }
 
+    /// Would a frame presented now wait behind one still queued (and so
+    /// show a refresh late)? Never true inside the OS's modal size loop,
+    /// where every step must draw.
+    [[nodiscard]] bool frame_queue_full() noexcept {
+        return state_ && state_->gpu_active && state_->gpu && !state_->in_modal && state_->gpu->queue_full();
+    }
+
     /// How long before a vblank a late-latch frame must be PRESENTED to make
-    /// it. DWM composes well ahead of scan-out: measured with DXGI frame
-    /// statistics (MAYAG_PRESENTSTATS=1), a frame handed over 2 ms before the
-    /// vblank -- the generic margin -- missed it EVERY time and showed a
-    /// whole refresh later (16.5 ms present->glass at 60 Hz). Half a refresh
-    /// makes it: ~7.7 ms (3/4 gave ~12; a per-frame AIMD learner, as on
-    /// macOS, was tried and oscillated as DWM's deadline moved under it).
+    /// it: DWM's composition deadline. The generic 2 ms margin missed every
+    /// vblank here (each frame a whole refresh late, 16.5 ms present->glass
+    /// at 60 Hz, measured with MAYAG_PRESENTSTATS=1). Learned by the D3D11
+    /// backend from frames presented into an empty queue (see
+    /// D3D11Device::latch_margin_s); half a refresh until it knows.
     [[nodiscard]] std::chrono::nanoseconds latch_margin() const noexcept {
         const auto p = state_ && state_->timing.period.count() > 0 ? state_->timing.period : std::chrono::nanoseconds{16'666'667};
+        if (state_ && state_->gpu_active && state_->gpu)
+            if (const double s = state_->gpu->latch_margin_s(); s > 0.0) return std::chrono::nanoseconds{static_cast<std::int64_t>(s * 1e9)};
         return p / 2;
+    }
+    /// Late draws (into an empty queue) that missed their vblank, of those judged.
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> latch_misses() const noexcept {
+        if (state_ && state_->gpu) return state_->gpu->latch_misses();
+        return {0, 0};
     }
 
   private:
@@ -1567,7 +1580,7 @@ class Win32Window {
 // give it (platform/concepts.hpp) -- losing one or gaining one unstated
 // fails the build, naming the capability.
 static_assert(check_capabilities<Win32Window, caps<cap::event_fd, cap::draws_live, cap::counts_skipped_frames,
-                                                          cap::latches_late,
+                                                          cap::reports_queue_full, cap::latches_late, cap::counts_latch_misses,
                                                           cap::reports_display_timing, cap::fullscreens, cap::manages_itself,
                                                           cap::uploads_images, cap::takes_text_input, cap::prestarts_gpu>>());
 

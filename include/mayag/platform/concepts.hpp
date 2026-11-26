@@ -80,6 +80,10 @@ template <class W> concept ReplacesQueuedFrames =
 /// Counts frames it did not resubmit because they were identical.
 template <class W> concept CountsSkippedFrames =
     requires(const W& w) { { w.frames_skipped() } -> std::convertible_to<std::uint64_t>; };
+/// Says when its presentation queue is still full (a frame would block, and
+/// then show a refresh late): the host holds the draw instead.
+template <class W> concept ReportsQueueFull =
+    requires(W& w) { { w.frame_queue_full() } -> std::convertible_to<bool>; };
 /// Learns how late before vblank a frame can still make it.
 template <class W> concept LatchesLate =
     requires(const W& w) { { w.latch_margin() } -> std::convertible_to<std::chrono::nanoseconds>; };
@@ -162,6 +166,7 @@ MAYAG_CAPABILITY(event_fd, HasEventFd);
 MAYAG_CAPABILITY(draws_live, DrawsLive);
 MAYAG_CAPABILITY(replaces_queued_frames, ReplacesQueuedFrames);
 MAYAG_CAPABILITY(counts_skipped_frames, CountsSkippedFrames);
+MAYAG_CAPABILITY(reports_queue_full, ReportsQueueFull);
 MAYAG_CAPABILITY(latches_late, LatchesLate);
 MAYAG_CAPABILITY(counts_latch_misses, CountsLatchMisses);
 MAYAG_CAPABILITY(reports_display_timing, ReportsDisplayTiming);
@@ -180,7 +185,7 @@ MAYAG_CAPABILITY(prestarts_gpu, PrestartsGpu);
 #undef MAYAG_CAPABILITY
 
 /// Every capability there is: the universe capabilities_of filters.
-using all = caps<event_fd, draws_live, replaces_queued_frames, counts_skipped_frames, latches_late,
+using all = caps<event_fd, draws_live, replaces_queued_frames, counts_skipped_frames, reports_queue_full, latches_late,
                  counts_latch_misses, reports_display_timing, repeats_keys, asks_for_redraw, owes_redraw,
                  fullscreens, manages_itself, uploads_images, patches_images, moves_image_rows,
                  shares_event_queue, takes_text_input, measures_photons, prestarts_gpu>;

@@ -281,14 +281,21 @@ class D3D11Device {
         if (!valid_) return;
         if (resize_pending_) { resize_pending_ = false; resize_swapchain(); }
         if (rtv_srgb_ == nullptr) return;
-        // Wait for the swapchain to want a frame (latency 1): the frame is
-        // built from the freshest input instead of queuing behind vsync.
-        // Not right after a resize: the chain's buffers are new, nothing is
-        // queued, and a live drag-resize must not stall a refresh per step.
-        // (Not waiting -- presenting with sync interval 0 to replace a still
-        // queued frame -- was measured: some launches sat at 1.7 refreshes
-        // present->glass with frames discarded. Waiting is steadier.)
-        if (latency_wait_ && !just_resized_) ::WaitForSingleObjectEx(latency_wait_, 100, TRUE);
+        // Wait for the swapchain to want a frame (latency 1). The host asks
+        // queue_full() first and holds a late draw rather than come here
+        // with the queue full (see there); a probe that found it free left a
+        // token, so this does not wait twice. Not right after a resize: the
+        // chain's buffers are new and nothing is queued.
+        LARGE_INTEGER wait0{};
+        if (pstats_.on) ::QueryPerformanceCounter(&wait0);
+        if (latency_wait_ && !just_resized_ && !queue_token_) ::WaitForSingleObjectEx(latency_wait_, 100, TRUE);
+        queue_token_ = false;
+        if (pstats_.on) {
+            LARGE_INTEGER w1, f;
+            ::QueryPerformanceCounter(&w1);
+            ::QueryPerformanceFrequency(&f);
+            pstats_.wait_ms.push_back(static_cast<double>(w1.QuadPart - wait0.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart));
+        }
         just_resized_ = false;
 
         upload_instances(list);
@@ -345,12 +352,164 @@ class D3D11Device {
 
         const bool immediate = low_latency_ && tearing_;
         LARGE_INTEGER submit_q{};
+        // empty queue: the previous present went out before the latest vblank
+        // (the learned clock says when). Not DXGI's statistics: they report a
+        // flip up to a refresh late, so with one present per refresh nearly
+        // every frame looked queued -- and the learner, starved of evidence,
+        // never widened a margin that was missing every vblank.
+        bool queue_was_empty = last_submit_qpc_ == 0;
+        if (!queue_was_empty && latch_.anchor != 0) {
+            LARGE_INTEGER nq, fq;
+            ::QueryPerformanceCounter(&nq);
+            ::QueryPerformanceFrequency(&fq);
+            const auto pq = static_cast<LONGLONG>(latch_.period_s * static_cast<double>(fq.QuadPart));
+            if (pq > 0 && nq.QuadPart > latch_.anchor) {
+                const LONGLONG last_vblank = latch_.anchor + (nq.QuadPart - latch_.anchor) / pq * pq;
+                queue_was_empty = last_submit_qpc_ <= last_vblank;
+            }
+        }
         ::QueryPerformanceCounter(&submit_q);
+        last_submit_qpc_ = submit_q.QuadPart;
         const HRESULT hr = swapchain_->Present(immediate ? 0 : 1, immediate ? DXGI_PRESENT_ALLOW_TEARING : 0);
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) valid_ = false;
         content_changed_ = false;
         ++frames_;
+        learn_latch(submit_q, queue_was_empty);
         if (pstats_.on) track_present(submit_q);
+    }
+
+    /// How long before a vblank a frame must be presented to make it: DWM's
+    /// composition deadline. It sits several ms before scan-out and moves
+    /// from launch to launch (one laptop: ~7 ms of lead on some, ~10+ on
+    /// others), so it is learned. Only frames presented into an EMPTY queue
+    /// are evidence: one queued behind another shows late whatever its lead
+    /// (that contamination is what made an earlier learner run away to a
+    /// full refresh). Such a frame shown a refresh later than the vblank it
+    /// was handed over for -- past the pipeline's own depth, 1 composed, 0 on
+    /// an overlay plane -- missed: +1 ms. Each late draw that made it:
+    /// -5 us. Bounded to [1 ms, 3/4 refresh]; 0 until it has evidence.
+    [[nodiscard]] double latch_margin_s() const noexcept { return latch_.tried >= 8 && depth_ == 0 ? latch_.margin_s : 0.0; }
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> latch_misses() const noexcept { return {latch_.missed, latch_.tried}; }
+
+  private:
+    struct LatchLearner {
+        struct Sent { UINT count; LONGLONG target; double lead_s; int depth; };
+        std::vector<Sent> sent;
+        LONGLONG anchor = 0;       // QPC of a vblank a shown frame hit
+        UINT anchor_refresh = 0;
+        double period_s = 1.0 / 60.0;
+        double margin_s = 1.0 / 120.0;
+        std::uint64_t tried = 0, missed = 0;
+    } latch_;
+
+    [[nodiscard]] int pipeline_depth() const noexcept {
+        int depth = 1;   // composed by DWM: shown a refresh after the vblank it latched on
+        IDXGISwapChainMedia* media = nullptr;
+        if (SUCCEEDED(swapchain_->QueryInterface(__uuidof(IDXGISwapChainMedia), reinterpret_cast<void**>(&media)))) {
+            DXGI_FRAME_STATISTICS_MEDIA fm{};
+            if (SUCCEEDED(media->GetFrameStatisticsMedia(&fm)) && fm.CompositionMode == DXGI_FRAME_PRESENTATION_MODE_OVERLAY)
+                depth = 0;   // flipped to a plane: shown ON it
+            media->Release();
+        }
+        return depth;
+    }
+
+    void learn_latch(LARGE_INTEGER submit_q, bool queue_was_empty) {
+        auto& L = latch_;
+        LARGE_INTEGER f;
+        ::QueryPerformanceFrequency(&f);
+        const double tick_s = 1.0 / static_cast<double>(f.QuadPart);
+        DXGI_FRAME_STATISTICS fs{};
+        if (FAILED(swapchain_->GetFrameStatistics(&fs)) || fs.SyncQPCTime.QuadPart == 0) return;
+        if (L.anchor != 0 && fs.SyncRefreshCount > L.anchor_refresh && fs.SyncRefreshCount - L.anchor_refresh <= 600 &&
+            fs.SyncQPCTime.QuadPart > L.anchor) {
+            const double p = static_cast<double>(fs.SyncQPCTime.QuadPart - L.anchor) * tick_s /
+                             static_cast<double>(fs.SyncRefreshCount - L.anchor_refresh);
+            if (p > 1.0 / 500.0 && p < 1.0 / 20.0) L.period_s = L.period_s * 0.9 + p * 0.1;
+        }
+        for (const auto& s : L.sent) {
+            if (s.count > fs.PresentCount) break;
+            if (s.count != fs.PresentCount || s.lead_s >= L.period_s * 0.75) continue;   // replaced, or early: no verdict
+            const double late = static_cast<double>(fs.SyncQPCTime.QuadPart - s.target) * tick_s;
+            const int k = std::max(0, static_cast<int>(std::lround(late / L.period_s)));
+            ++L.tried;
+            if (k > s.depth) {
+                ++L.missed;
+                L.margin_s = std::min(L.margin_s + 1.0e-3, L.period_s * 0.75);
+            } else if (s.lead_s < L.margin_s + 2.0e-3) {
+                // -5 us a hit against +1 ms a miss: it settles where about one
+                // late draw in 200 misses (at -20 us it was one in 25, and
+                // that showed as judder: every 25th frame a refresh late)
+                L.margin_s = std::max(L.margin_s - 5e-6, 1.0e-3);
+            }
+        }
+        std::erase_if(L.sent, [&](const LatchLearner::Sent& s) { return s.count <= fs.PresentCount; });
+        // Composed by DWM or flipped to a plane: asked every 30 presents (a
+        // window changes between them as it is covered, resized, moved). On a
+        // plane a frame shows ON the vblank it makes, so the deadline can be
+        // learned and the queue predicted from the clock. Composed, DWM
+        // keeps only the newest frame per composition and its timing is its
+        // own: that clock-based prediction measured as half the frames never
+        // shown, so composed windows keep the latency object and half a
+        // refresh (see queue_full, latch_margin_s).
+        if (frames_ % 30 == 1) depth_ = pipeline_depth();
+        if (depth_ != 0) {
+            L.anchor = fs.SyncQPCTime.QuadPart;
+            L.anchor_refresh = fs.SyncRefreshCount;
+            return;
+        }
+        L.anchor = fs.SyncQPCTime.QuadPart;
+        L.anchor_refresh = fs.SyncRefreshCount;
+        if (!queue_was_empty) return;
+        UINT count = 0;
+        const LONGLONG period_q = static_cast<LONGLONG>(L.period_s / tick_s);
+        if (FAILED(swapchain_->GetLastPresentCount(&count)) || period_q <= 0 || submit_q.QuadPart <= L.anchor) return;
+        const LONGLONG target = L.anchor + ((submit_q.QuadPart - L.anchor) / period_q + 1) * period_q;
+        L.sent.push_back({count, target, static_cast<double>(target - submit_q.QuadPart) * tick_s, depth_});
+        if (L.sent.size() > 32) L.sent.erase(L.sent.begin());
+    }
+
+  public:
+
+    /// Is the one-frame queue still full -- would a Present now block, and
+    /// then show a whole refresh late? Asked, never waited on.
+    ///
+    /// This is what made every motion lag on some launches: one frame that
+    /// missed its vblank left the queue full at the next late draw, which
+    /// blocked until that vblank, presented just after it, missed again --
+    /// a stable state, every frame a refresh late for as long as anything
+    /// moved (measured: ~7.7 ms blocked in the wait per frame, 16.5 ms
+    /// present->glass, in overlay and composed mode alike). The host holds
+    /// such a draw to its next late-latch point instead: the queued frame
+    /// flips, and the pipeline is back in step at the cost of one frame,
+    /// once. A free queue's signal is taken here and kept for submit().
+    [[nodiscard]] bool queue_full() noexcept {
+        if (latency_wait_ == nullptr || queue_token_ || resize_pending_ || just_resized_) return false;
+        // The flip queue: the last present is still waiting for a vblank if
+        // it was handed over after the most recent one (the learned clock
+        // says when that was). The latency object alone cannot see it -- it
+        // signals once the GPU has taken the frame, so a second frame could
+        // still queue behind the first for the NEXT vblank: a stable state on
+        // some launches, every frame a refresh late (24.4 ms present->glass
+        // at 60 Hz, vs 7.7 out of it). Not DXGI's frame statistics: they
+        // report a flip up to a refresh after it, so at the late-latch point
+        // the frame that just flipped still looked pending and every second
+        // draw was held (a steady 30 Hz).
+        if (last_submit_qpc_ != 0 && latch_.anchor != 0 && depth_ == 0) {
+            LARGE_INTEGER now_q, f;
+            ::QueryPerformanceCounter(&now_q);
+            ::QueryPerformanceFrequency(&f);
+            const auto period_q = static_cast<LONGLONG>(latch_.period_s * static_cast<double>(f.QuadPart));
+            if (period_q > 0 && now_q.QuadPart > latch_.anchor) {
+                const LONGLONG last_vblank = latch_.anchor + (now_q.QuadPart - latch_.anchor) / period_q * period_q;
+                if (last_submit_qpc_ > last_vblank) return true;
+            }
+        }
+        if (::WaitForSingleObjectEx(latency_wait_, 0, FALSE) == WAIT_OBJECT_0) {
+            queue_token_ = true;
+            return false;
+        }
+        return true;
     }
 
     [[nodiscard]] std::uint64_t frames_presented() const noexcept { return frames_; }
@@ -379,12 +538,18 @@ class D3D11Device {
         std::vector<Sent> sent;
         std::vector<double> lat_ms;
         std::vector<double> gap_ms;    // submit-to-submit, while presents come within 100 ms (a burst)
+        std::vector<double> wait_ms;   // blocked in the frame-latency wait before Present
         LONGLONG prev_q = 0;
         UINT last_shown = 0;
         UINT last_refresh = 0;
         int dropped = 0, shown = 0, gaps = 0;   // gaps: a refresh passed showing nothing new mid-burst
         LONGLONG window_start = 0;
+        LONGLONG last_qpc = 0;
+        double period_ms = 0;
     } pstats_;
+    bool queue_token_ = false;   ///< queue_full() took the latency object's signal
+    int depth_ = 1;              ///< 0: on an overlay plane; 1: composed by DWM
+    LONGLONG last_submit_qpc_ = 0;   ///< QPC just before the last Present
 
     void track_present(LARGE_INTEGER submit_q) {
         auto& s = pstats_;
@@ -412,6 +577,12 @@ class D3D11Device {
             // they were submitted less than one apart: a missed refresh
             if (s.last_shown != 0 && fs.PresentCount == s.last_shown + 1 && fs.SyncRefreshCount > s.last_refresh + 1)
                 ++s.gaps;
+            if (s.last_shown != 0 && fs.SyncRefreshCount > s.last_refresh && fs.SyncQPCTime.QuadPart > s.last_qpc && s.last_qpc != 0) {
+                const double per = static_cast<double>(fs.SyncQPCTime.QuadPart - s.last_qpc) * 1000.0 / static_cast<double>(f.QuadPart) /
+                                   static_cast<double>(fs.SyncRefreshCount - s.last_refresh);
+                if (per > 4 && per < 50) s.period_ms = per;
+            }
+            s.last_qpc = fs.SyncQPCTime.QuadPart;
             std::erase_if(s.sent, [&](const PresentStats::Sent& p) { return p.count <= fs.PresentCount; });
             s.last_shown = fs.PresentCount;
             s.last_refresh = fs.SyncRefreshCount;
@@ -430,8 +601,25 @@ class D3D11Device {
                     std::fprintf(stderr, "  present gaps p50 %.1f p90 %.1f max %.1f ms", g(0.5), g(0.9), s.gap_ms.back());
                 }
                 std::fprintf(stderr, "\n");
+                if (!s.wait_ms.empty()) {
+                    std::sort(s.wait_ms.begin(), s.wait_ms.end());
+                    std::fprintf(stderr, "mayag: latency wait p50 %.2f p90 %.2f ms", s.wait_ms[s.wait_ms.size() / 2], s.wait_ms[s.wait_ms.size() * 9 / 10]);
+                }
+                IDXGISwapChainMedia* media = nullptr;
+                if (SUCCEEDED(swapchain_->QueryInterface(__uuidof(IDXGISwapChainMedia), reinterpret_cast<void**>(&media)))) {
+                    DXGI_FRAME_STATISTICS_MEDIA fm{};
+                    if (SUCCEEDED(media->GetFrameStatisticsMedia(&fm)))
+                        std::fprintf(stderr, "  mode %s", fm.CompositionMode == DXGI_FRAME_PRESENTATION_MODE_COMPOSED ? "composed"
+                                                     : fm.CompositionMode == DXGI_FRAME_PRESENTATION_MODE_OVERLAY ? "overlay"
+                                                     : fm.CompositionMode == DXGI_FRAME_PRESENTATION_MODE_NONE ? "none" : "failed");
+                    media->Release();
+                }
+                std::fprintf(stderr, "\n");
+                std::fprintf(stderr, "mayag: display refresh %.2f ms (measured)  latch margin %.2f ms (%llu of %llu missed)\n", s.period_ms,
+                             latch_.margin_s * 1e3, static_cast<unsigned long long>(latch_.missed), static_cast<unsigned long long>(latch_.tried));
             }
             s.lat_ms.clear();
+            s.wait_ms.clear();
             s.gap_ms.clear();
             s.shown = s.dropped = s.gaps = 0;
             s.window_start = submit_q.QuadPart;

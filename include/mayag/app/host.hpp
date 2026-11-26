@@ -48,6 +48,7 @@
 #include "sources.hpp"
 
 #include <jaal/jaal.hpp>
+#include <jaal/platform/display_clock.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -228,6 +229,22 @@ class window_host {
                 reg_.emplace(std::move(*reg));
             }
         }
+        // The display's own frame clock, where the OS has one to ask (Windows:
+        // DWM's compositor clock). Watched like any handle: one wait() covers
+        // input, output, timers and the next frame, and an idle app is never
+        // woken -- it ticks only while armed (see pace_clock()). Without one
+        // (POSIX, a simulated clock) the host keeps its own pacing.
+        if constexpr (std::same_as<time_point, std::chrono::steady_clock::time_point>) {
+            if (!external_loop_ && cfg_.vsync) {
+                if (auto c = jaal::platform::display_clock::open()) {
+                    using H = typename Cx::reactor::handle;
+                    if (auto reg = cx.watch(static_cast<H>(c->handle().get()), jaal::interest::read, kClock)) {
+                        dclock_.emplace(std::move(*c));
+                        clock_reg_.emplace(std::move(*reg));
+                    }
+                }
+            }
+        }
         poll_window_ = !reg_.has_value() && !external_loop_;
         cx_ = [&cx](const window_events& e) { return cx.emit(e); };
         stop_ = [&cx](int code) { cx.stop(code); };
@@ -250,6 +267,7 @@ class window_host {
 
     template <class Cx>
     void on_ready(Cx& cx, const jaal::readiness& r) {
+        if (r.token == kClock) { take_clock(); return; }
         if (r.token != kWindow) return;
         if (r.hangup || r.error) { cx.stop(0); return; }
         pump(cx);
@@ -322,6 +340,7 @@ class window_host {
         const auto now = now_();
         time_ = std::chrono::duration<double>(now - start_).count();
         sync_display();
+        struct ArmAfter { window_host& h; ~ArmAfter() { h.pace_clock(); } } arm_after{*this};   // every exit below
         // Input that the program acted on, while something animates: its
         // answer usually moves in the frame tick (a smooth scroll, a fade, a
         // drag that scrolls), so waiting for the vblank-grid tick held every
@@ -353,6 +372,24 @@ class window_host {
             }
         }
         const auto slot = slot_of(now);
+        // The queue still holds a frame (it missed its vblank, or an early
+        // draw this refresh is waiting on it): presenting now would block
+        // until that vblank and show a whole refresh late -- and leave the
+        // next frame in the same place, so motion stayed a refresh behind
+        // for as long as it lasted. Hold the draw to the next late-latch
+        // point instead: the queued frame flips meanwhile, this one goes out
+        // with the freshest state, and the pipeline is back in step. Never
+        // for more than two refreshes (an occluded window's queue may never
+        // drain): then the draw goes ahead and the backend waits as before.
+        if (window_queue_full() && (held_since_ == time_point{} || now - held_since_ < period_ * 2)) {
+            if (held_since_ == time_point{}) held_since_ = now;
+            const auto lp = latch_point(slot);
+            hold_until_ = now < lp ? lp : latch_point(slot + 1);
+            draw_owed_ = true;
+            return;
+        }
+        hold_until_ = {};
+        held_since_ = {};
         const bool was_latched = latched_;
         const auto was_slot = drawn_slot_;
         const int was_draws = draws_in_slot_;
@@ -380,6 +417,17 @@ class window_host {
             return window_.replaces_queued_frames();
         return false;
     }
+    [[nodiscard]] bool window_queue_full() noexcept {
+        if constexpr (platform::has<W, platform::cap::reports_queue_full>)
+            return cfg_.vsync && window_.frame_queue_full();
+        return false;
+    }
+    /// A window whose frames queue one deep behind the vblank (it reports a
+    /// full queue, and does not replace a queued frame): see next_draw_at.
+    [[nodiscard]] bool one_deep_queue() const noexcept {
+        if constexpr (platform::has<W, platform::cap::reports_queue_full>) return !window_replaces_queued();
+        return false;
+    }
 
     [[nodiscard]] std::uint64_t frames_skipped() const noexcept {
         if constexpr (platform::has<W, platform::cap::counts_skipped_frames>) return window_.frames_skipped();
@@ -404,6 +452,22 @@ class window_host {
         // vsync off (async/tearing presents): a frame is shown the moment it
         // is submitted, so holding it for a vblank only adds latency.
         if (!cfg_.vsync) return now;
+        if (hold_until_ > now) return hold_until_;   // a full queue: see present()
+        // A one-deep FIFO queue (Win32 flip model, latency 1): a second
+        // present in a refresh waits behind the first and shows a refresh
+        // LATER -- the old "draw now, then a late draw before the vblank"
+        // plan put every second frame there (typing p90 a refresh late,
+        // scroll flipping between ~5 and ~22 ms present->glass). So: ONE
+        // present per refresh, at that refresh's late-latch point. Drawing
+        // earlier would reach the glass at the same vblank, so waiting costs
+        // nothing -- and the frame carries every input up to the deadline.
+        // Past the deadline, the frame belongs to the next refresh.
+        if (one_deep_queue()) {
+            auto t = slot_of(now);
+            if (now > latch_point(t)) ++t;     // this refresh's deadline passed
+            if (t <= drawn_slot_) t = drawn_slot_ + 1;   // it already has its frame
+            return std::max(now, latch_point(t));
+        }
         if (slot_of(now) != drawn_slot_) return now;
         if (window_replaces_queued()) return draws_in_slot_ < kFreshPerSlot ? now : slot_start(drawn_slot_ + 1);
         if (latched_) return slot_start(drawn_slot_ + 1);
@@ -427,17 +491,19 @@ class window_host {
     [[nodiscard]] time_point latch_point(std::int64_t n) const noexcept {
         return slot_start(n + 1) - latch_margin();
     }
-    /// The window's margin when it knows one (macOS learns it, Win32 sets
-    /// half a refresh for DWM), capped at half a refresh; else the fixed
-    /// default capped at a quarter.
+    /// The window's margin when it knows one (macOS learns WindowServer's,
+    /// capping it at half a refresh; Win32 learns DWM's, which can sit
+    /// earlier), bounded at 3/4 of a refresh; else the fixed default capped
+    /// at a quarter.
     [[nodiscard]] duration_t latch_margin() const noexcept {
         if constexpr (platform::has<W, platform::cap::latches_late>)
             return std::min<duration_t>(
-                std::chrono::duration_cast<duration_t>(window_.latch_margin()), period_ / 2);
+                std::chrono::duration_cast<duration_t>(window_.latch_margin()), period_ * 3 / 4);
         return std::min<duration_t>(std::chrono::duration_cast<duration_t>(kLatchMargin),
                                          period_ / 4);
     }
     void sync_display() {
+        if (clock_seq_ != 0) return;   // the compositor's clock is ticking: it is the authority
         // A window reports vblanks on the REAL clock; under a simulated
         // clock they are meaningless, and the 60 Hz default grid is used.
         if constexpr (platform::has<W, platform::cap::reports_display_timing> && std::same_as<time_point, std::chrono::steady_clock::time_point>) {
@@ -1051,6 +1117,37 @@ class window_host {
 
   private:
     static constexpr std::uint64_t kWindow = 1;
+    static constexpr std::uint64_t kClock = 2;
+
+    // ── the compositor's clock ──────────────────────────────────────────────
+    // Every frame slot, late-latch point and animation tick is laid on the
+    // vblank grid. Guessed, that grid drifts (60.006 Hz is not 60) and goes
+    // stale, and a draw aimed just before a deadline lands just after it: a
+    // whole refresh of lag with no slow code anywhere. So the grid is the
+    // compositor's: each tick re-anchors vblank_ and period_ to the frame DWM
+    // just began. Armed only while frames are wanted (or one is owed), and
+    // boosted to the display's higher rate while the motion is the user's.
+    std::optional<jaal::platform::display_clock> dclock_;
+    std::optional<jaal::platform::native_reactor::registration> clock_reg_;
+    std::uint64_t clock_seq_ = 0;
+    void take_clock() {
+        if (!dclock_) return;
+        const auto f = dclock_->tick();
+        if (f.seq == clock_seq_ || f.at == decltype(f.at){}) return;
+        clock_seq_ = f.seq;
+        if constexpr (std::same_as<time_point, std::chrono::steady_clock::time_point>) {
+            const auto drawn_at = drawn_slot_ >= 0 ? slot_start(drawn_slot_) : time_point{};
+            vblank_ = f.at;
+            if (f.period.count() > 0) period_ = std::chrono::duration_cast<duration_t>(f.period);
+            if (drawn_slot_ >= 0) drawn_slot_ = slot_of(drawn_at + period_ / 2);
+        }
+    }
+    void pace_clock() noexcept {
+        if (!dclock_) return;
+        const bool want = animating() || dirty_ || draw_owed_;
+        dclock_->arm(want);
+        dclock_->boost(want && input_since_render_ && animating());
+    }
     static constexpr std::chrono::nanoseconds kPollPeriod{8'000'000};
 
     // For fd-less windows: pump through the context attach() captured.
@@ -1895,6 +1992,8 @@ class window_host {
     int                 draws_in_slot_ = 0;     // frames drawn in drawn_slot_
     bool                tick_pending_ = false;  // a frame tick was dispatched; draw it next
     time_point   last_draw_{};
+    time_point   hold_until_{};             // a draw held behind a full queue (see present())
+    time_point   held_since_{};
     time_point   vblank_{};                 // a refresh boundary (set at start)
     duration_t     period_ = std::chrono::duration_cast<duration_t>(kFramePeriod);
     std::int64_t        drawn_slot_ = -1;                       // slot of the last draw

@@ -125,6 +125,13 @@ class Win32Gpu {
     [[nodiscard]] bool needs_present() const noexcept {
         return MG_GPU_CALL(d3d_->needs_present(), vk_->needs_present(), false);
     }
+    /// D3D11 only: would a present now block on a full queue (see there)?
+    [[nodiscard]] bool queue_full() noexcept { return api_ == Api::d3d11 && d3d_->queue_full(); }
+    /// D3D11 only: DWM's learned composition deadline (0: not known yet).
+    [[nodiscard]] double latch_margin_s() const noexcept { return api_ == Api::d3d11 ? d3d_->latch_margin_s() : 0.0; }
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> latch_misses() const noexcept {
+        return api_ == Api::d3d11 ? d3d_->latch_misses() : std::pair<std::uint64_t, std::uint64_t>{0, 0};
+    }
     /// Presentation feedback (D3D11 only): the vblank the last shown frame hit.
     [[nodiscard]] bool last_shown_vblank(LONGLONG& qpc, UINT& refresh) const noexcept {
         return api_ == Api::d3d11 && d3d_->last_shown_vblank(qpc, refresh);
