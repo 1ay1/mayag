@@ -772,6 +772,8 @@ class Win32Window {
         bool tracking_mouse = false;
         bool text_input = false;
         bool resized = false;   ///< a WM_SIZE/DPI change needs a swapchain rebuild
+        bool sized_ahead = false;   ///< WM_NCCALCSIZE already resized and drew for the coming size
+        bool drawing_ahead = false; ///< inside that draw: a nested WM_NCCALCSIZE must not re-enter it
         bool no_redirection = false;   ///< created WS_EX_NOREDIRECTIONBITMAP: GDI cannot present
         bool gpu_failed = false;       ///< the GPU was expected and did not come up
         bool fullscreen = false;
@@ -1281,6 +1283,8 @@ class Win32Window {
                 ::GetClientRect(hwnd, &rc);
                 const Vec2 sz{static_cast<float>(rc.right - rc.left) * inv,
                               static_cast<float>(rc.bottom - rc.top) * inv};
+                // Already resized and drawn in WM_NCCALCSIZE, before the move.
+                if (sz == st->size && std::exchange(st->sized_ahead, false)) return 0;
                 if (sz == st->size && !st->in_modal) return 0;
                 st->size = sz;
                 st->resized = true;   // dispatch() rebuilds the swapchain
@@ -1311,8 +1315,10 @@ class Win32Window {
                 break;
 
             // ── frameless, but still a native window ───────────────────────────
-            case WM_NCCALCSIZE:
-                if (!st->decorated && wp == TRUE) {
+            case WM_NCCALCSIZE: {
+                if (wp != TRUE) break;
+                auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
+                if (!st->decorated) {
                     // Claim the whole window as client area, which removes
                     // the caption while keeping WS_THICKFRAME: Aero Snap,
                     // snap layouts, resize borders and the DWM shadow stay.
@@ -1320,7 +1326,6 @@ class Win32Window {
                     // monitor edge by the frame width; inset by it so no
                     // content is lost off-screen.
                     if (::IsZoomed(hwnd)) {
-                        auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
                         const int fx = get_metric(SM_CXSIZEFRAME, st) + get_metric(SM_CXPADDEDBORDER, st);
                         const int fy = get_metric(SM_CYSIZEFRAME, st) + get_metric(SM_CXPADDEDBORDER, st);
                         p->rgrc[0].left += fx;
@@ -1328,9 +1333,35 @@ class Win32Window {
                         p->rgrc[0].top += fy;
                         p->rgrc[0].bottom -= fy;
                     }
-                    return 0;
+                } else {
+                    (void)::DefWindowProcW(hwnd, msg, wp, lp);   // rgrc[0]: the client rect to come
                 }
-                break;
+                // Every edge drag in step: the frame for the NEW size is drawn
+                // and on the glass BEFORE Windows moves the window -- here,
+                // not in WM_SIZE (which arrives after the move, so the frame
+                // edge always led and the content trailed it by a refresh or
+                // more, on every edge). The recipe: a DirectComposition
+                // swapchain, resized in WM_NCCALCSIZE, presented before
+                // returning (jbatez, gamedev.net 2021; noflicker_directx_window).
+                // The resize is still an event the program folds: pump it
+                // through update, draw its view, then let the window move.
+                const RECT& r = p->rgrc[0];
+                if (st->in_modal && !st->drawing_ahead && r.right > r.left && r.bottom > r.top && !::IsIconic(hwnd) &&
+                    st->gpu_active && st->gpu && st->gpu->composed() && st->live_draw) {
+                    const Vec2 sz{static_cast<float>(r.right - r.left) * inv, static_cast<float>(r.bottom - r.top) * inv};
+                    if (sz != st->size) {
+                        st->drawing_ahead = true;
+                        st->size = sz;
+                        st->sized_ahead = true;
+                        push(ResizeEvent{st->size, st->dpi});
+                        if (st->on_resize) st->on_resize();
+                        st->gpu->present_for_resize();
+                        st->live_draw();
+                        st->drawing_ahead = false;
+                    }
+                }
+                return 0;
+            }
 
             case WM_NCHITTEST:
                 if (!st->decorated && st->resizable && !::IsZoomed(hwnd)) {

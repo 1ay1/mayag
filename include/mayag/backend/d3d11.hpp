@@ -43,6 +43,7 @@
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <dcomp.h>
 #include <dxgi1_6.h>
 
 #include <algorithm>
@@ -154,8 +155,14 @@ class D3D11Device {
                                        D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 2, D3D11_SDK_VERSION, &dev_, nullptr, &ctx_);
         if (adapter) {
             DXGI_ADAPTER_DESC1 d{};
-            if (SUCCEEDED(adapter->GetDesc1(&d)))
+            if (SUCCEEDED(adapter->GetDesc1(&d))) {
                 ::WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, device_name_, sizeof device_name_, nullptr, nullptr);
+                // Intel iGPUs present a composition swapchain's resize frame
+                // slightly out of step with the window (the gap shows at the
+                // moving edge); waiting for that output's vblank first is the
+                // known remedy (noflicker_directx_window: syncIntelOutput).
+                if (d.VendorId == 0x8086) (void)adapter->EnumOutputs(0, &intel_output_);
+            }
             adapter->Release();
         }
         if (FAILED(hr) || dev_ == nullptr) return false;
@@ -198,7 +205,11 @@ class D3D11Device {
         for (auto& [id, t] : textures_) { release(t.srv); release(t.tex); }
         textures_.clear();
         release_targets();
+        if (dcomp_visual_) { dcomp_visual_->Release(); dcomp_visual_ = nullptr; }
+        if (dcomp_target_) { dcomp_target_->Release(); dcomp_target_ = nullptr; }
+        if (dcomp_dev_) { dcomp_dev_->Release(); dcomp_dev_ = nullptr; }
         release(swapchain_);
+        release(intel_output_);
         if (latency_wait_) { ::CloseHandle(latency_wait_); latency_wait_ = nullptr; }
         release(atlas_srv_); release(atlas_tex_);
         release(color_srv_); release(color_tex_);
@@ -214,6 +225,14 @@ class D3D11Device {
     [[nodiscard]] bool valid() const noexcept { return valid_; }
     [[nodiscard]] const char* device_name() const noexcept { return device_name_; }
     [[nodiscard]] bool needs_present() const noexcept { return content_changed_; }
+
+    /// Composed through DirectComposition (resize frames can be synchronous).
+    [[nodiscard]] bool composed() const noexcept { return dcomp_visual_ != nullptr; }
+    /// The next submit() is a RESIZE frame: present at once, discarding any
+    /// queued frame (DXGI_PRESENT_RESTART), then wait for the vblank so it is
+    /// on the glass before the window finishes moving -- the recipe that makes
+    /// a composition swapchain resize without lag or tearing at the edge.
+    void present_for_resize() noexcept { resize_frame_ = true; }
 
     void resize(Vec2 logical, float dpi) {
         logical_ = logical;
@@ -288,7 +307,7 @@ class D3D11Device {
         // chain's buffers are new and nothing is queued.
         LARGE_INTEGER wait0{};
         if (pstats_.on) ::QueryPerformanceCounter(&wait0);
-        if (latency_wait_ && !just_resized_ && !queue_token_) ::WaitForSingleObjectEx(latency_wait_, 100, TRUE);
+        if (latency_wait_ && !just_resized_ && !queue_token_ && !resize_frame_) ::WaitForSingleObjectEx(latency_wait_, 100, TRUE);
         queue_token_ = false;
         if (pstats_.on) {
             LARGE_INTEGER w1, f;
@@ -370,7 +389,16 @@ class D3D11Device {
         }
         ::QueryPerformanceCounter(&submit_q);
         last_submit_qpc_ = submit_q.QuadPart;
-        const HRESULT hr = swapchain_->Present(immediate ? 0 : 1, immediate ? DXGI_PRESENT_ALLOW_TEARING : 0);
+        HRESULT hr;
+        if (std::exchange(resize_frame_, false)) {
+            if (intel_output_ != nullptr) (void)intel_output_->WaitForVBlank();
+            hr = swapchain_->Present(0, DXGI_PRESENT_RESTART);
+            // on the glass before we return -- one vblank wait per step, not two
+            // (the Intel sync above already waited one)
+            if (SUCCEEDED(hr) && intel_output_ == nullptr) (void)swapchain_->Present(1, DXGI_PRESENT_DO_NOT_SEQUENCE);
+        } else {
+            hr = swapchain_->Present(immediate ? 0 : 1, immediate ? DXGI_PRESENT_ALLOW_TEARING : 0);
+        }
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) valid_ = false;
         content_changed_ = false;
         ++frames_;
@@ -772,6 +800,7 @@ class D3D11Device {
     }
 
     [[nodiscard]] bool create_swapchain() {
+        if (create_composition_swapchain()) return true;
         DXGI_SWAP_CHAIN_DESC1 sd{};
         sd.Width = 0; sd.Height = 0;   // the window's client size
         // Typeless backbuffers are not allowed for flip-model swapchains, so
@@ -801,12 +830,76 @@ class D3D11Device {
         return make_targets();
     }
 
+    // ── DirectComposition presentation ───────────────────────────────────────────────
+    // What Zed's Windows renderer and Windows Terminal do: the swapchain is
+    // created FOR COMPOSITION and set as the content of a DirectComposition
+    // visual on the window, instead of being bound to the HWND. DWM then
+    // composes window and content as one tree: a resize never stretches the
+    // old buffers across the new frame (the HWND swapchain's DXGI_SCALING),
+    // there is no redirection surface underneath to fall out of step with,
+    // and the chain stays eligible for independent flip / MPO planes.
+    // MAYAG_DCOMP=0 keeps the HWND swapchain (for A/B and old drivers).
+    [[nodiscard]] bool create_composition_swapchain() {
+        if (const char* e = std::getenv("MAYAG_DCOMP"); e != nullptr && *e == '0') return false;
+        using CreateDevice = HRESULT(WINAPI*)(IDXGIDevice*, REFIID, void**);
+        static const CreateDevice create = [] {
+            const HMODULE m = ::LoadLibraryExW(L"dcomp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            return m ? reinterpret_cast<CreateDevice>(reinterpret_cast<void*>(::GetProcAddress(m, "DCompositionCreateDevice"))) : nullptr;
+        }();
+        if (create == nullptr) return false;
+        RECT rc{};
+        ::GetClientRect(hwnd_, &rc);
+        DXGI_SWAP_CHAIN_DESC1 sd{};
+        sd.Width = static_cast<UINT>(std::max<LONG>(rc.right - rc.left, 1));   // required: no HWND to size from
+        sd.Height = static_cast<UINT>(std::max<LONG>(rc.bottom - rc.top, 1));
+        sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = 2;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        sd.Scaling = DXGI_SCALING_STRETCH;      // the only scaling composition chains take
+        sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;  // opaque: flip-eligible
+        sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT |
+                   (tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u);
+        IDXGIDevice* dxgi_dev = nullptr;
+        if (FAILED(dev_->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi_dev)))) return false;
+        IDCompositionDevice* cdev = nullptr;
+        const bool have_dev = SUCCEEDED(create(dxgi_dev, __uuidof(IDCompositionDevice), reinterpret_cast<void**>(&cdev)));
+        dxgi_dev->Release();
+        if (!have_dev) return false;
+        IDXGISwapChain1* sc = nullptr;
+        IDCompositionTarget* target = nullptr;
+        IDCompositionVisual* visual = nullptr;
+        const bool ok = SUCCEEDED(factory_->CreateSwapChainForComposition(dev_, &sd, nullptr, &sc)) &&
+                        SUCCEEDED(cdev->CreateTargetForHwnd(hwnd_, TRUE, &target)) &&
+                        SUCCEEDED(cdev->CreateVisual(&visual)) && SUCCEEDED(visual->SetContent(sc)) &&
+                        SUCCEEDED(target->SetRoot(visual)) && SUCCEEDED(cdev->Commit());
+        if (!ok) {
+            for (IUnknown* u : {static_cast<IUnknown*>(visual), static_cast<IUnknown*>(target), static_cast<IUnknown*>(sc),
+                                static_cast<IUnknown*>(cdev)})
+                if (u != nullptr) u->Release();
+            return false;
+        }
+        startup::mark("  d3d11 CreateSwapChainForComposition");
+        flags_ = sd.Flags;
+        swapchain_ = sc;
+        dcomp_dev_ = cdev; dcomp_target_ = target; dcomp_visual_ = visual;
+        IDXGISwapChain2* sc2 = nullptr;
+        if (SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain2), reinterpret_cast<void**>(&sc2)))) {
+            sc2->SetMaximumFrameLatency(1);
+            latency_wait_ = sc2->GetFrameLatencyWaitableObject();
+            sc2->Release();
+        }
+        return make_targets();
+    }
+
     [[nodiscard]] bool make_targets() {
         ID3D11Texture2D* bb = nullptr;
         if (FAILED(swapchain_->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb)))) return false;
         D3D11_TEXTURE2D_DESC td{};
         bb->GetDesc(&td);
-        sc_w_ = td.Width; sc_h_ = td.Height;
+        cap_w_ = td.Width; cap_h_ = td.Height;
+        sc_w_ = td.Width; sc_h_ = td.Height;   // reallocate() narrows it to the source region
         D3D11_RENDER_TARGET_VIEW_DESC rv{};
         rv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
         rv.Format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
@@ -825,18 +918,35 @@ class D3D11Device {
 
     void resize_swapchain() {
         if (!swapchain_) return;
-        release_targets();
-        if (ctx_) ctx_->Flush();
         RECT rc{};
         ::GetClientRect(hwnd_, &rc);
-        const UINT w = static_cast<UINT>(std::max<LONG>(rc.right - rc.left, 1));
-        const UINT h = static_cast<UINT>(std::max<LONG>(rc.bottom - rc.top, 1));
-        // (Resizing by SetSourceSize inside over-allocated buffers, to skip
-        // the reallocation, was measured and rejected: a region smaller than
-        // the buffers is never flip-eligible, DWM composed it ~40 ms behind
-        // with most frames never shown, and the chain did not recover.)
-        if (FAILED(swapchain_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, flags_))) { valid_ = false; return; }
+        // The size the window was TOLD (resize()): inside WM_NCCALCSIZE the
+        // client rect still holds the old size -- the window moves after.
+        const UINT w = logical_.x > 0.0f ? static_cast<UINT>(std::max(1.0f, std::round(logical_.x * dpi_)))
+                                         : static_cast<UINT>(std::max<LONG>(rc.right - rc.left, 1));
+        const UINT h = logical_.y > 0.0f ? static_cast<UINT>(std::max(1.0f, std::round(logical_.y * dpi_)))
+                                         : static_cast<UINT>(std::max<LONG>(rc.bottom - rc.top, 1));
+        if (w == cap_w_ && h == cap_h_) return;
+        content_changed_ = true;
+        // A plain reallocation, as Zed's composition swapchain does on WM_SIZE.
+        // (A source region inside headroom buffers -- no reallocation -- was
+        // measured twice, on HWND and on DirectComposition chains: DWM then
+        // composes it ~83 ms behind at 30 fps. Rejected.)
+        reallocate(w, h, w, h);
+    }
+
+    void reallocate(UINT bw, UINT bh, UINT w, UINT h) {
+        release_targets();
+        if (ctx_) ctx_->Flush();
+        if (FAILED(swapchain_->ResizeBuffers(0, bw, bh, DXGI_FORMAT_UNKNOWN, flags_))) { valid_ = false; return; }
         (void)make_targets();
+        if (dcomp_visual_ != nullptr && (bw != w || bh != h)) {
+            IDXGISwapChain2* sc2 = nullptr;
+            if (SUCCEEDED(swapchain_->QueryInterface(__uuidof(IDXGISwapChain2), reinterpret_cast<void**>(&sc2)))) {
+                if (SUCCEEDED(sc2->SetSourceSize(w, h))) { sc_w_ = w; sc_h_ = h; }
+                sc2->Release();
+            }
+        }
         content_changed_ = true;
         just_resized_ = true;
     }
@@ -921,7 +1031,9 @@ class D3D11Device {
     float dpi_ = 1.0f;
     bool valid_ = false, low_latency_ = false, tearing_ = false, resize_pending_ = false, content_changed_ = true;
     bool just_resized_ = false;
+    bool resize_frame_ = false;    ///< the next submit is a synchronous resize frame (present_for_resize)
     UINT flags_ = 0, sc_w_ = 0, sc_h_ = 0, capture_w_ = 0, capture_h_ = 0, instance_capacity_ = 0;
+    UINT cap_w_ = 0, cap_h_ = 0;   ///< the buffers' size
     int atlas_w_ = 0, atlas_h_ = 0;
     std::uint64_t frames_ = 0;
     char device_name_[128] = "d3d11";
@@ -930,6 +1042,10 @@ class D3D11Device {
     ID3D11Device* dev_ = nullptr;
     ID3D11DeviceContext* ctx_ = nullptr;
     IDXGISwapChain1* swapchain_ = nullptr;
+    IDXGIOutput* intel_output_ = nullptr;   ///< an Intel iGPU's output: resize frames sync to its vblank
+    IDCompositionDevice* dcomp_dev_ = nullptr;      ///< DirectComposition: the chain is a visual's content
+    IDCompositionTarget* dcomp_target_ = nullptr;
+    IDCompositionVisual* dcomp_visual_ = nullptr;
     HANDLE latency_wait_ = nullptr;
     ID3D11Texture2D* backbuffer_ = nullptr;
     ID3D11RenderTargetView* rtv_srgb_ = nullptr;

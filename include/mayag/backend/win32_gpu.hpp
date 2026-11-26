@@ -127,6 +127,9 @@ class Win32Gpu {
     }
     /// D3D11 only: would a present now block on a full queue (see there)?
     [[nodiscard]] bool queue_full() noexcept { return api_ == Api::d3d11 && d3d_->queue_full(); }
+    /// D3D11 through DirectComposition: resize frames can be presented in step with the window.
+    [[nodiscard]] bool composed() const noexcept { return api_ == Api::d3d11 && d3d_->composed(); }
+    void present_for_resize() noexcept { if (api_ == Api::d3d11) d3d_->present_for_resize(); }
     /// D3D11 only: DWM's learned composition deadline (0: not known yet).
     [[nodiscard]] double latch_margin_s() const noexcept { return api_ == Api::d3d11 ? d3d_->latch_margin_s() : 0.0; }
     [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> latch_misses() const noexcept {
