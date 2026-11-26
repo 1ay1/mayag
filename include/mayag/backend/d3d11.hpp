@@ -400,6 +400,7 @@ class D3D11Device {
         double period_s = 1.0 / 60.0;
         double margin_s = 1.0 / 120.0;
         std::uint64_t tried = 0, missed = 0;
+        UINT last_count = 0;   // DXGI's present count at the last present (a drop: the chain was reallocated)
     } latch_;
 
     [[nodiscard]] int pipeline_depth() const noexcept {
@@ -419,8 +420,18 @@ class D3D11Device {
         LARGE_INTEGER f;
         ::QueryPerformanceFrequency(&f);
         const double tick_s = 1.0 / static_cast<double>(f.QuadPart);
+        // ResizeBuffers restarts DXGI's present counts, and until a frame of
+        // the new chain is shown the statistics still name the OLD chain's
+        // last frame. Anything keyed on counts must restart with them, and
+        // ignore statistics from before -- otherwise stale entries block every
+        // verdict and a frozen anchor mispredicts the queue (measured: after
+        // a window drag, every second draw held, a steady 30 Hz).
+        UINT count = 0;
+        if (FAILED(swapchain_->GetLastPresentCount(&count))) return;
+        if (count < L.last_count) { L.sent.clear(); L.anchor = 0; L.anchor_refresh = 0; }
+        L.last_count = count;
         DXGI_FRAME_STATISTICS fs{};
-        if (FAILED(swapchain_->GetFrameStatistics(&fs)) || fs.SyncQPCTime.QuadPart == 0) return;
+        if (FAILED(swapchain_->GetFrameStatistics(&fs)) || fs.SyncQPCTime.QuadPart == 0 || fs.PresentCount > count) return;
         if (L.anchor != 0 && fs.SyncRefreshCount > L.anchor_refresh && fs.SyncRefreshCount - L.anchor_refresh <= 600 &&
             fs.SyncQPCTime.QuadPart > L.anchor) {
             const double p = static_cast<double>(fs.SyncQPCTime.QuadPart - L.anchor) * tick_s /
@@ -461,9 +472,8 @@ class D3D11Device {
         L.anchor = fs.SyncQPCTime.QuadPart;
         L.anchor_refresh = fs.SyncRefreshCount;
         if (!queue_was_empty) return;
-        UINT count = 0;
         const LONGLONG period_q = static_cast<LONGLONG>(L.period_s / tick_s);
-        if (FAILED(swapchain_->GetLastPresentCount(&count)) || period_q <= 0 || submit_q.QuadPart <= L.anchor) return;
+        if (period_q <= 0 || submit_q.QuadPart <= L.anchor) return;
         const LONGLONG target = L.anchor + ((submit_q.QuadPart - L.anchor) / period_q + 1) * period_q;
         L.sent.push_back({count, target, static_cast<double>(target - submit_q.QuadPart) * tick_s, depth_});
         if (L.sent.size() > 32) L.sent.erase(L.sent.begin());
@@ -500,7 +510,7 @@ class D3D11Device {
             ::QueryPerformanceCounter(&now_q);
             ::QueryPerformanceFrequency(&f);
             const auto period_q = static_cast<LONGLONG>(latch_.period_s * static_cast<double>(f.QuadPart));
-            if (period_q > 0 && now_q.QuadPart > latch_.anchor) {
+            if (period_q > 0 && now_q.QuadPart > latch_.anchor && now_q.QuadPart - latch_.anchor < 3 * period_q) {
                 const LONGLONG last_vblank = latch_.anchor + (now_q.QuadPart - latch_.anchor) / period_q * period_q;
                 if (last_submit_qpc_ > last_vblank) return true;
             }
@@ -561,9 +571,13 @@ class D3D11Device {
             if (g < 100.0) s.gap_ms.push_back(g);
         }
         s.prev_q = submit_q.QuadPart;
-        if (SUCCEEDED(swapchain_->GetLastPresentCount(&count))) s.sent.push_back({count, submit_q.QuadPart});
+        if (SUCCEEDED(swapchain_->GetLastPresentCount(&count))) {
+            // ResizeBuffers restarts the counts: what was pending is gone, not lost
+            if (!s.sent.empty() && count <= s.sent.back().count) { s.sent.clear(); s.last_shown = 0; s.last_refresh = 0; s.last_qpc = 0; }
+            s.sent.push_back({count, submit_q.QuadPart});
+        }
         DXGI_FRAME_STATISTICS fs{};
-        if (SUCCEEDED(swapchain_->GetFrameStatistics(&fs)) && fs.PresentCount != s.last_shown) {
+        if (SUCCEEDED(swapchain_->GetFrameStatistics(&fs)) && fs.PresentCount <= count && fs.PresentCount != s.last_shown) {
             for (const auto& p : s.sent) {
                 if (p.count > fs.PresentCount) break;
                 if (p.count == fs.PresentCount) {
@@ -805,6 +819,10 @@ class D3D11Device {
         ::GetClientRect(hwnd_, &rc);
         const UINT w = static_cast<UINT>(std::max<LONG>(rc.right - rc.left, 1));
         const UINT h = static_cast<UINT>(std::max<LONG>(rc.bottom - rc.top, 1));
+        // (Resizing by SetSourceSize inside over-allocated buffers, to skip
+        // the reallocation, was measured and rejected: a region smaller than
+        // the buffers is never flip-eligible, DWM composed it ~40 ms behind
+        // with most frames never shown, and the chain did not recover.)
         if (FAILED(swapchain_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, flags_))) { valid_ = false; return; }
         (void)make_targets();
         content_changed_ = true;
