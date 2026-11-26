@@ -125,6 +125,10 @@ class Win32Gpu {
     [[nodiscard]] bool needs_present() const noexcept {
         return MG_GPU_CALL(d3d_->needs_present(), vk_->needs_present(), false);
     }
+    /// Presentation feedback (D3D11 only): the vblank the last shown frame hit.
+    [[nodiscard]] bool last_shown_vblank(LONGLONG& qpc, UINT& refresh) const noexcept {
+        return api_ == Api::d3d11 && d3d_->last_shown_vblank(qpc, refresh);
+    }
     void resize(Vec2 logical, float dpi) {
         if (api_ == Api::d3d11) d3d_->resize(logical, dpi);
 #if MAYAG_GPU_VULKAN

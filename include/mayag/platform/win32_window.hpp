@@ -120,6 +120,33 @@ inline void enable_dpi_awareness() {
     (void)once;
 }
 
+/// Opt out of Windows 11 power throttling, once per process. On battery (or
+/// under a vendor's "optimized" plan) Windows may run a process with
+/// EcoQoS -- efficiency cores, lowered clocks -- and ignore its 1 ms timer
+/// resolution request, so every frame tick, glide and resize step lands up
+/// to ~15 ms late and the whole UI feels like it drags. A UI that animates
+/// on the display's clock must not be treated as background work.
+inline void opt_out_of_power_throttling() {
+    static const bool once = [] {
+        struct Throttle { ULONG version, control, state; };   // PROCESS_POWER_THROTTLING_STATE
+        constexpr ULONG kExecutionSpeed = 0x1;          // PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+        constexpr ULONG kIgnoreTimerResolution = 0x4;   // PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+        constexpr int kProcessPowerThrottling = 4;      // PROCESS_INFORMATION_CLASS::ProcessPowerThrottling
+        using Fn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+        const HMODULE k32 = ::GetModuleHandleW(L"kernel32.dll");
+        const auto set = k32 != nullptr ? reinterpret_cast<Fn>(reinterpret_cast<void*>(
+                                              ::GetProcAddress(k32, "SetProcessInformation")))
+                                        : nullptr;
+        if (set == nullptr) return false;
+        // control = what we decide, state = 0: neither throttle applies to us
+        Throttle t{1, kExecutionSpeed | kIgnoreTimerResolution, 0};
+        if (set(::GetCurrentProcess(), kProcessPowerThrottling, &t, sizeof t) != FALSE) return true;
+        t.control = kExecutionSpeed;   // pre-22H2 rejects the timer flag
+        return set(::GetCurrentProcess(), kProcessPowerThrottling, &t, sizeof t) != FALSE;
+    }();
+    (void)once;
+}
+
 /// Translate a virtual-key code to mayag's named-key vocabulary. Printable
 /// keys deliberately return `unknown`: they arrive as WM_CHAR text instead.
 inline Key key_of(WPARAM vk) {
@@ -208,6 +235,7 @@ class Win32Window {
   private:
     [[nodiscard]] static std::optional<Win32Window> open_impl(const WindowConfig& cfg, bool force_gdi) {
         win32_detail::enable_dpi_awareness();
+        win32_detail::opt_out_of_power_throttling();
 
         Win32Window w;
         w.state_ = std::make_unique<State>();
@@ -390,6 +418,7 @@ class Win32Window {
                 return;
             }
             state_->gpu->submit(dl, clear);
+            learn_vblank();
             state_->last_list.assign_from(dl);
             state_->last_clear = clear;
             state_->had_frame = true;
@@ -697,6 +726,18 @@ class Win32Window {
         return state_ ? state_->frames_skipped : 0;
     }
 
+    /// How long before a vblank a late-latch frame must be PRESENTED to make
+    /// it. DWM composes well ahead of scan-out: measured with DXGI frame
+    /// statistics (MAYAG_PRESENTSTATS=1), a frame handed over 2 ms before the
+    /// vblank -- the generic margin -- missed it EVERY time and showed a
+    /// whole refresh later (16.5 ms present->glass at 60 Hz). Half a refresh
+    /// makes it: ~7.7 ms (3/4 gave ~12; a per-frame AIMD learner, as on
+    /// macOS, was tried and oscillated as DWM's deadline moved under it).
+    [[nodiscard]] std::chrono::nanoseconds latch_margin() const noexcept {
+        const auto p = state_ && state_->timing.period.count() > 0 ? state_->timing.period : std::chrono::nanoseconds{16'666'667};
+        return p / 2;
+    }
+
   private:
     Win32Window() = default;
 
@@ -768,6 +809,11 @@ class Win32Window {
         // ── the display clock (DwmGetCompositionTimingInfo) ──────────
         DisplayTiming timing{};
         HMONITOR monitor = nullptr;
+        // presentation feedback: the last vblank a shown frame reached the
+        // screen on, and the measured refresh period (ns, smoothed)
+        LONGLONG fb_qpc = 0;
+        UINT     fb_refresh = 0;
+        double   fb_period_ns = 0.0;
 
         // ── input ────────────────────────────────────────────────────
         UINT wheel_lines = 3;   ///< SPI_GETWHEELSCROLLLINES (cached)
@@ -1008,18 +1054,63 @@ class Win32Window {
                 ::QueryPerformanceCounter(&now_q);
                 const auto now_tp = std::chrono::steady_clock::now();
                 const auto now_u = static_cast<std::uint64_t>(now_q.QuadPart);
+                // QPC and steady_clock may not share an epoch: convert by
+                // offset from a reading of both. Windows 11's DWM often
+                // reports the NEXT vblank (in the future) -- just as good a
+                // phase. Treating it as "no report" (as this once did) laid
+                // the frame grid at a random phase: draws aimed just before a
+                // vblank landed just after it, and motion juddered.
+                const auto to_ns = [&](std::uint64_t d) {
+                    return std::chrono::nanoseconds(static_cast<std::int64_t>(
+                        static_cast<long double>(d) * 1.0e9L / static_cast<long double>(f.QuadPart)));
+                };
+                // DWM's period is exact (60.006 Hz, not 60): take it when it is
+                // this monitor's rate (DWM's is the primary's)
+                if (info.qpcRefreshPeriod != 0) {
+                    const auto dp = to_ns(info.qpcRefreshPeriod);
+                    if (dp * 100 > period * 98 && dp * 100 < period * 102) period = dp;
+                }
                 if (now_u >= info.qpcVBlank) {
-                    // QPC and steady_clock share a time base on Windows (both
-                    // are QPC), so the vblank converts by offset alone.
-                    const auto ago = std::chrono::nanoseconds(static_cast<std::int64_t>(
-                        static_cast<long double>(now_u - info.qpcVBlank) * 1.0e9L /
-                        static_cast<long double>(f.QuadPart)));
-                    if (ago < std::chrono::seconds(1)) vblank = now_tp - ago;
+                    if (const auto ago = to_ns(now_u - info.qpcVBlank); ago < std::chrono::seconds(1)) vblank = now_tp - ago;
+                } else if (const auto ahead = to_ns(info.qpcVBlank - now_u); ahead < std::chrono::seconds(1)) {
+                    vblank = now_tp + ahead;
                 }
             }
         }
         st->timing.vblank = vblank;
         st->timing.period = period;
+        ++st->timing.seq;
+    }
+
+    /// The display clock from presentation feedback. A one-off DWM reading
+    /// gives a phase that is stale the moment it is taken and a whole-Hz
+    /// rate (60, for a 60.006 Hz panel: the grid slid ~4 ms a minute across
+    /// the real vblank, so for stretches every late-latch draw missed its
+    /// refresh and motion juddered). Each frame DXGI names the vblank our
+    /// last shown present hit and the refresh count there: the true phase on
+    /// the monitor the window is on, and -- across refreshes -- the true
+    /// period. Chromium's vsync thread keeps its timebase the same way.
+    void learn_vblank() {
+        State* st = state_.get();
+        LONGLONG q = 0;
+        UINT n = 0;
+        if (!st->gpu->last_shown_vblank(q, n) || (q == st->fb_qpc && n == st->fb_refresh)) return;
+        LARGE_INTEGER f, now_q;
+        ::QueryPerformanceFrequency(&f);
+        ::QueryPerformanceCounter(&now_q);
+        const auto now_tp = std::chrono::steady_clock::now();
+        const double per_tick = 1.0e9 / static_cast<double>(f.QuadPart);   // ns per QPC tick
+        if (st->fb_refresh != 0 && n > st->fb_refresh && n - st->fb_refresh <= 600 && q > st->fb_qpc) {
+            const double p = static_cast<double>(q - st->fb_qpc) * per_tick / static_cast<double>(n - st->fb_refresh);
+            const double nominal = static_cast<double>(st->timing.period.count());
+            if (nominal <= 0.0 || (p > nominal * 0.5 && p < nominal * 2.0))
+                st->fb_period_ns = st->fb_period_ns > 0.0 ? st->fb_period_ns * 0.9 + p * 0.1 : p;
+        }
+        st->fb_qpc = q;
+        st->fb_refresh = n;   // (ResizeBuffers restarts DXGI's counts: the guards above skip that sample)
+        const auto d = std::chrono::nanoseconds(static_cast<std::int64_t>(static_cast<double>(now_q.QuadPart - q) * per_tick));
+        if (d < std::chrono::seconds(1) && d > -std::chrono::seconds(1)) st->timing.vblank = now_tp - d;
+        if (st->fb_period_ns > 0.0) st->timing.period = std::chrono::nanoseconds(static_cast<std::int64_t>(st->fb_period_ns));
         ++st->timing.seq;
     }
 
@@ -1476,6 +1567,7 @@ class Win32Window {
 // give it (platform/concepts.hpp) -- losing one or gaining one unstated
 // fails the build, naming the capability.
 static_assert(check_capabilities<Win32Window, caps<cap::event_fd, cap::draws_live, cap::counts_skipped_frames,
+                                                          cap::latches_late,
                                                           cap::reports_display_timing, cap::fullscreens, cap::manages_itself,
                                                           cap::uploads_images, cap::takes_text_input, cap::prestarts_gpu>>());
 

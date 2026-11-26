@@ -285,6 +285,9 @@ class D3D11Device {
         // built from the freshest input instead of queuing behind vsync.
         // Not right after a resize: the chain's buffers are new, nothing is
         // queued, and a live drag-resize must not stall a refresh per step.
+        // (Not waiting -- presenting with sync interval 0 to replace a still
+        // queued frame -- was measured: some launches sat at 1.7 refreshes
+        // present->glass with frames discarded. Waiting is steadier.)
         if (latency_wait_ && !just_resized_) ::WaitForSingleObjectEx(latency_wait_, 100, TRUE);
         just_resized_ = false;
 
@@ -341,13 +344,101 @@ class D3D11Device {
         ctx_->OMSetRenderTargets(0, nullptr, nullptr);
 
         const bool immediate = low_latency_ && tearing_;
+        LARGE_INTEGER submit_q{};
+        ::QueryPerformanceCounter(&submit_q);
         const HRESULT hr = swapchain_->Present(immediate ? 0 : 1, immediate ? DXGI_PRESENT_ALLOW_TEARING : 0);
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) valid_ = false;
         content_changed_ = false;
         ++frames_;
+        if (pstats_.on) track_present(submit_q);
     }
 
     [[nodiscard]] std::uint64_t frames_presented() const noexcept { return frames_; }
+
+    /// The vblank our latest shown present reached the screen on (QPC) and
+    /// the refresh counter there: the display's REAL phase and rate, on the
+    /// monitor the window is on. False until something was shown.
+    [[nodiscard]] bool last_shown_vblank(LONGLONG& qpc, UINT& refresh) const noexcept {
+        if (swapchain_ == nullptr) return false;
+        DXGI_FRAME_STATISTICS fs{};
+        if (FAILED(swapchain_->GetFrameStatistics(&fs)) || fs.SyncQPCTime.QuadPart == 0) return false;
+        qpc = fs.SyncQPCTime.QuadPart;
+        refresh = fs.SyncRefreshCount;
+        return true;
+    }
+
+  private:
+    // ── MAYAG_PRESENTSTATS=1: what the screen actually showed ────────────
+    // PresentMon's two numbers without ETW (no admin): DXGI's frame
+    // statistics name the last present that reached scan-out and when, so
+    // each present gets its submit -> on-screen time, and presents that
+    // never showed (replaced in the queue) are counted. Printed every 2 s.
+    struct PresentStats {
+        bool on = [] { const char* e = std::getenv("MAYAG_PRESENTSTATS"); return e && *e && *e != '0'; }();
+        struct Sent { UINT count; LONGLONG q; };
+        std::vector<Sent> sent;
+        std::vector<double> lat_ms;
+        std::vector<double> gap_ms;    // submit-to-submit, while presents come within 100 ms (a burst)
+        LONGLONG prev_q = 0;
+        UINT last_shown = 0;
+        UINT last_refresh = 0;
+        int dropped = 0, shown = 0, gaps = 0;   // gaps: a refresh passed showing nothing new mid-burst
+        LONGLONG window_start = 0;
+    } pstats_;
+
+    void track_present(LARGE_INTEGER submit_q) {
+        auto& s = pstats_;
+        LARGE_INTEGER f;
+        ::QueryPerformanceFrequency(&f);
+        UINT count = 0;
+        if (s.prev_q != 0) {
+            const double g = static_cast<double>(submit_q.QuadPart - s.prev_q) * 1000.0 / static_cast<double>(f.QuadPart);
+            if (g < 100.0) s.gap_ms.push_back(g);
+        }
+        s.prev_q = submit_q.QuadPart;
+        if (SUCCEEDED(swapchain_->GetLastPresentCount(&count))) s.sent.push_back({count, submit_q.QuadPart});
+        DXGI_FRAME_STATISTICS fs{};
+        if (SUCCEEDED(swapchain_->GetFrameStatistics(&fs)) && fs.PresentCount != s.last_shown) {
+            for (const auto& p : s.sent) {
+                if (p.count > fs.PresentCount) break;
+                if (p.count == fs.PresentCount) {
+                    s.lat_ms.push_back(static_cast<double>(fs.SyncQPCTime.QuadPart - p.q) * 1000.0 / static_cast<double>(f.QuadPart));
+                    ++s.shown;
+                } else if (p.count > s.last_shown) {
+                    ++s.dropped;
+                }
+            }
+            // consecutive presents shown more than one refresh apart while
+            // they were submitted less than one apart: a missed refresh
+            if (s.last_shown != 0 && fs.PresentCount == s.last_shown + 1 && fs.SyncRefreshCount > s.last_refresh + 1)
+                ++s.gaps;
+            std::erase_if(s.sent, [&](const PresentStats::Sent& p) { return p.count <= fs.PresentCount; });
+            s.last_shown = fs.PresentCount;
+            s.last_refresh = fs.SyncRefreshCount;
+        }
+        if (s.sent.size() > 256) s.sent.erase(s.sent.begin(), s.sent.begin() + 128);
+        if (s.window_start == 0) s.window_start = submit_q.QuadPart;
+        if (submit_q.QuadPart - s.window_start > 2 * f.QuadPart) {
+            if (!s.lat_ms.empty()) {
+                std::sort(s.lat_ms.begin(), s.lat_ms.end());
+                const auto at = [&](double q) { return s.lat_ms[std::min(s.lat_ms.size() - 1, static_cast<std::size_t>(q * static_cast<double>(s.lat_ms.size())))]; };
+                std::fprintf(stderr, "mayag: present->screen p50 %.1f  p90 %.1f  max %.1f ms  (%d shown, %d never shown, %d missed refreshes)",
+                             at(0.5), at(0.9), s.lat_ms.back(), s.shown, s.dropped, s.gaps);
+                if (!s.gap_ms.empty()) {
+                    std::sort(s.gap_ms.begin(), s.gap_ms.end());
+                    const auto g = [&](double q) { return s.gap_ms[std::min(s.gap_ms.size() - 1, static_cast<std::size_t>(q * static_cast<double>(s.gap_ms.size())))]; };
+                    std::fprintf(stderr, "  present gaps p50 %.1f p90 %.1f max %.1f ms", g(0.5), g(0.9), s.gap_ms.back());
+                }
+                std::fprintf(stderr, "\n");
+            }
+            s.lat_ms.clear();
+            s.gap_ms.clear();
+            s.shown = s.dropped = s.gaps = 0;
+            s.window_start = submit_q.QuadPart;
+        }
+    }
+
+  public:
 
   private:
     struct Texture { ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; int w = 0, h = 0; };

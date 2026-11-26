@@ -427,8 +427,9 @@ class window_host {
     [[nodiscard]] time_point latch_point(std::int64_t n) const noexcept {
         return slot_start(n + 1) - latch_margin();
     }
-    /// The window's learned margin when it measures one (macOS, capped there
-    /// at half a refresh), else the fixed default capped at a quarter.
+    /// The window's margin when it knows one (macOS learns it, Win32 sets
+    /// half a refresh for DWM), capped at half a refresh; else the fixed
+    /// default capped at a quarter.
     [[nodiscard]] duration_t latch_margin() const noexcept {
         if constexpr (platform::has<W, platform::cap::latches_late>)
             return std::min<duration_t>(
