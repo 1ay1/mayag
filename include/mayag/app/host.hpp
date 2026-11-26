@@ -338,8 +338,10 @@ class window_host {
         // jaal runs at once because a message is pending. So the frame is
         // drawn AFTER its tick, not one tick late.
         const auto now = now_();
-        time_ = std::chrono::duration<double>(now - start_).count();
         sync_display();
+        // The widgets' clock (frame_time: blinks, spinners, fades) is display
+        // time too, never earlier than it was (a re-anchor must not step back).
+        time_ = std::max(time_, std::chrono::duration<double>(display_time(now) - start_).count());
         struct ArmAfter { window_host& h; ~ArmAfter() { h.pace_clock(); } } arm_after{*this};   // every exit below
         // Input that the program acted on, while something animates: its
         // answer usually moves in the frame tick (a smooth scroll, a fade, a
@@ -1095,16 +1097,49 @@ class window_host {
         if (external_loop_) return std::nullopt;   // vsync() does this
         const auto now = now_();
         if (!animating() || now < next_frame_) return std::nullopt;
-        const double dt = last_tick_
-            ? std::min(std::chrono::duration<double>(now - *last_tick_).count(), 0.1)
-            : std::chrono::duration<double>(period_).count();
-        last_tick_ = now;
+        // Animate to DISPLAY time: the vblank this frame will be shown at,
+        // not the moment the thread happened to wake. Wake-ups jitter by a
+        // millisecond or two, the screen does not -- every frame is shown for
+        // exactly one refresh. Stepping by wake-up time moved content 15 ms
+        // one frame and 18 the next while each stayed up 16.7: uneven steps
+        // the eye reads as judder, with every frame on time. So dt is a whole
+        // number of refreshes (the gap between target vblanks), and frame
+        // time is the target vblank itself (see display_time).
+        const auto target = display_time(now);
+        double dt = std::chrono::duration<double>(period_).count();
+        if (last_tick_) {
+            const double d = std::chrono::duration<double>(target - *last_tick_).count();
+            const double p = std::chrono::duration<double>(period_).count();
+            // A gap of a few refreshes is frames missed mid-motion: catch up,
+            // so motion keeps its speed. A longer one is motion STARTING after
+            // a pause (the clock idled): step one refresh, never leap -- a
+            // glide that began with a 100 ms jump was the first-frame jerk.
+            dt = d > 4.0 * p ? p : std::max(d, 0.0);
+            if (d > 1.5 * p && d <= 4.0 * p) ++janks_;   // a refresh shown twice: visible judder
+            if (d > 0.5 * p && d <= 4.0 * p) ++ticks_;
+            static const bool say = [] { const char* e = std::getenv("MAYAG_PRESENTSTATS"); return e && *e && *e != '0'; }();
+            if (say && d > 0.5 * p && d <= 4.0 * p && ticks_ % 120 == 0)
+                std::fprintf(stderr, "mayag: judder %llu of %llu animation frames skipped a refresh\n",
+                             static_cast<unsigned long long>(janks_), static_cast<unsigned long long>(ticks_));
+        }
+        last_tick_ = target;
         // The next tick at the next late-latch point (just before a vblank):
         // locked to the display, at its real rate (60, 120, 144 Hz ...).
         // drawn_slot_ is only set by an actual draw.
         const auto slot = slot_of(now);
         next_frame_ = now < latch_point(slot) ? latch_point(slot) : latch_point(slot + 1);
         return dt;
+    }
+
+    /// When a frame drawn now will reach the glass: the vblank ending the
+    /// refresh whose late-latch point it makes (the next one's, past it).
+    /// Monotonic, on the display's own grid (the compositor clock anchors
+    /// it), so frame-to-frame steps are whole refreshes.
+    [[nodiscard]] time_point display_time(time_point now) const noexcept {
+        if (!cfg_.vsync) return now;   // shown at once: real time is display time
+        auto s = slot_of(now);
+        if (now > latch_point(s)) ++s;
+        return slot_start(s + 1);
     }
 
   public:
@@ -2006,6 +2041,11 @@ class window_host {
     std::function<typename P::Msg(double)> frame_make_;
     time_point   next_frame_{};
     std::optional<time_point> last_tick_;
+    std::uint64_t janks_ = 0, ticks_ = 0;   ///< animation ticks that skipped a refresh / all, mid-motion
+  public:
+    /// Mid-motion animation frames that skipped a refresh (judder), of all.
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> judder() const noexcept { return {janks_, ticks_}; }
+  private:
 
     std::uint64_t       frame_counter_ = 0;
     // MAYAG_FRAMESTATS=1: print per-stage means about once a second.

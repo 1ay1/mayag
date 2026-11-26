@@ -401,6 +401,7 @@ class D3D11Device {
         double margin_s = 1.0 / 120.0;
         std::uint64_t tried = 0, missed = 0;
         UINT last_count = 0;   // DXGI's present count at the last present (a drop: the chain was reallocated)
+        int late_run = 0;      // consecutive late frames (a stuck queue, not a deadline)
     } latch_;
 
     [[nodiscard]] int pipeline_depth() const noexcept {
@@ -446,12 +447,21 @@ class D3D11Device {
             ++L.tried;
             if (k > s.depth) {
                 ++L.missed;
+                // Several misses in a row are not a deadline problem: the
+                // queue is one frame deep with a frame that missed, and every
+                // present since queues behind it (shown exactly a refresh
+                // late, none lost -- measured in 2 s stretches). Widening the
+                // margin cannot fix that; one held refresh drains it.
+                if (++L.late_run >= 3) { drain_ = true; L.late_run = 0; continue; }
                 L.margin_s = std::min(L.margin_s + 1.0e-3, L.period_s * 0.75);
-            } else if (s.lead_s < L.margin_s + 2.0e-3) {
+            } else {
+                L.late_run = 0;
+                if (s.lead_s < L.margin_s + 2.0e-3) {
                 // -5 us a hit against +1 ms a miss: it settles where about one
                 // late draw in 200 misses (at -20 us it was one in 25, and
                 // that showed as judder: every 25th frame a refresh late)
                 L.margin_s = std::max(L.margin_s - 5e-6, 1.0e-3);
+                }
             }
         }
         std::erase_if(L.sent, [&](const LatchLearner::Sent& s) { return s.count <= fs.PresentCount; });
@@ -495,6 +505,7 @@ class D3D11Device {
     /// once. A free queue's signal is taken here and kept for submit().
     [[nodiscard]] bool queue_full() noexcept {
         if (latency_wait_ == nullptr || queue_token_ || resize_pending_ || just_resized_) return false;
+        if (std::exchange(drain_, false)) return true;   // a stuck queue: hold one refresh (learn_latch)
         // The flip queue: the last present is still waiting for a vblank if
         // it was handed over after the most recent one (the learned clock
         // says when that was). The latency object alone cannot see it -- it
@@ -558,6 +569,7 @@ class D3D11Device {
         double period_ms = 0;
     } pstats_;
     bool queue_token_ = false;   ///< queue_full() took the latency object's signal
+    bool drain_ = false;         ///< frames keep showing a refresh late: skip one present
     int depth_ = 1;              ///< 0: on an overlay plane; 1: composed by DWM
     LONGLONG last_submit_qpc_ = 0;   ///< QPC just before the last Present
 
