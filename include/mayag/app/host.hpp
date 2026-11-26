@@ -45,6 +45,7 @@
 #include "handlers.hpp"
 #include "interaction.hpp"
 #include "latency.hpp"
+#include "pacing.hpp"
 #include "sources.hpp"
 
 #include <jaal/jaal.hpp>
@@ -368,8 +369,7 @@ class window_host {
             // changes in the same slot are held and drawn once, just before
             // the vblank, so that frame carries the freshest input. The draw
             // is owed, never dropped.
-            if (now < next_draw_at(now)) {
-                if (!draw_owed_) draw_at_ = next_draw_at(now);   // the deadline this draw is held for
+            if (const auto at = hold_.decide([&] { return next_draw_at(now); }); now < at) {   // pacing rule 1
                 draw_owed_ = true;
                 return;
             }
@@ -386,8 +386,7 @@ class window_host {
         // drain): then the draw goes ahead and the backend waits as before.
         if (window_queue_full() && (held_since_ == time_point{} || now - held_since_ < period_ * 2)) {
             if (held_since_ == time_point{}) held_since_ = now;
-            const auto lp = latch_point(slot);
-            hold_until_ = now < lp ? lp : latch_point(slot + 1);
+            hold_until_ = grid().full_queue_deadline(now);   // pacing rule 5
             draw_owed_ = true;
             return;
         }
@@ -399,7 +398,7 @@ class window_host {
         latched_ = (slot == drawn_slot_);   // second draw of a slot: the late one
         draws_in_slot_ = slot == drawn_slot_ ? draws_in_slot_ + 1 : 1;
         draw_owed_ = false;
-        draw_at_ = {};
+        hold_.drawn();
         last_draw_ = now;
         drawn_slot_ = slot;
         const std::uint64_t skipped_before = frames_skipped();
@@ -456,6 +455,9 @@ class window_host {
         // vsync off (async/tearing presents): a frame is shown the moment it
         // is submitted, so holding it for a vblank only adds latency.
         if (!cfg_.vsync) return now;
+        // pacing rule 1, for every queue model: a held draw keeps the deadline
+        // it was held for; a timer waking a hair past it draws now.
+        if (hold_.held()) return hold_.deadline();
         if (hold_until_ > now) return hold_until_;   // a full queue: see present()
         // A one-deep FIFO queue (Win32 flip model, latency 1): a second
         // present in a refresh waits behind the first and shows a refresh
@@ -466,18 +468,7 @@ class window_host {
         // earlier would reach the glass at the same vblank, so waiting costs
         // nothing -- and the frame carries every input up to the deadline.
         // Past the deadline, the frame belongs to the next refresh.
-        if (one_deep_queue()) {
-            // A draw already held keeps the deadline it was held FOR. The
-            // timer wakes a hair after that point; re-deciding then ("the
-            // deadline passed: next refresh") slipped every input-driven
-            // frame a whole refresh -- a scrollbar or pane drag ran at 20-30
-            // fps while animation ticks, which skip this, ran at 60.
-            if (draw_owed_ && draw_at_ != time_point{}) return draw_at_;
-            auto t = slot_of(now);
-            if (now > latch_point(t)) ++t;     // this refresh's deadline passed
-            if (t <= drawn_slot_) t = drawn_slot_ + 1;   // it already has its frame
-            return std::max(now, latch_point(t));
-        }
+        if (one_deep_queue()) return grid().one_deep_deadline(now, drawn_slot_);   // pacing rule 4
         if (slot_of(now) != drawn_slot_) return now;
         if (window_replaces_queued()) return draws_in_slot_ < kFreshPerSlot ? now : slot_start(drawn_slot_ + 1);
         if (latched_) return slot_start(drawn_slot_ + 1);
@@ -489,18 +480,11 @@ class window_host {
     // no report yet, from start-up at 60 Hz. Slot n runs [vblank + n*period,
     // vblank + (n+1)*period).
 
-    [[nodiscard]] std::int64_t slot_of(time_point t) const noexcept {
-        const auto d = t - vblank_;
-        return d >= duration_t::zero() ? d / period_ : -((-d) / period_) - 1;
-    }
-    [[nodiscard]] time_point slot_start(std::int64_t n) const noexcept {
-        return vblank_ + n * period_;
-    }
-    /// Late enough to carry the newest input, early enough to make the vblank
-    /// that ends slot n.
-    [[nodiscard]] time_point latch_point(std::int64_t n) const noexcept {
-        return slot_start(n + 1) - latch_margin();
-    }
+    /// The display grid, as pacing.hpp's pure rules see it (tests/test_pacing.cpp).
+    [[nodiscard]] pacing::Grid<time_point> grid() const noexcept { return {vblank_, period_, latch_margin()}; }
+    [[nodiscard]] std::int64_t slot_of(time_point t) const noexcept { return grid().slot_of(t); }
+    [[nodiscard]] time_point slot_start(std::int64_t n) const noexcept { return grid().slot_start(n); }
+    [[nodiscard]] time_point latch_point(std::int64_t n) const noexcept { return grid().latch_point(n); }
     /// The window's margin when it knows one (macOS learns WindowServer's,
     /// capping it at half a refresh; Win32 learns DWM's, which can sit
     /// earlier), bounded at 3/4 of a refresh; else the fixed default capped
@@ -613,6 +597,7 @@ class window_host {
         frame_make_ = p.make;
         frames_on_ = true;
         last_tick_.reset();
+        booked_tick_.reset();
         sync_display();
         next_frame_ = now_();   // the first tick at once, then on vblank
     }
@@ -1105,37 +1090,25 @@ class window_host {
         if (external_loop_) return std::nullopt;   // vsync() does this
         const auto now = now_();
         if (!animating() || now < next_frame_) return std::nullopt;
-        // Animate to DISPLAY time: the vblank this frame will be shown at,
-        // not the moment the thread happened to wake. Wake-ups jitter by a
-        // millisecond or two, the screen does not -- every frame is shown for
-        // exactly one refresh. Stepping by wake-up time moved content 15 ms
-        // one frame and 18 the next while each stayed up 16.7: uneven steps
-        // the eye reads as judder, with every frame on time. So dt is a whole
-        // number of refreshes (the gap between target vblanks), and frame
-        // time is the target vblank itself (see display_time).
-        const auto target = display_time(now);
-        double dt = std::chrono::duration<double>(period_).count();
-        if (last_tick_) {
-            const double d = std::chrono::duration<double>(target - *last_tick_).count();
-            const double p = std::chrono::duration<double>(period_).count();
-            // A gap of a few refreshes is frames missed mid-motion: catch up,
-            // so motion keeps its speed. A longer one is motion STARTING after
-            // a pause (the clock idled): step one refresh, never leap -- a
-            // glide that began with a 100 ms jump was the first-frame jerk.
-            dt = d > 4.0 * p ? p : std::max(d, 0.0);
-            if (d > 1.5 * p && d <= 4.0 * p) ++janks_;   // a refresh shown twice: visible judder
-            if (d > 0.5 * p && d <= 4.0 * p) ++ticks_;
+        // Animate to DISPLAY time (pacing rule 2): the vblank this frame is
+        // shown at, not the wake-up instant; the refresh is the one the tick
+        // was booked for (rule 6), and motion resuming after an idle steps a
+        // single refresh (rule 3).
+        const auto g = grid();
+        const auto target = g.tick_target(now, booked_tick_);
+        const auto step = pacing::tick_step(last_tick_, target, period_);
+        const double dt = step.dt;
+        if (step.counted) {
+            ++ticks_;
+            if (step.skipped) ++janks_;   // a refresh shown twice: visible judder
             static const bool say = [] { const char* e = std::getenv("MAYAG_PRESENTSTATS"); return e && *e && *e != '0'; }();
-            if (say && d > 0.5 * p && d <= 4.0 * p && ticks_ % 120 == 0)
+            if (say && ticks_ % 120 == 0)
                 std::fprintf(stderr, "mayag: judder %llu of %llu animation frames skipped a refresh\n",
                              static_cast<unsigned long long>(janks_), static_cast<unsigned long long>(ticks_));
         }
         last_tick_ = target;
-        // The next tick at the next late-latch point (just before a vblank):
-        // locked to the display, at its real rate (60, 120, 144 Hz ...).
-        // drawn_slot_ is only set by an actual draw.
-        const auto slot = slot_of(now);
-        next_frame_ = now < latch_point(slot) ? latch_point(slot) : latch_point(slot + 1);
+        booked_tick_ = g.next_tick_target(now, target);
+        next_frame_ = g.wake_for(*booked_tick_);
         return dt;
     }
 
@@ -1145,9 +1118,7 @@ class window_host {
     /// it), so frame-to-frame steps are whole refreshes.
     [[nodiscard]] time_point display_time(time_point now) const noexcept {
         if (!cfg_.vsync) return now;   // shown at once: real time is display time
-        auto s = slot_of(now);
-        if (now > latch_point(s)) ++s;
-        return slot_start(s + 1);
+        return grid().display_time(now);   // pacing rule 2
     }
 
   public:
@@ -2036,7 +2007,7 @@ class window_host {
     bool                tick_pending_ = false;  // a frame tick was dispatched; draw it next
     time_point   last_draw_{};
     time_point   hold_until_{};             // a draw held behind a full queue (see present())
-    time_point   draw_at_{};                // a held draw's deadline (see next_draw_at)
+    pacing::Hold<time_point> hold_;         // a held draw's deadline, decided once (pacing rule 1)
     time_point   held_since_{};
     time_point   vblank_{};                 // a refresh boundary (set at start)
     duration_t     period_ = std::chrono::duration_cast<duration_t>(kFramePeriod);
@@ -2050,6 +2021,7 @@ class window_host {
     std::function<typename P::Msg(double)> frame_make_;
     time_point   next_frame_{};
     std::optional<time_point> last_tick_;
+    std::optional<time_point> booked_tick_;   ///< the vblank the next tick is booked for (pacing rule 6)
     std::uint64_t janks_ = 0, ticks_ = 0;   ///< animation ticks that skipped a refresh / all, mid-motion
   public:
     /// Mid-motion animation frames that skipped a refresh (judder), of all.
