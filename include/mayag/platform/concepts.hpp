@@ -127,6 +127,12 @@ template <class W> concept TakesTextInput = requires(W& w, bool on, Rect caret) 
 template <class W> concept MeasuresPhotons = requires(W& w) { { w.photon_stats() } -> std::convertible_to<PhotonStats>; };
 /// Starts the GPU device before the window exists (Win32: overlaps startup).
 template <class W> concept PrestartsGpu = requires { W::gpu_prestart(); };
+/// Reads the clipboard's text from ANY thread (Win32: OpenClipboard(NULL)),
+/// so the host can keep the read off the UI thread. Win32 needs it most: a
+/// read asks the clipboard's owner to render its data and waits for it, so a
+/// hung owner (an app frozen with something copied) would freeze the caller.
+template <class W> concept ReadsClipboardAnywhere =
+    requires { { W::read_clipboard_anywhere() } -> std::same_as<std::string>; };
 /// Driven by a script, not a person (the headless window): the host may run
 /// world effects inline there, so a scripted run is deterministic. Every
 /// window a person uses runs them on the world lane, off the UI thread.
@@ -186,6 +192,7 @@ MAYAG_CAPABILITY(shares_event_queue, SharesEventQueue);
 MAYAG_CAPABILITY(takes_text_input, TakesTextInput);
 MAYAG_CAPABILITY(measures_photons, MeasuresPhotons);
 MAYAG_CAPABILITY(prestarts_gpu, PrestartsGpu);
+MAYAG_CAPABILITY(reads_clipboard_anywhere, ReadsClipboardAnywhere);
 MAYAG_CAPABILITY(scripted, Scripted);
 #undef MAYAG_CAPABILITY
 
@@ -193,7 +200,8 @@ MAYAG_CAPABILITY(scripted, Scripted);
 using all = caps<event_fd, draws_live, replaces_queued_frames, counts_skipped_frames, reports_queue_full, latches_late,
                  counts_latch_misses, reports_display_timing, repeats_keys, asks_for_redraw, owes_redraw,
                  fullscreens, manages_itself, uploads_images, patches_images, moves_image_rows,
-                 shares_event_queue, takes_text_input, measures_photons, prestarts_gpu, scripted>;
+                 shares_event_queue, takes_text_input, measures_photons, prestarts_gpu,
+                 reads_clipboard_anywhere, scripted>;
 }  // namespace cap
 
 /// Does window W have capability C? The one question the host asks.

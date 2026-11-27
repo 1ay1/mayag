@@ -565,9 +565,23 @@ class Win32Window {
         ::CloseClipboard();
     }
 
-    [[nodiscard]] std::string get_clipboard() {
-        if (!state_ || ::IsClipboardFormatAvailable(CF_UNICODETEXT) == FALSE) return {};
-        if (::OpenClipboard(state_->hwnd) == FALSE) return {};
+    [[nodiscard]] std::string get_clipboard() { return read_clipboard_anywhere(1); }
+
+    /// The clipboard's text, from any thread (cap::reads_clipboard_anywhere).
+    /// OpenClipboard(NULL) ties the open to the calling thread, not a window,
+    /// so the host reads it on a worker: GetClipboardData of delay-rendered
+    /// data waits on the owner's WM_RENDERFORMAT, and a hung owner must not
+    /// freeze the UI. Another app holding the clipboard open (a clipboard
+    /// manager mid-read) is retried briefly instead of pasting nothing.
+    [[nodiscard]] static std::string read_clipboard_anywhere() { return read_clipboard_anywhere(10); }
+    [[nodiscard]] static std::string read_clipboard_anywhere(int tries) {
+        if (::IsClipboardFormatAvailable(CF_UNICODETEXT) == FALSE) return {};
+        bool open = false;
+        for (int i = 0; i < tries && !open; ++i) {
+            if (i > 0) ::Sleep(5);   // only with tries > 1: a worker, never the UI thread
+            open = ::OpenClipboard(nullptr) != FALSE;
+        }
+        if (!open) return {};
         std::string out;
         if (const HANDLE h = ::GetClipboardData(CF_UNICODETEXT); h != nullptr)
             if (const auto* p = static_cast<const wchar_t*>(::GlobalLock(h)); p != nullptr) {
@@ -1613,6 +1627,7 @@ class Win32Window {
 static_assert(check_capabilities<Win32Window, caps<cap::event_fd, cap::draws_live, cap::counts_skipped_frames,
                                                           cap::reports_queue_full, cap::latches_late, cap::counts_latch_misses,
                                                           cap::reports_display_timing, cap::fullscreens, cap::manages_itself,
-                                                          cap::uploads_images, cap::takes_text_input, cap::prestarts_gpu>>());
+                                                          cap::uploads_images, cap::takes_text_input, cap::prestarts_gpu,
+                                                          cap::reads_clipboard_anywhere>>());
 
 }  // namespace mayag::platform

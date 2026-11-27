@@ -34,3 +34,29 @@ macro(lint_unescape var)
     string(REPLACE "<RB>" "]" ${var} "${${var}}")
     string(REPLACE "<BS>" "\\" ${var} "${${var}}")
 endmacro()
+
+# lint_grep(file regex out): the lines of `file` matching `regex` (matched on
+# the real source text), as a list that is safe to count and iterate --
+# what `file(STRINGS ... REGEX)` was meant to give. Elements are escaped;
+# print them with lint_show(). (`file(STRINGS ... REGEX)` still filters real
+# lines, so a PRESENCE check -- `if(hits)` -- is sound with it; a COUNT or a
+# per-hit loop is not: two hits merge at a `[`.)
+function(lint_grep file regex out)
+    lint_lines("${file}" all)
+    set(hits "")
+    foreach(e IN LISTS all)
+        set(l "${e}")
+        lint_unescape(l)
+        if(l MATCHES "${regex}")
+            list(APPEND hits "${e}")
+        endif()
+    endforeach()
+    set(${out} "${hits}" PARENT_SCOPE)
+endfunction()
+
+# lint_show(list out): a lint_grep list as printable text, one line each.
+function(lint_show hits out)
+    list(JOIN hits "\n" s)
+    lint_unescape(s)
+    set(${out} "${s}" PARENT_SCOPE)
+endfunction()

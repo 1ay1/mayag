@@ -78,8 +78,11 @@ struct LaneApp {
 struct Desk : platform::Headless {
     static constexpr bool scripted = false;
     explicit Desk(platform::Headless&& h) : platform::Headless(std::move(h)) {}
+    /// A clipboard whose owner takes 300 ms to render its data (a hung app).
+    static std::string read_clipboard_anywhere() { std::this_thread::sleep_for(300ms); return "pasted"; }
 };
 static_assert(!platform::has<Desk, platform::cap::scripted>);
+static_assert(platform::has<Desk, platform::cap::reads_clipboard_anywhere>);
 static_assert(platform::has<platform::Headless, platform::cap::scripted>);
 
 AppConfig quiet() {
@@ -117,11 +120,52 @@ void test_scripted() {
     });
 }
 
+// ── the clipboard: a slow owner can't freeze the frame ──────────────────
+std::atomic<int> g_clip_ticks{0};
+std::atomic<int> g_clip_ticks_at_paste{-1};
+std::string      g_pasted;   // written on the loop thread only
+
+struct ClipApp {
+    struct Model { int pastes = 0; };
+    struct Tick {};
+    struct Pasted { std::string text; };
+    using Msg = std::variant<Tick, Pasted>;
+    using Cmd = mayag::Cmd<Msg, mayag::read_clipboard>;
+    using Sub = mayag::Sub<Msg>;
+    static Cmd init(Model&) {
+        return Cmd(ReadClipboard<Msg>{[](std::string s) -> Msg { return Pasted{std::move(s)}; }});
+    }
+    static Cmd update(Model&, Tick) { ++g_clip_ticks; return {}; }
+    static Cmd update(Model& m, Pasted p) {
+        ++m.pastes;
+        g_pasted = p.text;
+        g_clip_ticks_at_paste = g_clip_ticks.load();
+        return Cmd::quit();
+    }
+    static Sub subscribe(const Model&) { return Sub::every(10ms, Tick{}); }
+    static Node view(const Model&) { return dsl::box().build(); }
+};
+
+void test_clipboard() {
+    std::printf("\nclipboard read (a window a person uses)\n");
+    AppConfig cfg = quiet();
+    Desk win{std::move(*platform::Headless::open(detail::window_config(cfg)))};
+    const auto t0 = std::chrono::steady_clock::now();
+    const int rc = run_on<ClipApp>(win, cfg);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    check(rc == 0, "ran and quit (" + std::to_string(ms) + " ms)");
+    check(g_pasted == "pasted", "the paste arrived with the clipboard's text");
+    check(g_clip_ticks_at_paste.load() >= 10,
+          "the loop kept folding while the clipboard owner took 300 ms (" +
+              std::to_string(g_clip_ticks_at_paste.load()) + " ticks; inline: 0)");
+}
+
 }  // namespace
 
 int main() {
     test_lane();
     test_scripted();
+    test_clipboard();
     std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "passed", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

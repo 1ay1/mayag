@@ -337,6 +337,7 @@ class window_host {
         // Handler messages from this pump: into the kernel now. jaal folds
         // them on the very next turn (a message is pending), which draws.
         flush_handled(k);
+        take_pastes(k);
 
         // The frame tick goes straight into the kernel on this thread (no
         // mailbox, no wake syscall) and is folded on the next turn, which
@@ -522,6 +523,7 @@ class window_host {
     [[nodiscard]] bool owes_frame() const noexcept {
         const auto now = now_();
         if (window_wants_redraw()) return true;
+        if (paste_ready()) return true;   // the clipboard lane has the text: fold its paste
         if (external_loop_ && tick_pending_) return true;   // a display-link frame draws now
         // a scheduled step has come (a spinner's next glyph): a frame is owed
         if ((dirty_ || draw_owed_ || change_due(now)) && now >= next_draw_at(now)) return true;
@@ -543,7 +545,10 @@ class window_host {
 
     [[nodiscard]] std::optional<std::chrono::nanoseconds> wait_hint() const noexcept {
         using ns = std::chrono::nanoseconds;
-        const auto hint = wait_hint_inner();
+        auto hint = wait_hint_inner();
+        // A clipboard read in flight can't wake the loop itself (it is a
+        // future, not a message): look again every millisecond until it lands.
+        if (!pastes_.empty()) hint = hint ? std::min(*hint, ns{1'000'000}) : ns{1'000'000};
         const double rep = window_repeat_in();
         if (rep < 0.0) return hint;
         const ns r{static_cast<std::int64_t>(rep * 1e9)};
@@ -612,8 +617,24 @@ class window_host {
 
     void handle(const SetTitle& e)       { window_.set_title(e.title); }
     void handle(const WriteClipboard& e) { window_.set_clipboard(e.text); }
+    /// The clipboard, read OFF the UI thread where the window can (Win32: a
+    /// read waits on the clipboard owner, and a hung owner would freeze the
+    /// frame). The read runs on the clipboard lane -- its own worker, so a
+    /// wedged owner can't hold up the world lane's pty writes -- and `make`
+    /// runs here, on the loop, when the text is in: the paste lands a step
+    /// later (well under a millisecond). Scripted windows read inline.
     template <class Msg>
-    Msg handle(const ReadClipboard<Msg>& e) { return e.make(window_.get_clipboard()); }
+    std::optional<Msg> handle(ReadClipboard<Msg> e) {
+        if constexpr (platform::has<W, platform::cap::reads_clipboard_anywhere> &&
+                      !platform::has<W, platform::cap::scripted> && std::same_as<Msg, typename P::Msg>) {
+            if (!clip_lane_) clip_lane_.emplace(1u);
+            pastes_.push_back({std::move(e.make),
+                               clip_lane_->submit(+[](std::stop_token) { return W::read_clipboard_anywhere(); })});
+            return std::nullopt;
+        } else {
+            return e.make(window_.get_clipboard());
+        }
+    }
     /// mayag::run: the world, in Cmd order, on the WORLD LANE (see effects.hpp):
     /// one worker, FIFO, so effects keep their order and a frame never waits
     /// on I/O. Its answer comes back through the kernel's sink and is folded
@@ -1553,6 +1574,23 @@ class window_host {
     }
     [[nodiscard]] bool has_handled() const noexcept { return !handled_.empty(); }
 
+    /// Clipboard reads whose text is in: their messages, in the order the
+    /// pastes were asked for (a later paste never overtakes an earlier one).
+    template <class K>
+    void take_pastes(K& k) {
+        while (!pastes_.empty() && pastes_.front().text.ready()) {
+            Paste p = std::move(pastes_.front());
+            pastes_.erase(pastes_.begin());
+            std::string text;
+            try { if (auto t = p.text.try_take()) text = std::move(*t); } catch (...) {}
+            k.dispatch(p.make(std::move(text)));
+            dirty_ = true;
+        }
+    }
+    [[nodiscard]] bool paste_ready() const {
+        return !pastes_.empty() && pastes_.front().text.ready();
+    }
+
   private:
     // ── tooltips ─────────────────────────────────────────────────────────
     //
@@ -2115,6 +2153,14 @@ class window_host {
     std::optional<jaal::kernel::pool> world_lane_;
     bool                world_lane_on_ = !platform::has<W, platform::cap::scripted>;
     std::uint64_t       world_posted_ = 0;
+    // The clipboard lane: reads only (they may wait on a hung clipboard
+    // owner), apart from the world lane so they can't hold up pty writes.
+    struct Paste {
+        std::function<typename P::Msg(std::string)> make;   // runs on the loop
+        jaal::kernel::job_result<std::string>       text;
+    };
+    std::optional<jaal::kernel::pool> clip_lane_;
+    std::vector<Paste>  pastes_;
     BusyLoopDetector    busy_{};
     bool                busy_warned_ = false;
     bool                input_since_render_ = false;
