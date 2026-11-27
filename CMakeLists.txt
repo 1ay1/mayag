@@ -469,6 +469,12 @@ if(MAYAG_BUILD_TESTS)
     target_compile_options(mayag_pacing_tests PRIVATE ${MAYAG_WARNINGS})
     add_test(NAME mayag_pacing_tests COMMAND mayag_pacing_tests)
 
+    # The world can't stall the UI: world effects run on the host's lane.
+    add_executable(mayag_world_lane_tests tests/test_world_lane.cpp)
+    target_link_libraries(mayag_world_lane_tests PRIVATE mayag)
+    target_compile_options(mayag_world_lane_tests PRIVATE ${MAYAG_WARNINGS})
+    add_test(NAME mayag_world_lane_tests COMMAND mayag_world_lane_tests)
+
     # What every window backend shares (platform/keys.hpp, photon.hpp):
     # tested headless, on every platform, not only where the backend runs.
     add_executable(mayag_platform_shared_tests tests/test_platform_shared.cpp)

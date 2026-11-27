@@ -210,6 +210,9 @@ class window_host {
 
     window_host(const window_host&)            = delete;
     window_host& operator=(const window_host&) = delete;
+    // The lane DROPS queued work when it is destroyed: finish it first, so a
+    // save asked for just before the window closed still happens.
+    ~window_host() { drain_world(); }
 
     // ── jaal protocol ───────────────────────────────────────────────────
 
@@ -611,9 +614,34 @@ class window_host {
     void handle(const WriteClipboard& e) { window_.set_clipboard(e.text); }
     template <class Msg>
     Msg handle(const ReadClipboard<Msg>& e) { return e.make(window_.get_clipboard()); }
-    /// mayag::run: the world, on the loop, in Cmd order (see effects.hpp).
+    /// mayag::run: the world, in Cmd order, on the WORLD LANE (see effects.hpp):
+    /// one worker, FIFO, so effects keep their order and a frame never waits
+    /// on I/O. Its answer comes back through the kernel's sink and is folded
+    /// on a later step. A scripted host (headless, simulated) turns the lane
+    /// off and runs the body here, answering in this step, so tests stay
+    /// deterministic (decided by the window type: see world_lane_on_).
     template <class Msg>
-    std::optional<Msg> handle(const Run<Msg>& e) { return e.go(); }
+    std::optional<Msg> handle(Run<Msg> e, jaal::Sink<Msg> answer) {
+        if (!world_lane_on_) return e.go();
+        if (!world_lane_) world_lane_.emplace(1u);
+        ++world_posted_;
+        world_lane_->post(+[](std::stop_token, Run<Msg> r, jaal::Sink<Msg> out) {
+            try {
+                if (auto m = r.go()) (void)out.send(std::move(*m));
+            } catch (const std::exception& x) {
+                ::mayag::diag::say("mayag: a world effect threw: %s (its answer is dropped)\n", x.what());
+            } catch (...) {
+                ::mayag::diag::say("mayag: a world effect threw (its answer is dropped)\n");
+            }
+        }, std::move(e), std::move(answer));
+        return std::nullopt;
+    }
+    /// Run world effects on the calling thread instead of the world lane: for
+    /// a scripted driver that steps the program by hand. Never for a window a
+    /// person uses.
+    void run_world_inline(bool on) noexcept { world_lane_on_ = !on; }
+    /// World effects handed to the lane so far (0 when they run inline).
+    [[nodiscard]] std::uint64_t world_posted() const noexcept { return world_posted_; }
     void handle(const SetCursor& e)      { window_.set_cursor(e.shape); }
     void handle(const SetFullscreen& e) {
         if constexpr (platform::has<W, platform::cap::fullscreens>) window_.set_fullscreen(e.on);
@@ -669,7 +697,22 @@ class window_host {
         }
     }
 
-    void release() { reg_.reset(); cx_ = nullptr; stop_ = nullptr; children_.clear(); }
+    void release() {
+        reg_.reset(); cx_ = nullptr; stop_ = nullptr; children_.clear();
+        drain_world();
+    }
+
+    /// Wait (bounded) for the world lane to finish what it was given: the
+    /// program is ending, and `batch(save, quit)` must still save. A wedged
+    /// effect is abandoned after the grace instead of hanging the exit.
+    void drain_world(std::chrono::milliseconds grace = std::chrono::milliseconds(2000)) {
+        if (!world_lane_) return;
+        auto done = world_lane_->submit(+[](std::stop_token) {});   // FIFO: done = all before it done
+        if (!done.wait_for_at_root(grace))
+            ::mayag::diag::say("mayag: a world effect was still running %lld ms after exit; abandoned\n",
+                               static_cast<long long>(grace.count()));
+        world_lane_.reset();
+    }
 
     // ── child windows ────────────────────────────────────────────────────────────
     //
@@ -1949,7 +1992,7 @@ class window_host {
         input_since_render_ = false;
         if (busy_.busy() && !busy_warned_ && !cfg_.continuous_animation) {
             busy_warned_ = true;
-            std::fprintf(stderr,
+            ::mayag::diag::say(
                 "mayag: rendering continuously at %.0f fps for several seconds.\n"
                 "       Something keeps asking for frames: an on_frame subscription\n"
                 "       that is always on, or a spring that never settles.\n"
@@ -2064,6 +2107,14 @@ class window_host {
     // MAYAG_MEMO=0 turns memo() off (to check it changes nothing).
     bool memo_on_ = [] { const char* e = std::getenv("MAYAG_MEMO"); return e == nullptr || *e != '0'; }();
     std::uint64_t       interaction_reads_ = 0;
+    // The world lane: one worker for every world effect, in order, so I/O
+    // never runs on the UI thread. Made on first use; drained by release().
+    // On for every real window; the scripted window (headless, simulated)
+    // runs them inline, deterministic. Decided by type, not at runtime, so
+    // init()'s effects -- run while the kernel is being built -- obey it too.
+    std::optional<jaal::kernel::pool> world_lane_;
+    bool                world_lane_on_ = !platform::has<W, platform::cap::scripted>;
+    std::uint64_t       world_posted_ = 0;
     BusyLoopDetector    busy_{};
     bool                busy_warned_ = false;
     bool                input_since_render_ = false;

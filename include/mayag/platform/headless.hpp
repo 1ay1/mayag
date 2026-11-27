@@ -37,6 +37,9 @@ namespace mayag::platform {
 
 class Headless {
   public:
+    /// Driven by a script: world effects run inline here (cap::scripted).
+    static constexpr bool scripted = true;
+
     [[nodiscard]] static std::optional<Headless> open(const WindowConfig& cfg) {
         Headless w;
         w.size_  = cfg.size;
@@ -326,6 +329,7 @@ class Headless {
 // What Headless can do, stated: checked both ways against what its methods
 // give it (platform/concepts.hpp) -- losing one or gaining one unstated
 // fails the build, naming the capability.
-static_assert(check_capabilities<Headless, caps<cap::fullscreens, cap::manages_itself, cap::uploads_images, cap::takes_text_input>>());
+static_assert(check_capabilities<Headless, caps<cap::fullscreens, cap::manages_itself, cap::uploads_images, cap::takes_text_input,
+                                                cap::scripted>>());
 
 }  // namespace mayag::platform

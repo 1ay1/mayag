@@ -110,9 +110,19 @@ struct read_clipboard {
 
 /// Do something to the world -- write a file, a pty, start a program -- and
 /// optionally answer with a message. update() DESCRIBES it; the runtime runs
-/// it on the loop thread, after update() returns, in the order the Cmd lists
-/// its effects. So update stays a pure function of (Model, Msg), and the
-/// world sees the effects in exactly the order they were asked for.
+/// it after update() returns, in the order the Cmd lists its effects. So
+/// update stays a pure function of (Model, Msg), and the world sees the
+/// effects in exactly the order they were asked for.
+///
+/// WHERE it runs is the window host's business, and in a window it is never
+/// the UI thread: the world is I/O, and I/O takes as long as the world likes
+/// (a pipe whose reader is busy, a file a virus scanner holds, ShellExecute
+/// waking a browser, a process snapshot). Every world effect goes, in order,
+/// to ONE worker -- the host's world lane -- and its answer is folded on a
+/// later step. A frame can never wait for one. (Scripted hosts, headless and
+/// simulated, run them inline so a test is deterministic.) The lane is
+/// drained, bounded, before the program exits, so `batch(save, quit)` still
+/// saves.
 ///
 ///     using Cmd = mayag::Cmd<Msg, mayag::world>;
 ///     return Cmd::run([](std::string path, Config c) { save(path, c); }, path, m.cfg);
@@ -123,22 +133,36 @@ struct read_clipboard {
 /// may have moved on by the time it runs. It returns void, a Msg, or
 /// std::optional<Msg> (the answer is folded next, like any message).
 template <class Msg> struct Run { std::function<std::optional<Msg>()> go; };
+namespace detail {
+// A mapper rides along to the world lane, so it may hold nothing the loop
+// can still reach: a captureless function, as jaal requires of a task's.
+template <class F, class From>
+concept world_mapper = std::is_convertible_v<std::remove_cvref_t<F>, std::invoke_result_t<F, From> (*)(From)>;
+}  // namespace detail
 struct world {   // the descriptor; mayag::run<P>() is the entry point
     static constexpr std::string_view name = "run";
     template <class Msg> using type = Run<Msg>;
     template <class F, class M>
     static auto fmap(F&& f, Run<M> e) -> Run<std::invoke_result_t<F, M>> {
         using To = std::invoke_result_t<F, M>;
-        return {[f = std::forward<F>(f), g = std::move(e.go)]() -> std::optional<To> {
-            if (auto m = g()) return f(std::move(*m));
+        static_assert(detail::world_mapper<F, M>,
+                      "mayag: Cmd::map over a Cmd holding a world effect needs a captureless mapper "
+                      "(it runs on the world lane, off the UI thread)");
+        To (*fp)(M) = f;
+        return {[fp, g = std::move(e.go)]() -> std::optional<To> {
+            if (auto m = g()) return fp(std::move(*m));
             return std::nullopt;
         }};
     }
     template <class Id, class F, class M>
     static auto fmap_with(const Id& id, F&& f, Run<M> e) -> Run<std::invoke_result_t<F, const Id&, M>> {
         using To = std::invoke_result_t<F, const Id&, M>;
-        return {[id, f = std::forward<F>(f), g = std::move(e.go)]() -> std::optional<To> {
-            if (auto m = g()) return f(id, std::move(*m));
+        static_assert(jaal::Sendable<Id>, "mayag: Cmd::map_with over a world effect: the id travels to the world lane, so it must be Sendable");
+        static_assert(std::is_convertible_v<std::remove_cvref_t<F>, To (*)(const Id&, M)>,
+                      "mayag: Cmd::map_with over a world effect needs a captureless mapper (it runs on the world lane)");
+        To (*fp)(const Id&, M) = f;
+        return {[id, fp, g = std::move(e.go)]() -> std::optional<To> {
+            if (auto m = g()) return fp(id, std::move(*m));
             return std::nullopt;
         }};
     }
@@ -185,3 +209,13 @@ using window_cmd = jaal::Cmd<Msg, set_title, write_clipboard, set_fullscreen, se
                              focus, upload_image, release_image, patch_image, read_clipboard, window_action, world>;
 
 }  // namespace mayag
+
+// A Run is safe to move to the world lane. It holds one std::function, which
+// jaal can't see into, and every way to build one is checked: Cmd::run takes a
+// captureless body (or a function pointer) and Sendable arguments, moved in;
+// world::fmap / fmap_with add only a function pointer and a Sendable id. So
+// nothing inside reaches the model or the loop. Keep it that way: a new
+// constructor for Run must check the same two things.
+namespace jaal {
+template <class Msg> inline constexpr bool sendable_opt_in<mayag::Run<Msg>> = true;
+}  // namespace jaal

@@ -80,9 +80,29 @@ inline void apply_env_overrides(AppConfig& cfg) {
 [[nodiscard]] inline jaal::kernel::options kernel_options(const AppConfig& cfg) {
     jaal::kernel::options o;
     o.on_fault = cfg.catch_exceptions ? jaal::fault_policy::skip : jaal::fault_policy::stop;
+    // jaal's own reports are a synchronous stderr write on the loop thread --
+    // the UI thread, at the very moment it is already late. Route both
+    // through diag::say (written by a worker), at most once a second per
+    // message type for the slow line, as jaal does.
     if (cfg.on_error) {
         o.faults = [f = cfg.on_error](const jaal::fault& e) { f(jaal::to_string(e.site), e.what); };
+    } else {
+        o.faults = [](const jaal::fault& e) {
+            const auto site = jaal::to_string(e.site);
+            ::mayag::diag::say("mayag: fault in %.*s: %s%s\n", static_cast<int>(site.size()), site.data(),
+                               e.what.c_str(), e.stopping ? " (stopping)" : " (message dropped)");
+        };
     }
+    o.slow = [said = std::make_shared<std::vector<std::chrono::steady_clock::time_point>>()](
+                 std::string_view leaf, std::size_t index, std::chrono::nanoseconds took) {
+        const auto now = std::chrono::steady_clock::now();
+        if (said->size() <= index) said->resize(index + 1);
+        if (now - (*said)[index] < std::chrono::seconds(1)) return;
+        (*said)[index] = now;
+        ::mayag::diag::say("mayag: slow update: %.*s took %.1f ms -- a frame the user waited for\n",
+                           static_cast<int>(leaf.size()), leaf.data(),
+                           std::chrono::duration<double, std::milli>(took).count());
+    };
     return o;
 }
 

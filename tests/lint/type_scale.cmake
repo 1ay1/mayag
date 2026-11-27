@@ -11,13 +11,15 @@
 # monogram, a powerline wedge) says so with `glyph_size(px)`, which is the one
 # sizing modifier allowed to compute.
 
+include(${CMAKE_CURRENT_LIST_DIR}/lines.cmake)
 set(bad 0)
 file(GLOB_RECURSE fs RELATIVE ${ROOT}/include/mayag ${ROOT}/include/mayag/widget/*.hpp)
 foreach(rel ${fs})
-    file(STRINGS ${ROOT}/include/mayag/${rel} lines)
+    lint_lines(${ROOT}/include/mayag/${rel} lines)   # file(STRINGS) merged lines at a `[` (ssh_manager: 468 of 1407)
     set(n 0)
     foreach(l IN LISTS lines)
         math(EXPR n "${n}+1")
+        lint_unescape(l)
         string(REGEX REPLACE "//.*" "" code "${l}")
         # font( ... ) with no nested call: catch `font(x * 0.8f)`, `font(11)`
         string(REGEX MATCHALL "[^a-z_]font\\([^()]*\\)" calls "${code}")
