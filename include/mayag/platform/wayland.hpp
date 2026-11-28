@@ -58,6 +58,7 @@
 #include "concepts.hpp"   // check_capabilities
 #include "keys.hpp"
 #include "photon.hpp"
+#include "compositor_queue.hpp"
 #include "images.hpp"
 #include "gpu_bringup.hpp"
 #include "../backend/gpu_policy.hpp"
@@ -709,10 +710,16 @@ class WaylandWindow {
         L.display_flush(display_);
 
         // Start the input-to-photon clock at the first user event not yet on
-        // screen (unless the program marks inputs itself).
-        for (const auto& e : pending_) {
-            if (photon_manual_) break;
-            if (starts_photon_clock(e)) { note_input(); break; }
+        // screen (unless the program marks inputs itself). A batch of pointer
+        // motion alone is flagged: it may need no frame (PhotonMeter::settle).
+        if (!photon_manual_) {
+            bool any = false, motion_only = true;
+            for (const auto& e : pending_) {
+                if (!starts_photon_clock(e)) continue;
+                any = true;
+                if (!std::holds_alternative<MouseMove>(e)) { motion_only = false; break; }
+            }
+            if (any) note_input(motion_only);
         }
 
         // A protocol error is fatal and unrecoverable — the compositor has
@@ -1162,6 +1169,30 @@ class WaylandWindow {
     }
     [[nodiscard]] std::uint64_t frames_skipped() const noexcept { return frames_skipped_; }
     [[nodiscard]] bool replaces_queued_frames() const noexcept { return gpu_ != nullptr && gpu_->valid() && gpu_->replaces_queued(); }
+    /// A commit now would wait a refresh behind one of ours the compositor
+    /// already holds (compositor_queue.hpp): the host holds the draw to the
+    /// next latch point instead -- same vblank, freshest input, and the
+    /// compositor never falls into showing every frame a refresh late.
+    /// MAYAG_QUEUE=0: no queue model (draw whenever, fixed 2 ms margin);
+    /// =1 (default): hold behind a taken frame, fixed margin; =2: and learn
+    /// the margin (opt-in: under VRR the deadline wanders and the learned
+    /// margin crept early, worsening typing's tail). For A/B runs.
+    static int queue_mode() noexcept {
+        static const int m = [] {
+            const char* e = std::getenv("MAYAG_QUEUE");
+            return (e != nullptr && *e >= '0' && *e <= '2') ? *e - '0' : 1;
+        }();
+        return m;
+    }
+    [[nodiscard]] bool frame_queue_full() const noexcept {
+        return queue_mode() >= 1 && queue_.full(wldetail::monotonic_now());
+    }
+    /// How long before a vblank a commit still makes it, learned from feedback.
+    [[nodiscard]] std::chrono::nanoseconds latch_margin() const noexcept {
+        if (queue_mode() < 2) return std::chrono::nanoseconds{2'000'000};
+        return std::chrono::nanoseconds{static_cast<std::int64_t>(queue_.margin() * 1e9)};
+    }
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> latch_misses() const noexcept { return queue_.latch_misses(); }
 
     /// Frames skipped because the compositor still held every buffer.
     /// Nonzero in a tight present loop; should be zero in a frame-callback
@@ -1702,6 +1733,7 @@ class WaylandWindow {
         Impl*      w;
         wl::proxy* proxy;
         PhotonMeter::Frame frame;   // the input it carries, when it was committed
+        std::uint64_t ticket = 0;   // its place in queue_
     };
 
     void request_feedback() {
@@ -1717,7 +1749,8 @@ class WaylandWindow {
         // FIRST one presented shows it. (Under MAILBOX a frame is discarded
         // when a newer one replaces it at the same vblank -- the newer one
         // shows the input too, and its feedback is the one that answers.)
-        auto fb = std::make_unique<Feedback>(Feedback{this, p, photon_.take(wldetail::monotonic_now())});
+        const double now = wldetail::monotonic_now();
+        auto fb = std::make_unique<Feedback>(Feedback{this, p, photon_.take(now), queue_.committed(now)});
         wl::add_listener(p, &feedback_listener, fb.get());
         pending_feedback_.push_back(std::move(fb));
     }
@@ -1740,11 +1773,24 @@ class WaylandWindow {
             const char flags[5] = {(pres_flags & 1u) ? 'v' : '-', (pres_flags & 2u) ? 'c' : '-',
                                    (pres_flags & 4u) ? 'h' : '-', (pres_flags & 8u) ? 'z' : '-', '\0'};
             w->photon_.presented(fb->frame, secs, static_cast<double>(w->period_ns_) / 1e6, flags);
+            w->queue_presented(fb->ticket, secs);
         }
         w->retire_feedback(fb);
     }
+    /// The compositor's queue learns from every presentation (compositor_queue.hpp).
+    void queue_presented(std::uint64_t ticket, double secs) {
+        const int depth = queue_.depth();
+        const double margin = queue_.margin();
+        queue_.presented(ticket, secs, static_cast<double>(period_ns_) * 1e-9);
+        if (PhotonMeter::trace_level() >= 2 &&
+            (queue_.depth() != depth || std::fabs(queue_.margin() - margin) >= 0.0005))
+            ::mayag::diag::say("compositor queue: depth %d  margin %.2f ms  (hits %llu, misses %llu)\n", queue_.depth(),
+                               queue_.margin() * 1e3, static_cast<unsigned long long>(queue_.latch_misses().first),
+                               static_cast<unsigned long long>(queue_.latch_misses().second));
+    }
     static void on_fb_discarded(void* data, wl::proxy*) {
         auto* fb = static_cast<Feedback*>(data);
+        fb->w->queue_.discarded(fb->ticket);
         // Replaced before scanout: the input it carried is still unshown, and
         // the frames after it carry it (see request_feedback).
         fb->w->retire_feedback(fb);
@@ -1772,7 +1818,7 @@ class WaylandWindow {
     /// with (pointer moves coalesce), so latency is measured from that: from
     /// the event's own timestamp when the compositor gave one (it's the
     /// kernel's, on CLOCK_MONOTONIC in ms), else from when we read it.
-    void note_input() {
+    void note_input(bool motion = false) {
         const double now = wldetail::monotonic_now();
         double t = now;
         if (last_event_ms_ != 0) {
@@ -1782,7 +1828,7 @@ class WaylandWindow {
             if (age < 1000) t = now - static_cast<double>(age) / 1000.0;
             last_event_ms_ = 0;
         }
-        photon_.note(t, now);
+        photon_.note(t, now, motion);
     }
     void note_event_time(std::uint32_t ms) noexcept { if (ms != 0) last_event_ms_ = ms; }
 
@@ -1819,6 +1865,7 @@ class WaylandWindow {
         return DisplayTiming{vb, nanoseconds{period_ns_}, vblank_seq_};
     }
     [[nodiscard]] PhotonStats photon_stats() const noexcept { return photon_.stats(); }
+    void settle_photon() noexcept { photon_.settle(); }
 
     static void on_frame_done(void* data, wl::proxy* cb, std::uint32_t) {
         Impl* w = self(data);
@@ -2498,6 +2545,7 @@ class WaylandWindow {
     std::uint32_t period_ns_ = 0;         // refresh period from the compositor
     std::uint32_t last_event_ms_ = 0;     // newest input's wl timestamp this dispatch
     PhotonMeter photon_;                  // input to photon (photon.hpp, shared with Cocoa)
+    CompositorQueue queue_;               // what the compositor does with our frames (compositor_queue.hpp)
     bool       photon_manual_ = false;
     wl::proxy* frame_callback_ = nullptr;
     wl::proxy* pool_           = nullptr;
@@ -2639,6 +2687,8 @@ class WaylandWindow {
     [[nodiscard]] PhotonStats photon_stats() const noexcept {
         return p_ ? p_->photon_stats() : PhotonStats{};
     }
+    /// The input waiting for a frame got none (the host drew nothing for it).
+    void settle_photon() noexcept { if (p_) p_->settle_photon(); }
 
     [[nodiscard]] double now() const noexcept { return p_->now(); }
     [[nodiscard]] double double_click_interval() const noexcept {
@@ -2732,6 +2782,16 @@ class WaylandWindow {
     [[nodiscard]] std::uint64_t frames_skipped() const noexcept { return p_->frames_skipped(); }
     /// See window_host::next_draw_at: a draw never waits behind a queued one.
     [[nodiscard]] bool replaces_queued_frames() const noexcept { return p_->replaces_queued_frames(); }
+    /// The compositor already holds a frame of ours for the next vblank: a
+    /// commit now would show a refresh late (compositor_queue.hpp).
+    [[nodiscard]] bool frame_queue_full() const noexcept { return p_ && p_->frame_queue_full(); }
+    /// How long before a vblank a commit still makes it (learned per launch).
+    [[nodiscard]] std::chrono::nanoseconds latch_margin() const noexcept {
+        return p_ ? p_->latch_margin() : std::chrono::nanoseconds{3'000'000};
+    }
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> latch_misses() const noexcept {
+        return p_ ? p_->latch_misses() : std::pair<std::uint64_t, std::uint64_t>{};
+    }
 
     [[nodiscard]] std::uint64_t frames_dropped() const noexcept {
         return p_->frames_dropped();
@@ -2745,6 +2805,7 @@ class WaylandWindow {
 // give it (platform/concepts.hpp) -- losing one or gaining one unstated
 // fails the build, naming the capability.
 static_assert(check_capabilities<WaylandWindow, caps<cap::event_fd, cap::replaces_queued_frames, cap::counts_skipped_frames,
+                                                            cap::reports_queue_full, cap::latches_late, cap::counts_latch_misses,
                                                             cap::reports_display_timing, cap::repeats_keys, cap::asks_for_redraw,
                                                             cap::owes_redraw, cap::fullscreens, cap::manages_itself, cap::uploads_images,
                                                             cap::patches_images, cap::takes_text_input, cap::measures_photons>>());

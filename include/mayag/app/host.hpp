@@ -543,6 +543,17 @@ class window_host {
         return -1.0;
     }
 
+    /// End of a turn: if no frame is owed, the input waiting for one got
+    /// none -- the program folded it and the picture didn't change (a
+    /// pointer moving over text). The photon meter forgets such motion
+    /// rather than timing the wait for some later, unrelated frame.
+    void settle_input() noexcept {
+        if constexpr (platform::has<W, platform::cap::measures_photons>) {
+            if (dirty_ || draw_owed_ || change_due(now_()) || animating() || window_wants_redraw()) return;
+            window_.settle_photon();
+        }
+    }
+
     [[nodiscard]] std::optional<std::chrono::nanoseconds> wait_hint() const noexcept {
         using ns = std::chrono::nanoseconds;
         auto hint = wait_hint_inner();

@@ -62,24 +62,45 @@ class PhotonMeter {
     }
 
     /// An input event at `at`, read at `read_at` (both backend seconds).
-    void note(double at, double read_at) noexcept {
-        if (unshown_ >= 0.0) return;   // the oldest unshown input is the one to measure
+    /// `motion`: only pointer motion, which may have no answer at all (a move
+    /// over text) -- see settle().
+    void note(double at, double read_at, bool motion = false) noexcept {
+        if (unshown_ >= 0.0) {   // the oldest unshown input is the one to measure...
+            if (!unshown_motion_ || motion || carried_) return;
+            // ...unless it is motion no frame has carried: nothing was drawn
+            // for it, so this input is the first one anything answers.
+        }
         unshown_ = at;
         unshown_read_ = read_at;
+        unshown_motion_ = motion;
+        carried_ = false;
+    }
+
+    /// Nothing will be drawn for what is unshown: the program handled it and
+    /// the picture is unchanged (or no frame is owed at all). Pointer motion
+    /// with no answer is then no input waiting for a photon -- kept, it timed
+    /// the wait for some LATER frame: the next keystroke's echo, a blink, up
+    /// to 260 ms "stalls" in every Wayland run where the pointer had moved.
+    /// Keys, clicks and scrolls stay: their answer can come later (a pty's
+    /// echo), and that wait is real latency. A frame already committed with
+    /// it keeps it too (a replaced MAILBOX frame hands it to the next one).
+    void settle() noexcept {
+        if (unshown_ >= 0.0 && unshown_motion_ && !carried_) unshown_ = -1.0;
     }
     /// The program says the next frame answers input from `at` (manual mode:
     /// a forwarding app whose window's own events are not the input).
     void mark(double at, double now) noexcept {
-        if (unshown_ < 0.0 || at < unshown_) { unshown_ = at; unshown_read_ = now; }
+        if (unshown_ < 0.0 || at < unshown_) { unshown_ = at; unshown_read_ = now; unshown_motion_ = false; }
     }
     [[nodiscard]] bool has_unshown() const noexcept { return unshown_ >= 0.0; }
     [[nodiscard]] double unshown() const noexcept { return unshown_; }
 
     /// The frame committed at `now` carries the oldest unshown input.
-    [[nodiscard]] Frame take(double now) const noexcept {
+    [[nodiscard]] Frame take(double now) noexcept {
+        if (unshown_ >= 0.0) carried_ = true;
         if (trace_level() >= 3) {
-            if (unshown_ >= 0.0) ::mayag::diag::say("commit %.3f  +%.3f ms after input\n", now, (now - unshown_) * 1e3);
-            else ::mayag::diag::say("commit %.3f\n", now);
+            if (unshown_ >= 0.0) ::mayag::diag::say("commit %.4f  +%.3f ms after input\n", now, (now - unshown_) * 1e3);
+            else ::mayag::diag::say("commit %.4f\n", now);
         }
         return Frame{unshown_, unshown_read_, now};
     }
@@ -87,7 +108,7 @@ class PhotonMeter {
     /// Frame `f` was presented at `at`. `flags` is for the trace only.
     void presented(const Frame& f, double at, double period_ms = 0.0, const char* flags = "") {
         if (trace_level() >= 3)
-            ::mayag::diag::say("present %.3f  commit %.3f  +%.2f ms\n", at, f.commit_at, (at - f.commit_at) * 1e3);
+            ::mayag::diag::say("present %.4f  commit %.4f  +%.2f ms\n", at, f.commit_at, (at - f.commit_at) * 1e3);
         if (first_present_ < 0.0) first_present_ = at;   // the window's first frame on the glass
         if (f.input_at < 0.0 || f.input_at <= shown_) return;   // nothing new on screen
         shown_ = f.input_at;
@@ -152,6 +173,8 @@ class PhotonMeter {
     std::size_t next_ = 0, count_ = 0;
     double last_ = 0.0;
     double unshown_ = -1.0, unshown_read_ = -1.0;
+    bool unshown_motion_ = false;   // the unshown input is pointer motion alone
+    bool carried_ = false;          // a committed frame carries the unshown input
     double shown_ = -1.0;   // newest input a presented frame has shown
     double first_present_ = -1.0;   // when the first frame reached the display
     std::array<double, 3> stage_sum_{};

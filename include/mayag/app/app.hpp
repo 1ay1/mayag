@@ -364,6 +364,7 @@ class embedded_app {
         }
         ++turns_;
         in_turn_ = false;
+        host_.settle_input();
         if (!done_) rearm();
     }
 

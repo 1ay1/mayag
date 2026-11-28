@@ -123,8 +123,12 @@ template <class W> concept MovesImageRows = requires(W& w, std::uint32_t id, int
 template <class W> concept SharesEventQueue = requires(W& w) { w.enroll(); w.set_pull(false); };
 /// Text input (IME) with the caret's rectangle, for the candidate window.
 template <class W> concept TakesTextInput = requires(W& w, bool on, Rect caret) { w.set_text_input(on, caret); };
-/// Measures input-to-photon latency.
-template <class W> concept MeasuresPhotons = requires(W& w) { { w.photon_stats() } -> std::convertible_to<PhotonStats>; };
+/// Measures input-to-photon latency; settle_photon() says the input waiting
+/// for its frame got none (PhotonMeter::settle).
+template <class W> concept MeasuresPhotons = requires(W& w) {
+    { w.photon_stats() } -> std::convertible_to<PhotonStats>;
+    w.settle_photon();
+};
 /// Starts the GPU device before the window exists (Win32: overlaps startup).
 template <class W> concept PrestartsGpu = requires { W::gpu_prestart(); };
 /// Reads the clipboard's text from ANY thread (Win32: OpenClipboard(NULL)),

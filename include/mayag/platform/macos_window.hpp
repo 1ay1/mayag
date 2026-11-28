@@ -645,6 +645,8 @@ class MacWindow {
         drain_feedback();
         return photon_.stats();
     }
+    /// The input waiting for a frame got none (PhotonMeter::settle).
+    void settle_photon() noexcept { photon_.settle(); }
 
     /// How long before a vblank the late-latch draw must be SUBMITTED to make
     /// it. Not a constant: WindowServer composites ahead of scanout, and how
@@ -1013,7 +1015,10 @@ class MacWindow {
         // a bare modifier, whose answer is nothing on screen (photon.hpp).
         if (photon_manual_) return;
         for (std::size_t i = before; i < out.size(); ++i)
-            if (starts_photon_clock(out[i])) { note_input(msg<double>(ev, sel("timestamp"))); break; }
+            if (starts_photon_clock(out[i])) {
+                note_input(msg<double>(ev, sel("timestamp")), std::holds_alternative<MouseMove>(out[i]));
+                break;
+            }
     }
 
     static double host_now() noexcept {
@@ -1023,12 +1028,12 @@ class MacWindow {
 
     /// An input event arrived; the meter keeps the oldest one not yet on
     /// screen (photon.hpp).
-    void note_input(double ts) noexcept {
+    void note_input(double ts, bool motion = false) noexcept {
         const double now = host_now();
         // NSEvent.timestamp is seconds since boot on the mach_absolute_time
         // clock, the same one host_now() reads. Guard anyway: a
         // synthetic event (timestamp 0) must not record a 40-day latency.
-        photon_.note((ts > now - 1.0 && ts <= now + 0.001) ? ts : now, now);
+        photon_.note((ts > now - 1.0 && ts <= now + 0.001) ? ts : now, now, motion);
     }
 
 #if MAYAG_GPU_METAL
